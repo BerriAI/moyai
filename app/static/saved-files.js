@@ -38,6 +38,8 @@
     if(!container)return;
     container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code,.work-image [data-file-ref]').forEach(node=>{
       if(node.closest('pre')||(!node.matches('[data-file-ref]')&&(node.closest('a')||node.children.length)))return;
+      const messageRun=node.closest('[data-message-run]')?.dataset.messageRun;
+      if(messageRun&&messageRun!==runId)return;
       const ref=node.dataset.fileRef||node.textContent,file=resolve(ref,files);
       if(!file){
         if(node.dataset.savedFile){
@@ -78,7 +80,7 @@
   }
   function preview(result,ref,{escape:esc,markdown}){
     if(result.text===null)return '<p class="saved-file-empty">Preview isn’t available for this file type. Use Download to open it.</p>';
-    const location=reference(ref),notice=result.truncated?'<p class="saved-file-notice">Showing the first 128 KB. Use Download for the complete file.</p>':'';
+    const location=reference(ref),notice=result.truncated?'<p class="saved-file-notice">Showing part of this file. Load more below or use Download for the complete file.</p>':'';
     if(!location?.line)return notice+(result.format==='markdown'?`<div class="markdown">${markdown(result.text)}</div>`:`<pre class="saved-file-text">${esc(result.text)}</pre>`);
     const lines=result.text.split('\n'),{line,endLine}=location,available=lines.length-(result.truncated?1:0);
     const label=line===endLine?'Line '+line:'Lines '+line+'–'+endLine;
@@ -102,14 +104,14 @@
     }
     function update(){
       const button=query('#files-button');
-      if(button){button.hidden=!(run?.has_artifact||run?.has_captures);button.textContent='Files'+(catalog?' · '+catalog.files.length:'');button.onclick=()=>open();}
+      if(button){button.hidden=!(run?.has_artifact||run?.has_captures||run?.has_published_artifacts);button.textContent='Files'+(catalog?' · '+catalog.files.length:'');button.onclick=()=>open();}
       const area=query('#artifact-area');
-      if(area)area.innerHTML=(run?.has_artifact||run?.has_captures)?`<button type="button" class="quiet browse-files">Browse saved files${catalog?' · '+catalog.files.length:''}</button>${run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download workspace ZIP</a>`:''}`:'';
+      if(area)MoyaiUI.render(area, (run?.has_artifact||run?.has_captures||run?.has_published_artifacts)?`<button type="button" class="quiet browse-files">Browse saved files${catalog?' · '+catalog.files.length:''}</button>${run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download workspace ZIP</a>`:''}`:'');
       if(area?.querySelector('.browse-files'))area.querySelector('.browse-files').onclick=()=>open();
       decorate(query('#conversation'));
     }
     async function load(force=false){
-      if(!(run?.has_artifact||run?.has_captures))return;
+      if(!(run?.has_artifact||run?.has_captures||run?.has_published_artifacts))return;
       const next=run.id+':'+(run.events||[]).filter(e=>e.kind==='artifact').at(-1)?.id;
       if(!force&&key===next)return loading;
       key=next;const id=++requestId,rid=run.id;
@@ -130,7 +132,7 @@
     function drawList(){
       const filter=query('#saved-file-search').value.toLowerCase();
       const files=(catalog?.files||[]).filter(file=>file.path.toLowerCase().includes(filter));
-      query('#saved-file-list').innerHTML=files.length?files.map(file=>`<button type="button" class="saved-file-choice ${file.archive_path===selected?.archive_path?'selected':''}" data-file-choice="${esc(file.archive_path)}" ${file.archive_path===selected?.archive_path?'aria-current="true"':''}><span class="saved-file-icon" aria-hidden="true">▤</span><span><strong>${esc(file.name)}</strong><small>${esc(file.path)} · ${size(file.size)}</small></span></button>`).join(''):'<p class="saved-file-empty">No matching files.</p>';
+      MoyaiUI.render(query('#saved-file-list'), files.length?files.map(file=>`<button type="button" class="saved-file-choice ${file.archive_path===selected?.archive_path?'selected':''}" data-file-choice="${esc(file.archive_path)}" ${file.archive_path===selected?.archive_path?'aria-current="true"':''}><span class="saved-file-icon" aria-hidden="true">▤</span><span><strong>${esc(file.name)}</strong><small>${esc(file.path)} · ${size(file.size)}</small></span></button>`).join(''):'<p class="saved-file-empty">No matching files.</p>');
       query('#saved-file-list').querySelectorAll('[data-file-choice]').forEach(button=>button.onclick=()=>select(catalog.files.find(file=>file.archive_path===button.dataset.fileChoice)));
     }
     async function select(file,ref=null){
@@ -140,29 +142,46 @@
       const location=reference(ref);
       query('#saved-file-path').textContent=file.path+(location?.line?':'+location.line+(location.endLine!==location.line?'–'+location.endLine:''):'');
       const download=query('#saved-file-download');download.href=file.url;download.hidden=false;download.setAttribute('download',file.name);
-      query('#saved-file-preview').innerHTML='<p class="saved-file-empty" role="status">Opening file…</p>';
+      MoyaiUI.render(query('#saved-file-preview'), '<p class="saved-file-empty" role="status">Opening file…</p>');
       if(file.inline_url&&['image','video'].includes(file.kind)){
-        query('#saved-file-preview').innerHTML=file.kind==='image'?`<img class="saved-capture" src="${esc(file.inline_url)}" alt="${esc(file.name)}">`:`<video class="saved-capture" src="${esc(file.inline_url)}" controls preload="metadata"></video>`;
+        MoyaiUI.render(query('#saved-file-preview'), file.kind==='image'?`<img class="saved-capture" src="${esc(file.inline_url)}" alt="${esc(file.name)}">`:`<video class="saved-capture" src="${esc(file.inline_url)}" controls preload="metadata"></video>`);
         return;
       }
       try{
-        const result=await api(file.preview_url);if(id!==previewId||!dialog.open)return;
+        let result=await api(file.preview_url);if(id!==previewId||!dialog.open)return;
         const target=query('#saved-file-preview');
-        target.innerHTML=preview(result,ref,{escape:esc,markdown});
-        target.scrollTop=0;decorate(target);reveal(target);
+        MoyaiUI.render(target, preview(result,ref,{escape:esc,markdown}));
+        function continuation(){
+          if(result.next_offset==null||result.text==null)return;
+          MoyaiUI.insert(target,'beforeend','<button type="button" class="quiet saved-file-more">Load more</button>');
+          const button=target.querySelector('.saved-file-more');
+          button.onclick=async()=>{
+            button.disabled=true;button.textContent='Loading…';
+            try{
+              const page=await api(file.preview_url+'&offset='+result.next_offset);
+              if(id!==previewId||!dialog.open)return;
+              if(page.text==null)throw new Error('This part cannot be previewed. Download the complete file.');
+              const scroll=target.scrollTop;
+              result={...page,text:result.text+page.text};
+              MoyaiUI.render(target,preview(result,ref,{escape:esc,markdown}));
+              decorate(target);continuation();target.scrollTop=scroll;
+            }catch(error){if(id===previewId&&dialog.open){button.disabled=false;button.textContent='Retry loading more';button.title=error.message;}}
+          };
+        }
+        continuation();target.scrollTop=0;decorate(target);reveal(target);
         target.querySelectorAll('.copy-code').forEach(button=>button.onclick=async()=>{try{await navigator.clipboard.writeText(button.closest('.code-block').querySelector('code').textContent);button.textContent='Copied';}catch{button.textContent='Select text to copy';}});
-      }catch(error){if(id===previewId&&dialog.open)query('#saved-file-preview').innerHTML=`<p class="saved-file-empty" role="alert">${esc(error.message)}</p>`;}
+      }catch(error){if(id===previewId&&dialog.open)MoyaiUI.render(query('#saved-file-preview'), `<p class="saved-file-empty" role="alert">${esc(error.message)}</p>`);}
     }
     async function open(file=null,ref=null){
       if(onOpen?.(file,ref))return;
-      if(!(run?.has_artifact||run?.has_captures))return;
-      if(!dialog){dialog=doc.createElement('dialog');dialog.id='saved-files-dialog';dialog.setAttribute('aria-labelledby','saved-files-heading');doc.body.append(dialog);dialog.addEventListener('close',()=>{previewId++;viewId++;dialog.querySelectorAll('video').forEach(video=>video.pause());});}
+      if(!(run?.has_artifact||run?.has_captures||run?.has_published_artifacts))return;
+      if(!dialog){dialog=MoyaiUI.createDialog();dialog.id='saved-files-dialog';dialog.setAttribute('aria-labelledby','saved-files-heading');doc.body.append(dialog);dialog.addEventListener('close',()=>{previewId++;viewId++;dialog.querySelectorAll('video').forEach(video=>video.pause());});}
       const rid=run.id,viewing=++viewId;
-      dialog.innerHTML=`<header class="saved-files-heading"><div><h2 id="saved-files-heading">Saved files</h2><p>Latest saved version of this workspace</p></div><button type="button" class="icon-button" aria-label="Close saved files">×</button></header><div class="saved-files-loading" role="status">Loading saved files…</div>`;
+      MoyaiUI.render(dialog, `<header class="saved-files-heading"><div><h2 id="saved-files-heading">Saved files</h2><p>Latest saved version of this workspace</p></div><button type="button" class="icon-button" aria-label="Close saved files">×</button></header><div class="saved-files-loading" role="status">Loading saved files…</div>`);
       dialog.querySelector('button').onclick=()=>dialog.close();
       if(!dialog.open)dialog.showModal();
       await load(true);if(run?.id!==rid||!dialog.open||viewing!==viewId)return;
-      dialog.querySelector('.saved-files-loading').outerHTML=`<div class="saved-files-body"><aside class="saved-files-nav"><input id="saved-file-search" type="search" placeholder="Find a file…" aria-label="Find a saved file"><div id="saved-file-list"></div></aside><section class="saved-file-view"><div class="saved-file-heading"><div><h3 id="saved-file-title">Select a file</h3><p id="saved-file-path"></p></div><a id="saved-file-download" class="small" hidden>↓ Download</a></div><div id="saved-file-preview"><p class="saved-file-empty">Choose a file to preview.</p></div></section></div><footer class="saved-files-footer"><span>${esc(catalog?.error||catalog?.note||'')}${catalog?.limited?' Some entries cannot be previewed.':''}</span>${run.has_artifact?`<a href="/api/runs/${rid}/artifact">Download ZIP</a>`:''}</footer>`;
+      MoyaiUI.replace(dialog.querySelector('.saved-files-loading'), `<div class="saved-files-body"><aside class="saved-files-nav"><input id="saved-file-search" type="search" placeholder="Find a file…" aria-label="Find a saved file"><div id="saved-file-list"></div></aside><section class="saved-file-view"><div class="saved-file-heading"><div><h3 id="saved-file-title">Select a file</h3><p id="saved-file-path"></p></div><a id="saved-file-download" class="small" hidden>↓ Download</a></div><div id="saved-file-preview"><p class="saved-file-empty">Choose a file to preview.</p></div></section></div><footer class="saved-files-footer"><span>${esc(catalog?.error||catalog?.note||'')}${catalog?.limited?' Some entries cannot be previewed.':''}</span>${run.has_artifact?`<a href="/api/runs/${rid}/artifact">Download ZIP</a>`:''}</footer>`);
       selected=null;drawList();query('#saved-file-search').oninput=drawList;
       const choice=file?catalog.files.find(item=>item.archive_path===file.archive_path):catalog.files.find(item=>item.workspace_path)||catalog.files[0];
       if(choice)select(choice,ref);

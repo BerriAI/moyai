@@ -7,12 +7,14 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from .context_budget import ModelContextLimits
+from .model_selection import ASTRA_ULTRAFAST
 
 
 # Keep picker IDs and labels in code so a stale deployment environment cannot
 # hide models added by a release. AGENT_MODEL only chooses the default.
 MODEL_CATALOG: dict[str, str] = {
     'openai/gpt-6-astra': 'GPT-6 Astra',
+    ASTRA_ULTRAFAST: 'GPT-6 Astra Ultrafast',
     'openai/gpt-6.1-sol': 'GPT-6.1 Sol',
     'anthropic/claude-opus-5-5': 'Claude Opus 5.5',
     'fireworks_ai/glm-5p3': 'GLM-5.3',
@@ -20,7 +22,7 @@ MODEL_CATALOG: dict[str, str] = {
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
@@ -28,6 +30,53 @@ class Settings(BaseSettings):
         # unrelated global gateway key. Containers do not contain the .env file.
         return init_settings, dotenv_settings, env_settings, file_secret_settings
     data_dir: Path = Path(".data")
+    moyai_database_url: str = Field(default='', repr=False)
+    moyai_database_initialize: bool = False
+    moyai_schema_mode: Literal['auto', 'verify'] = 'auto'
+    moyai_database_schema: str = Field(default='moyai', pattern=r'^moyai(?:_[a-z][a-z0-9_]{0,49})?$')
+    moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
+    moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker', 'api'] = 'standalone'
+    moyai_separate_broker: bool = False
+    moyai_coordinator_handoff: bool = False
+    temporal_startup_timeout_seconds: float = Field(default=60, ge=1, le=600)
+    temporal_worker_activities: int = Field(default=120, ge=1, le=10000)
+    temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000)
+    temporal_dispatch_concurrency: int = Field(default=10, ge=1, le=1000)
+    temporal_dispatch_batch_size: int = Field(default=200, ge=1, le=10000)
+    sandbox_prepared_pool_size: int = Field(default=0, ge=0, le=20)
+    sandbox_prepared_idle_seconds: int = Field(default=300, ge=30, le=3600)
+    bundled_skills_enabled: bool = True
+
+    @model_validator(mode='after')
+    def database_backend(self):
+        if self.moyai_schema_mode == 'verify' and not self.moyai_database_url:
+            raise ValueError('MOYAI_SCHEMA_MODE=verify requires PostgreSQL.')
+        if self.sandbox_prepared_pool_size:
+            if not self.temporal_enabled or self.sandbox_provider != 'modal':
+                raise ValueError('Prepared workspaces require Temporal and the Modal provider.')
+            if self.max_concurrent_runs and self.sandbox_prepared_pool_size >= self.max_concurrent_runs:
+                raise ValueError('Prepared workspaces must leave capacity for active sessions.')
+        if self.moyai_database_url:
+            if urlsplit(self.moyai_database_url).scheme not in {'postgresql', 'postgres'}:
+                raise ValueError('MOYAI_DATABASE_URL must be a Postgres connection URL.')
+            if self.checkpoint_dir:
+                raise ValueError('SQLite CHECKPOINT_DIR cannot be used with Postgres; use database backups and retain durable file storage.')
+        if self.moyai_runtime_role != 'standalone':
+            if not self.moyai_database_url or not self.temporal_enabled:
+                raise ValueError('Distributed roles require PostgreSQL and Temporal.')
+            if not self.object_storage_bucket or not self.session_secret or not self.encryption_key:
+                raise ValueError('Distributed roles require shared object storage and explicit SESSION_SECRET and ENCRYPTION_KEY.')
+        if self.moyai_runtime_role == 'api' and (self.moyai_schema_mode != 'verify' or not self.moyai_separate_broker):
+            raise ValueError('API replicas require MOYAI_SCHEMA_MODE=verify and MOYAI_SEPARATE_BROKER=true.')
+        if self.moyai_coordinator_handoff and (self.moyai_schema_mode != 'verify'
+                or not self.moyai_separate_broker or not self.temporal_enabled):
+            raise ValueError('Coordinator handoff requires verified schema, Temporal and a separate broker.')
+        if self.moyai_runtime_role == 'broker' and not self.moyai_separate_broker:
+            raise ValueError('The broker role requires MOYAI_SEPARATE_BROKER=true on every cluster process.')
+        if self.moyai_separate_broker and self.moyai_runtime_role == 'standalone':
+            raise ValueError('A separate broker requires coordinator and worker roles.')
+        return self
+
     attachment_storage_limit_mb: int = Field(default=256, ge=50, le=100000)
     media_share_storage_limit_mb: int = Field(default=1024, ge=64, le=100000)
     media_share_receipt_limit: int = Field(default=4096, ge=128, le=100000)
@@ -41,6 +90,7 @@ class Settings(BaseSettings):
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
     # Maintenance commands also need the private service's origin; they don't
     # inherit the environment updates performed inside the server process.
     public_url: str = Field(default='http://127.0.0.1:8787',
@@ -112,16 +162,24 @@ class Settings(BaseSettings):
     session_title_concurrency: int = Field(default=2, ge=1, le=8)
     session_title_backfill_limit: int = Field(default=50, ge=0, le=128)
     memory_review_enabled: bool = True
+    repository_context_enabled: bool = True
+    repository_context_refresh_seconds: int = Field(default=900, ge=60, le=86400)
     # Empty uses the completed turn's configured model; no new provider is needed.
     memory_review_model: str = Field(default='', max_length=200)
     memory_review_idle_seconds: float = Field(default=60, ge=0, le=3600)
     memory_review_timeout_seconds: float = Field(default=60, ge=1, le=180)
     memory_review_backfill_limit: int = Field(default=50, ge=0, le=200)
+    skill_learning_enabled: bool = True
+    skill_learning_model: str = Field(default='', max_length=200)
+    skill_learning_idle_seconds: float = Field(default=60, ge=0, le=3600)
+    skill_learning_timeout_seconds: float = Field(default=60, ge=1, le=180)
     audio_transcription_model: str = "gpt-transcribe"
     audio_transcription_prompt: str = Field(default="", max_length=800)
     # Separate destination/key; enabling traces never reroutes inference.
     litellm_trace_endpoint: str = ""
-    litellm_trace_api_key: str = ""
+    litellm_trace_api_key: str = Field(default="", repr=False)
+    lens_feedback_endpoint: str = ""
+    lens_feedback_api_key: str = Field(default="", repr=False)
     raindrop_trace_endpoint: str = "https://api.raindrop.ai/v1/traces"
     raindrop_write_key: str = ""
     raindrop_project_id: str = ""
@@ -132,6 +190,7 @@ class Settings(BaseSettings):
                                              pattern=r"^[a-z0-9_-]+$")
     trace_environment: str = Field(default="development", min_length=1, max_length=40,
                                    pattern=r"^[a-z0-9_-]+$")
+    moyai_build_sha: str = ""
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_api_key: str = ""
     langsmith_project: str = "moyai"
@@ -173,17 +232,21 @@ class Settings(BaseSettings):
 
     auto_prepare_repositories: bool = True
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
-    max_concurrent_runs: int = Field(default=100, ge=1, le=100)
-    max_pending_runs: int = Field(default=1000, ge=100, le=5000)
-    max_parallel_agents: int = Field(default=100, ge=1, le=100)
-    # Bound response buffers on the web worker independently of sandbox count.
-    max_concurrent_model_requests: int = Field(default=8, ge=1, le=100)
+    # Zero means unlimited. A positive value caps active and warm sandboxes.
+    max_concurrent_runs: int = Field(default=0, ge=0)
+    max_pending_runs: int = Field(default=1000, ge=100)
+    max_parallel_agents: int = Field(default=100, ge=1)
+    swarm_models: str = ''
+    # Zero means unlimited. A positive value bounds broker response buffers.
+    max_concurrent_model_requests: int = Field(default=0, ge=0)
     # Zero means no overall response deadline or iteration cap.
     run_timeout_seconds: int = Field(default=0, ge=0, le=82800)
     snapshot_timeout_seconds: int = Field(default=180, ge=10, le=900)
     max_agent_iterations: int = Field(default=0, ge=0)
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     sandbox_idle_seconds: int = Field(default=300, ge=0, le=3600)
+    codex_runtime_reuse: bool = True
+    independent_agent_runtime: bool = True
     temporal_enabled: bool = False
     maintenance_drain: bool = False
     temporal_address: str = "localhost:7233"
@@ -260,6 +323,13 @@ class Settings(BaseSettings):
             raise ValueError('Use at most 100 comma-separated Modal object IDs.')
         return ','.join(items)
 
+    @field_validator('moyai_build_sha')
+    @classmethod
+    def validate_build_sha(cls, value: str) -> str:
+        if value and not re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', value):
+            raise ValueError('MOYAI_BUILD_SHA must be a full 40- or 64-character hexadecimal commit ID.')
+        return value.lower()
+
     @field_validator('litellm_trace_endpoint', 'raindrop_trace_endpoint')
     @classmethod
     def validate_trace_endpoint(cls, value):
@@ -269,6 +339,26 @@ class Settings(BaseSettings):
                       parsed.password or parsed.query or parsed.fragment or not parsed.path.endswith('/v1/traces')):
             raise ValueError('Use an HTTPS trace endpoint ending in /v1/traces, without credentials or query parameters.')
         return value
+
+    @field_validator('lens_feedback_endpoint')
+    @classmethod
+    def validate_lens_feedback_endpoint(cls, value):
+        parsed = urlsplit(value)
+        if value and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
+                      parsed.password or parsed.query or parsed.fragment or
+                      not parsed.path.endswith('/lens/feedback')):
+            raise ValueError('Use an HTTPS feedback endpoint ending in /lens/feedback, without credentials or query parameters.')
+        return value
+
+    def lens_feedback_target(self) -> tuple[str, dict[str, str]] | None:
+        endpoint = self.lens_feedback_endpoint
+        if not endpoint and self.litellm_trace_endpoint:
+            parsed = urlsplit(self.litellm_trace_endpoint)
+            endpoint = f'{parsed.scheme}://{parsed.netloc}/lens/feedback'
+        api_key = self.lens_feedback_api_key or self.litellm_trace_api_key
+        if not endpoint or not api_key:
+            return None
+        return endpoint, {'Authorization': 'Bearer ' + api_key}
 
     @field_validator('langfuse_base_url', 'langsmith_endpoint', 'braintrust_api_url')
     @classmethod
@@ -356,8 +446,10 @@ class Settings(BaseSettings):
         return resolve(value).id
 
     def default_harness(self, value: str | None = None) -> str:
-        """Choose once for a new session; explicit deployment settings win."""
+        """Choose once for a new session, honoring processing-mode requirements."""
         model = self.resolve_model(value)
+        if model == ASTRA_ULTRAFAST:
+            return 'codex'  # Ultrafast requires the native Responses API.
         if 'agent_harness' in self.model_fields_set:
             return self.agent_harness
         # Resolve aliases first, then use the provider namespace so new catalog
@@ -378,6 +470,9 @@ class Settings(BaseSettings):
         aliases = {
             'astra': 'openai/gpt-6-astra', '6-astra': 'openai/gpt-6-astra',
             'openai/6-astra': 'openai/gpt-6-astra', 'gpt-6-astra': 'openai/gpt-6-astra',
+            'astra-ultrafast': ASTRA_ULTRAFAST, '6-astra-ultrafast': ASTRA_ULTRAFAST,
+            'gpt-6-astra-ultrafast': ASTRA_ULTRAFAST,
+            'astra ultrafast': ASTRA_ULTRAFAST, '6-astra ultrafast': ASTRA_ULTRAFAST,
             'sol': 'openai/gpt-6.1-sol', '6.1-sol': 'openai/gpt-6.1-sol',
             'openai/6.1-sol': 'openai/gpt-6.1-sol', 'gpt-6.1-sol': 'openai/gpt-6.1-sol',
             'gpt 6.1 sol': 'openai/gpt-6.1-sol',

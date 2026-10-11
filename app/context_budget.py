@@ -9,6 +9,7 @@ import time
 import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from .model_selection import gateway_model
 
 
 class ModelContextLimits(BaseModel):
@@ -58,13 +59,14 @@ def counting_input(payload):
     """
     images = []
 
-    def visit(value, content_block=False):
-        if isinstance(value, list):
-            return [visit(item, content_block) for item in value]
+    def visit_content(value):
+        return [visit_block(item) for item in value] if isinstance(value, list) else value
+
+    def visit_block(value):
         if not isinstance(value, dict):
             return value
         kind = value.get('type')
-        if content_block and kind in {'image_url', 'input_image', 'image'}:
+        if kind in {'image_url', 'input_image', 'image'}:
             if kind == 'image':
                 source = value.get('source', {})
                 url = (f"data:{source.get('media_type')};base64,{source.get('data')}"
@@ -78,19 +80,45 @@ def counting_input(payload):
                 raise HTTPException(422, 'Cannot count the image in this request.')
             images.append({'type': 'image_url', 'image_url': item})
             return '[image counted separately]'
-        if content_block and kind in {'input_audio', 'audio', 'input_file', 'file', 'video', 'video_url'}:
+        if kind in {'input_audio', 'audio', 'input_file', 'file', 'video', 'video_url'}:
             raise HTTPException(422, 'This media type needs a supported token counter before inference.')
-        return {key: visit(item, key in {'content', 'input'}) for key, item in value.items()}
+        if kind == 'tool_result' and 'content' in value:
+            return {**value, 'content': visit_content(value['content'])}
+        return value
+
+    def visit_item(value, *, responses=False):
+        if not isinstance(value, dict):
+            return value
+        kind = value.get('type', 'message')
+        if responses and kind in {'function_call_output', 'custom_tool_call_output'} and 'output' in value:
+            return {**value, 'output': visit_content(value['output'])}
+        if kind in {'message', 'input_message', 'output_message'} and 'content' in value:
+            return {**value, 'content': visit_content(value['content'])}
+        return value
 
     fields = {key: payload[key] for key in ('messages', 'input', 'system', 'instructions',
         'tools', 'tool_choice', 'response_format', 'text') if key in payload}
     try:
-        serialized = json.dumps(visit(fields), ensure_ascii=False, separators=(',', ':'))
+        # Only protocol content positions contain media. Tool arguments and
+        # schemas can have arbitrary keys named input, content, or output.
+        for key in ('messages', 'input'):
+            if isinstance(fields.get(key), list):
+                fields[key] = [visit_item(value, responses=key == 'input') for value in fields[key]]
+        if 'system' in fields:
+            fields['system'] = visit_content(fields['system'])
+        serialized = json.dumps(fields, ensure_ascii=False, separators=(',', ':'))
         byte_count = len(serialized.encode())
     except (ValueError, TypeError, UnicodeError, AttributeError, RecursionError):
         raise HTTPException(422, 'The request cannot be represented for token counting.') from None
     content = [{'type': 'text', 'text': serialized}, *images]
     return [{'role': 'user', 'content': content}], byte_count, bool(images)
+
+
+@dataclass(frozen=True)
+class InputAllocation:
+    input_budget: int
+    output_tokens: int
+    context_window: int
 
 
 @dataclass(frozen=True)
@@ -122,6 +150,9 @@ class ContextBudget:
 
     async def limits(self, model):
         configured = self.settings.model_context_limits.get(model)
+        model = gateway_model(model)
+        if configured is None:
+            configured = self.settings.model_context_limits.get(model)
         if configured is not None:
             return ModelContextLimits.model_validate(configured)
         key = (self.base, hashlib.sha256(self.settings.litellm_api_key.encode()).digest(), model)
@@ -215,7 +246,7 @@ class ContextBudget:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.post(self.base + '/utils/token_counter', params={'call_endpoint': 'true'},
-                    headers=self.headers, json={'model': payload['model'], 'messages': messages})
+                    headers=self.headers, json={'model': gateway_model(payload['model']), 'messages': messages})
                 response.raise_for_status()
                 value = response.json()
                 count = positive(value.get('total_tokens'))
@@ -235,7 +266,8 @@ class ContextBudget:
                 raise HTTPException(503, 'Image token counting is unavailable. The request was not sent to the model.') from None
         return tokens, method
 
-    async def measure(self, payload, *, scope=''):
+    async def allocation(self, payload):
+        """Resolve available input room without counting an incomplete request."""
         limits = await self.limits(payload['model'])
         supplied = [payload[key] for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens') if key in payload]
         if any(positive(value) is None for value in supplied):
@@ -253,8 +285,12 @@ class ContextBudget:
         if available <= 0:
             raise HTTPException(422, 'The selected model has no input room with this output allowance. '
                 'Choose compatible model limits or an explicit output allowance.')
-        tokens, method = await self.count(payload, input_budget=available, scope=scope)
-        return Budget(tokens, available, output, limits.context_window, method)
+        return InputAllocation(available, output, limits.context_window)
+
+    async def measure(self, payload, *, scope=''):
+        allocation = await self.allocation(payload)
+        tokens, method = await self.count(payload, input_budget=allocation.input_budget, scope=scope)
+        return Budget(tokens, allocation.input_budget, allocation.output_tokens, allocation.context_window, method)
 
     async def check(self, payload, *, scope=''):
         budget = await self.measure(payload, scope=scope)

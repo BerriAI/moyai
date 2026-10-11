@@ -238,14 +238,14 @@ def test_admin_override_survives_refresh_and_existing_links_migrate(profiles):
         response = client.post('/api/admin/spend/link-slack', json={'slack_user_id': actor, 'google_user_id': 'google:bob'})
         assert response.status_code == 200
         assert account(app)['link_method'] == 'manual'
-    refresh(app)
-    assert account(app)['linked_user_id'] == 'google:bob'
-    assert account(app)['link_status'] == 'manual'
-    app.state.store.execute("UPDATE users SET link_method='',link_status='' WHERE id=?", (actor,))
-    Store(app.state.settings.data_dir)
-    assert account(app)['link_method'] == 'manual'
-    audit = app.state.store.rows("SELECT * FROM identity_audit WHERE reason='admin_override'")
-    assert len(audit) == 1 and audit[0]['actor_id'] == 'google:alice'
+        refresh(app)
+        assert account(app)['linked_user_id'] == 'google:bob'
+        assert account(app)['link_status'] == 'manual'
+        app.state.store.execute("UPDATE users SET link_method='',link_status='' WHERE id=?", (actor,))
+        Store(app.state.settings.data_dir)
+        assert account(app)['link_method'] == 'manual'
+        audit = app.state.store.rows("SELECT * FROM identity_audit WHERE reason='admin_override'")
+        assert len(audit) == 1 and audit[0]['actor_id'] == 'google:alice'
 
 
 def test_admin_routes_require_login_role_and_csrf_but_slack_never_grants_login(profiles):
@@ -300,6 +300,7 @@ def test_oauth_requests_profile_scopes_only_when_enabled(profiles):
     assert 'users:read' not in scopes and 'users:read.email' not in scopes
 
 
+@pytest.mark.sqlite_only
 def test_existing_database_gains_columns_and_retains_admin_link(tmp_path):
     with sqlite3.connect(tmp_path / 'workspace.db') as conn:
         conn.executescript("""
@@ -361,7 +362,7 @@ def memory_profiles(profiles, monkeypatch):
     actor = sender(app.state.store)
     run = app.state.store.run(app.state.store.rows('SELECT id FROM runs')[0]['id'])
     sync(app)
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
     app.state.memory.save('google:alice', Note(key='response-style', title='Response style',
         content='Use a 25-word TLDR.', request_id='response-style-demo'))
     return app, control, clock, actor, run
@@ -371,9 +372,9 @@ def test_automatic_refresh_keeps_memory_available_across_hours(memory_profiles):
     app, control, clock, actor, run = memory_profiles
     for _ in range(4):
         clock[0] += 31 * 60
-        assert len(app.state.memory.tools(run)) == 3  # Refresh happens before expiry.
+        assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}  # Refresh happens before expiry.
         sync(app)
-        assert len(app.state.memory.tools(run)) == 3
+        assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
         assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
         assert '25-word TLDR' in app.state.memory.context(run)
         calls = len(control['calls'])
@@ -393,7 +394,7 @@ def test_old_daily_timer_recovers_expired_memory_automatically(memory_profiles):
     assert not app.state.memory.tools(run)
     sync(app)
     assert control['calls'] == [USER, USER]
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
     assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
 
 
@@ -413,7 +414,7 @@ def test_refresh_failure_blocks_memory_and_recovers_after_retry(memory_profiles)
     clock[0] += 2
     sync(app)
     assert len(control['calls']) == calls + 1
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
 
 
 @pytest.mark.parametrize('change', ['deleted', 'email'])

@@ -1,0 +1,332 @@
+"""Exercise process reuse with pinned Codex, real MCP, and scripted inference."""
+import asyncio
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from agent.harnesses.codex_harness import CodexAgent
+from sandbox.codex_runtime import RuntimeLease, discard_orphan
+from test_codex_tool_readiness import readiness_case
+from test_codex_tool_search import search_case
+from test_workspace import workspace as broker_workspace  # noqa: F401
+
+
+@pytest.fixture
+def runtime_root():
+    # Unix control socket paths have a small platform-dependent limit.
+    with tempfile.TemporaryDirectory(prefix='moyai-warm-', dir='/tmp') as directory:
+        yield Path(directory)
+
+
+def reuse_case(tmp_path, monkeypatch, root, *, scope='same-session', progress=lambda value: None, **options):
+    proof = {}
+
+    class WarmAgent(CodexAgent):
+        def __init__(self, **kwargs):
+            self.lease = RuntimeLease(scope, 5, root=root)
+            kwargs['relay'].codex_runtime = self.lease
+            super().__init__(**kwargs)
+
+        def close(self):
+            proof.update(self.lease.info or {})
+            proof['clean'] = self.lease.clean
+            super().close()
+            self.lease.close()
+
+    started = time.monotonic()
+    result, requests, outcome = readiness_case(tmp_path, monkeypatch, delay=0,
+        agent_class=WarmAgent, progress=progress, **options)
+    proof.update(result)
+    proof['elapsed_ms'] = round((time.monotonic() - started) * 1000, 2)
+    return proof, requests, outcome
+
+
+def test_completed_runs_reuse_process_but_not_thread_credentials_or_history(tmp_path, monkeypatch, runtime_root):
+    first, requests, outcome = reuse_case(tmp_path, monkeypatch, runtime_root)
+    assert first['completed'] and first['clean'], outcome
+    second, next_requests, outcome = reuse_case(tmp_path, monkeypatch, runtime_root,
+        capability='rotated-capability', tool_name='fresh_echo')
+    assert second['completed'] and second['clean'], outcome
+    assert first['pid'] == second['pid'] and second['reused'] and not first['reused']
+    assert first['model_started_after_catalog'] and second['model_started_after_catalog']
+    assert first['tool_calls'] == ['echo'] and second['tool_calls'] == ['fresh_echo']
+    # A new thread must not carry the earlier tool call/output into its request.
+    assert 'ready-before-inference' not in json.dumps(next_requests[0]['body']['input'])
+    assert 'ready-before-inference' in json.dumps(requests[-1]['body']['input'])
+
+
+def test_new_scope_restarts_runtime(tmp_path, monkeypatch, runtime_root):
+    first, _, _ = reuse_case(tmp_path, monkeypatch, runtime_root)
+    second, _, result = reuse_case(tmp_path, monkeypatch, runtime_root, scope='different-requester')
+    assert second['completed'] and second['clean'], result
+    assert second['pid'] != first['pid'] and not second['reused']
+
+
+def test_idle_expiry_and_unclean_release_discard_runtime(runtime_root):
+    lease = RuntimeLease('session', .05, root=runtime_root)
+    first = lease.ready()
+    assert first
+    lease.close()  # No successful cleanup receipt.
+    second = RuntimeLease('session', .05, root=runtime_root)
+    info = second.ready()
+    assert info and info['pid'] != first['pid'] and not info['reused']
+    second.clean = True  # No thread was ever started.
+    second.close()
+    deadline = time.monotonic() + 8
+    while (runtime_root / 'lease.sock').exists() and time.monotonic() < deadline:
+        time.sleep(.02)
+    assert not (runtime_root / 'lease.sock').exists()
+    assert not (runtime_root / 'home').exists()
+
+
+def test_concurrent_lease_falls_back_without_disrupting_owner(runtime_root):
+    first = RuntimeLease('session', .1, root=runtime_root)
+    info = first.ready()
+    try:
+        second = RuntimeLease('session', .1, root=runtime_root)
+        try:
+            assert second.ready() is None
+        finally:
+            second.close()
+        os.kill(info['pid'], 0)
+    finally:
+        first.close()
+
+
+def test_owner_disconnect_discards_even_a_previously_clean_runtime(runtime_root):
+    owner = RuntimeLease('session', .1, root=runtime_root)
+    info = owner.ready()
+    assert info
+    owner.clean = True
+    owner.info = None  # Simulate EOF without sending a clean-release message.
+    owner.close()
+    replacement = RuntimeLease('session', .1, root=runtime_root)
+    try:
+        next_info = replacement.ready()
+        assert next_info and next_info['pid'] != info['pid'] and not next_info['reused']
+    finally:
+        replacement.close()
+
+
+def test_unavailable_lease_keeps_cold_execution_working(tmp_path, monkeypatch, runtime_root):
+    blocked = runtime_root / 'not-a-directory'
+    blocked.touch()
+    proof, requests, result = reuse_case(tmp_path, monkeypatch, blocked)
+    assert proof['completed'] and proof['model_started_after_catalog'], result
+    assert 'pid' not in proof and len(requests) == 2 and proof['tool_calls'] == ['echo']
+
+
+def test_failed_required_mcp_discards_warm_process_without_inference(tmp_path, monkeypatch, runtime_root):
+    failed, requests, result = reuse_case(tmp_path, monkeypatch, runtime_root, fail_tools=True)
+    assert not failed['completed'] and not failed['clean'] and result['failed']
+    assert not requests and not failed['tool_calls']
+    recovered, _, result = reuse_case(tmp_path, monkeypatch, runtime_root)
+    assert recovered['completed'] and recovered['pid'] != failed['pid'], result
+
+
+def test_prewarm_does_not_inherit_provider_or_broker_secrets(monkeypatch):
+    from sandbox.codex_runtime import clean_env
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'private-capability')
+    monkeypatch.setenv('OPENAI_API_KEY', 'private-provider-key')
+    monkeypatch.setenv('CODEX_HOME', '/untrusted')
+    assert not {'WORKSPACE_RUN_TOKEN', 'OPENAI_API_KEY', 'CODEX_HOME'} & clean_env().keys()
+
+
+def test_snapshot_cleanup_removes_orphans_but_preserves_live_owner(runtime_root):
+    home = runtime_root / 'home'
+    home.mkdir()
+    (home / 'private-native-state').write_text('cloned state')
+    discard_orphan(runtime_root)
+    assert not home.exists()
+    owner = RuntimeLease('session', .1, root=runtime_root)
+    try:
+        info = owner.ready()
+        assert info
+        discard_orphan(runtime_root)
+        assert home.exists()
+        os.kill(info['pid'], 0)
+    finally:
+        owner.close()
+
+
+def test_reused_runtime_native_search_and_real_broker(tmp_path, monkeypatch, runtime_root, broker_workspace):
+    info = []
+
+    class WarmAgent(CodexAgent):
+        def __init__(self, **kwargs):
+            self.lease = RuntimeLease('search-session', 5, root=runtime_root)
+            kwargs['relay'].codex_runtime = self.lease
+            super().__init__(**kwargs)
+
+        def close(self):
+            info.append({**self.lease.info, 'clean': self.lease.clean})
+            super().close()
+            self.lease.close()
+
+    for _ in range(2):
+        with monkeypatch.context() as turn_patch:
+            proof, _, _ = search_case(tmp_path, turn_patch, broker_workspace, agent_class=WarmAgent)
+        assert all(proof.values())
+    assert info[1]['reused'] and info[0]['pid'] == info[1]['pid']
+    assert all(value['clean'] for value in info)
+
+
+@pytest.mark.parametrize('fault', ['unload', 'unload_and_lease', 'unload_and_sdk', 'sdk_exit'])
+def test_cleanup_failure_preserves_completed_answer_and_discards_process(tmp_path, monkeypatch, runtime_root, fault):
+    from openai_codex.async_client import AsyncCodexClient
+    injected = []
+    request, sdk_exit, close = AsyncCodexClient.request, AsyncCodexClient.__aexit__, RuntimeLease.close
+
+    async def cleanup_request(self, method, *args, **kwargs):
+        if method == 'thread/unsubscribe' and fault.startswith('unload'):
+            injected.append('unload')
+            raise OSError('Injected unload failure')
+        return await request(self, method, *args, **kwargs)
+
+    async def close_sdk(self, *args):
+        await sdk_exit(self, *args)
+        if fault in {'unload_and_sdk', 'sdk_exit'}:
+            injected.append('sdk')
+            raise OSError('Injected SDK shutdown failure')
+
+    def close_lease(self):
+        close(self)
+        if fault == 'unload_and_lease' and 'lease' not in injected:
+            injected.append('lease')
+            raise OSError('Injected lease close failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncCodexClient, 'request', cleanup_request)
+        patch.setattr(AsyncCodexClient, '__aexit__', close_sdk)
+        patch.setattr(RuntimeLease, 'close', close_lease)
+        proof, requests, result = reuse_case(tmp_path, patch, runtime_root)
+    assert injected, 'The fault must be reached after the real native turn'
+    assert result['completed'] and not result['failed'], result
+    assert result['final_response'] == 'Tools were ready before the first request.'
+    assert proof['tool_calls'] == ['echo'] and len(requests) == 2  # No replay.
+    assert not proof['clean']
+    replacement, _, result = reuse_case(tmp_path, monkeypatch, runtime_root)
+    assert replacement['completed'] and replacement['pid'] != proof['pid'], result
+    print(f'PASS {fault}: completed answer preserved; tool executed once; runtime discarded.')
+
+
+@pytest.mark.parametrize('fault', ['pool', 'disconnect', 'stream', 'connection', 'lock'])
+def test_lease_close_attempts_all_resources_even_when_one_fails(fault):
+    calls = []
+
+    def release(name):
+        calls.append(name)
+        if name == fault:
+            raise OSError('Injected close failure')
+
+    lease = RuntimeLease.__new__(RuntimeLease)
+    lease.pool = SimpleNamespace(shutdown=lambda **kwargs: release('pool'))
+    lease.info = None
+    lease.stream = SimpleNamespace(close=lambda: release('stream'))
+    lease.connection = SimpleNamespace(shutdown=lambda *args: release('disconnect'),
+                                       close=lambda: release('connection'))
+    lease.lock = SimpleNamespace(close=lambda: release('lock'))
+    lease.close()
+    assert {'pool', 'disconnect', 'stream', 'connection', 'lock'} <= set(calls)
+    assert lease.stream is lease.connection is lease.lock is None
+    lease.close()
+    assert calls.count('stream') == calls.count('connection') == calls.count('lock') == 1
+
+
+@pytest.mark.parametrize('turn_failed', [False, True])
+def test_entrypoint_always_closes_relay_without_changing_turn_outcome(monkeypatch, turn_failed):
+    from sandbox import agent
+    calls = []
+    relay = SimpleNamespace(url='http://fixture', close=lambda: calls.append('relay'))
+    relay.start = lambda: relay
+
+    def close():
+        calls.append('lease')
+        raise OSError('Injected lease cleanup failure')
+
+    def run_agent(spec, relay):
+        calls.append('turn')
+        if turn_failed:
+            raise ValueError('Original turn failure')
+        agent.emit('final', 'Completed answer.', completed=True)
+        return 0
+
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-only')
+    monkeypatch.setattr(agent, 'BrokerRelay', lambda *args, **kwargs: relay)
+    monkeypatch.setattr(agent, 'RuntimeLease', lambda *args, **kwargs: SimpleNamespace(close=close))
+    monkeypatch.setattr(agent, 'discard_orphan', lambda: None)
+    monkeypatch.setattr(agent, 'run_agent', run_agent)
+    monkeypatch.setattr(agent, 'emit', lambda *args, **kwargs: calls.append('final'))
+    spec = {'broker_url': 'http://fixture', 'harness': 'codex', 'model': 'openai/gpt-6-astra',
+            'codex_runtime_scope': 'fixture', 'codex_runtime_idle_seconds': 5}
+    if turn_failed:
+        with pytest.raises(ValueError, match='Original turn failure'):
+            agent.run(spec)
+    else:
+        assert agent.run(spec) == 0
+    assert calls == (['turn'] if turn_failed else ['turn', 'final']) + ['lease', 'relay']
+
+
+@pytest.mark.parametrize('phase', ['unload', 'sdk_exit', 'lease_release'])
+def test_task_deadline_excludes_runtime_teardown(tmp_path, monkeypatch, runtime_root, phase):
+    from openai_codex.async_client import AsyncCodexClient
+    timeout, offload = asyncio.timeout, asyncio.to_thread
+    request, sdk_exit = AsyncCodexClient.request, AsyncCodexClient.__aexit__
+    deadlines, injected = [], []
+
+    def task_timeout(seconds):
+        scope = timeout(seconds)
+        if seconds and seconds > 5:
+            deadlines.append(scope)
+        return scope
+
+    async def expire_at_cleanup():
+        injected.append(phase)
+        assert deadlines, 'The real invocation deadline must be installed'
+        try:
+            deadlines[0].reschedule(asyncio.get_running_loop().time())
+        except RuntimeError:
+            pass  # Correct: the execution deadline has already left its scope.
+        # Deliver an active deadline before letting this teardown step finish.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    async def cleanup_request(self, method, *args, **kwargs):
+        if method == 'thread/unsubscribe':
+            if phase == 'unload':
+                await expire_at_cleanup()
+            if phase == 'lease_release':
+                raise OSError('Discard runtime to exercise lease release')
+        return await request(self, method, *args, **kwargs)
+
+    async def close_sdk(self, *args):
+        if phase == 'sdk_exit':
+            await expire_at_cleanup()
+        await sdk_exit(self, *args)
+
+    async def close_worker(function, *args, **kwargs):
+        if (phase == 'lease_release' and isinstance(getattr(function, '__self__', None), RuntimeLease)
+                and function.__name__ == 'close'):
+            await expire_at_cleanup()  # Before the worker actually owns cleanup.
+        return await offload(function, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(asyncio, 'timeout', task_timeout)
+        patch.setattr(asyncio, 'to_thread', close_worker)
+        patch.setattr(AsyncCodexClient, 'request', cleanup_request)
+        patch.setattr(AsyncCodexClient, '__aexit__', close_sdk)
+        proof, requests, result = reuse_case(tmp_path, patch, runtime_root)
+    assert injected == [phase]
+    assert result['completed'] and not result['failed'], result
+    assert result['final_response'] == 'Tools were ready before the first request.'
+    assert proof['tool_calls'] == ['echo'] and len(requests) == 2
+    assert not deadlines[0].expired()
+    replacement, _, outcome = reuse_case(tmp_path, monkeypatch, runtime_root)
+    assert replacement['completed'], outcome
+    assert (replacement['pid'] == proof['pid']) == (phase != 'lease_release')
+    print(f'PASS {phase}: execution deadline excludes teardown; answer preserved; lease released.')

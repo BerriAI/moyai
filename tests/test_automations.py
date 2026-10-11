@@ -42,7 +42,12 @@ def test_drafts_require_explicit_enable_and_keep_identity(workspace, monkeypatch
     app.state.store.update_run(run['id'],status='idle',summary='Finished with PR link')
     next_run=client.post(path,json={'revision':1,'client_id':'fourth-occurrence'}).json()
     assert next_run['run_id'] != run['id']
-    assert 'Finished with PR link' in app.state.store.run(next_run['run_id'])['prompt']
+    assert 'automation_history' in app.state.store.run(next_run['run_id'])['prompt']
+    from app.automation_history import read_history
+    assert any(row['summary'] == 'Finished with PR link' for row in read_history(app.state.store, automation['id'])['history'])
+    app.state.session_lifecycle.request_delete(run['id'], owner, False)
+    history = {row['run_id']: row for row in client.get('/api/automations').json()['automations'][0]['history']}
+    assert history[run['id']]['status'] == 'deleting' and history[run['id']]['outcome'] == 'started'
 
 
 def test_ownership_csrf_revision_and_admin_pause(workspace, monkeypatch):
@@ -130,6 +135,8 @@ async def test_stale_schedule_and_downtime_do_not_launch_old_work(workspace, mon
 
 async def test_retry_flushes_receipt_after_checkpoint_failure(workspace,monkeypatch):
     app,client=workspace
+    # Keep unrelated Slack flushes from consuming the injected failure.
+    client.portal.call(app.state.slack.chat.shutdown)
     a=create(client)
     service=app.state.automations
     from app.temporal_runtime import TemporalRunManager
@@ -188,9 +195,10 @@ def test_my_linear_issues_uses_session_identity_not_connection_owner(workspace,m
     monkeypatch.setattr(app.state.connectors,'request',request)
     result=client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{}})
     assert result.status_code==200 and result.json()['issues']['nodes'][0]['identifier']=='LIT-123'
-    assert sent[0]['variables']=={'email':'tin@berri.ai'}
+    assert sent[0]['variables']=={'email':'tin@berri.ai', 'first':50, 'after':None}
     assert 'assignee' in sent[0]['query'] and 'completed' in sent[0]['query']
-    assert client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{'email':'someone@berri.ai'}}).status_code==422
+    rejected=client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{'email':'someone@berri.ai'}}).json()
+    assert rejected['code']=='invalid_arguments' and rejected['dispatched'] is False
 
 
 def test_concurrent_occurrences_admit_independent_sessions(workspace,monkeypatch):
@@ -242,17 +250,19 @@ def test_active_child_does_not_block_independent_occurrences(workspace,monkeypat
 
 def test_builder_metadata_and_queue_setting_round_trip(workspace):
     app, client = workspace
-    a = create(client, metadata={'team': 'engineering', 'owner': '<script>demo</script>'}, queue_events=False)
+    a = create(client, metadata={'team': 'engineering', 'owner': '<script>demo</script>', 'notes': 'x' * 501}, queue_events=False)
     assert a['definition']['metadata']['team'] == 'engineering'
     assert a['definition']['queue_events'] is False
+    notes = '界' * 16370 + '\nreview notes!'
+    assert len(notes) == 16384
     saved = client.put('/api/automations/' + a['id'], json={
-        'revision': a['revision'], 'definition': {**a['definition'], 'metadata': {'team': 'platform'}, 'queue_events': True}})
+        'revision': a['revision'], 'definition': {**a['definition'], 'metadata': {'team': 'platform', 'notes': notes}, 'queue_events': True}})
     assert saved.status_code == 200
     current = client.get('/api/automations').json()['automations'][0]
     assert current['paused'] and current['revision'] == 2
-    assert current['definition']['metadata'] == {'team': 'platform'}
+    assert current['definition']['metadata'] == {'team': 'platform', 'notes': notes}
     assert current['definition']['queue_events'] is True
-    for metadata in ({' ': 'empty'}, {'a' * 81: 'long key'}, {'team': 'x' * 501}, {str(i): '' for i in range(21)}):
+    for metadata in ({' ': 'empty'}, {'team': ['invalid nested value']}):
         result = client.post('/api/automations', json={'definition': {**a['definition'], 'metadata': metadata}})
         assert result.status_code == 422
 

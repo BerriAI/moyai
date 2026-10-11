@@ -139,7 +139,8 @@ async def test_ready_environment_only_matches_its_repository(environments, monke
 
 
 @pytest.mark.asyncio
-async def test_new_sessions_recheck_github_access_before_snapshot_use(environments):
+@pytest.mark.parametrize('explicit_environment', [False, True])
+async def test_new_sessions_recheck_github_access_before_snapshot_use(environments, explicit_environment):
     env = environments
     await env.sync_repositories()
     row = next(r for r in env.catalog(True) if r['repository']=='BerriAI/agentchat')
@@ -147,8 +148,9 @@ async def test_new_sessions_recheck_github_access_before_snapshot_use(environmen
     env.update(build['id'], phase='ready', snapshot_id='im-private', commit_sha='a'*40)
     env.store.execute('UPDATE environments SET enabled=1,activate_on_ready=0,active_build=? WHERE id=?', (build['id'], row['id']))
     env.connectors.github.selected_target = AsyncMock(side_effect=ConnectorError('Repository access was removed.'))
+    run = new_run(env, '', environment_id=row['id']) if explicit_environment else new_run(env)
     with pytest.raises(HTTPException, match='access was removed'):
-        await env.prepare(new_run(env)['id'])
+        await env.prepare(run['id'])
 
 
 @pytest.mark.asyncio

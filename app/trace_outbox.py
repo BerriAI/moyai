@@ -18,11 +18,14 @@ log = logging.getLogger(__name__)
 
 TABLES = frozenset({'trace_outbox', 'trace_outbox_raindrop', 'trace_outbox_langfuse',
                    'trace_outbox_langsmith', 'trace_outbox_braintrust', 'trace_outbox_raindrop_events'})
+MAX_BATCH_BYTES = 8 * 1024 * 1024
 
 
 class TraceOutbox:
     # One table per receiver: each keeps its own retries and receipts, so an
     # outage at one destination never delays or duplicates delivery to another.
+    batch_row_overhead = 0
+
     def __init__(self, store, table, endpoint, headers):
         if table not in TABLES:
             raise ValueError('Unknown trace outbox')
@@ -32,19 +35,9 @@ class TraceOutbox:
         self.lock = asyncio.Lock()
         self.wake = asyncio.Event()
         self.task = None
-        with store.connect() as conn:
-            conn.executescript(f'''
-                CREATE TABLE IF NOT EXISTS {table} (
-                    trace_id TEXT NOT NULL, span_id TEXT NOT NULL, payload BLOB,
-                    created_at REAL NOT NULL, delivered_at REAL,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at REAL NOT NULL DEFAULT 0,
-                    last_error TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY(trace_id,span_id)
-                );
-                CREATE INDEX IF NOT EXISTS {table}_pending
-                    ON {table}(next_attempt_at,created_at) WHERE delivered_at IS NULL;
-            ''')
+        self.loop = None
+        if store.schema_updates:
+            initialize_schema(store, table)
 
     def enqueue(self, span, connection=None):
         payload = encode_spans([span]).SerializeToString()
@@ -55,14 +48,26 @@ class TraceOutbox:
             return
         values = (format(span.context.trace_id, '032x'), format(span.context.span_id, '016x'),
                   payload, time.time())
-        sql = f'''INSERT OR IGNORE INTO {self.table}(trace_id,span_id,payload,created_at)
-                  VALUES(?,?,?,?)'''
+        sql = f'''INSERT INTO {self.table}(trace_id,span_id,payload,created_at)
+                  VALUES(?,?,?,?) ON CONFLICT DO NOTHING'''
         if connection is not None:
             connection.execute(sql, values)
         else:
             with self.store.connect() as conn:
                 conn.execute(sql, values)
-        self.wake.set()
+        # Producers also run in database threads. Notify only after commit;
+        # signalling an asyncio Event from those threads can lose trace writes.
+        if connection is not None:
+            connection.commit_callbacks.append(self.notify)
+        else:
+            self.notify()
+
+    def notify(self):
+        if self.loop is not None and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(self.wake.set)
+            except RuntimeError:
+                pass  # A closed exporter recovers its durable queue on restart.
 
     def payload_run_ids(self, payload):
         request = ExportTraceServiceRequest.FromString(payload)
@@ -92,6 +97,7 @@ class TraceOutbox:
 
     def start(self):
         if self.task is None:
+            self.loop = asyncio.get_running_loop()
             self.task = asyncio.create_task(self.run())
 
     async def run(self):
@@ -110,8 +116,24 @@ class TraceOutbox:
 
     async def export_once(self):
         async with self.lock:
-            rows = self.store.rows(f'''SELECT * FROM {self.table} WHERE delivered_at IS NULL
-                AND next_attempt_at<=? ORDER BY created_at LIMIT 64''', (time.time(),))
+            pending = self.store.rows(f'''SELECT trace_id,span_id,length(payload) AS payload_bytes
+                FROM {self.table} WHERE delivered_at IS NULL AND next_attempt_at<=?
+                ORDER BY created_at,trace_id,span_id LIMIT 64''', (time.time(),))
+            queue_ids, size = [], 0
+            for row in pending:
+                row_size = row['payload_bytes'] + self.batch_row_overhead
+                if queue_ids and size + row_size > MAX_BATCH_BYTES:
+                    break
+                # An existing oversized span is still attempted unchanged by
+                # itself. Do not strand it or silently discard trace content.
+                queue_ids.append((row['trace_id'], row['span_id']))
+                size += row_size
+            if not queue_ids:
+                return False
+            # Read payloads only after selecting a byte-bounded batch; 64 large
+            # spans must not all be loaded into memory to send just a few.
+            rows = self.store.rows(f'''SELECT * FROM {self.table}
+                WHERE (trace_id,span_id) IN (VALUES {','.join('(?,?)' for _ in queue_ids)}) ORDER BY created_at,trace_id,span_id''', tuple(value for pair in queue_ids for value in pair))
             allowed = []
             for row in rows:
                 if any(private_run(self.store, run_id) for run_id in self.payload_run_ids(row['payload'])):
@@ -166,6 +188,10 @@ class TraceOutbox:
 class RaindropEventOutbox(TraceOutbox):
     """Raindrop interactions power Events/Signals; OTLP spans alone do not."""
 
+    # json.dumps adds two brackets and a comma/space between stored JSON
+    # objects: exactly two extra bytes per event for every nonempty batch.
+    batch_row_overhead = 2
+
     def __init__(self, store, endpoint, headers):
         super().__init__(store, 'trace_outbox_raindrop_events', endpoint, headers)
         self.headers['Content-Type'] = 'application/json'
@@ -197,3 +223,21 @@ class RaindropEventOutbox(TraceOutbox):
         # The documented API returns 204; the current hosted API returns 200
         # with the accepted event IDs. Both acknowledge the batch.
         return '' if response.status_code in {200, 204} else 'HTTP ' + str(response.status_code)
+
+
+def initialize_schema(store, table):
+    if table not in TABLES:
+        raise ValueError('Unknown trace outbox')
+    with store.connect() as conn:
+        conn.executescript(f'''
+            CREATE TABLE IF NOT EXISTS {table} (
+                trace_id TEXT NOT NULL, span_id TEXT NOT NULL, payload BLOB,
+                created_at REAL NOT NULL, delivered_at REAL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(trace_id,span_id)
+            );
+            CREATE INDEX IF NOT EXISTS {table}_pending
+                ON {table}(next_attempt_at,created_at) WHERE delivered_at IS NULL;
+        ''')

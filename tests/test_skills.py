@@ -69,6 +69,13 @@ def skill_context(app,run):
     return json.loads(app.state.skills.context(run).split('\n',1)[1])
 
 
+def assert_rejected(response: httpx.Response, status: int) -> None:
+    assert response.status_code == 200
+    result = response.json()
+    assert set(result) == {'error', 'status_code'}
+    assert result['status_code'] == status and result['error']
+
+
 def test_personal_library_is_owner_only_and_org_skill_is_visible_to_ishaan(workspace):
     app,client=workspace
     sign_in(app,client)
@@ -130,23 +137,23 @@ def test_sharing_changes_require_owner_and_org_admin(workspace):
 
 
 @pytest.mark.parametrize('scope,capacity', [('personal', 50), ('organization', 200)])
-def test_library_capacity_allows_retries_edits_and_counts_archived(workspace, scope, capacity):
+def test_library_exceeds_old_capacity_and_preserves_retry_and_archive_identity(workspace, scope, capacity):
     app,client=workspace
     sign_in(app,client)
     for i in range(capacity):
         response=create(client,scope,name=f'workflow-{i}',client_id=f'workflow-{i}')
         assert response.status_code==201
     skill=response.json()['id']
-    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==201
     retry=create(client,scope,name=f'workflow-{capacity-1}',client_id=f'workflow-{capacity-1}')
     assert retry.status_code==201 and retry.json()['id']==skill
     assert edit(client,skill,description='Updated at capacity').status_code==200
     assert client.post('/api/skills/'+skill+'/archive',json={'archived':True,'revision':2}).status_code==200
-    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
-    assert len(client.get('/api/skills?archived=true').json()['skills'])==capacity
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==201
+    assert len(client.get('/api/skills?archived=true').json()['skills'])==capacity+1
 
 
-def test_sharing_into_organization_uses_the_200_skill_capacity(workspace):
+def test_sharing_into_organization_has_no_old_count_cap(workspace):
     app,client=workspace
     sign_in(app,client)
     for i in range(199):
@@ -154,8 +161,8 @@ def test_sharing_into_organization_uses_the_200_skill_capacity(workspace):
     shared=create(client,name='share-last-slot',client_id='share-last-slot').json()['id']
     overflow=create(client,name='share-overflow',client_id='share-overflow').json()['id']
     assert edit(client,shared,scope='organization').status_code==200
-    assert edit(client,overflow,scope='organization').status_code==409
-    assert client.get('/api/skills/'+overflow).json()['scope']=='personal'
+    assert edit(client,overflow,scope='organization').status_code==200
+    assert client.get('/api/skills/'+overflow).json()['scope']=='organization'
     assert edit(client,shared,description='Organization edit at capacity').status_code==200
 
 
@@ -196,7 +203,7 @@ def test_skill_tool_returns_metadata_and_checks_turn_actor_in_shared_session(wor
     assert response.status_code==200 and response.json()['loaded']
     assert MARKER not in response.text and 'encrypted' not in response.text
     app.state.store.execute("UPDATE runs SET active_user_id='google:ishaan' WHERE id=?",(run['id'],))
-    assert client.post(url,json=body,headers=headers).status_code==404
+    assert_rejected(client.post(url,json=body,headers=headers), 404)
     assert MARKER not in app.state.skills.context(app.state.store.run(run['id']))
     app.state.store.update_run(run['id'],token_hash='')
     assert client.post(url,json=body,headers=headers).status_code==401
@@ -297,15 +304,17 @@ def test_search_keeps_gateway_prompt_bounded_and_returns_only_references(workspa
     for i in range(12):
         assert create(client,'organization',name=f'workflow-{i}',client_id=f'workflow-{i}').status_code==201
     assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
-    assert captured[0]==captured[1]
-    assert skill_context(app,run)=={'turn_id':run['active_message_id'],'matches':[],'loaded':[],'unavailable':[]}
+    assert captured[0]!=captured[1]
+    initial = skill_context(app,run)
+    assert len(initial['available']) == 12 and initial['omitted'] == 0
+    assert not initial['matches'] and not initial['loaded'] and not initial['unavailable']
     response=search(client,run,'coverage')
-    assert response.status_code==200 and len(response.json()['matches'])==5
+    assert response.status_code==200 and len(response.json()['matches'])==12
     assert all(set(m)=={'reference','revision'} for m in response.json()['matches'])
     assert 'Review benchmark coverage and results.' not in response.text and MARKER not in response.text
     assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
     context=json.loads(captured[-1][0]['content'].split('\n',1)[1])
-    assert len(context['matches'])==5 and not context['loaded'] and 'available' not in context
+    assert len(context['matches'])==12 and not context['loaded'] and not context['available']
     assert context['matches'][0]['description']=='Review benchmark coverage and results.'
     assert MARKER not in json.dumps(captured) and not app.state.store.rows('SELECT * FROM skill_uses')
     assert 'Review benchmark coverage and results.' not in client.get('/api/runs/'+run['id']).text
@@ -320,15 +329,15 @@ def test_search_ranks_exact_references_replaces_matches_and_never_scans_bodies(w
     run=active(app)
     result=search(client,run,'ORG:BENCHMARK-REVIEW').json()
     assert result['matches'][0]['reference']=='org:benchmark-review'
-    assert len(result['matches'])==5
+    assert len(result['matches'])==8
     result=search(client,run,'BENCHMARK-REVIEW').json()
     assert {m['reference'] for m in result['matches'][:2]}=={'personal:benchmark-review','org:benchmark-review'}
     selected=app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')
-    for query in ['', '   ', 'x'*201]:
+    for query in [None, [], {}]:
         invalid=search(client,run,query)
         assert invalid.status_code==200 and 'Invalid skill arguments' in invalid.json()['error']
         assert app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')==selected
-    assert search(client,run,'the and for').status_code==422
+    assert_rejected(search(client,run,'the and for'), 422)
     assert app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')==selected
     assert search(client,run,MARKER).json()['matches']==[]
     assert skill_context(app,run)['matches']==[]
@@ -356,20 +365,55 @@ def test_search_stale_actor_and_turn_do_not_replace_current_selection(workspace)
     app.state.store.enqueue_message(old['id'],'Next request','next-request',user_id='google:ishaan')
     app.state.store.claim_message(old['id'])
     app.state.store.update_run(old['id'],status='running')
-    assert search(client,old,'coverage').status_code==409
+    assert_rejected(search(client,old,'coverage'), 409)
     assert app.state.store.rows('SELECT * FROM skill_searches')==selected
     assert skill_context(app,app.state.store.run(old['id']))['matches']==[]
 
 
-def test_five_skill_limit_and_untrusted_old_context_cannot_select_skills(workspace):
+@pytest.mark.parametrize('selection,count', [('tool', 86), ('explicit', 12)])
+def test_many_skills_load_in_one_turn_without_exposing_bodies(workspace, selection, count):
     app,client=workspace
     sign_in(app,client)
-    for i in range(6):assert create(client,name='workflow-'+str(i),client_id='workflow-'+str(i)).status_code==201
+    references = [f'org:workflow-{i}' for i in range(count)]
+    for i in range(count):
+        assert create(client, 'organization', name=f'workflow-{i}', client_id=f'workflow-{i}').status_code==201
     run=active(app)
     # Merely having a library loads neither metadata nor instruction bodies.
-    context=app.state.skills.context(run)
-    assert MARKER not in context
-    for i in range(5):app.state.skills.load(run,'workflow-'+str(i))
-    with pytest.raises(HTTPException) as exc:app.state.skills.load(run,'workflow-5')
-    assert exc.value.status_code==409
-    assert app.state.skills.load(run,'workflow-0')['loaded']  # Replay consumes no extra slot.
+    assert MARKER not in app.state.skills.context(run)
+    if selection == 'explicit':
+        app.state.store.execute('UPDATE messages SET content=? WHERE id=?',
+                               (' '.join('/'+ref for ref in references), run['active_message_id']))
+    else:
+        for reference in references:
+            response = client.post('/broker/'+run['id']+'/tools/call', headers={'Authorization':'Bearer capability'},
+                                   json={'name':'skills_load','arguments':{'name':reference}})
+            assert response.status_code == 200 and response.json()['loaded']
+            assert MARKER not in response.text
+    context = skill_context(app, run)
+    assert {item['reference'] for item in context['loaded']} == set(references)
+    assert all(item['instructions'] == INSTRUCTIONS for item in context['loaded'])
+    assert not context['unavailable']
+    assert app.state.skills.load(run, references[0])['loaded']
+    assert len(app.state.store.rows('SELECT * FROM skill_uses')) == count  # Replays are idempotent.
+    assert MARKER not in client.get('/api/runs/'+run['id']).text
+    assert MARKER not in app.state.skills.context(active(app))  # Loads do not carry to another turn.
+
+
+@pytest.mark.parametrize('failure,status', [('capability', 401), ('skill-auth', 401), ('skill-server', 500), ('checkpoint', 503)])
+def test_skill_broker_keeps_authentication_and_server_failures_fatal(workspace, monkeypatch, failure, status):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    with monkeypatch.context() as patch:
+        if failure == 'capability':
+            app.state.store.update_run(run['id'], token_hash='')
+        elif failure.startswith('skill-'):
+            def unavailable(*args: object) -> None:
+                raise HTTPException(status, 'Skill service unavailable.')
+            patch.setattr(app.state.skills, 'call', unavailable)
+        else:
+            async def flush() -> None:
+                raise HTTPException(status, 'Checkpoint unavailable.')
+            patch.setattr(app.state.memory.checkpoints, 'flush', flush)
+        response = search(client, run, 'workflow')
+    assert response.status_code == status and 'status_code' not in response.json()

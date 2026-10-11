@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const {randomUUID}=require('node:crypto');
 function context(extra={}) {
   const c={Intl,Date,Map,Set,crypto:{randomUUID},state:{pageVersion:1,config:{cloud_ready:true,model:'model',models:[{id:'model',name:'Model'}]}},providerNames:{github:'GitHub'},esc:s=>String(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x])),...extra};
@@ -28,6 +28,14 @@ test('connection tool descriptions are escaped and unavailable choices are label
 test('metadata rejects duplicate keys instead of silently overwriting a value',()=>{
   const c=context(),form={querySelectorAll:selector=>selector.includes('key')?[{value:'team'},{value:' team '}]:[{value:'one'},{value:'two'}]};
   assert.throws(()=>c.readAutomationMetadata(form),/different key/);
+});
+test('metadata editor preserves complete Unicode values beyond the former text cap',()=>{
+  const value='🚀'.repeat(20000),button={},add={};
+  const item={querySelector:()=>button},host={children:[],append(row){this.children.push(row);}};
+  const form={querySelector:s=>s==='[data-metadata]'?host:add};
+  const c=context({document:{createElement:()=>item}});c.automationMetadata(form,{notes:value});
+  assert.ok(item.innerHTML.includes(value));assert.doesNotMatch(item.innerHTML,/maxlength/);
+  assert.equal(add.disabled,false);
 });
 function generatorContext({suggest=false,recent=true,description='Every Monday review tickets',fail=false}={}) {
   const requests=[],opened=[],errors={textContent:''},button={},form={elements:{description:{focus(){}}},querySelector:s=>s==='[type=submit]'?button:errors};

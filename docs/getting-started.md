@@ -96,6 +96,7 @@ With **Auto** selected, resolved `openai/` models use Codex SDK and `anthropic/`
 | OpenCode | Any configured compatible model | Chat Completions |
 | Deep Agents | Any configured compatible model | Chat Completions |
 | Tool Loop | Any configured compatible model | Chat Completions |
+| Pi | Any configured compatible model | Chat Completions |
 
 For Claude Agent SDK or Codex, use a LiteLLM gateway that exposes the required native API. Moyai forwards Messages and Responses requests without converting them to Chat Completions. Confirm that your key permits the selected model and protocol.
 

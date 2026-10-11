@@ -7,15 +7,30 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.context_store import ContextStore, ContextUnavailable, open_context, read_records, BATCH_BYTES, SUMMARY_BYTES
-from sandbox.harness_agent import TurnJournal
-from sandbox.continuation import RotationDeadline
+from agent.context_store import ContextStore, ContextUnavailable, open_context, read_records
+from agent.harnesses.harness_agent import TurnJournal
+from agent.continuation import RotationDeadline
+
+
+TEST_INPUT_BUDGET = 48_000
+
+@pytest.fixture(autouse=True)
+def model_budget(monkeypatch):
+    original = ContextStore.__init__
+    def initialize(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.input_budget = TEST_INPUT_BUDGET
+    monkeypatch.setattr(ContextStore, '__init__', initialize)
+
+
+def history_text(store):
+    return json.dumps(store.history(), ensure_ascii=False)
 
 
 @pytest.fixture
 def native_checkpoint(tmp_path):
     from app.native_sessions import NativeSessions
-    from sandbox.native_session import NativeSession
+    from agent.harnesses.native_session import NativeSession
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'assistant', 'content': 'Public completed receipt'}])
     requests = []
@@ -61,10 +76,9 @@ def test_native_commit_requires_the_exact_completed_public_checkpoint(native_che
     assert 'PRIVATE NATIVE MARKER' not in json.dumps(read_records(store.path))
 
 
-@pytest.mark.parametrize('failure', ['missing', 'corrupt', 'oversize', 'wrong_lease', 'unavailable',
+@pytest.mark.parametrize('failure', ['missing', 'corrupt', 'wrong_lease', 'unavailable',
                                      'restart_unavailable', 'restart_wrong_lease'])
 def test_missing_or_corrupt_native_load_preserves_the_public_fallback(native_checkpoint, failure):
-    from sandbox.native_session import MAX_BYTES
     native, store, requests = native_checkpoint
     private = native.root / 'claude/previous.jsonl'
     private.write_text('OLD PRIVATE STATE')
@@ -74,7 +88,6 @@ def test_missing_or_corrupt_native_load_preserves_the_public_fallback(native_che
         state = {'private': 'OLD PRIVATE STATE'}
         if failure == 'missing': state = None
         if failure == 'corrupt' or failure.startswith('restart_'): state = ['bad state']
-        if failure == 'oversize': state = {'large': 'x' * (MAX_BYTES + 1)}
         wrong_lease = failure == 'wrong_lease' or (failure == 'restart_wrong_lease' and body['action'] == 'restart')
         return {'lease': 'different-lease' if wrong_lease else body['lease'], 'state': state}
     native.context.relay.native = load
@@ -84,7 +97,7 @@ def test_missing_or_corrupt_native_load_preserves_the_public_fallback(native_che
         native.finish({'opaque': 'Unacknowledged replacement'})
         assert native.staged is None and not any(body['action'] == 'commit' for body in requests)
     assert not private.exists()
-    assert 'Public completed receipt' in store.history()[0]['content']
+    assert 'Public completed receipt' in history_text(store)
     assert 'OLD PRIVATE STATE' not in json.dumps(read_records(store.path))
 
 
@@ -115,25 +128,24 @@ def test_native_file_restore_rejects_bad_names_before_writing(native_checkpoint,
     assert not (native.cache / 'valid.json').exists()
 
 
-def test_native_file_roundtrip_is_private_and_size_count_bounded(native_checkpoint, monkeypatch):
-    from sandbox import native_session
+def test_native_file_roundtrip_preserves_large_complete_snapshots(native_checkpoint):
     native, _, _ = native_checkpoint
     data = base64.b64encode(b'private').decode()
     native.restore_files(native.cache, {'nested/session.json': data})
     target = native.cache / 'nested/session.json'
     assert target.read_bytes() == b'private' and target.stat().st_mode & 0o777 == 0o600
     assert native.files(native.cache) == {'nested/session.json': data}
-    for snapshot in ({'valid': data, 'bad': 'not base64!'}, {'valid': data, 'large': base64.b64encode(b'x' * 33).decode()}):
-        monkeypatch.setattr(native_session, 'MAX_BYTES', 32)
-        with pytest.raises(ValueError):
-            native.restore_files(native.root / 'restore', snapshot)
-        assert not (native.root / 'restore/valid').exists()
-    monkeypatch.setattr(native_session, 'MAX_FILES', 1)
     with pytest.raises(ValueError):
-        native.restore_files(native.root / 'restore', {'one': data, 'two': data})
-    (target.parent / 'second').write_text('second')
-    with pytest.raises(ValueError):
-        native.files(native.cache)
+        native.restore_files(native.root / 'restore', {'valid': data, 'bad': 'not base64!'})
+    assert not (native.root / 'restore/valid').exists()
+    snapshot = {f'file-{i}': data for i in range(300)}
+    snapshot['large'] = base64.b64encode(b'x' * 3_000_000).decode()
+    native.restore_files(native.root / 'restore', snapshot)
+    assert native.files(native.root / 'restore') == snapshot
+    native.context.relay.native = lambda body: {'lease': body['lease'], 'state': snapshot}
+    assert native.begin() == snapshot
+    native.finish(snapshot)
+    assert native.staged[0] == snapshot
 
 
 @pytest.mark.parametrize('destination', ['outside', 'inside'])
@@ -160,7 +172,7 @@ def add_round(store, number, output='completed'):
     return journal
 
 
-def facts_summary(previous, entries):
+def facts_summary(previous, entries, **kwargs):
     """Deterministic inference fixture; no claim about live summary quality."""
     text = previous + json.dumps(entries)
     facts = [fact for fact in ['Keep Escape support', 'Do not deploy', 'PR #127 created'] if fact in text]
@@ -174,8 +186,8 @@ def test_many_cold_checkpoints_read_only_new_previews_and_keep_receipts(tmp_path
                       {'role': 'assistant', 'content': 'PR #127 created'}])
     batches, max_prompt = [], 0
     def summarize(previous, entries):
-        assert len(json.dumps(entries, ensure_ascii=False).encode()) <= BATCH_BYTES
-        assert len(previous.encode()) <= SUMMARY_BYTES
+        assert len(json.dumps(entries, ensure_ascii=False).encode()) <= store.batch_bytes
+        assert len(previous.encode()) <= store.summary_bytes
         batches.append([entry['seq'] for entry in entries])
         return facts_summary(previous, entries)
     for checkpoint in range(30):
@@ -216,7 +228,7 @@ def test_summary_failure_retains_cursor_and_receipts_then_retries_delta(tmp_path
         if len(calls) == 1:
             return 'Last good summary'
         if failure == 'exception': raise TimeoutError('provider secret')
-        return {'empty': '', 'oversize': 'x' * (SUMMARY_BYTES + 1), 'wrong_type': None}[failure]
+        return {'empty': '', 'oversize': 'x' * (store.summary_bytes + 1), 'wrong_type': None}[failure]
     with pytest.raises(ContextUnavailable, match='Saved receipts are preserved'):
         store.compact(summarize)
     state = store.state()
@@ -236,12 +248,12 @@ def test_crash_during_summary_commit_rolls_back_both_summary_and_cursor(tmp_path
     store.initialize([])
     for i in range(50): add_round(store, i)
     store.db.execute("CREATE TRIGGER crash BEFORE UPDATE OF cursor ON state BEGIN SELECT RAISE(ABORT, 'crash'); END")
-    with pytest.raises(sqlite3.IntegrityError): store.compact(facts_summary)
+    with pytest.raises(sqlite3.IntegrityError): store.compact(facts_summary, force=True)
     store.close()
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     assert store.state()['cursor'] == 0 and store.state()['summary'] == ''
     store.db.execute('DROP TRIGGER crash')
-    store.compact(facts_summary)
+    store.compact(facts_summary, force=True)
     assert store.state()['cursor'] > 0
     store.close()
 
@@ -261,9 +273,9 @@ def test_interrupted_tools_allow_investigation_without_settling_or_replaying(tmp
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     assert store.pending == unresolved
     for i in range(50): store.append({'role': 'assistant', 'content': f'Later record {i}'})
-    store.compact(lambda *_: 'Summary deliberately omits the interrupted tool.')
+    store.compact(lambda *a, **k: 'Summary deliberately omits the interrupted tool.', force=True)
     assert store.state()['cursor'] > 3
-    history = store.history()[0]['content']
+    history = history_text(store)
     assert 'UNRESOLVED TOOL OUTCOMES' in history and next(iter(unresolved)) in history
     assert 'unknown' in history and 'before repeating' in history
     assert store.pending == unresolved
@@ -272,7 +284,7 @@ def test_interrupted_tools_allow_investigation_without_settling_or_replaying(tmp
     # Only an actual receipt settles the pending operation.
     store.append({'role': 'tool', 'tool_call_id': next(iter(unresolved)), 'content': 'verified receipt'})
     assert not store.pending
-    assert 'UNRESOLVED TOOL OUTCOMES' not in store.history()[0]['content']
+    assert 'UNRESOLVED TOOL OUTCOMES' not in history_text(store)
     store.close()
 
 
@@ -294,14 +306,14 @@ def test_fresh_runtime_reusing_tool_id_cannot_settle_interrupted_call(tmp_path, 
     store.close()
 
 
-def test_unresolved_notice_stays_bounded_with_many_large_ids(tmp_path):
+def test_unresolved_notice_preserves_every_pending_identity(tmp_path):
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'user', 'content': 'Investigate'}])
     with store.db:
         store.db.executemany('INSERT INTO pending VALUES(?)', [(f'{i}-' + '界' * 1000,) for i in range(100)])
-    history = store.history()[0]['content']
+    history = history_text(store)
     assert '100' in history and 'UNRESOLVED TOOL OUTCOMES' in history
-    assert len(history.encode()) < 5_000
+    assert '99-' + '界' * 1000 in history
     store.close()
 
 
@@ -329,9 +341,9 @@ def test_inherited_and_stale_context_reset_to_canonical_fallback(tmp_path, flag)
     (tmp_path / 'conversation.json').write_text(json.dumps([{'role': 'user', 'content': 'old legacy'}]))
     store = open_context(tmp_path, {'run_id': 'new', flag: True,
         'history_fallback': [{'role': 'user', 'content': 'new context'}]})
-    assert 'new context' in store.history()[0]['content']
-    assert 'old context' not in store.history()[0]['content']
-    assert 'old legacy' not in store.history()[0]['content']
+    assert 'new context' in history_text(store)
+    assert 'old context' not in history_text(store)
+    assert 'old legacy' not in history_text(store)
     store.close()
 
 
@@ -342,7 +354,8 @@ def test_archive_reads_page_large_unicode_receipts_and_use_no_full_blob_query(tm
     queries = []
     store.db.set_trace_callback(queries.append)
     store.history()
-    assert not any('select' in q.lower() and 'message' in q.lower() for q in queries)
+    assert any('select message' in q.lower() for q in queries)
+    assert raw in history_text(store)
     records = read_records(store.path, limit=1, offset=5000)
     expected = json.dumps({'role': 'assistant', 'content': raw}, ensure_ascii=False)
     assert records[0]['text'] == expected[5000:9000]
@@ -376,13 +389,13 @@ def test_invalid_coverage_cursor_cannot_silently_hide_history(tmp_path):
 def test_full_tail_and_budget_trigger_ignore_receipt_count(tmp_path):
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'assistant', 'content': f'receipt-{i:03d}'} for i in range(90)])
-    assert all(f'receipt-{i:03d}' in store.history()[0]['content'] for i in range(90))
+    assert all(f'receipt-{i:03d}' in history_text(store) for i in range(90))
     assert store.maintenance_snapshot(100_000) is None
-    snapshot = store.maintenance_snapshot(8_000)
+    snapshot = store.maintenance_snapshot(6_000)
     assert snapshot and snapshot['cursor'] == 0
     store.append({'role': 'user', 'content': 'New correction: never deploy'})
     assert store.apply_summary(snapshot, {'summary': 'Original receipts retained', 'through_seq': snapshot['entries'][-1]['seq']})
-    assert 'never deploy' in store.history()[0]['content'] and 'receipt-089' in store.history()[0]['content']
+    assert 'never deploy' in history_text(store) and 'receipt-089' in history_text(store)
     assert not store.apply_summary(snapshot, 'stale summary')
     # Resetting the same run may reproduce exactly the same prefix. Its epoch
     # must still prevent a late summary from the discarded checkpoint applying.
@@ -411,7 +424,7 @@ def test_large_recent_tail_can_be_summarized_in_background(tmp_path, recent_rows
         if snapshot is None:
             break
         assert snapshot['entries'][0]['seq'] == cursor + 1
-        assert len(json.dumps(snapshot['entries'], ensure_ascii=False).encode()) <= BATCH_BYTES + 2
+        assert len(json.dumps(snapshot['entries'], ensure_ascii=False).encode()) <= store.batch_bytes + 2
         assert store.apply_summary(snapshot, 'Keep the corrections; original receipts remain available.')
         assert store.state()['cursor'] > cursor
         cursor = store.state()['cursor']
@@ -433,16 +446,16 @@ def test_summary_network_call_does_not_lock_append_and_stale_result_loses(tmp_pa
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'assistant', 'content': f'receipt-{i}'} for i in range(60)])
     entered, release = threading.Event(), threading.Event()
-    def summarize(previous, entries):
+    def summarize(previous, entries, **kwargs):
         entered.set()
         assert release.wait(3)
         return 'slow stale summary'
     with ThreadPoolExecutor(2) as pool:
-        work = pool.submit(store.compact, summarize)
+        work = pool.submit(store.compact, summarize, force=True)
         try:
             assert entered.wait(2)
             pool.submit(store.append, {'role': 'user', 'content': 'New correction'}).result(timeout=1)
-            assert 'New correction' in store.history()[0]['content']
+            assert 'New correction' in history_text(store)
             # A mandatory recovery wins while optional work is still in flight.
             store.compact(lambda *a, **k: 'Newer forced summary', force=True)
         finally:

@@ -11,8 +11,8 @@ import pytest
 from app.config import Settings
 from app.db import Store
 from app.tracing import AgentTracing
-from sandbox.activity import ActivityReporter
-from sandbox.trace_content import trace_content
+from agent.activity import ActivityReporter
+from agent.trace_content import trace_content
 from test_spend import active
 from test_workspace import workspace
 
@@ -28,15 +28,94 @@ class Processor:
         pass
 
 
-def setup(tmp_path):
+@pytest.mark.parametrize('fails', [False, True])
+async def test_runtime_step_spans_keep_original_phase_and_turn(tmp_path, fails):
+    from app.durable_runner import DurableRunner
+    from types import SimpleNamespace
+    store, tracing, processor, run, message = setup(tmp_path)
+    state = {'phase': 'install', 'message_id': message['id'], 'segment': 2}
+
+    async def step(run_id, state):
+        state['phase'] = 'launch'
+        if fails:
+            raise ValueError('private error body')
+        return 'receipt'
+
+    manager = SimpleNamespace(store=store, _step=step)
+    if fails:
+        with pytest.raises(ValueError, match='private error body'):
+            await DurableRunner.step(manager, run['id'], state)
+    else:
+        assert await DurableRunner.step(manager, run['id'], state) == 'receipt'
+    tracing.runtime_phase(run['id'], message['id'], 'activity_queue', 1000000, 3000000)
+    store.finish_message(run['id'], message['id'], 'Done')
+    phase, queue, root = processor.spans
+    assert phase.name == 'runtime.install'
+    assert phase.parent == queue.parent == root.context
+    assert phase.attributes['moyai.runtime.segment'] == 2
+    assert phase.attributes['moyai.runtime.duration_ms'] >= 0
+    assert phase.status.is_ok is (not fails)
+    assert queue.attributes['moyai.runtime.duration_ms'] == 2
+    payload = encode_spans(processor.spans).SerializeToString()
+    assert b'private error body' not in payload
+
+
+async def test_runtime_trace_failure_cannot_replace_step_result(tmp_path, monkeypatch):
+    from app.durable_runner import DurableRunner
+    from types import SimpleNamespace
+    store, tracing, _, run, message = setup(tmp_path)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError('trace export unavailable')
+
+    async def step(*args):
+        return 'completed'
+
+    monkeypatch.setattr(tracing, 'emit', broken)
+    manager = SimpleNamespace(store=store, _step=step)
+    assert await DurableRunner.step(manager, run['id'],
+                                   {'phase': 'finish', 'message_id': message['id']}) == 'completed'
+
+
+def setup(tmp_path, *, build_sha='', environment='development'):
     store = Store(tmp_path)
     settings = Settings(_env_file=None, litellm_trace_endpoint='https://gateway-dev.litellm-sandbox.ai/lens-ingest/v1/traces',
-                        litellm_trace_api_key='trace-secret', litellm_api_key='model-secret')
+                        litellm_trace_api_key='trace-secret', litellm_api_key='model-secret',
+                        moyai_build_sha=build_sha, trace_environment=environment)
     processor = Processor()
     tracing = store.tracing = AgentTracing(store, settings, processor)
     run = store.create_run('Inspect a file', '', 'modal', [], chat_enabled=True)
     message = store.claim_message(run['id'])
     return store, tracing, processor, store.run(run['id']), message
+
+
+@pytest.mark.parametrize('build_sha,environment', [('', 'development'), ('a1' * 20, 'lens-eval'),
+                                                 ('b2' * 32, 'preview')])
+def test_otlp_build_and_environment_metadata_comes_from_server_settings(tmp_path, build_sha, environment):
+    store, tracing, processor, run, message = setup(tmp_path, build_sha=build_sha, environment=environment)
+    stamp = time.time_ns()
+    tracing.emit(run, message['id'], 'read_file', 'tool-1', stamp, stamp,
+                 {'openinference.span.kind': 'TOOL', 'input.value': 'file.txt', 'output.value': 'hello',
+                  'agent.version': 'request-controlled-version', 'deployment.environment': 'production'})
+    store.finish_message(run['id'], message['id'], 'It says hello')
+
+    # Inspect the actual OTLP protobuf that all configured destinations receive.
+    encoded = encode_spans(processor.spans)
+    resource_spans = encoded.resource_spans[0]
+    resource = {attribute.key: attribute.value.string_value for attribute in resource_spans.resource.attributes}
+    assert resource['deployment.environment'] == resource['deployment.environment.name'] == environment
+    spans = [span for scope in resource_spans.scope_spans for span in scope.spans]
+    assert {span.name for span in spans} == {'read_file', 'moyai'}
+    span_attributes = [{attribute.key: attribute.value.string_value for attribute in span.attributes} for span in spans]
+    for attributes in [resource, *span_attributes]:
+        assert attributes['deployment.environment'] == environment
+        if build_sha:
+            assert attributes['agent.version'] == build_sha
+        else:
+            assert 'agent.version' not in attributes
+    payload = encoded.SerializeToString()
+    assert b'request-controlled-version' not in payload
+    assert b'trace-secret' not in payload
 
 
 def test_trace_tree_contains_task_model_tool_and_answer_with_stable_turn_ids(tmp_path):
@@ -94,6 +173,12 @@ def test_sensitive_content_is_redacted_and_private_tools_are_omitted(monkeypatch
     activity.complete('private', 'mcp_workspace_skills_load', {}, {'content': 'secret-definition'})
     assert 'secret-definition' not in json.dumps(events)
     assert next(event for event in events if event[0] == 'trace')[2]['output'] == '[private tool payload omitted]'
+
+
+def test_lens_feedback_api_key_is_redacted_from_trace_content(tmp_path):
+    store = Store(tmp_path)
+    tracing = AgentTracing(store, Settings(_env_file=None, lens_feedback_api_key='feedback-secret'), Processor())
+    assert 'feedback-secret' not in tracing.content('feedback-secret')
 
 
 @pytest.mark.parametrize('name', ['memory_save', 'mcp_workspace_memory_save', 'mcp__workspace__memory_search',
@@ -196,19 +281,51 @@ def test_model_broker_emits_span_without_rerouting_or_exposing_system_prompts(wo
     tracing.enabled = True
     tracing.processor = Processor()
     run = active(app)
+    prompt = 'Inspect this file: ' + 'line of code\n' * 3000
+    answer = 'Review findings\n' * 2000 + 'Done'
     def gateway(request):
         assert str(request.url) == 'https://existing-model-gateway.example/v1/chat/completions'
         assert request.headers['authorization'] == 'Bearer existing-model-key'
-        return httpx.Response(200, json={'choices': [{'message': {'content': 'Done'}}], 'usage': {'prompt_tokens': 2, 'completion_tokens': 1}})
+        assert json.loads(request.content)['messages'][-1]['content'] == prompt
+        return httpx.Response(200, json={'choices': [{'message': {'content': answer}}], 'usage': {'prompt_tokens': 2, 'completion_tokens': 1}})
     real = httpx.AsyncClient
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(gateway), **kw))
     response = client.post(f"/broker/{run['id']}/v1/chat/completions", headers={'Authorization': 'Bearer capability'},
-                           json={'messages': [{'role': 'system', 'content': 'private-system-prompt'}, {'role': 'user', 'content': 'Hello'}]})
+                           json={'messages': [{'role': 'system', 'content': 'private-system-prompt'}, {'role': 'user', 'content': prompt}]})
     assert response.status_code == 200
+    assert response.json()['choices'][0]['message']['content'] == answer
     assert len(tracing.processor.spans) == 1
     span = tracing.processor.spans[0]
     assert 'private-system-prompt' not in str(span.attributes)
-    assert 'Hello' in span.attributes['input.value'] and 'Done' in span.attributes['output.value']
+    for direction, text in [('input', prompt), ('output', answer)]:
+        assert json.loads(span.attributes[f'{direction}.value'])[0]['content'] == text
+        assert json.loads(span.attributes[f'gen_ai.{direction}.messages'])[0]['parts'] == [
+            {'type': 'text', 'content': text}]
+
+
+def test_model_span_with_large_unicode_and_escaped_text_fits_lens_ingestion(tmp_path):
+    _, tracing, processor, run, _ = setup(tmp_path)
+    # Both UTF-8 width and JSON escaping count toward the upload limit. Exercise
+    # all retained messages and choices, including the duplicated GenAI content.
+    text = '🗿"\\\n' * 150_000 + ' model-secret <think>private-reasoning</think>'
+    tracing.model(run, 'large-request', time.time_ns(), [{'role': 'user', 'content': text}] * 5,
+                  {'choices': [{'message': {'content': text}}] * 5}, 'completed')
+    assert len(processor.spans) == 1
+    attrs = processor.spans[0].attributes
+    for direction in ['input', 'output']:
+        legacy = json.loads(attrs[f'{direction}.value'])
+        genai = json.loads(attrs[f'gen_ai.{direction}.messages'])
+        assert len(legacy) == len(genai) == 5
+        for message, modern in zip(legacy, genai):
+            assert message['content'].startswith(text[:16000])
+            assert message['content'].endswith(' [truncated]')
+            assert modern['content'] == message['content']
+            assert modern['parts'] == [{'type': 'text', 'content': message['content']}]
+        assert len(attrs[f'{direction}.value'].encode()) <= 2 * 1024 * 1024
+        assert len(attrs[f'gen_ai.{direction}.messages'].encode()) <= 2 * 1024 * 1024
+    payload = encode_spans(processor.spans).SerializeToString()
+    assert len(payload) < 16 * 1024 * 1024
+    assert b'model-secret' not in payload and b'private-reasoning' not in payload
 
 
 @pytest.mark.parametrize('route', ['messages', 'responses'])
@@ -226,7 +343,16 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
             pytest.fail('Disabled tracing must not retain native content')
         monkeypatch.setattr('app.harness_gateway.NativeModelContent', unexpected_capture)
     run = active(app)
-    public = 'Hello configured-secret <think>private-thought</think>world'
+    input_prefix = 'Inspect ' + 'i' * 15_980 + ' '
+    output_prefix = 'Hello ' + 'o' * 15_982 + ' '
+    prompt = input_prefix + 'configured-secret ' + 'input-tail ' * 2000
+    # Split a secret at the old 16,000-character limit and a stream delta
+    # boundary. Long text must survive while redaction sees the complete value.
+    parts = [output_prefix + 'configured-', 'secret <thi',
+             'nk>private-thought</think>world ' + 'output-tail ' * 2000]
+    public = ''.join(parts)
+    expected_input = prompt.replace('configured-secret', '[redacted]')
+    expected_output = output_prefix + '[redacted] world ' + 'output-tail ' * 2000
     usage = {'input_tokens': 12, 'output_tokens': 3}
     if route == 'messages':
         value = {'id': 'provider-id', 'content': [
@@ -236,7 +362,7 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
         frames = [{'type': 'message_start', 'message': {'id': 'provider-id', 'content': [], 'usage': usage}},
                   {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
                   *[{'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': part}}
-                    for part in ['Hello configured-', 'secret <thi', 'nk>private-thought</think>world']],
+                    for part in parts],
                   {'type': 'content_block_delta', 'index': 1,
                    'delta': {'type': 'thinking_delta', 'thinking': 'private-reasoning'}},
                   {'type': 'content_block_start', 'index': 2, 'content_block': value['content'][2]},
@@ -249,7 +375,7 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
             {'type': 'function_call', 'name': 'read_file', 'arguments': 'private-arguments'}], 'usage': usage,
             'x_litellm_response_cost': '0.00123'}
         frames = [*({'type': 'response.output_text.delta', 'delta': part}
-                    for part in ['Hello configured-', 'secret <thi', 'nk>private-thought</think>world']),
+                    for part in parts),
                   {'type': 'response.output_item.added', 'item': value['output'][2]},
                   {'type': 'response.completed', 'response': value}]
     wire = (''.join('data: ' + json.dumps(frame) + '\n\n' for frame in frames).encode()
@@ -257,10 +383,12 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
 
     class Chunks(httpx.AsyncByteStream):
         async def __aiter__(self):
-            for start in range(0, len(wire), 17):
-                yield wire[start:start + 17]
+            for start in range(0, len(wire), 4093):
+                yield wire[start:start + 4093]
 
     def gateway(request):
+        field = 'messages' if route == 'messages' else 'input'
+        assert json.loads(request.content)[field] == messages
         return httpx.Response(200, stream=Chunks(), headers={'x-litellm-response-cost': '0.00123'})
     real = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient',
@@ -268,7 +396,7 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
     messages = [{'role': 'system', 'content': 'private-system'},
                 {'role': 'developer', 'content': 'private-developer'},
                 {'role': 'user', 'content': [
-                    {'type': 'text' if route == 'messages' else 'input_text', 'text': 'Inspect configured-secret'},
+                    {'type': 'text' if route == 'messages' else 'input_text', 'text': prompt},
                     {'type': 'tool_result', 'content': 'private-result'}]}]
     response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer capability'},
                            json={'messages' if route == 'messages' else 'input': messages, 'stream': stream})
@@ -282,11 +410,12 @@ def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, r
         return
     assert len(tracing.processor.spans) == 1
     attrs = tracing.processor.spans[0].attributes
-    assert json.loads(attrs['input.value']) == [{'role': 'user', 'content': 'Inspect [redacted]'}]
+    assert json.loads(attrs['input.value']) == [{'role': 'user', 'content': expected_input}]
     assert json.loads(attrs['output.value']) == [
-        {'role': 'assistant', 'content': 'Hello [redacted] world', 'tool_names': ['read_file']}]
-    assert json.loads(attrs['gen_ai.output.messages'])[0]['parts'] == [
-        {'type': 'text', 'content': 'Hello [redacted] world'}]
+        {'role': 'assistant', 'content': expected_output, 'tool_names': ['read_file']}]
+    for direction, text in [('input', expected_input), ('output', expected_output)]:
+        assert json.loads(attrs[f'gen_ai.{direction}.messages'])[0]['parts'] == [
+            {'type': 'text', 'content': text}]
     assert 'private-' not in str(attrs) and 'configured-secret' not in str(attrs)
     assert attrs['gen_ai.usage.total_tokens'] == 15
 
@@ -342,21 +471,21 @@ def test_unsuccessful_snapshot_cannot_erase_or_shorten_observed_output(status, s
 @pytest.mark.parametrize('route', ['/v1/messages', '/v1/responses'])
 def test_native_projection_bounds_and_private_blocks_never_enter_usage(route):
     from app.harness_gateway import NativeUsageCapture
-    from app.native_trace import LIMIT, OMITTED, NativeModelContent
+    from app.native_trace import MODEL_TEXT_LIMIT, OMITTED, NativeModelContent
 
     field = 'messages' if route == '/v1/messages' else 'input'
     messages = [{'role': 'user', 'content': str(i)} for i in range(8)]
     content = NativeModelContent({field: messages}, route)
     assert [m['content'] for m in content.messages] == ['3', '4', '5', '6', '7']
-    for values in [[{'role': 'user', 'content': 'private-prefix' + 'x' * LIMIT}],
-                   [{'role': 'user', 'content': 'x' * 3500} for _ in range(5)]]:
+    for values in [[{'role': 'user', 'content': 'private-prefix' + 'x' * MODEL_TEXT_LIMIT}],
+                   [{'role': 'user', 'content': 'x' * (MODEL_TEXT_LIMIT // 5 + 1)} for _ in range(5)]]:
         assert NativeModelContent({field: values}, route).messages == [{'role': 'user', 'content': OMITTED}]
     private = [None, 'private-string', {'type': []}, {'type': 'image', 'source': 'private-image'},
                {'type': 'reasoning', 'summary': 'private-reasoning'},
                {'type': 'tool_result', 'content': 'private-result'}, {'type': 'text', 'text': {'private': 1}}]
     assert NativeModelContent({field: [{'role': 'user', 'content': private}]}, route).messages == []
     blocks = [{'type': 'text' if route == '/v1/messages' else 'output_text',
-               'text': 'private-prefix' + 'x' * LIMIT}, *private]
+               'text': 'private-prefix' + 'x' * MODEL_TEXT_LIMIT}, *private]
     tools = [{'type': 'tool_use' if route == '/v1/messages' else 'custom_tool_call',
               'name': 'read_file', 'arguments': 'private-arguments'} for _ in range(101)]
     value = ({'content': blocks + tools} if route == '/v1/messages' else
@@ -369,6 +498,12 @@ def test_native_projection_bounds_and_private_blocks_never_enter_usage(route):
     assert 'private-' not in json.dumps(content.choices)
     assert capture.response == {'usage': {'input_tokens': 2, 'output_tokens': 1,
                                         'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3}}
+    streamed = NativeModelContent({}, route)
+    for part in ['private-prefix', 'x' * MODEL_TEXT_LIMIT, 'private-suffix']:
+        event = ({'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': part}}
+                 if route == '/v1/messages' else {'type': 'response.output_text.delta', 'delta': part})
+        streamed.consume(event)
+    assert streamed.choices[0]['message']['content'] == OMITTED
 
 
 def test_internal_compaction_traces_remain_content_free(workspace, monkeypatch):
@@ -513,3 +648,21 @@ def test_nested_trace_keeps_root_trace_and_direct_parent_span(tmp_path):
     assert identities[2][2] == identities[1][1]
     store.execute("UPDATE agent_groups SET status='completed'")
     assert tracing.identity(store.run(reviewer['id']), store.messages(reviewer['id'])[0]['id']) == identities[2]
+
+
+def test_failed_spans_use_structured_errors_not_model_output(tmp_path):
+    store, tracing, processor, run, message = setup(tmp_path)
+    diagnostic = {'error_code': 'cyber_policy', 'stage': 'upstream', 'http_status': 400,
+                  'sdk_error': 'invalid_request', 'request_id': 'broker-123', 'message': 'private-error-body'}
+    tracing.model(run, 'request-1', time.time_ns(), [], {'choices': []}, 'failed', error=diagnostic)
+    store.event(run['id'], 'error', 'private-event-message', {'phase': 'sdk_failure', **diagnostic})
+    store.finish_message(run['id'], message['id'], 'Public final answer', status='failed')
+    model, root = processor.spans
+    for span in (model, root):
+        assert span.attributes['error.type'] == 'cyber_policy'
+        assert span.status.description == span.events[0].attributes['exception.message']
+        assert 'cybersecurity policy' in span.status.description
+        assert 'HTTP 400' in span.status.description
+    payload = encode_spans(processor.spans).SerializeToString()
+    assert b'private-error-body' not in payload and b'private-event-message' not in payload
+    assert b'cyber_policy' in payload

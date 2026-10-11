@@ -26,6 +26,38 @@ with sync_playwright() as p:
         disclosure = page.locator(".agent-disclosure").first
         if disclosure.get_attribute("aria-expanded") == "false":
             disclosure.click()
+        # Count rendered leading markers, including CSS-generated content.
+        child_row = page.locator(".child-session").first
+        expect(child_row).to_have_attribute("data-variant", "ghost")
+        expect(disclosure).to_have_attribute("data-slot", "button")
+        marker_count = child_row.evaluate(
+            """e => e.querySelectorAll('.child-mark').length +
+            Number(getComputedStyle(e.previousElementSibling, '::after').content === '\"·\"')"""
+        )
+        assert marker_count == 1, marker_count
+        # A child with its own children uses a chevron instead of another dot.
+        page.evaluate("""() => {
+            const child = state.runs[0].children[0];
+            child.children = [{...child, id: 'f'.repeat(32),
+                parent_run_id: child.id, agent_label: 'Nested agent', children: []}];
+            state.expandedParents.add(child.id);
+            renderSidebar();
+        }""")
+        nested = page.locator('.child-sessions .child-sessions .child-session')
+        expect(nested).to_be_visible()
+        expect(page.locator('.child-sessions .agent-disclosure')).to_have_count(1)
+        expect(child_row.locator('.child-mark')).to_have_count(0)
+        assert nested.evaluate(
+            "e => getComputedStyle(e.previousElementSibling, '::after').content"
+        ) == '"·"'
+        page.locator('.child-sessions .agent-disclosure').click()
+        expect(nested).not_to_be_visible()
+        page.locator('.child-sessions .agent-disclosure').click()
+        expect(nested).to_be_visible()
+        page.evaluate("""() => {
+            state.runs[0].children[0].children = [];
+            renderSidebar();
+        }""")
         heights = page.locator(".session-link:visible").evaluate_all(
             "(rows)=>rows.map(r=>r.getBoundingClientRect().height)"
         )
@@ -51,7 +83,10 @@ with sync_playwright() as p:
         )
         page.locator(".session-move").first.click()
         expect(page.locator("#session-actions")).to_be_visible()
-        bounds = page.locator("#session-actions").bounding_box()
+        # The shadcn portal owns geometry; the content host is display:contents.
+        menu = page.locator('[data-popover-id="session-actions"]')
+        expect(menu).to_be_visible()
+        bounds = menu.bounding_box()
         assert bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= width
         page.keyboard.press("Escape")
         expect(page.locator("#session-actions")).not_to_be_visible()

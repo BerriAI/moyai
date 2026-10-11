@@ -25,7 +25,8 @@ class ExistingApp(BaseModel):
 def routes(connectors, security, store, settings):
     router = APIRouter()
     github = connectors.github
-    store.execute('CREATE TABLE IF NOT EXISTS github_registration (state_hash TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, owner_login TEXT NOT NULL)')
+    if store.schema_updates:
+        initialize_schema(store)
 
     def state_for(sid, provider):
         state = secrets.token_urlsafe(32)
@@ -169,7 +170,12 @@ def routes(connectors, security, store, settings):
             '<link rel="stylesheet" href="/static/style.css"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
             '<h1>Connect GitHub for your organization</h1><p>Organization: <strong>' + html.escape(owner) + '</strong>. Select repositories on GitHub; manage the selection in Moyai afterward.</p>'
             '<p>Moyai can read code, create normal pull requests, and update or comment on Moyai PRs created by any chat in this workspace under the current GitHub connection without an administrator approval step. It cannot approve or merge pull requests, '
-            'enable auto-merge, or change workflow and access-control files.</p>'
+            'enable auto-merge, or change credential and access-control files.</p>'
+            '<p>Publishing changes to <code>.github/workflows/</code> requires Workflows write permission. '
+            'For an existing app, an organization owner can enable this in GitHub → Organization settings → Developer settings → GitHub Apps → your app → Permissions &amp; events, '
+            'then approve the updated installation permissions. Ordinary code and composite actions use Contents access.</p>'
+            '<p>CI tools read check results, workflow runs, jobs and complete paginated job logs. They require Checks, Commit statuses and Actions read access; '
+            'they cannot rerun, cancel or modify workflows.</p>'
             '<p>Moyai can inspect repository rulesets and change their required reviewing teams and file patterns when requested. '
             'Ruleset edits preserve approval counts, code owner review, status checks and other settings. '
             'This requires Administration write access in addition to Contents and Pull requests write permissions. The credential stays on the server; '
@@ -227,3 +233,7 @@ def routes(connectors, security, store, settings):
         return RedirectResponse('/?connection=success#connections', status_code=303)
 
     return router
+
+
+def initialize_schema(store):
+    store.execute('CREATE TABLE IF NOT EXISTS github_registration (state_hash TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, owner_login TEXT NOT NULL)')

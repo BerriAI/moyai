@@ -8,6 +8,7 @@ SQLite receipts, sessions and the outbox remain the authoritative durable state.
 from .private_sinks import deny_export, private_run
 import asyncio
 import hashlib
+import json
 from collections.abc import Sequence
 from types import MappingProxyType
 from weakref import WeakValueDictionary
@@ -19,10 +20,26 @@ from agentchat.channels.slack_media import rich_payload, upload_slack_files
 from fastapi import HTTPException
 
 from . import captures, pr_delivery
+from .slack_origin import metadata as slack_metadata
 
 
 class MissingFileScope(RuntimeError):
     pass
+
+
+def mrkdwn_sections(text, limit=3000):
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        end = text.rfind('\n', 0, limit + 1)
+        if end <= 0:
+            end = limit
+        chunks.append(text[:end])
+        text = text[end:].lstrip('\n')
+    return [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': chunk, 'verbatim': True}}
+            for chunk in chunks]
 
 
 class SessionState:
@@ -86,14 +103,14 @@ class SlackWebhookChannel:
         self._closed.set()
 
     async def handle_validated_event(self, *, team, event_id, channel, ts, root, user,
-                                     prompt, mentioned, direct_message, missing_cloud, file_ids=()):
+                                     prompt, mentioned, direct_message, missing_cloud, file_ids=(), reference=''):
         conversation = f'slack:{team}:{channel}:{root}'
         message = Message(id=f'slack:{team}:{event_id}', conversation_id=conversation, channel=self.name,
                           sender=Sender(id=user), text=prompt, role='user',
                           attachments=tuple(Attachment(id=file_id) for file_id in file_ids),
                           metadata=MappingProxyType({'team': team, 'event_id': event_id, 'channel': channel,
                               'ts': ts, 'root': root, 'mentioned': mentioned, 'direct_message': direct_message,
-                              'missing_cloud': tuple(missing_cloud)}))
+                              'missing_cloud': tuple(missing_cloud), 'reference': reference}))
         await self._receiver(self, message)
 
     def source_for_run(self, run_id, delivery=None):
@@ -170,16 +187,34 @@ class SlackWebhookChannel:
             content + '\n\n' + self.owner.chat.link(source.metadata['run_id']))
         return response.metadata['slack_ts']
 
-    def build_rich_reply(self, source, content, pull_requests=(), body_blocks=None):
+    def build_rich_reply(self, source, content, pull_requests=(), body_blocks=None, feedback_message_id=None):
         """Build a payload with the session footer and PR cards; does not send it."""
         link = self.owner.chat.link(source.metadata['run_id'])
         body = content.removesuffix('\n\n' + link)
-        blocks = list(body_blocks) if body_blocks else [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        if body_blocks:
+            blocks = list(body_blocks)
+        elif len(body) <= 3000:
+            blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        elif feedback_message_id is not None:
+            blocks = mrkdwn_sections(body)
+        else:
+            blocks = []
         if body != content:
             blocks.append({'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': link, 'verbatim': True}]})
+        feedback_added = False
+        if feedback_message_id is not None and len(blocks) < 50:
+            blocks.append({'type': 'actions', 'block_id': 'moyai_feedback', 'elements': [{
+                'type': 'button',
+                'action_id': 'feedback_open',
+                'text': {'type': 'plain_text', 'text': 'Give feedback'},
+                'value': json.dumps({'run_id': source.metadata['run_id'],
+                                     'message_id': feedback_message_id}),
+            }]})
+            feedback_added = True
         cards = tuple(pr_delivery.attachment(pr_delivery.PullRequest.model_validate(pr),
             self.owner.settings.public_url, source.metadata['run_id']) for pr in pull_requests)
-        return RichReply(text=content, blocks=tuple(blocks) if body_blocks or len(body) <= 3000 else (), attachments=cards)
+        return RichReply(text=content, blocks=tuple(blocks) if body_blocks or len(body) <= 3000 or feedback_added else (),
+                         attachments=cards)
 
     async def reply(self, source, content):
         return await self.reply_rich(source, self.build_rich_reply(source, content))
@@ -192,7 +227,8 @@ class SlackWebhookChannel:
         payload, timestamp, metadata = self.owner.access.payload(card_id, binding, identity)
         target = {'ts': timestamp} if timestamp else {'thread_ts': binding['thread_ts']}
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/' + ('chat.update' if timestamp else 'chat.postMessage'),
-            headers={'Authorization': f'Bearer {token}'}, json={**payload, 'channel': binding['channel'], **target})
+            headers={'Authorization': f'Bearer {token}'}, json={**payload, 'channel': binding['channel'], **target,
+                'metadata': slack_metadata(self.owner.connectors, binding['channel'], payload['text'])})
         sent = response.get('ts')
         if response.get('ok') is not True or not isinstance(sent, str) or not sent or (timestamp and sent != timestamp):
             raise RuntimeError('Slack access card delivery could not be confirmed.')
@@ -207,7 +243,8 @@ class SlackWebhookChannel:
         binding = self.destination(source, identity)
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={**rich_payload(content),
-                'channel': binding['channel'], 'thread_ts': binding['thread_ts']})
+                'channel': binding['channel'], 'thread_ts': binding['thread_ts'],
+                'metadata': slack_metadata(self.owner.connectors, binding['channel'], rich_payload(content)['text'])})
         timestamp = response.get('ts')
         if response.get('ok') is not True or not isinstance(timestamp, str) or not timestamp:
             raise RuntimeError('Slack reply delivery could not be confirmed.')
@@ -245,6 +282,7 @@ class SlackWebhookChannel:
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={
                 **payload, 'channel': binding['channel'],
+                'metadata': slack_metadata(self.owner.connectors, binding['channel'], payload['text']),
                 'thread_ts': binding['thread_ts'],
             })
         if not response.get('ts'):

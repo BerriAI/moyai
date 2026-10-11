@@ -1,17 +1,18 @@
 """Select confirmed PRs and explicitly referenced captures for a Slack handoff."""
+from .private_sinks import private_run
 import hashlib
 import html
 import re
-import sqlite3
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from .private_sinks import private_run
+from .database import Connection
 from . import captures
 from .config import Settings
 
 TOKENS = re.compile(r'[^\s<>()`"\[\]]+')
+CAPTURE_PATH = re.compile(r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))')
 
 
 class PullRequest(BaseModel):
@@ -32,11 +33,11 @@ class Capture(BaseModel):
     sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
-def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullRequest]:
-    run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
-    if run and dict(run).get('private_owner_id'):
-        return []
+def select_prs(conn: Connection, run_id: str, answer: str) -> list[PullRequest]:
     # A URL selects an existing receipt; it cannot establish a publication.
+    run = conn.execute('SELECT private_owner_id FROM runs WHERE id=?', (run_id,)).fetchone()
+    if run and run['private_owner_id']:
+        return []
     urls = {url.rstrip('.,;!?') for url in re.findall(r'https://[^\s<>`"\)\]\|]+', answer)}
     result = []
     seen = set()
@@ -54,12 +55,11 @@ def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullR
 
 
 def select_captures(settings: Settings, run_id: str, answer: str, *, store,
-                    conn: sqlite3.Connection | None = None) -> list[Capture]:
+                    conn: Connection | None = None) -> list[Capture]:
     if private_run(store, run_id, conn):
         return []
     tokens = TOKENS.findall(answer)
-    names = [match[1] for token in tokens if (match := re.fullmatch(
-        r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))', token))]
+    names = [match[1] for token in tokens if (match := CAPTURE_PATH.fullmatch(token))]
     result = []
     kinds = set()
     for name in names:
@@ -92,7 +92,14 @@ def link_captures(settings: Settings, run_id: str, answer: str, selected: list[C
         url = f'{settings.public_url.rstrip("/")}/api/runs/{run_id}/computer/captures/{capture.name}'
         links['moyai-captures/' + capture.name] = url
         links['/workspace/moyai-captures/' + capture.name] = url
-    return TOKENS.sub(lambda match: links.get(match[0], match[0]), answer)
+    session_url = f'{settings.public_url.rstrip("/")}/#run={run_id}'
+
+    def replace(match: re.Match[str]) -> str:
+        # Capture bytes may arrive with the workspace save after this answer.
+        # Keep those references usable without claiming the file exists yet.
+        return links.get(match[0], session_url) if CAPTURE_PATH.fullmatch(match[0]) else match[0]
+
+    return TOKENS.sub(replace, answer)
 
 
 def attachment(pr: PullRequest, public_url: str, run_id: str) -> dict:

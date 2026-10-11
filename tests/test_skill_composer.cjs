@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const {test} = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 
 const catalog = [
   {id:'org',name:'benchmark-review',reference:'org:benchmark-review',scope:'organization',description:'Review benchmark coverage'},
@@ -56,6 +56,24 @@ test('same-named skills keep explicit scope, archived skills stay hidden',()=>{
   assert.deepEqual(Array.from(ctx.matchingSkills(catalog,'org:'),s=>s.id),['org']);
 });
 
+test('skill text shares icons, scoped labels and literal exclusions across composer and history',()=>{
+  const {ctx}=fixture(),skills=catalog.map(skill=>({...skill,icon:'video'}));
+  const content='調査 /personal:benchmark-review and /org:benchmark-review\n<em>literal</em>';
+  const html=ctx.MoyaiSkillText.render(content,skills);
+  assert.equal(ctx.MoyaiSkillText.message({content,skill_mentions:skills}),html);
+  assert.equal((html.match(/data-skill-icon="video"/g)||[]).length,2);
+  assert.match(html,/Personal skill: benchmark-review/);assert.match(html,/Organization skill: benchmark-review/);
+  assert.match(html,/\n&lt;em&gt;literal&lt;\/em&gt;/);
+  for(const literal of ['`/personal:benchmark-review`','```\n/personal:benchmark-review\n```',
+    'https://example.test/personal:benchmark-review','/personal:benchmark-review/file',
+    '/personal:unknown','/benchmark-review','/goal Fix it'])
+    assert.equal(ctx.MoyaiSkillText.render(literal,skills),literal);
+  assert.equal(ctx.MoyaiSkillText.message({content}),content.replaceAll('<','&lt;').replaceAll('>','&gt;'));
+  assert.equal(ctx.MoyaiSkillText.message({content:'hidden',display_content:'Visible & safe'}),'Visible &amp; safe');
+  const hostile=ctx.MoyaiSkillText.render('/personal:benchmark-review', [{...skills[1],name:'<img src=x onerror="bad()">',icon:'<svg onload=bad()>'}]);
+  assert.doesNotMatch(hostile,/<img|onload=/);assert.match(hostile,/&lt;img/);assert.match(hostile,/data-skill-icon="cube"/);
+});
+
 test('Enter selects rather than sends; caret and surrounding draft survive',async()=>{
   const b=fixture();
   b.type('Please /bench then check costs',13);
@@ -106,7 +124,7 @@ test('built-in goal works without skills and only at the start of the request',a
   await flush();
   assert.equal(b.popup.hidden,true);
   b.type('Please /go');
-  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/small>/);
+  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/span>/);
   b.type('/goal verify the suite');
   assert.equal(b.popup.hidden,true);
   assert.match(b.hint.textContent,/Not running yet/);
@@ -122,4 +140,33 @@ test('provider failure is visible and untrusted descriptions stay text',async()=
   b.type('/');await flush();
   assert.doesNotMatch(b.popup.innerHTML,/<img/);
   assert.match(b.popup.innerHTML,/&lt;img/);
+});
+
+function pickerFixture(){
+  const form={inert:false},input={id:'followup',isConnected:true,value:'Keep draft',maxLength:16000,closest:()=>form,dispatchEvent(){},focus(){}},choice={dataset:{pickSkill:'org'}};
+  let current=input,finish;
+  const dialog={open:false,dataset:{},querySelector:()=>({}),querySelectorAll:()=>[choice],showModal(){this.open=true;},close(){this.open=false;this.onclose?.();}};
+  const c={state:{pageVersion:1},document:{getElementById:()=>current,addEventListener(){}},$:selector=>selector==='#skill-dialog'?dialog:{},
+    api:()=>new Promise(resolve=>finish=resolve),skillToken:skill=>'/'+skill.reference,skillIcon:()=>'',esc:value=>value,autoSize(){},Event:class{}};
+  vm.createContext(c);const source=readFileSync('app/static/skills.js','utf8');vm.runInContext(source.slice(source.indexOf('function insertSkill(')),c);
+  return {c,form,input,dialog,choice,finish:()=>finish({skills:catalog}),replace(){input.isConnected=false;current={...input,isConnected:true};return current;}};
+}
+
+for(const transition of ['deletion','replacement'])test(`a late global skill picker cannot open after ${transition}`,async()=>{
+  const b=pickerFixture(),pending=b.c.openSkillPicker('followup');
+  if(transition==='deletion')b.form.inert=true;else b.replace();
+  b.finish();await pending;assert.equal(b.dialog.open,false);assert.equal(b.input.value,'Keep draft');
+});
+
+for(const transition of ['deletion','replacement'])test(`a global skill selection cannot edit the composer after ${transition}`,async()=>{
+  const b=pickerFixture(),pending=b.c.openSkillPicker('followup');b.finish();await pending;
+  assert.equal(b.dialog.open,true);let replacement;
+  if(transition==='deletion')b.form.inert=true;else replacement=b.replace();
+  b.choice.onclick();assert.equal(b.input.value,'Keep draft');assert.equal(b.dialog.open,false);
+  if(replacement)assert.equal(replacement.value,'Keep draft');
+});
+
+test('global skill selection still inserts into the original editable composer',async()=>{
+  const b=pickerFixture(),pending=b.c.openSkillPicker('followup');b.finish();await pending;b.choice.onclick();
+  assert.equal(b.input.value,'/org:benchmark-review Keep draft');assert.equal(b.dialog.open,false);
 });

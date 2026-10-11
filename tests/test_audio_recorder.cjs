@@ -1,24 +1,25 @@
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
 const {test}=require('node:test');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function setup(){
-  class Element{setAttribute(){}remove(){this.removed=true;}prepend(...items){this.children=items;}}
-  const toolbar=new Element(), form={querySelector:()=>toolbar},files=[],errors=[],requests=[],recorders=[],tracks=[];
+  class Element{set innerHTML(value){this.textContent=value.replace(/<[^>]*>/g,'');}setAttribute(){}remove(){this.removed=true;}prepend(...items){this.children=items;}}
+  const toolbar=new Element(), form={querySelector:()=>toolbar},files=[],errors=[],requests=[],recorders=[],tracks=[];let locked=false;
   class Recorder{
     static isTypeSupported(type){return type.includes('webm');}
     constructor(stream,options){this.mimeType=options.mimeType;this.state='inactive';recorders.push(this);}
     start(){this.state='recording';}
     stop(){this.state='inactive';queueMicrotask(()=>{this.ondataavailable({data:new Blob(['audio'])});this.onstop();});}
   }
-  const ctx={Blob,File,console,clearInterval,setInterval,MediaRecorder:Recorder,
+  let tick;
+  const ctx={Blob,File,console,clearInterval(){tick=null;},setInterval(fn){tick=fn;},MediaRecorder:Recorder,
     navigator:{mediaDevices:{getUserMedia:()=>new Promise((resolve,reject)=>requests.push({resolve,reject}))}},
     document:{createElement:()=>new Element()},toast:value=>errors.push(value)};
   vm.createContext(ctx);vm.runInContext(readFileSync('app/static/audio-recorder.js','utf8'),ctx);
-  const controller=ctx.bindAudioRecorder(form,file=>files.push(file),()=>false);
+  const controller=ctx.bindAudioRecorder(form,file=>files.push(file),()=>locked);
   const acquire=(i=0)=>{const track={stopped:false,stop(){this.stopped=true;}};tracks.push(track);requests[i].resolve({getTracks:()=>[track]});};
-  return {controller,button:toolbar.children[0],cancel:toolbar.children[1],files,errors,requests,recorders,tracks,acquire};
+  return {controller,button:toolbar.children[0],cancel:toolbar.children[1],files,errors,requests,recorders,tracks,acquire,tick(){tick?.();},lock(){locked=true;controller.cancel();}};
 }
 test('recording requests permission only after a click and stops all tracks',async()=>{
   const f=setup();assert.equal(f.requests.length,0);
@@ -37,7 +38,25 @@ test('navigation discards recordings and releases microphone',async()=>{
   const f=setup();const start=f.button.onclick();f.acquire();await start;f.controller.destroy();await flush();
   assert.equal(f.files.length,0);assert.ok(f.tracks[0].stopped);
 });
+for(const phase of ['permission','recording'])test(`locking during ${phase} releases microphone without creating an upload`,async()=>{
+  const f=setup(),start=f.button.onclick();
+  if(phase==='recording'){f.acquire();await start;}
+  f.lock();
+  if(phase==='permission'){f.acquire();await start;}
+  await flush();await f.button.onclick();
+  assert.equal(f.files.length,0);assert.equal(f.requests.length,1);assert.ok(f.tracks.every(track=>track.stopped));
+  assert.equal(f.controller.busy(),false);assert.equal(f.button.disabled,true);f.controller.destroy();
+});
 test('denied microphone permission is actionable and retryable',async()=>{
   const f=setup();const start=f.button.onclick();f.requests[0].reject(Object.assign(new Error(),{name:'NotAllowedError'}));await start;
   assert.match(f.errors[0],/permission was denied/);assert.equal(f.controller.busy(),false);assert.equal(f.button.disabled,false);f.controller.destroy();
+});
+
+test('recording continues beyond old duration and byte cutoffs until the user stops',async()=>{
+  const f=setup(),start=f.button.onclick();f.acquire();await start;
+  for(let i=0;i<181;i++)f.tick();
+  f.recorders[0].ondataavailable({data:new Blob([new Uint8Array(11*1024*1024)])});
+  assert.equal(f.recorders[0].state,'recording');assert.equal(f.files.length,0);
+  await f.button.onclick();await flush();
+  assert.ok(f.files[0].size>11*1024*1024);assert.deepEqual(f.errors,[]);f.controller.destroy();
 });

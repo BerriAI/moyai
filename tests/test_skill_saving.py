@@ -8,7 +8,7 @@ from app.db import Store, now
 from app.skills import Skills
 from test_attachments import upload, storage_mode
 from storage_fixture import MemoryObjects
-from test_skills import edit
+from test_skills import assert_rejected, edit
 from test_spend import active, sign_in
 from test_workspace import workspace
 
@@ -43,7 +43,7 @@ def test_save_current_requester_explicit_personal_and_admin_org_only(workspace):
     # Follow-up ownership uses active_user_id, even when the original owner is Alice.
     member = active(app,'google:ishaan')
     app.state.store.execute("UPDATE runs SET owner_id='google:alice' WHERE id=?",(member['id'],))
-    assert call(client,member,**form(scope='organization')).status_code==403
+    assert_rejected(call(client,member,**form(scope='organization')), 403)
     mine = call(client,member,**form()).json()
     assert app.state.store.rows('SELECT owner_id FROM skills WHERE id=?',(mine['id'],))[0]['owner_id']=='google:ishaan'
     for fake in ({'owner_id':'google:alice'},{'admin':True}):
@@ -55,26 +55,20 @@ def test_save_current_requester_explicit_personal_and_admin_org_only(workspace):
     assert call(client,member,**form()).status_code==401
 
 
-def test_unspecified_skill_scope_returns_question_and_saves_nothing(workspace):
+def test_unspecified_skill_scope_defaults_to_personal_without_publishing(workspace):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
     args=form()
     del args['scope']
-    question=call(client,run,**args)
-    assert question.status_code==200
-    assert question.json()['status']=='scope_required' and question.json()['saved'] is False
-    assert [c['scope'] for c in question.json()['choices']]==['personal','organization']
-    assert all(c['available'] for c in question.json()['choices'])
-    assert not app.state.store.rows('SELECT * FROM skills')
-    assert not app.state.store.rows('SELECT * FROM skill_saves')
-    # Asking the question consumes no save receipt; an explicit reply can save.
-    assert call(client,run,**args,scope='organization').json()['scope']=='organization'
+    saved=call(client,run,**args)
+    assert saved.status_code==200 and saved.json()['saved'] and saved.json()['scope']=='personal'
+    assert call(client,run,**args).json()==saved.json()
     sign_in(app,client,'ishaan','ishaan@berri.ai')
+    assert client.get('/api/skills/'+saved.json()['id']).status_code==404
     member=active(app,'google:ishaan')
-    choices=call(client,member,**args).json()['choices']
-    assert choices[0]['available'] and not choices[1]['available']
-    assert call(client,member,**args,scope='organization').status_code==403
+    assert call(client,member,**args).json()['scope']=='personal'
+    assert_rejected(call(client,member,**args,scope='organization'), 403)
 
 
 @pytest.mark.parametrize('scope',[None,''])
@@ -106,8 +100,8 @@ def test_atomic_save_replay_concurrent_updates_and_no_duplicate_audit(workspace)
     assert call(client,run,**change).json()['revision']==2
     assert call(client,run,**change).json()['revision']==2
     assert call(client,run,**args).json()==saved  # Lost initial response after a later edit.
-    assert call(client,run,**form(description='Conflicting retry')).status_code==409
-    assert call(client,run,**form(expected_revision=1,request_id='stale-save-1')).status_code==409
+    assert_rejected(call(client,run,**form(description='Conflicting retry')), 409)
+    assert_rejected(call(client,run,**form(expected_revision=1,request_id='stale-save-1')), 409)
     assert len(app.state.store.rows('SELECT * FROM skill_audit'))==2
     assert client.get('/api/skills/'+saved['id']).json()['revision']==2
     assert client.get('/api/skills/'+saved['id']+'/files/references/checks.md').text=='New reference.'
@@ -137,7 +131,7 @@ def test_large_attachments_persist_exactly_and_references_are_private_pinned_and
     assert 'runbook-secret-marker' in app.state.skills.context(later)
     for offset in range(100,600,100):
         assert call(client,later,'skills_read_file',name='personal:team-review',path='references/runbook.md',offset=offset,limit=80).status_code==200
-    assert len(app.state.store.rows('SELECT * FROM skill_file_reads'))==4
+    assert len(app.state.store.rows('SELECT * FROM skill_file_reads'))==6
     # Search can bring a relevant excerpt back without replaying the whole file.
     assert call(client,later,'skills_read_file',name='personal:team-review',path='references/runbook.md',search='runbook-secret-marker',limit=40).status_code==200
     missing = call(client,later,'skills_read_file',name='personal:team-review',path='references/runbook.md',search='not-in-this-document')
@@ -190,7 +184,7 @@ def test_attachment_cutoff_and_failed_import_leave_no_partial_skill(workspace,st
     app.state.store.execute('UPDATE attachments SET message_id=? WHERE id=?',(future['id'],future_id))
     for attachment_id in (draft,other_id,future_id):
         result=call(client,run,**form(files=[{'path':'references/private.md','attachment_id':attachment_id}]))
-        assert result.status_code==404
+        assert_rejected(result, 404)
     assert not app.state.store.rows('SELECT * FROM skills')
     assert not app.state.store.rows('SELECT * FROM skill_saves')
 
@@ -206,22 +200,23 @@ def test_skill_paths_rejected(workspace,path):
     assert not app.state.store.rows('SELECT * FROM skills')
 
 
-def test_file_limits_invalid_text_removal_and_rollback(workspace,storage_mode):
+def test_large_file_bundles_preserve_bytes_and_invalid_imports_roll_back(workspace,storage_mode):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
-    for raw,status in [(b'x'*(1024*1024+1),413),(b'binary\x00content',422),(b'\xff\xff',422)]:
+    for raw in (b'binary\x00content', b'\xff\xff'):
         attachment_id=attach(app,client,run,'reference.md',raw)
-        assert call(client,run,**form(files=[{'path':'ref.md','attachment_id':attachment_id}])).status_code==status
+        assert_rejected(call(client,run,**form(files=[{'path':'ref.md','attachment_id':attachment_id}])), 422)
     assert not app.state.store.rows('SELECT * FROM skills')
+    raw=b'x'*(1024*1024+1)
+    large=attach(app,client,run,'large.md',raw)
     saved=call(client,run,**form(files=[{'path':'ref.md','content':'Keep this file.'}])).json()
-    large=attach(app,client,run,'large.md',b'x'*(1024*1024))
-    result=call(client,run,**form(expected_revision=1,request_id='oversized-update',
-        files=[{'path':f'ref{i}.md','attachment_id':large} for i in range(5)]))
-    assert result.status_code==413
-    assert client.get('/api/skills/'+saved['id']).json()['revision']==1
-    removed=call(client,run,**form(expected_revision=1,request_id='remove-reference',remove_files=['ref.md']))
-    assert removed.json()['files']==[]
+    result=call(client,run,**form(expected_revision=1,request_id='large-update',
+        files=[{'path':f'ref{i}.md','attachment_id':large} for i in range(5)])).json()
+    assert result['revision']==2 and len(result['files'])==6
+    assert client.get('/api/skills/'+saved['id']+'/files/ref4.md').content==raw
+    removed=call(client,run,**form(expected_revision=2,request_id='remove-reference',remove_files=['ref.md'])).json()
+    assert len(removed['files'])==5
     assert client.get('/api/skills/'+saved['id']+'/files/ref.md').status_code==404
 
 
@@ -231,28 +226,28 @@ def test_slack_save_uses_verified_google_owner_and_live_admin_policy(workspace):
     store=app.state.store
     store.execute("INSERT INTO users(id,kind,email,name,linked_user_id,created_at,updated_at) VALUES('slack:member','slack','wrong@berri.ai','Slack user','google:alice',?,?)",(now(),now()))
     run=active(app,'slack:member')
-    assert call(client,run,**form()).status_code==403
+    assert_rejected(call(client,run,**form()), 403)
     store.execute("UPDATE users SET email='alice@berri.ai',profile_eligible=1,profile_checked_at=? WHERE id='slack:member'",(now(),))
     saved=call(client,run,**form()).json()
     assert store.rows('SELECT owner_id FROM skills WHERE id=?',(saved['id'],))[0]['owner_id']=='google:alice'
     assert client.get('/api/skills/'+saved['id']).status_code==200
     assert call(client,run,**form(scope='organization',request_id='slack-shared-save')).status_code==200
     app.state.settings.google_admin_emails='other@berri.ai'
-    assert call(client,run,**form(scope='organization',request_id='slack-shared-save')).status_code==403
+    assert_rejected(call(client,run,**form(scope='organization',request_id='slack-shared-save')), 403)
     store.execute("UPDATE users SET profile_checked_at='2000-01-01T00:00:00+00:00' WHERE id='slack:member'")
-    assert call(client,run,**form()).status_code==403
+    assert_rejected(call(client,run,**form()), 403)
     store.execute("UPDATE users SET profile_checked_at=?,profile_conflict=1 WHERE id='slack:member'",(now(),))
-    assert call(client,run,**form()).status_code==403
+    assert_rejected(call(client,run,**form()), 403)
 
 
 def test_nonchat_and_unknown_identities_cannot_write_skills(workspace):
     app,client=workspace
     sign_in(app,client)
     unknown=active(app,'google:unknown')
-    assert call(client,unknown,**form()).status_code==403
+    assert_rejected(call(client,unknown,**form()), 403)
     run=active(app)
     app.state.store.execute('UPDATE runs SET chat_enabled=0 WHERE id=?',(run['id'],))
-    assert call(client,run,**form()).status_code==403
+    assert_rejected(call(client,run,**form()), 403)
 
 
 def test_remote_skill_import_has_no_writer_lock_and_completed_retry_survives_outage(workspace, monkeypatch):
@@ -297,6 +292,6 @@ def test_skill_import_revalidates_authorized_identity_after_remote_read(workspac
         return raw
     monkeypatch.setattr(backend, 'read', raced_read)
     response = call(client, run, **form(files=[{'path': 'reference.md', 'attachment_id': attachment_id}]))
-    assert response.status_code == (404 if change == 'scope' else 409)
+    assert_rejected(response, 404 if change == 'scope' else 409)
     assert not store.rows('SELECT * FROM skills')
     assert not store.rows('SELECT * FROM skill_saves')

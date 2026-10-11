@@ -1,3 +1,6 @@
+import pytest
+
+from app.model_selection import ASTRA_ULTRAFAST
 from app.db import Store
 from app.model_preferences import preferred_model, save_model
 from test_workspace import workspace
@@ -59,18 +62,19 @@ def test_switch_uses_active_author_and_retry_does_not_overwrite(workspace):
         assert preferred_model(conn, app.state.settings, 'google:alice') == OPUS
 
 
-def test_new_slack_thread_inherits_saved_model(slack_app):
+@pytest.mark.parametrize('alias,selected', [('opus', OPUS), ('astra-ultrafast', ASTRA_ULTRAFAST)])
+def test_new_slack_thread_inherits_saved_model(slack_app, alias, selected):
     app, client, submitted, _ = slack_app
-    first = event(text='<@U99999999> model opus\nFirst task')
+    first = event(text=f'<@U99999999> model {alias}\nFirst task')
     assert client.post('/hooks/slack/events', **signed(first)).status_code == 200
-    assert submitted[-1]['model'] == OPUS
+    assert submitted[-1]['model'] == selected
     second = event(text='<@U99999999> Another task')
     second['event_id'] = 'EvDifferentThread'
     second['event']['ts'] = '1700000999.000001'
     second['event'].pop('thread_ts', None)
     assert client.post('/hooks/slack/events', **signed(second)).status_code == 200
     assert len(submitted) == 2
-    assert submitted[-1]['model'] == OPUS
+    assert submitted[-1]['model'] == selected
 
 
 def test_slack_preference_survives_automatic_linking(tmp_path):

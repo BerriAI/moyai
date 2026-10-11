@@ -16,8 +16,10 @@ def stored_run(store, run_id, connection=None):
 
 
 def private_run(store, run_id, connection=None):
-    run = stored_run(store, run_id, connection)
-    return SessionPrivacy.is_private(run)
+    if not run_id:
+        return False
+    rows = store.rows('SELECT private_owner_id FROM runs WHERE id=?', (run_id,), connection=connection)
+    return bool(rows and rows[0]['private_owner_id'])
 
 
 def require_owner(store, run_id, actor='', connection=None):
@@ -29,7 +31,10 @@ def require_owner(store, run_id, actor='', connection=None):
 
 def require_request_owner(store, security, request, run_id):
     security.require(request)
-    actor = store.identity(security.session_info(request))
+    info = security.session_info(request)
+    actor = getattr(request.state, 'access_actor', None) if info and info.get('method') == 'cloudflare' else None
+    if actor is None:
+        actor = store.identity(info)
     require_owner(store, run_id, actor)
     return actor
 

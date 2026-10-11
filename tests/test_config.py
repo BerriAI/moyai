@@ -3,6 +3,34 @@ import pytest
 from pydantic import ValidationError
 
 
+def test_independent_runtime_defaults_on_and_preserves_explicit_opt_out(monkeypatch):
+    monkeypatch.delenv('INDEPENDENT_AGENT_RUNTIME', raising=False)
+    assert Settings(_env_file=None).independent_agent_runtime is True
+    monkeypatch.setenv('INDEPENDENT_AGENT_RUNTIME', 'false')
+    assert Settings(_env_file=None).independent_agent_runtime is False
+
+
+@pytest.mark.parametrize('value', ['', 'a1' * 20, 'B2' * 32])
+def test_build_sha_accepts_only_full_optional_commit_identity(monkeypatch, value):
+    monkeypatch.setenv('MOYAI_BUILD_SHA', value)
+    assert Settings(_env_file=None).moyai_build_sha == value.lower()
+
+
+@pytest.mark.parametrize('value', ['main', 'abcdef1', 'a' * 39, 'a' * 41, 'a' * 63, 'a' * 65, 'g' * 40, ' ' + 'a' * 40])
+def test_build_sha_rejects_partial_or_invalid_commit_identity(monkeypatch, value):
+    monkeypatch.setenv('MOYAI_BUILD_SHA', value)
+    with pytest.raises(ValidationError, match='MOYAI_BUILD_SHA'):
+        Settings(_env_file=None)
+
+
+def test_build_identity_remains_optional_and_environment_keeps_its_default(monkeypatch):
+    monkeypatch.delenv('MOYAI_BUILD_SHA', raising=False)
+    monkeypatch.delenv('TRACE_ENVIRONMENT', raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.moyai_build_sha == ''
+    assert settings.trace_environment == 'development'
+
+
 def test_project_gateway_key_overrides_unrelated_shell_key(tmp_path, monkeypatch):
     monkeypatch.setenv("LITELLM_API_KEY", "unrelated-shell-key")
     env = tmp_path / ".env"
@@ -115,3 +143,48 @@ def test_explicit_harness_configuration_overrides_model_pairings(tmp_path, monke
     assert settings.default_harness() == harness
     assert settings.default_harness('opus') == harness
     assert settings.default_harness('sol') == harness
+
+
+def test_lens_feedback_target_derives_gateway_and_standalone_origins_and_honors_override():
+    gateway = Settings(_env_file=None, litellm_trace_endpoint='https://gateway.example/lens-ingest/v1/traces',
+                       litellm_trace_api_key='gateway-key')
+    assert gateway.lens_feedback_target() == (
+        'https://gateway.example/lens/feedback', {'Authorization': 'Bearer gateway-key'})
+
+    standalone = Settings(_env_file=None, litellm_trace_endpoint='https://lens.example/v1/traces',
+                          litellm_trace_api_key='lens-key')
+    assert standalone.lens_feedback_target() == (
+        'https://lens.example/lens/feedback', {'Authorization': 'Bearer lens-key'})
+
+    explicit = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                        litellm_trace_endpoint='https://gateway.example/v1/traces',
+                        litellm_trace_api_key='explicit-key')
+    assert explicit.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer explicit-key'})
+
+    feedback_key = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                            litellm_trace_api_key='trace-key', lens_feedback_api_key='feedback-key')
+    assert feedback_key.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer feedback-key'})
+    assert 'feedback-key' not in repr(feedback_key)
+    assert 'trace-key' not in repr(feedback_key)
+
+    feedback_key_only = Settings(_env_file=None, lens_feedback_endpoint='https://feedback.example/lens/feedback',
+                                 lens_feedback_api_key='feedback-only-key')
+    assert feedback_key_only.lens_feedback_target() == (
+        'https://feedback.example/lens/feedback', {'Authorization': 'Bearer feedback-only-key'})
+
+    assert Settings(_env_file=None, litellm_trace_endpoint='https://gateway.example/v1/traces').lens_feedback_target() is None
+    assert Settings(_env_file=None, litellm_trace_api_key='key').lens_feedback_target() is None
+
+
+@pytest.mark.parametrize('endpoint', [
+    'http://lens.example/lens/feedback',
+    'https://user:password@lens.example/lens/feedback',
+    'https://lens.example/lens/feedback?token=secret',
+    'https://lens.example/lens/feedback#fragment',
+    'https://lens.example/other',
+])
+def test_lens_feedback_endpoint_requires_https_feedback_path_without_url_extras(endpoint):
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, lens_feedback_endpoint=endpoint)

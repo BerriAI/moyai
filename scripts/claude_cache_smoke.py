@@ -17,9 +17,9 @@ import uvicorn
 from app.config import Settings
 from app.main import create_app
 from app.security import digest
-from sandbox.activity import ActivityReporter
+from agent.activity import ActivityReporter
 from sandbox.broker_relay import BrokerRelay
-from sandbox.harness_registry import create_agent
+from agent.harnesses.harness_registry import create_agent
 
 
 def main():

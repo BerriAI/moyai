@@ -10,23 +10,36 @@ aliases retain the Claude SDK fallback. An explicitly configured `AGENT_HARNESS`
 overrides these model defaults; remove an old `AGENT_HARNESS=claude-agent-sdk` setting
 to enable automatic pairing. The new-session picker shows the effective automatic
 choice and supports an explicit override. Explicitly
-selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents and
-Tool Loop. All configured models remain selectable with every harness. The configured
+selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents,
+Tool Loop and Pi. Regular model choices remain selectable with every harness.
+**GPT-6 Astra Ultrafast** is an opt-in processing mode that requires Codex and
+automatically selects it, including when `AGENT_HARNESS` sets another default.
+An explicit incompatible harness selection is rejected. The configured
 `AGENT_MODEL` is preserved, including GPT-6 Astra. The gateway must support the
 selected model and tool calls through the runtime's native API (Responses for
 Codex, Messages for Claude); selecting it does not establish provider compatibility.
 
+Delegated groups can mix harnesses and models. `agents_fanout` accepts shared
+`harness` and `model` defaults, and each explicit task can override either field.
+Omitted fields retain the parent's harness and active model. Every resolved pair
+is validated before any group or child session is created. The group saves these
+choices before copying its workspace, so a repeated request or explicit worker
+retry keeps the original assignment even if session model preferences change.
+The agent graph and result handoff include each worker's actual harness, model
+preference, and active model; model choice alone does not identify its harness.
+
 ## Codex SDK
 
-`sandbox/codex_harness.py` uses the published Python `openai-codex==0.161.0`
+`agent/harnesses/codex_harness.py` uses the published Python `openai-codex==0.161.0`
 package and its pinned `openai-codex-cli-bin==0.161.0` app-server runtime directly.
 It replaces the LiteLLM harness wrapper for the existing `codex` selection.
 The SDK requires Python 3.10 or later; Moyai's sandbox uses Python 3.12 or later.
 Published runtime wheels support Linux x86_64 and ARM64. Older workspace snapshots
 install the pinned SDK/runtime on first use.
 
-Codex runs inside Moyai's isolated machine with a fresh, temporary native home and
-an ephemeral thread for every invocation. Native authentication, transcripts and
+Codex runs inside Moyai's isolated machine with an ephemeral thread for every
+invocation. Cold starts use a fresh temporary native home; the warm process below
+owns a temporary home for its bounded lifetime. Native authentication, transcripts and
 summaries are never resumed across requesters. The shared public journal described
 below supplies restored context and records completed actions. Moyai keeps ownership
 of sessions, memory, skills, delegated workers, permissions, checkpoints and delivery.
@@ -34,6 +47,89 @@ Native delegation is disabled with `agents.enabled=false`; native hooks, apps,
 memory, bundled skill instructions and automatic project instructions are disabled.
 Project runtime configuration is untrusted. Only Moyai's configured MCP server is
 added, and inherited provider credentials and runtime switches are removed.
+
+The Moyai MCP server is required, with a 60-second startup timeout. The pinned
+runtime waits for its actual tool catalog before sending the first model request;
+failed or timed-out MCP discovery ends the turn without inference. Optional MCP
+startup previously let Codex begin with native tools only and add connected tools
+mid-turn. This could produce false missing-access answers and failed early calls.
+Codex uses native `tool_search` to discover MCP schemas and then calls the returned
+tool namespace directly. Claude uses native `ToolSearch`, and Hermes uses
+`tool_search`/`tool_describe`/`tool_call`.
+Shared instructions select the correct discovery path for the active harness.
+
+Native search is always enabled in the pinned runtime for search-capable models;
+the old `features.tool_search` flag is a retired no-op. However, Astra and Sol's
+bundled `code_mode_only` setting hides the standalone search tool, and that special
+tool cannot be invoked inside `functions.exec`. At startup Moyai reads the pinned
+binary's full catalog with `debug models --bundled`, changes only the selected
+search-capable model from `code_mode_only` to `code_mode`, and supplies it through
+`model_catalog_json` in the disposable native home. This retains `functions.exec`
+and all original model metadata and prompts while exposing native client search.
+The catalog probe receives no provider credentials or broker capability and does
+not refresh from the network. Other models retain their original tool mode.
+Search covers only the MCP tools authorized for this session; discovery does not
+grant additional connection access. Models without search use their actual tool
+catalog, including `ALL_TOOLS` when code mode is available.
+
+To reproduce startup and native search using real Codex and MCP with scripted local inference:
+
+```sh
+uv run pytest -q tests/test_codex_tool_readiness.py tests/test_codex_tool_search.py tests/test_workspace_diagnostics.py
+uv run python scripts/tool_readiness_demo.py --output /tmp/moyai-tool-readiness
+uv run python scripts/codex_tool_search_demo.py --output /tmp/moyai-tool-search
+```
+
+### Warm runtime and schema caching
+
+With Temporal, `CODEX_RUNTIME_REUSE=true` (default) reuses the native Codex
+app-server inside the chat's already-warm sandbox. Prewarming starts when the
+sandbox receives the run, overlapping repository, attachment and workspace setup.
+It does not allocate a sandbox when someone opens a chat. Non-Temporal runs,
+delegated workers and `SANDBOX_IDLE_SECONDS=0` retain the cold path.
+
+A local lease supervisor keeps the process for at most
+`min(SANDBOX_IDLE_SECONDS, 300)` idle seconds. Reuse requires the same chat, actor,
+model and runtime revision, exclusive ownership, completed tool receipts, background
+terminal cleanup and verified unloading of the finished native thread. A failed or
+interrupted invocation, owner disconnect, idle expiry or scope change discards the
+process. An unavailable lease falls back before inference to the cold launch;
+runtime failures after admission do not introduce an automatic turn replay.
+Unload, SDK shutdown and lease-release errors disable reuse without changing a
+completed answer or replacing the original execution error. Resource cleanup is
+independent, and lease cleanup cannot prevent the broker relay from closing.
+The task deadline covers startup and execution, then exits before teardown.
+Cancellation during teardown waits for owned SDK/lease cleanup before propagating;
+the lease remains attached until release succeeds, preserving the entrypoint fallback.
+Orphaned native files from filesystem snapshots are removed before workspace
+preparation, including on cold runs and delegated workers.
+`CODEX_RUNTIME_REUSE=false` disables prewarming and reuse.
+
+The pinned SDK connects through a local JSON-lines/Unix-WebSocket adapter
+(`websockets==16.1.1`). Each invocation still starts a new native thread with the
+current relay URL, capability, config and permission-filtered MCP catalog.
+The supervisor starts without inherited credentials, and per-thread credentials
+travel over stdin, not process arguments. MCP remains required before inference.
+This reuses the Codex process, not a prior conversation or MCP connection across
+capability boundaries.
+
+The reusable process caches the pinned binary's bundled model metadata. The broker
+also caches up to 256 immutable connector schema templates, copying them for each
+response. Connection selection, policy, token validation and tool authorization
+are reevaluated on every catalog request; authorized catalogs are never cached.
+
+Reproduce locally with real Codex and MCP, using scripted inference:
+
+```sh
+uv run pytest -q tests/test_codex_runtime.py tests/test_tool_schema_cache.py
+uv run python scripts/codex_runtime_demo.py --output /tmp/moyai-runtime --pairs 11
+```
+
+The benchmark reports entry-to-first-inference startup separately from the first
+warm launch. Its steady medians exclude the first pair for both paths. It excludes
+cloud provisioning and model generation and is not an end-to-end production SLA.
+
+### Inference and lifecycle
 
 The SDK receives the run capability and sends Responses requests to Moyai's local
 relay using a custom provider. The broker still pins the selected model, authorizes
@@ -49,9 +145,11 @@ shell/file tools and Moyai MCP tools. Moyai saves receipts from public
 `commandExecution`, `fileChange`, `mcpToolCall` and `imageView` lifecycle items.
 Code-mode outer call IDs differ from nested tool IDs. Before allowing the next
 model request, the relay waits for its output IDs to appear in the ordered native
-`rawResponseItem/completed` stream and for all nested receipts to settle. Only
-those IDs are consumed from raw events; private request/response contents never
-become public receipts. A missing receipt blocks the boundary rather than inventing
+`rawResponseItem/completed` stream and for all nested receipts to settle. Raw native
+client `tool_search_call` and `tool_search_output` events also supply search receipts,
+using their call IDs, arguments and discovered schemas. Other raw events contribute
+only output IDs; private reasoning and model responses never become public receipts.
+A missing receipt blocks the boundary rather than inventing
 completion. Corrections, delegation waits and cooperative checkpoints occur at
 these boundaries; native in-flight steering is not enabled.
 
@@ -69,7 +167,8 @@ rejection uses the same bounded journal-recovery path as Claude, preserving the
 original request, deadlines and completed receipts. The gateway must support both
 Responses and Chat Completions for durable summary generation. For Astra it must
 also preserve native Responses items such as `additional_tools`, tool namespaces,
-custom tool calls/outputs and streamed completion events.
+custom tool calls/outputs, client `tool_search_call`/`tool_search_output` items and
+streamed completion events.
 
 Transient model connection failures with pending tools continue in the same live
 native thread, preserving existing command sessions under the original turn
@@ -93,7 +192,7 @@ to block automatic restart.
 
 ## Claude Agent SDK
 
-`sandbox/claude_harness.py` calls the pinned Python **`ClaudeSDKClient`** directly.
+`agent/harnesses/claude_harness.py` calls the pinned Python **`ClaudeSDKClient`** directly.
 It does not use LiteLLM's harness wrapper or import/patch Hermes. The shared
 sandbox image retains Hermes and other runtimes for existing sessions and
 explicit selections. Claude runs inside that same isolated Modal machine.
@@ -126,7 +225,7 @@ wait for credentials/delegated work, or apply a correction at a complete tool
 boundary. In-flight redirect is a Hermes capability; Claude uses boundary
 steering. Stop revokes the capability and terminates the isolated machine.
 
-Claude and OpenCode can resume a compatible, successfully completed native
+Claude, OpenCode and Pi can resume a compatible, successfully completed native
 conversation on the next chat turn, including after the sandbox process exits.
 The SDK receives only the new request; it owns its existing conversation instead
 of receiving the public journal again inside a new user message. Completed
@@ -137,11 +236,35 @@ Native reuse has three independent gates:
 - Compatibility: the harness, installed runtime version, adapter instructions,
   working directory, effective model and gateway configuration must match
 - Privacy: the broker requires the exact current requester. A turn that injected
-  personal memory, loaded skills, skill excerpts or search descriptions cannot
+  personal memory, skill directory entries, loaded skills, skill excerpts or search descriptions cannot
   publish reusable native state, even if those selections are later removed
 - Restart: the saved public journal epoch and append position must match the
   restored filesystem. The preceding canonical turn must have completed, with no
   intervening metadata reply, failed turn or changed delivered steering input
+
+Automatic memory and the initial skill directory use this same privacy gate.
+They can avoid discovery round trips, but more turns may lose native session
+reuse. The public journal still supports continuation. A smaller core prompt
+does not establish lower end-to-end latency; measure with representative
+libraries and follow-up turns. This changes inference context, not sandbox
+startup or deployment topology.
+
+The core prompt keeps task continuity, progress, trust boundaries and delivery
+requirements. Skill saving, memory capture and credential procedures live in
+their tool schemas/descriptions; the detailed 1Password procedure is supplied
+with `credentials_run`. Runtime tool discovery determines when those schemas
+enter the model request. Full request size still depends on the selected skills,
+notes, tools and history, not just the core prompt.
+
+Run `uv run python -m scripts.initial_context_demo --output /tmp/moyai-context-demo --delay 3`
+to record first-inference recall, direct skill loading, memory-budget receipt
+agreement and immediate revocation.
+Open the generated `recording.html` to replay the timestamped output. This is a
+real local broker demonstration using disposable identities and a synthetic
+inference upstream; it does not evaluate model quality. Add `--baseline REF` to
+compare core Codex prompt characters against another local Git revision. The demo
+uses the shared `agent.prompts.system_prompt` builder and accepts baselines from
+both before and after the agent-package extraction.
 
 The broker stores one encrypted, bounded native record per run, separately from
 public history, activity and downloadable artifacts. `/context/native` accepts
@@ -154,7 +277,7 @@ most 256 regular files for CLI runtimes; oversized state uses the public journal
 Native plaintext lives outside `/workspace` and is removed before attachments,
 project preparation or agent startup, including when starting a cloned child.
 Each SDK uses an isolated config/cache directory and fresh relay credentials.
-Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode uses
+Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode and Pi use
 LiteLLM's public resume API and its persisted native files. Missing, corrupt or
 incompatible state selects a fresh session before inference. An ambiguous SDK
 failure never automatically retries the task. Interrupted turns, intermediate
@@ -219,7 +342,7 @@ configuration error. Configure verified limits for private model aliases; model
 names such as Astra and GLM do not imply Claude's context window.
 
 Moyai's gateway owns background model-input compaction for Codex, Claude Agent
-SDK, Hermes, OpenCode, Deep Agents and Tool Loop. At 75% of the verified input
+SDK, Hermes, OpenCode, Deep Agents, Tool Loop and Pi. At 75% of the verified input
 budget it snapshots an older, closed prefix and starts tool-free summarization.
 Fitting model requests continue using the existing history while that summary
 runs. A later request uses the completed summary plus every item appended after
@@ -253,7 +376,7 @@ foreground work can preempt maintenance. Output allowances are unchanged.
 
 The authenticated `/context/window` capability enables supported native controls:
 Claude automatic compaction, Hermes proactive compression, OpenCode auto/prune,
-and Deep Agents summarization middleware yield to this gateway owner. Older
+Pi automatic compaction and Deep Agents summarization middleware yield to this gateway owner. Older
 gateways retain their existing controls. Codex has no supported disable switch;
 its usage-based native counter sees the projected input, while emergency native
 recovery remains available. Deep Agents' public middleware profile is process-wide;
@@ -395,23 +518,50 @@ Read the repository
 ```
 
 The task line is optional. A harness-only command starts no compute. Other IDs
-are `hermes`, `codex`, `opencode`, `deepagents` and `tool-loop`.
+are `hermes`, `codex`, `opencode`, `deepagents`, `tool-loop` and `pi`.
+
+## Pi
+
+Choose **Pi** in the new-session engine picker, or start a Slack thread with
+`@Moyai harness pi`. Pi uses Chat Completions through the configured gateway;
+the selected model must support that API and tool calls. Its native file and shell
+tools run in the isolated workspace. Connected-app tools use Moyai's authorized
+MCP bridge.
+
+Workspace images include Pi `1.1.0` and its private Node `22.23.3` runtime. An older
+saved workspace installs those versions on first use without replacing the
+project's Node runtime. The LiteLLM runtime also upgrades its pinned source and
+MCP dependency automatically. If an installation fails, the turn stops before
+launching Pi; retry after restoring package-download access, or rebuild the
+workspace image.
+
+Moyai owns background compaction when the gateway advertises that capability.
+Pi's automatic compaction yields to it, and Pi's agent/provider retries are
+disabled. A confirmed context rejection can rebuild from the saved public
+receipts only after tool outcomes settle. Failed summaries and uncertain tool
+outcomes stop recovery. Compatible completed conversations can resume native
+state on the next turn with fresh broker credentials; invalid snapshots fall
+back to public context.
 
 ## Other runtimes and extension
 
-`sandbox/harness_registry.py` is the single catalog for API validation, UI model
+`agent/harnesses/harness_registry.py` is the single catalog for API validation, UI model
 choices, Slack selection and adapter creation. Each adapter implements
 `HarnessAgent`: `validate`, `run_conversation`, `interrupt` and `close`.
-`sandbox/agent.py` owns workspace preparation, shared prompts, goals, waits,
-checkpointing and delivery.
+`agent/agent.py` owns the shared conversation lifecycle, prompts, goals, waits,
+and saved context. Production and evaluations call it directly. `sandbox/agent.py`
+prepares the workspace and handles infrastructure and artifact collection. See
+[the agent directory](../agent/README.md) for prompts, tools, harnesses, and skills.
 
-OpenCode, Deep Agents and Tool Loop use `litellm.aagent_session`, or
-`litellm.aagent_resume` for eligible OpenCode conversations, with the named
-bindings in `sandbox/harness_bindings.py`. The pinned beta source
-is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not
+OpenCode, Deep Agents, Tool Loop and Pi use `litellm.aagent_session`, or
+`litellm.aagent_resume` for eligible OpenCode and Pi conversations, with the named
+bindings in `agent/harnesses/harness_bindings.py`. The pinned beta source
+is `36f96259f08d449bdc996ed36919c47b39ce527f`; the tested PyPI wheel alone does not
 contain that API. Claude Agent SDK stays pinned at `0.2.163`; the native Codex
 Python SDK and its bundled runtime are pinned at `0.161.0`. No upstream source
 is vendored. Add a new registry definition and lifecycle adapter to extend Moyai.
+The isolated harness environment uses MCP `2.2.0`; the controller retains its
+separate locked dependencies.
 
 ## Verification
 
@@ -420,6 +570,23 @@ uv run pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transpor
 uv run pytest -q --tb=line tests/test_context_store.py tests/test_context_gateway.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py
 node --test tests/test_harness_picker.cjs tests/test_automation_editor.cjs
 ```
+
+With `uv`, Git and npm installed, run the native Pi contract suite:
+
+```sh
+scripts/test_pi_runtime.sh
+```
+
+This creates a disposable runtime environment and installs the pinned source,
+Pi and OpenCode. Missing Pi dependencies fail the suite. Tests run the actual
+Pi process against the real broker, encrypted native-state store and MCP bridge,
+with scripted local inference. They cover file and app tools, cold resume with
+renewed credentials, invalid snapshots, provider errors, truncated streams,
+Stop, deadlines, call budgets and context-recovery failures. Shared harness tests
+exercise background compaction while tools continue and steering at request
+boundaries. The Pi CI job also builds the production workspace image. These
+checks make no external model calls and do not establish every provider's
+compatibility, model quality or production latency.
 
 The `native-resume` cases in `test_claude_sdk_transport.py` exercise the real
 pinned Claude SDK, MCP tool transport, encrypted broker endpoint and SQLite.

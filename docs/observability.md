@@ -23,6 +23,23 @@ to a model or tool error.
 
 ## Cloud request failures and recovery
 
+`workspace_diagnostics` is a read-only tool available through the active run's
+broker capability. It takes no arguments and cannot inspect a different run.
+It returns the active harness/model, current broker tool names, connection scope
+and policy flags, and the latest 20 sanitized broker/SDK failures for this session.
+Records include allowlisted status codes, counters and correlation IDs; message
+text, tool payloads, credentials and raw host logs are excluded. The stdio MCP
+bridge adds the tool names from its last `tools/list` response. This distinguishes
+broker registration from what the bridge advertised; neither proves that every
+tool reached a particular model request. No recorded failure is not proof that
+no failure occurred.
+
+Source access already uses `github_repositories` and `github_checkout` when
+`BerriAI/moyai` is authorized. Diagnostics report `RENDER_GIT_COMMIT` when supplied
+as a full commit SHA so source can be compared with the deployed version. General
+Render/Modal logs still require an operator or an explicitly scoped log-reader
+integration. Do not give agent sandboxes account administrator keys to obtain them.
+
 The sandbox emits an `error` event with `data.phase=broker_failure`. Its structured
 fields preserve HTTP status, original upstream status, client request ID,
 allowlisted response IDs (including Render and model ledger IDs), exception and
@@ -132,18 +149,23 @@ messages, public assistant text and requested tool names, for both JSON and
 streaming responses. Streaming deltas are assembled before redaction; completed
 Responses snapshots replace those deltas so text is exported once. Failed and
 incomplete snapshots preserve any text and tool names already received. Text capture
-is bounded at 16,000 characters per input/output aggregate; overflowing text is
-omitted as a whole. Tool arguments and results remain in their separate tool
-spans. Internal context-compaction calls export usage and status only. Capture
+is bounded at 1,000,000 characters per input/output aggregate; overflowing native
+text is omitted as a whole before redaction. Model text is sanitized with that
+larger limit, and each serialized message representation is capped at 2 MiB of
+UTF-8 JSON. Text that exceeds the serialized budget is shortened after redaction
+with an explicit `[truncated]` marker. Tool arguments and results remain in their
+separate tool spans. Internal context-compaction calls export usage and status only. Capture
 uses the existing inference connection and does not add a network hop.
 
 System prompts, loaded skills, private reasoning, images and credential-tool
 payloads are excluded. Known credentials and common secret fields are redacted;
-ordinary task/tool text is sent to the configured gateway. Text is capped at
-16,000 characters per field. Moyai writes encoded spans to a SQLite outbox on
-Render's persistent disk before export. A background worker retries delivery after
+ordinary task/tool text is sent to the configured gateway. Agent and tool text
+retains its 16,000-character per-field limit. Moyai writes encoded spans to a SQLite
+outbox on Render's persistent disk before export. A background worker retries delivery after
 outages and restarts using the same IDs. It keeps delivery receipts and removes
-acknowledged payloads. The gateway must deduplicate by trace/span ID if it accepted
+acknowledged payloads. Export batches are bounded by encoded bytes as well as
+span count so larger model traces do not overflow Lens's 16 MiB request limit.
+The gateway must deduplicate by trace/span ID if it accepted
 a batch but its acknowledgment was lost. Pending payloads occupy disk until delivery;
 back up and protect that disk with the rest of the workspace data. A crash before
 capture, a lost disk, or a model response that never reaches Moyai can still leave

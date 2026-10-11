@@ -59,7 +59,7 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
     # Read retained history, including soft-deleted sessions, in one DB snapshot.
     # Deletion hides navigation, not the financial/publication record.
     with store.connect() as conn:
-        conn.execute('BEGIN')
+        conn.begin_read()
         publications = [dict(row) for row in conn.execute('''SELECT p.*,r.owner_id,r.chat_enabled,
             roots.root_id,m.user_id AS actor_id FROM github_publications p
             JOIN runs r ON r.id=p.run_id JOIN run_roots roots ON roots.run_id=r.id

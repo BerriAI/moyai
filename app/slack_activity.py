@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 
+from .db import database
 from .progress import current_focus
 from .runner import response_status
 
@@ -45,19 +46,19 @@ class SlackActivity:
         return STATUSES.get(state, '')
 
     def desired_status(self, run_id):
-        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,
+        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,r.deletion_requested_at,r.deleted_at,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status='queued') AS queued
             FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?''', (run_id,))
         return self.status_for(rows[0]) if rows else ''
 
-    async def sync(self):
+    def pending_statuses(self):
         if not self.owner.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']:
             # A disabled/replaced connection cannot send. Slack's TTL clears it.
-            return
+            return []
         team = self.owner.connectors.slack_installation().get('team_id')
         stamp = time.time()
         pending = []
-        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,a.status AS last_status,
+        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,r.deletion_requested_at,r.deleted_at,a.status AS last_status,
             a.refreshed_at,a.retry_at,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status='queued') AS queued
             FROM slack_threads t JOIN runs r ON r.id=t.run_id
@@ -76,27 +77,32 @@ class SlackActivity:
             if (status == row['last_status'] and row['refreshed_at']
                     and (not status or row['refreshed_at'] > stamp - 60)):
                 continue
-            pending.append(self.send(row['run_id'], status))
+            pending.append((row['run_id'], status))
             if len(pending) == 5:
                 break
+        return pending
+
+    async def sync(self):
+        pending = await database(self.pending_statuses)
         # Bound status work so a Slack outage cannot hold up saved answers.
-        await asyncio.gather(*pending)
+        await asyncio.gather(*(self.send(run_id, status) for run_id, status in pending))
 
     async def send(self, run_id, status):
         if private_run(self.store, run_id):
             return
         stamp = time.time()
         # Record even an ambiguous attempt so completion/restart clears it.
-        self.store.execute('''INSERT INTO slack_activity(run_id,status,refreshed_at,retry_at)
+        await database(self.store.execute, '''INSERT INTO slack_activity(run_id,status,refreshed_at,retry_at)
             VALUES(?,?,0,?) ON CONFLICT(run_id) DO UPDATE SET
             status=excluded.status,refreshed_at=0,retry_at=excluded.retry_at''', (run_id, status, stamp + 30))
         try:
+            source = await database(self.owner.channel.source_for_run, run_id)
             async with asyncio.timeout(3):
                 await self.owner.agentchat.set_status(self.owner.channel,
-                    self.owner.channel.source_for_run(run_id), status)
-            self.store.execute('UPDATE slack_activity SET refreshed_at=?,retry_at=0 WHERE run_id=?', (time.time(), run_id))
+                    source, status)
+            await database(self.store.execute, 'UPDATE slack_activity SET refreshed_at=?,retry_at=0 WHERE run_id=?', (time.time(), run_id))
             if status:
-                self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (run_id,))
+                await database(self.store.execute, "UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (run_id,))
         except asyncio.CancelledError:
             raise
         except Exception as exc:

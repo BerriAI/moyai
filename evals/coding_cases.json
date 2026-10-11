@@ -1,0 +1,38 @@
+{
+  "name": "moyai-python-coding-regressions",
+  "description": "Four real Python coding tasks, each run in a fresh workspace. Hidden deterministic checks are included in the scored output.",
+  "cases": [
+    {
+      "input": "Create solution.py with a function stable_unique(values) that removes duplicate hashable values while preserving their first-seen order. Do not mutate the input list. Use your terminal to test empty input, repeated numbers, and repeated strings. In your final response, summarize the behavior and the tests you actually ran.",
+      "expected": "A correct stable_unique implementation preserves first occurrence order, handles empty input, does not mutate its input, and passes all independent verification checks.",
+      "meta": {
+        "name": "stable-deduplication",
+        "verification_code": "import runpy\nf = runpy.run_path('solution.py')['stable_unique']\nassert f([]) == []\nvalues = [3, 1, 3, 2, 1]\nassert f(values) == [3, 1, 2]\nassert values == [3, 1, 3, 2, 1]\nassert f(['b', 'a', 'b', 'c']) == ['b', 'a', 'c']\nassert f([1, '1', 1, (1,), '1']) == [1, '1', (1,)]\nassert f([None, 'None', None]) == [None, 'None']\nprint('Independent contract checks passed')"
+      }
+    },
+    {
+      "input": "Create solution.py with merge_intervals(intervals). Each interval is a two-element list [start, end], with start <= end. Return intervals sorted by start, merging overlapping or touching intervals. Do not modify the caller's list or its nested interval lists. Use your terminal to test an empty list, unsorted overlaps, and touching endpoints. Summarize what you changed and verified.",
+      "expected": "A correct merge_intervals implementation sorts and merges overlapping or touching intervals, handles empty input, preserves the caller's input, and passes all independent verification checks.",
+      "meta": {
+        "name": "merge-intervals",
+        "verification_code": "import runpy\nf = runpy.run_path('solution.py')['merge_intervals']\nassert f([]) == []\nassert f([[5, 7], [1, 3], [2, 4]]) == [[1, 4], [5, 7]]\nassert f([[1, 2], [2, 3]]) == [[1, 3]]\nvalues = [[5, 6], [1, 4], [2, 3]]\nassert f(values) == [[1, 4], [5, 6]]\nassert values == [[5, 6], [1, 4], [2, 3]]\nassert f([[1, 1]]) == [[1, 1]]\nassert f([[3, 3], [1, 2]]) == [[1, 2], [3, 3]]\nassert f([[-5, -3], [-4, -1]]) == [[-5, -1]]\nprint('Independent contract checks passed')"
+      }
+    },
+    {
+      "input": "Create solution.py containing chunked(items, size), returning a list of lists of at most size elements in order, with a final shorter chunk when needed. It must work with an iterable such as a generator. Raise ValueError for zero or negative size. Use the terminal to verify these behaviors and report the results.",
+      "expected": "A correct chunked implementation preserves order, supports generators and empty input, handles remainder chunks, rejects nonpositive sizes, and passes all independent verification checks.",
+      "meta": {
+        "name": "iterable-chunking",
+        "verification_code": "import runpy\nf = runpy.run_path('solution.py')['chunked']\nassert f([], 2) == []\nassert f([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]\nassert f((i for i in range(3)), 2) == [[0, 1], [2]]\nfor size in [0, -1]:\n    try:\n        f([1], size)\n    except ValueError:\n        pass\n    else:\n        raise AssertionError('nonpositive size must raise ValueError')\nassert f([1, 2, 3], 1) == [[1], [2], [3]]\nassert f([1, 2, 3, 4], 3) == [[1, 2, 3], [4]]\nassert f((i for i in range(3)), 8) == [[0, 1, 2]]\nprint('Independent contract checks passed')"
+      }
+    },
+    {
+      "input": "Create solution.py with parse_bool(value). Strip leading/trailing whitespace and compare case-insensitively. Accept strings true, yes, 1 as True and false, no, 0 as False. Reject every other string with ValueError. Use the terminal to test mixed case, whitespace, each accepted value, and invalid input. Report what your tests showed.",
+      "expected": "A correct parse_bool implementation accepts the six specified tokens after trimming and case normalization, raises ValueError on other strings, and passes all independent verification checks.",
+      "meta": {
+        "name": "strict-boolean-parsing",
+        "verification_code": "import runpy\nf = runpy.run_path('solution.py')['parse_bool']\nfor value in ['true', ' YES ', '1', 'TrUe']:\n    assert f(value) is True\nfor value in ['false', ' NO ', '0', 'FaLsE']:\n    assert f(value) is False\nfor value in ['', 'maybe', '2', 'truthy']:\n    try:\n        f(value)\n    except ValueError:\n        pass\n    else:\n        raise AssertionError('unknown boolean token must raise ValueError')\nfor value in ['+1', '-0', '1.0', '0.0', 'truex', 'false extra']:\n    try:\n        f(value)\n    except ValueError:\n        pass\n    else:\n        raise AssertionError('noncanonical boolean token must be rejected')\nprint('Independent contract checks passed')"
+      }
+    }
+  ]
+}

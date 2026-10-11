@@ -174,7 +174,7 @@ def test_broker_buffers_gateway_to_obtain_final_cost_for_streaming_clients(works
     def fail(request):
         return httpx.Response(429)
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(fail), **kw))
-    assert client.post(url,headers={'Authorization':'Bearer capability'},json={'messages':[]}).status_code == 502
+    assert client.post(url,headers={'Authorization':'Bearer capability'},json={'messages':[]}).status_code == 429
     assert app.state.store.rows("SELECT * FROM model_requests WHERE status='failed'")
 
 
@@ -616,6 +616,7 @@ async def test_cost_recovery_faults_remain_unknown_and_retry_without_leaking_dia
     assert len(calls) == 1 and calls[0].startswith('https://gateway.example/')
 
 
+@pytest.mark.sqlite_only
 async def test_cost_recovery_checkpoint_survives_a_new_app_and_migration_is_idempotent(
         workspace: tuple[FastAPI, TestClient], tmp_path: Path) -> None:
     from app.persistence import Checkpoints, restore_checkpoint

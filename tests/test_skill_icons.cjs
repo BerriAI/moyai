@@ -1,7 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const ctx=vm.createContext({});
 for(const file of ['icons','skill-icons'])vm.runInContext(readFileSync(`app/static/${file}.js`,'utf8'),ctx);
 test('automatic icons use bounded name words and default to a cube',()=>{

@@ -96,6 +96,9 @@ async def test_writes_during_commit_are_not_lost_and_failed_commits_retry(tmp_pa
 
 async def test_computer_input_acknowledges_before_cloud_commit_and_keeps_activity(workspace, tmp_path):
     app, client = workspace
+    # Measure request-owned checkpoint work, not an unrelated Slack poller's
+    # allowed background flush. Drain those tasks before installing this gate.
+    client.portal.call(app.state.slack.chat.shutdown)
     hub, store = app.state.computer, app.state.store
     checkpoints = app.state.automations.checkpoints
     original_settings = checkpoints.settings

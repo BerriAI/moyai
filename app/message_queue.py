@@ -9,9 +9,10 @@ class MessageQueue:
     def __init__(self, store, mirror=None):
         self.store, self.mirror = store, mirror
 
-    def change(self, run_id, message_id, actor, admin, revision, action, content=None):
+    def change(self, run_id, message_id, actor, admin, revision, action, content=None, *, requested_at=None):
+        requested_at = requested_at or now()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             row = conn.execute("SELECT * FROM messages WHERE run_id=? AND id=? AND role='user'", (run_id, message_id)).fetchone()
             if not run or not row:
@@ -41,6 +42,8 @@ class MessageQueue:
                     raise HTTPException(409, 'Moyai is already picking up another queued message.')
                 conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (message_id, run_id))
                 conn.execute('UPDATE messages SET revision=revision+1 WHERE id=?', (message_id,))
+                from .performance import prioritized_in
+                prioritized_in(conn, run_id, message_id, requested_at)
                 # A pending approval has no external side effect. Retire it to
                 # let its blocked tool return before the safe steering boundary.
                 conn.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
@@ -56,8 +59,21 @@ class MessageQueue:
 
     def accept_steer(self, run_id, active_message_id):
         """Called between complete tool rounds or while durably checkpointed."""
+        # Most sandbox polls have no input. A read can proceed during another
+        # writer's transaction; do not acquire the backend's writer lock just
+        # to poll (SQLite's writer lock or Postgres's schema advisory lock).
+        # A newly queued input can wait until the next poll. Positive matches
+        # are only a hint: the transaction below rechecks ownership and state.
+        if not self.store.rows("""SELECT 1 FROM runs r JOIN messages m ON m.run_id=r.id
+                WHERE r.id=? AND r.active_message_id=?
+                AND r.status NOT IN ('stopping','cancelled','failed','interrupted')
+                AND m.status='queued' AND m.id!=?
+                AND (m.id=r.steer_message_id OR m.send_immediately=1 OR EXISTS (
+                    SELECT 1 FROM slack_receipts s WHERE s.run_id=m.run_id AND s.message_id=m.id))
+                LIMIT 1""", (run_id, active_message_id, active_message_id)):
+            return None
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run or run['active_message_id'] != active_message_id or run['status'] in {'stopping','cancelled','failed','interrupted'}:
                 return None
@@ -68,7 +84,7 @@ class MessageQueue:
                 row = conn.execute("""SELECT m.* FROM messages m WHERE m.run_id=? AND m.status='queued'
                     AND (m.send_immediately=1 OR EXISTS (
                         SELECT 1 FROM slack_receipts s WHERE s.run_id=m.run_id AND s.message_id=m.id))
-                    ORDER BY m.id LIMIT 1""", (run_id,)).fetchone()
+                    ORDER BY CASE WHEN m.input_kind='user' THEN 0 ELSE 1 END,m.id LIMIT 1""", (run_id,)).fetchone()
                 if row and row['id'] != active_message_id:
                     conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (row['id'], run_id))
             if not row or row['id'] == active_message_id:
@@ -83,14 +99,19 @@ class MessageQueue:
 
     def acknowledge(self, run_id, turn_id, ids):
         """Idempotent receipts from the live sandbox, also carried by model/final events."""
-        if not isinstance(ids, list) or len(ids) > 100 or any(type(i) is not int for i in ids):
+        if not isinstance(ids, list) or any(type(i) is not int for i in ids):
             raise HTTPException(422, 'Invalid steering receipts.')
+        if not ids:
+            return
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             for message_id in ids:
+                applied_at = now()
                 changed = conn.execute("UPDATE messages SET status='injected',started_at=? WHERE id=? AND run_id=? AND steering_parent_id=? AND status='queued' AND queue_locked=1",
-                                       (now(), message_id, run_id, turn_id)).rowcount
+                                       (applied_at, message_id, run_id, turn_id)).rowcount
                 if changed:
+                    from .performance import picked_up_in
+                    picked_up_in(conn, message_id, applied_at, 'steering')
                     conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=? AND steer_message_id=?', (run_id, message_id))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Your message is guiding the current task.',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'turn_id': turn_id, 'phase': 'steering'}), now()))
@@ -101,7 +122,7 @@ class MessageQueue:
         if not target:
             return {'steer_message_id': None}
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             message = conn.execute('SELECT * FROM messages WHERE id=?', (target,)).fetchone()
             allowed = {'waiting_children', 'waiting_credential'} if checkpointed else {'running', 'reconnecting', 'awaiting_approval'}
@@ -115,4 +136,5 @@ class MessageQueue:
             conn.execute('UPDATE messages SET steering_parent_id=? WHERE id=?', (turn_id, target))
         from .attachments import attachment_context
         uploads = [item for item in self.store.attachments.for_run(run_id, target) if item['message_id'] == target]
-        return {'steer_message_id': None, 'input': {'id': target, 'content': message['content'] + attachment_context(uploads), 'attachments': uploads}}
+        return {'steer_message_id': None, 'input': {'id': target, 'content': message['content'] + attachment_context(uploads), 'attachments': uploads,
+                'kind': message['input_kind'], 'source': json.loads(message['source_json'])}}

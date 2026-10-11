@@ -136,6 +136,11 @@ def test_broker_discovers_and_executes_personal_reads(personal, workspace, monke
     listing = client.get(endpoint, headers=headers)
     assert listing.status_code == 200
     assert set(TOOLS) <= {t['name'] for t in listing.json()}
+    bound = client.post(endpoint + '/call', headers=headers, json={
+        'name': 'credentials_request', 'arguments': {'provider': 'generic', 'name': 'slack-personal',
+            'format': 'env', 'secret_id': personal[3], 'reason': 'Read my Slack', 'request_key': 'broker-slack'}})
+    assert bound.status_code == 200, bound.text
+    assert bound.json()['status'] == 'provided'
     result = client.post(endpoint + '/call', headers=headers, json={
         'name': 'slack_personal_search', 'arguments': {'request_id': request_id, 'query': 'my private notes'}})
     assert result.status_code == 200, result.text

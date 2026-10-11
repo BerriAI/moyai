@@ -14,9 +14,9 @@ from app.config import Settings
 from app.main import create_app
 
 
-def demo(directory):
+def demo(directory, port=8830):
     values = {key: field.get_default(call_default_factory=True) for key, field in Settings.model_fields.items()}
-    values.update(data_dir=Path(directory), public_url='http://127.0.0.1:8830',
+    values.update(data_dir=Path(directory), public_url=f'http://127.0.0.1:{port}',
                   google_client_id='local-fixture', google_client_secret='local-fixture',
                   google_allowed_domains='example.com', google_admin_emails='alex@example.com',
                   auto_prepare_repositories=False, session_titles_enabled=False,
@@ -45,5 +45,14 @@ def demo(directory):
 
 if __name__ == '__main__':
     from tempfile import TemporaryDirectory
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=8830)
+    args = parser.parse_args()
+    if not args.port:
+        import socket
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            args.port = listener.getsockname()[1]
     with TemporaryDirectory(prefix='session-ui-', dir=Path(__file__).resolve().parents[2]) as directory:
-        uvicorn.run(demo(directory), host='127.0.0.1', port=8830)
+        uvicorn.run(demo(directory, args.port), host='127.0.0.1', port=args.port)

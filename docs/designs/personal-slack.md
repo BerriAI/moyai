@@ -1,13 +1,5 @@
 # Optional personal Slack connections
 
-## Evidence and scope
-
-Base acecc76010af3ccd5c86b93052dc4429c8429132. Two independent scouts completed. Prior art: merged #226 preserves verified requester identity; local history is shallow and contains no reverted personal-Slack work. Open-PR census is not available through the exposed listing tools, so do not claim it was completed.
-
-Unmodified real FastAPI app, SQLite, authenticated TestClient (no external Slack credentials): GET /api/connections/slack/personal returned 404; Bob GETting Alice's run returned 200. This is a declared in-process ASGI reproduction substitution for a LiteLLM proxy rig. Subsequent verification must also run the changed application over HTTP and show selected synthetic upstream identity.
-
-Root cause: connections is keyed only by provider, credentials() executes SELECT * FROM connections WHERE provider=?, and browser run endpoints authenticate workspace membership without an owner ACL. Personal credential selection therefore requires a durable privacy boundary for resulting content.
-
 ## Shape
 
 Problem classes: OAuth delegated authorization, credential precedence, and information-flow confinement. Established local solutions are owner-scoped skills/memory storage, verified requester resolution in AutomationTools.actor, and single-use browser-bound OAuth state. Reuse these conventions; native checkpoint invalidation alone does not protect published results.
@@ -41,7 +33,7 @@ Authorization: individual Google/Cloudflare owners may connect; verified Slack m
 
 Channel x ceiling: web/private => personal grant + immutable owner + org policy + plugin; web/shared, Slack shared, automation/unsupported derivatives => configured personal grant denied; absent personal grant => existing shared account subject to existing ceilings; bot => existing independent bot authorization. No new budget/rate-accounting system is introduced.
 
-Storage/lifecycle: separate encrypted personal-grant table; explicit owner key; row absence means no configured grant; invalid grants remain present. Single authoritative SQLite schema. Credential rotation uses the existing encryption service. Removal deletes grant only; privacy metadata persists. State consumption is transactional; refresh guarded by revision and owner lock. Indexed owner PK lookups need no speculative query redesign.
+Storage/lifecycle: separate encrypted personal-grant table; explicit owner key; row absence means no configured grant; invalid grants remain present. The explicit schema initializer supports SQLite and PostgreSQL at revision 19. Database triggers enforce immutable ownership and reject private derivation. Credential rotation uses the existing encryption service. Removal deletes grant only; privacy metadata persists. State consumption is transactional; refresh guarded by revision and owner lock. Indexed owner PK lookups need no speculative query redesign.
 
 Modes: all personal states (absent/healthy/expired/revoked/transient failure), session modes (shared/private), identities (individual/shared/Slack verified/ambiguous), and org enabled/read-only switches receive explicit test matrix coverage. Unsupported combinations fail at creation or before any private provider read.
 
@@ -88,5 +80,16 @@ must enforce the same durable owner. Disconnect revokes future credential use,
 while previously stored private results keep their owner. HTTP and browser
 verification therefore exercise selection, audience and disconnect separately.
 
-Final integration was rebased onto 1abf8ff; the only manual conflict was the script
-include list, preserving newer activity/sandbox assets and the personal Slack entry.
+The current-main integration also covers `slack_channel` pagination, broker
+session-history reads, owner Slack notifications, automatic skill learning,
+Lens feedback, multipart attachments, and shared trace queues. Private history
+can be read only into another private session with the same owner. Swarms and
+side chats are rejected before creating any derived session.
+
+Schema compatibility advances to revision 19. Old binaries cannot serve private
+sessions; deployment requires the coordinated maintenance procedure in
+[the schema migration guide](../schema-migrations.md#private-session-upgrade).
+The UI uses the current shared shadcn renderer. Browser fixtures cover connect,
+check, retry, disconnect cancellation, private creation and the shared default
+at 1440, 768 and 320px; the loopback HTTP probe exercises actual owner checks
+with synthetic Slack responses.

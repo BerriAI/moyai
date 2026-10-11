@@ -20,6 +20,7 @@ import httpx
 from modal.exception import NotFoundError
 
 from .substrate import Filesystem, Process, operation
+from . import ProvisioningTerminated
 
 _LOCKS = WeakValueDictionary()
 
@@ -44,7 +45,10 @@ class LambdaProvider:
             # Handles are short-lived (including in the durable runner). Close
             # HTTP pools instead of accumulating one per poll/stream read.
             with closing(self.session.client(service, config=Config(connect_timeout=10, read_timeout=30,
-                    retries={'mode': 'standard', 'total_max_attempts': 3}))) as client:
+                    retries={'mode': 'standard', 'total_max_attempts': 3},
+                    # S3 otherwise presigns with SigV2 in us-east-1. Its implicit
+                    # Content-Type signature disagrees with urllib's PUT header.
+                    **({'signature_version': 's3v4'} if service == 's3' else {})))) as client:
                 return getattr(client, method)(**kwargs)
         try:
             return await asyncio.to_thread(call)
@@ -108,10 +112,25 @@ class LambdaProvider:
             if not initialize:
                 raise RuntimeError('AWS creation outcome is unconfirmed; retry provisioning to resolve it')
             return await self.launch(name, record, token)
-        sandbox = await self.get('lambda:' + self.settings.lambda_region + ':' + record['vm_id'])
+        try:
+            sandbox = await self.get('lambda:' + self.settings.lambda_region + ':' + record['vm_id'])
+        except NotFoundError:
+            if initialize:
+                raise ProvisioningTerminated() from None
+            raise
         sandbox.env = {'WORKSPACE_RUN_TOKEN': token} if token else {}
         if initialize:
-            await self.initialize(sandbox, record)
+            if sandbox.vm['state'] in {'TERMINATING', 'TERMINATED'}:
+                await sandbox.wait.aio()
+                raise ProvisioningTerminated()
+            try:
+                await self.initialize(sandbox, record)
+            except BaseException:
+                # A worker can restart after recording the VM but before
+                # initialization completes. Apply launch's cleanup contract to
+                # that recovered startup too, so a later retry can replace it.
+                await asyncio.shield(sandbox.terminate.aio())
+                raise
         return sandbox
 
     async def create(self, *, name=None, snapshot_id='', token='', timeout=86400, memory=4096, apt_packages=()):
@@ -157,8 +176,11 @@ class LambdaProvider:
 
     async def initialize(self, sandbox, record):
         await sandbox.running()
-        await sandbox.request('/bootstrap', {})
-        async with asyncio.timeout(60):
+        try:
+            await sandbox.request('/bootstrap', {})
+        except (TransientEndpointError, httpx.TransportError):
+            pass  # Observe readiness after a lost ACK; never resend bootstrap.
+        async with asyncio.timeout(180):
             while True:
                 try:
                     if (await sandbox.request('/health', {})).get('bootstrapped'):
@@ -221,11 +243,12 @@ class Sandbox:
 
     async def _request(self, path, data):
         async with self.auth_lock:
-            if time.monotonic() >= self.auth_until:
+            # AWS tokens expire in wall time, including while the host sleeps.
+            if time.time() >= self.auth_until:
                 result = await self.provider.aws('lambda-microvms', 'create_microvm_auth_token',
                     microvmIdentifier=self.vm_id, expirationInMinutes=15, allowedPorts=[{'port': 80}])
                 self.auth = result['authToken']['X-aws-proxy-auth']
-                self.auth_until = time.monotonic() + 12 * 60
+                self.auth_until = time.time() + 12 * 60
         endpoint = self.vm['endpoint']
         url = urlsplit(endpoint if '://' in endpoint else 'https://' + endpoint)
         if (url.scheme != 'https' or url.username or url.password or url.port or

@@ -84,11 +84,27 @@ def test_render_uses_its_own_origin_and_disk_not_modal_proxy(monkeypatch):
     monkeypatch.setenv("TRUST_MODAL_PROXY", "true")
     monkeypatch.setenv("CHECKPOINT_DIR", "/checkpoints")
     monkeypatch.setenv("MODAL_VOLUME_NAME", "old-volume")
+    monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
     configure_environment()
     import os
     assert os.environ["PUBLIC_URL"] == "https://moyai.example"
     assert os.environ["TRUST_MODAL_PROXY"] == "false"
     assert "CHECKPOINT_DIR" not in os.environ and "MODAL_VOLUME_NAME" not in os.environ
+    assert os.environ["TRUSTED_PROXY_HOPS"] == "3"
+
+
+def test_render_lets_the_app_resolve_forwarded_clients(monkeypatch):
+    import os
+    import render_start
+    # main() configures the process environment; keep it from leaking into other tests.
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://moyai.example")
+    monkeypatch.setenv("RENDER_MIGRATION_STAGE", "true")
+    calls = []
+    monkeypatch.setattr(render_start.uvicorn.Server, "run", lambda server: calls.append(server.config))
+    render_start.main()
+    # uvicorn would otherwise rewrite the loopback peer to Render's proxy before the app sees it.
+    assert calls[0].proxy_headers is False
 
 
 def test_staging_cannot_accept_work_or_slack_events():
@@ -123,3 +139,21 @@ def test_invalid_custom_origins_never_start(monkeypatch, url):
     monkeypatch.setenv('MOYAI_PUBLIC_URL', url)
     with pytest.raises(RuntimeError):
         configure_environment()
+
+
+@pytest.mark.parametrize('role,seconds', [('api', 240), ('coordinator', 20), ('broker', 240), ('worker', 20), ('standalone', 20)])
+def test_render_api_shutdown_budget_leaves_time_for_cleanup(monkeypatch, role, seconds):
+    import render_start
+    monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example')
+    monkeypatch.setenv('MOYAI_RUNTIME_ROLE', role)
+    monkeypatch.setenv('RENDER_MIGRATION_STAGE', 'true')
+    calls = []
+    monkeypatch.setattr(render_start.uvicorn.Server, 'run', lambda server: calls.append(server))
+    render_start.main()
+    assert calls[0].config.timeout_graceful_shutdown == seconds
+    assert calls[0].config.workers == 1
+    assert isinstance(calls[0], render_start.RenderOverlapServer) is (role in {'api', 'broker', 'coordinator'})
+    if role in {'api', 'broker'}:
+        assert calls[0].listener_grace_seconds + seconds == 270
+    elif role == 'coordinator':
+        assert calls[0].listener_grace_seconds + seconds == 50

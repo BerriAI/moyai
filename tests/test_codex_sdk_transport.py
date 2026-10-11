@@ -2,6 +2,7 @@
 import json
 import re
 import shlex
+import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -11,10 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.codex_harness import CodexAgent
+from agent.harnesses.codex_harness import CodexAgent
 from sandbox.broker_relay import BrokerRelay
-from sandbox.context_store import ContextStore, ContextUnavailable
+from agent.context_store import ContextStore, ContextUnavailable
 from test_workspace import workspace as broker_workspace
+from test_workspace import recovery_catalog  # noqa: F401 -- actual broker declarations
 
 
 def send_response(handler, output, sequence, input_tokens=500, *, interrupted=None):
@@ -41,7 +43,7 @@ def send_response(handler, output, sequence, input_tokens=500, *, interrupted=No
 
 
 def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upstream,
-                       progress=lambda text: None):
+                       progress=lambda text: None, *, on_public_summary=None):
     """Real broker/relay and a delayed provider, shared by installed SDK proofs."""
     import asyncio
     from contextlib import contextmanager
@@ -109,6 +111,8 @@ def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upst
                     'usage': {'prompt_tokens': 500, 'completion_tokens': 50, 'total_tokens': 550}})
             if isinstance(instructions, str) and instructions.startswith(INSTRUCTIONS):
                 state.public_summaries += 1
+                if on_public_summary is not None:
+                    return on_public_summary(body, state)
                 return httpx.Response(200, json={'choices': [{'index': 0, 'finish_reason': 'stop',
                     'message': {'role': 'assistant', 'content': 'Completed fixture tools remain in their saved receipts.'}}],
                     'usage': {'prompt_tokens': 500, 'completion_tokens': 20, 'total_tokens': 520}})
@@ -138,7 +142,7 @@ def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upst
             def forward(self):
                 raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 if self.path in {'/v1/responses', '/v1/messages', '/v1/chat/completions'}:
-                    state.original.append(json.loads(unseal(capability, self.path, raw)))
+                    state.original.append(json.loads(unseal(state.capability, self.path, raw)))
                 headers = {name: self.headers[name] for name in
                     ('Authorization', 'Content-Type', 'anthropic-version', 'anthropic-beta') if name in self.headers}
                 response = client.request(self.command, '/broker/' + run['id'] + self.path,
@@ -178,7 +182,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
     from dataclasses import replace
     from io import BytesIO
     import httpx
-    from sandbox.claude_harness import ClaudeAgent
+    from agent.harnesses.claude_harness import ClaudeAgent
     from test_claude_native_compaction import send_message
 
     workspace = tmp_path / 'native-tools'
@@ -255,7 +259,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
         agent = cls(spec={'model': state.app.state.settings.agent_model, 'timeout': 60,
             'max_iterations': tool_steps + 10},
             relay=state.relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': state.relay.url, 'WORKSPACE_RUN_TOKEN': state.capability}}}},
             activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
                 complete=lambda *args: events.append(('complete', args)), commentary=progress),
@@ -264,7 +268,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
             options = agent.options
             agent.options = lambda system: replace(options(system), tools=['Read'], allowed_tools=['Read'], mcp_servers={})
         try:
-            from sandbox.context_store import ContextUnavailable
+            from agent.context_store import ContextUnavailable
             try:
                 result = agent.run_conversation('Perform the fixture steps once and preserve the current task.',
                     conversation_history=[], system_message='Keep each tool receipt. Do not repeat completed actions.')
@@ -319,12 +323,12 @@ def test_codex_background_compaction_preserves_running_command(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('outcome', [
-    'complete', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit'])
+    'complete', 'unphased', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit'])
 def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, outcome):
     requests, attempts, calls, events, faults = [], [], [], [], []
     samples, summaries = [], []
     boundaries, recovered = [], []
-    successful = outcome in {'complete', 'compaction', 'context-recovery-limit'}
+    successful = outcome in {'complete', 'unphased', 'compaction', 'context-recovery-limit'}
     max_iterations = {'context-recovery-limit': 4, 'iteration-limit': 2}.get(outcome, 12)
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -412,6 +416,8 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
                 output = {'type': 'message', 'id': f'msg_{sequence}', 'role': 'assistant',
                           'phase': 'final_answer', 'status': 'completed',
                           'content': [{'type': 'output_text', 'text': 'codex-transport-ok'}]}
+                if outcome == 'unphased':
+                    output.pop('phase')
             send_response(self, output, len(requests),
                           input_tokens=100000 if outcome == 'compaction' and sequence <= 3 else 500)
 
@@ -441,7 +447,7 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         return CodexAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': max_iterations},
             relay=relay, config={'mcp_servers': {'workspace': {
                 'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'fixture-capability'}}}},
             activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
                 complete=lambda *args: events.append(('complete', args)),
@@ -499,6 +505,7 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert result['completed'], {'result': result['final_response'], 'boundaries': boundaries,
                                      'recovered': len(recovered)}
         assert result['final_response'] == 'codex-transport-ok'
+        assert ('commentary', 'codex-transport-ok') not in events
         assert (workspace / 'receipt.txt').read_text() == 'codex-file-ok\n'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'codex-mcp-ok'}}]
         assert [args[1] for args in completed] == ['terminal', 'apply_patch', 'mcp__moyai__echo']
@@ -523,10 +530,17 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         store.close()
         store = ContextStore(tmp_path / 'context.sqlite3', 'codex-transport')
         agent = create_agent()
+        if outcome == 'unphased':
+            agent.context.spec['model'] = 'anthropic/claude-opus-5-5'
         result = agent.run_conversation('Continue using the saved receipts.', conversation_history=[],
                                         system_message='requester-private-second-marker')
+        if outcome == 'unphased':
+            assert requests[-1]['model'] == 'anthropic/claude-opus-5-5'
+            assert result['final_response'] == 'codex-transport-ok'
+            assert ('commentary', 'codex-transport-ok') not in events
         expected_samples = 6 if outcome == 'context-recovery-limit' else 5
-        assert result['completed'] and len(samples) == expected_samples and len(calls) == 1
+        assert result['completed'], result
+        assert len(samples) == expected_samples and len(calls) == 1
         assert len(requests) == expected_samples + len(summaries)
         assert 'requester-private-first-marker' not in json.dumps(requests[-1])
         assert 'requester-private-second-marker' in json.dumps(requests[-1])
@@ -600,6 +614,22 @@ def test_context_rejection_compacts_in_place_with_live_tools(tmp_path, monkeypat
     assert proof['final_response'] == 'yield-test-complete'
 
 
+def test_native_compaction_recovers_broker_outage_with_running_preview(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-context-preview',
+                             compact_outage_seconds=4, progress=print)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == proof['command_starts'] == 1
+    assert proof['native_compactions'] == 2 and proof['transport_attempt'] == 1
+    assert proof['original_request_receipts'] == 1 and proof['original_request_in_continuation']
+    assert proof['upstream_requests'] == proof['model_calls'] == 6
+    assert proof['readiness_statuses'][0] == 503 and proof['readiness_statuses'][-1] == 200
+    assert {sample['phase'] for sample in proof['preview_samples']} == {'before', 'during', 'after'}
+    assert len({(sample['pid'], sample['port']) for sample in proof['preview_samples']}) == 1
+    assert all(sample['status'] == 200 for sample in proof['preview_samples'])
+    assert not proof['faults'] and proof['saved_prose'].count('yield-test-complete') == 1
+
+
 @pytest.mark.parametrize('outcome', ['settle-transport-finite', 'settle-transport-preview'])
 def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypatch, outcome):
     proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome)
@@ -613,8 +643,10 @@ def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypa
     assert proof['final_response'] == 'yield-test-complete'
 
 
-def test_native_safe_read_reconnects_without_replaying_completed_write(tmp_path, monkeypatch):
-    proof = native_yield_case(tmp_path, monkeypatch, 2000, 'read-outage')
+@pytest.mark.parametrize('read_status', [502, 524])
+def test_native_safe_read_reconnects_without_replaying_completed_write(tmp_path, monkeypatch, recovery_catalog, read_status):
+    proof = native_yield_case(tmp_path, monkeypatch, 2000, 'read-outage',
+                             tool_catalog=recovery_catalog, read_status=read_status)
     assert proof['completed'] and not proof['pending_tools'], proof
     assert not proof['faults'] and not proof['transport_errors']
     assert proof['native_clients'] == proof['native_threads'] == 1
@@ -657,8 +689,8 @@ def test_native_interrupted_sse_preserves_existing_command(tmp_path, monkeypatch
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
                       context_rounds=1, compact_rejections=0,
-                      outage_seconds=0, interrupted=None, on_outage=lambda: None,
-                      on_status=lambda kind, message, data: None):
+                      outage_seconds=0, compact_outage_seconds=0, interrupted=None, on_outage=lambda: None,
+                      on_status=lambda kind, message, data: None, tool_catalog=None, read_status=502):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
 
     The tool waits for the next model request to reach the upstream server.
@@ -682,6 +714,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     context_case = outcome.startswith('settle-context')
     finish_during_compaction = outcome == 'settle-context-during-compaction'
     read_outage = outcome == 'read-outage'
+    tool_name = 'github_repositories' if read_outage else 'slow_echo'
     receipt_during_compaction = threading.Event()
     compactions = []
     corrections = []
@@ -707,6 +740,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             pid = int((workspace / 'preview-pid').read_text())
             with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
                 sample = {'phase': phase, 'pid': pid, 'port': port, 'status': response.status}
+            if compact_outage_seconds and not any(saved['phase'] == phase for saved in preview_samples):
+                progress(f'Preview {phase} recovery: HTTP {sample["status"]}, PID {pid}, port {port}')
             preview_samples.append(sample)
             return sample
         except (OSError, ValueError) as exc:
@@ -719,7 +754,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     agent = None
     native_errors, native_error_payloads, native_plugins, native_clients, native_threads = [], [], [], [], []
     from openai_codex.async_client import AsyncCodexClient
-    from sandbox.sdk_failure import codex_details
+    from agent.harnesses.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
         async def initialize(self):
             native_clients.append(self)
@@ -783,9 +818,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             if self.path == '/context/window':
                 return self.reply({'input_budget': 200000})
             assert self.path == '/tools'
-            self.reply([{'name': 'slow_echo', 'description': 'Wait for a local fixture signal.',
-                **({'annotations': {'readOnlyHint': True, 'idempotentHint': True}} if read_outage else {}),
-                'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
+            self.reply([next(tool for tool in tool_catalog if tool['name'] == tool_name)] if read_outage else [
+                {'name': tool_name, 'description': 'Wait for a local fixture signal.',
+                 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
 
         def do_POST(self):
             nonlocal outage_started, outage_until, observer, settlement_sent
@@ -803,7 +838,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             if self.path == '/tools/call':
                 read_attempts.append(body)
                 if read_outage and len(read_attempts) == 1:
-                    return self.reply({}, 502)
+                    return self.reply({}, read_status)
                 calls.append(body)
                 progress('Tool started; it waits for an admitted model poll')
                 if not release.wait(timeout=50):
@@ -815,6 +850,15 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 compactions.append(body)
                 progress('Native compaction request; original command remains live')
                 assert agent.journal.pending
+                if compact_outage_seconds and len(compactions) == 1:
+                    sample_preview('before')
+                    outage_started = time.monotonic()
+                    outage_until = outage_started + compact_outage_seconds
+                    observer = threading.Thread(target=observe_outage, daemon=True)
+                    observer.start()
+                    progress(f'Compaction receives HTTP 503; broker unavailable for {compact_outage_seconds} seconds')
+                    on_outage()
+                    return self.reply({}, 503)
                 if len(compactions) <= compact_rejections:
                     return self.reply({'detail': {'code': 'context_compaction_required',
                         'input_tokens': 300000, 'input_budget': 200000}}, 409)
@@ -846,7 +890,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 code = ('text(await tools.exec_command(' + json.dumps({
                     'cmd': shlex.quote(sys.executable) + ' command.py', 'tty': True,
                     'login': False, 'yield_time_ms': 1000}) + '));' if settlement else
-                    'text(await tools.mcp__moyai__slow_echo({}));')
+                    'text(await tools.mcp__moyai__' + tool_name + '({}));')
                 if read_outage:
                     code = 'text(await tools.exec_command({cmd: "printf \'once\\n\' >> writes; printf write-receipt", login: false}));' + code
                 if yield_ms is not None and not settlement:
@@ -888,7 +932,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     (context_rounds + 2 + int(transport) if context_case else 2 if interrupted else 3)):
                 assert bool(agent.journal.pending) != finish_during_compaction
                 assert agent.model_calls == sequence + len(compactions)
-                if transport and preview:
+                if (transport or compact_outage_seconds) and preview:
                     sample_preview('after')
                     progress('After reconnect: original preview server still answers HTTP 200')
                 corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
@@ -960,7 +1004,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': max(60, outage_seconds + 45),
         'max_iterations': 2 if outcome == 'settle-limit' else 8},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
             complete=completed, commentary=lambda text: None,
@@ -973,7 +1017,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         except ContextUnavailable as exc:
             result = {'completed': False, 'interrupted': False, 'failed': True,
                       'messages': agent.journal.messages, 'final_response': str(exc)}
-        assert calls == ([] if settlement else [{'name': 'slow_echo', 'arguments': {}}])
+        assert calls == ([] if settlement else [{'name': tool_name, 'arguments': {}}])
         receipts = [m for m in result['messages'] if m['role'] == 'tool']
         assert all('slow-tool-complete' in receipt['content'] or
                    (read_outage and 'write-receipt' in receipt['content']) for receipt in receipts)
@@ -995,6 +1039,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             outage_elapsed=time.monotonic() - outage_started if outage_started else 0,
             readiness_statuses=readiness_statuses, preview_samples=preview_samples, status_events=status_events,
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
+        proof['original_request_receipts'] = sum(m.get('role') == 'user'
+            and m.get('content') == 'Run the local slow tool once.' for m in store.history())
+        proof['original_request_in_continuation'] = 'Run the local slow tool once.' in json.dumps(requests[-1])
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
         return proof
@@ -1030,8 +1077,8 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
     from app.message_queue import MessageQueue
     from sandbox.broker_relay import BrokerRelay
     from sandbox.broker_transport import unseal
-    from sandbox.continuation import ActiveTurnSteering, AgentSteer
-    from sandbox.harness_registry import resolve
+    from agent.continuation import ActiveTurnSteering, AgentSteer
+    from agent.harnesses.harness_registry import resolve
     from openai_codex.async_client import AsyncCodexClient
     from openai_codex.errors import InvalidRequestError
     import asyncio
@@ -1127,7 +1174,7 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
     relay.steering = steering
     agent = CodexAgent(spec={'model': 'openai/gpt-6-astra', 'max_iterations': 6, 'timeout': 30},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *a: None, complete=lambda *a: None, commentary=lambda *a: None),
         step=lambda: steering.step(agent), cwd=str(tmp_path), definition=definition)
@@ -1173,3 +1220,125 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
         relay.close()
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex'])
+@pytest.mark.parametrize('terminal', ['complete', 'iteration-limit'])
+def test_native_automation_validation_can_recover(tmp_path, monkeypatch, broker_workspace, harness, terminal):
+    native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, harness, terminal, progress=print)
+
+
+def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, harness, terminal,
+                                      progress=lambda text: None):
+    """Actual app, relay, MCP and native SDK; only inference is scripted."""
+    from io import BytesIO
+    import httpx
+    from sandbox import agent as entrypoint
+    from test_automation_tools import definition
+    from test_claude_native_compaction import send_message
+    from test_spend import sign_in
+
+    app, client = broker_workspace
+    sign_in(app, client, 'background-fixture', 'background-fixture@berri.ai')
+    codex = harness == 'codex'
+    attempts, events, validation_seen = [], [], []
+    guest = tmp_path / 'automation-native'
+    guest.mkdir()
+    mcp_script = str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')
+    original_config = entrypoint.hermes_config
+
+    def local_config(spec, broker_url, workspace):
+        config = original_config(spec, broker_url, workspace)
+        config['mcp_servers']['workspace'].update(command=sys.executable, args=[mcp_script])
+        return config
+
+    # Only guest paths and unrelated machine preparation/teardown are replaced.
+    # The entrypoint, terminal selection, native runtime and tool path are real.
+    monkeypatch.setattr(entrypoint, 'Path', lambda value: guest / str(value).lstrip('/'))
+    monkeypatch.setattr(entrypoint, 'hermes_config', local_config)
+    monkeypatch.setattr(entrypoint, 'prepare_attachments', lambda *args, **kwargs: None)
+    monkeypatch.setattr(entrypoint, 'prepare_project', lambda *args, **kwargs: None)
+    monkeypatch.setattr(entrypoint, 'collect_archive', lambda *args: None)
+    monkeypatch.setattr(entrypoint, 'computer_request', lambda *args, **kwargs: {})
+    monkeypatch.setattr(entrypoint, 'emit', lambda kind, message, data=None, **extra:
+        events.append({'kind': kind, 'message': message, 'data': data or {}, **extra}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
+
+    def upstream(body, state):
+        text = json.dumps(body)
+        tool = 'mcp__moyai__automation_create'
+        discover = not codex and not any(item['name'] == tool for item in body['tools'])
+        arguments = None
+        if not discover and len(attempts) < 2:
+            if attempts:
+                validation_seen.append('definition.metadata.bootstrap_source' in text and 'Input should be a valid string' in text)
+                assert not app.state.store.rows('SELECT * FROM automations')
+            arguments = {'turn_id': app.state.store.run(state.run['id'])['active_message_id'],
+                'request_key': 'native-corrected-automation', 'definition': definition(**(
+                    {} if attempts else {'metadata': {'bootstrap_source': ['private-script-marker']}}))}
+            attempts.append('corrected' if attempts else 'invalid')
+        sequence = len(state.requests)
+        pipe = SimpleNamespace(server=state, wfile=BytesIO(), send_response=lambda *args: None,
+                               send_header=lambda *args: None, end_headers=lambda: None)
+        if codex:
+            output = ({'type': 'custom_tool_call', 'id': f'call_{sequence}', 'call_id': f'call_{sequence}',
+                'name': 'exec', 'namespace': 'functions', 'input': 'text(await tools.' + tool + '(' + json.dumps(arguments) + '));'}
+                if arguments is not None else {'type': 'message', 'id': 'final', 'role': 'assistant',
+                'phase': 'final_answer', 'status': 'completed',
+                'content': [{'type': 'output_text', 'text': 'automation-recovered'}]})
+            send_response(pipe, output, sequence)
+        else:
+            block = ({'type': 'tool_use', 'id': f'find_{sequence}', 'name': 'ToolSearch',
+                'input': {'query': 'select:' + tool, 'max_results': 1}} if discover else
+                {'type': 'tool_use', 'id': f'call_{sequence}', 'name': tool, 'input': arguments}
+                if arguments is not None else {'type': 'text', 'text': 'automation-recovered'})
+            send_message(pipe, body, block, {'input_tokens': 500, 'output_tokens': 100})
+        return httpx.Response(200, content=pipe.wfile.getvalue(), headers={'Content-Type': 'text/event-stream'})
+
+    with background_gateway(tmp_path, monkeypatch, broker_workspace, harness, upstream, progress) as state:
+        exit_code = entrypoint.run_agent({'run_id': state.run['id'], 'harness': harness,
+            'broker_url': state.relay.url, 'repo_url': '', 'model': app.state.settings.agent_model,
+            'prompt': 'Save the fixture automation, correcting any invalid fields.', 'chat_enabled': True,
+            'timeout': 45, 'max_iterations': (2 if codex else 3) if terminal == 'iteration-limit' else 6}, state.relay)
+        final = next(event for event in events if event['kind'] == 'final')
+        store = ContextStore(guest / 'session/context.sqlite3', state.run['id'])
+        try:
+            assert len(attempts) == 2
+            assert len(app.state.store.rows('SELECT * FROM automations')) == 1
+            assert len(app.state.store.rows('SELECT * FROM automation_operations')) == 1
+            assert not store.pending
+            receipts = [event['data'] for event in events if event['kind'] == 'tool'
+                and event['data'].get('tool') == 'automation_create' and event['data'].get('phase') != 'started']
+            evidence = {'harness': harness, 'terminal': terminal, 'completed': final['completed'],
+                'automation_writes': 1, 'settled_receipts': len(receipts), 'transport_failures': len(state.faults),
+                'pending_tools': len(store.pending), 'exit_code': exit_code, 'final_response': final['message']}
+            progress(json.dumps(evidence))
+            assert [receipt['phase'] for receipt in receipts] == ['error', 'completed']
+            # Feed actual native activity to the same projection used by chat,
+            # the sidebar and side chats; raw failed receipts remain in events.
+            public_run = {'status': 'idle' if final['completed'] else 'failed', 'active_message_id': 1,
+                'messages': [{'id': 1, 'role': 'user', 'status': 'completed' if final['completed'] else 'failed'}],
+                'events': [{'id': index, 'created_at': '2026-10-09T00:00:00Z', **event,
+                            'data': {**event['data'], 'turn_id': 1}} for index, event in enumerate(events, 1)]}
+            projection = subprocess.run(['node', '-e',
+                "const fs=require('fs'),ui=require(process.argv[1]);const run=JSON.parse(fs.readFileSync(0,'utf8'));"
+                "process.stdout.write(JSON.stringify(ui.groups(run).get('1').rows.filter(r=>r.tool==='automation_create').map(r=>r.state)));",
+                str(Path(__file__).resolve().parents[1] / 'app/static/activity.js')],
+                input=json.dumps(public_run), text=True, capture_output=True, check=True)
+            assert json.loads(projection.stdout) == ['completed']
+
+            assert final['completed'] is (terminal == 'complete')
+            if terminal == 'complete':
+                assert final['message'] == 'automation-recovered' and exit_code == 0
+            else:
+                assert exit_code == 1 and final['sdk_failure']['pending_tools'] == 0
+                assert 'limit' in final['message'] or 'max_turns' in final['message']
+                assert 'Invalid automation' not in final['message']
+            assert 'transport_failure' not in final and 'transport_retry' not in final
+            assert not state.relay.last_error and state.relay.last_failure is None
+            assert not state.relay.uncertain_tool and not state.faults
+            assert validation_seen == [True]
+            return evidence
+        finally:
+            store.close()

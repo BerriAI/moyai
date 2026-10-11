@@ -7,7 +7,7 @@ import pytest
 
 from app.config import Settings
 from app.db import Store
-from app.tracing import AgentTracing
+from app.tracing import AgentTracing, MODEL_JSON_BYTES
 from test_trace_outbox import spans, transport
 
 
@@ -109,7 +109,7 @@ async def test_five_receivers_get_identical_tree_and_raindrop_gets_interaction(t
     await tracing.close()
 
 
-async def test_message_json_stays_valid_when_large_and_errors_have_sanitized_exception(tmp_path):
+async def test_message_json_stays_valid_when_large_and_errors_keep_body_out_of_exception(tmp_path):
     store = Store(tmp_path)
     tracing = store.tracing = AgentTracing(store, settings())
     run = store.create_run('Check', '', 'modal', [], chat_enabled=True)
@@ -117,8 +117,10 @@ async def test_message_json_stays_valid_when_large_and_errors_have_sanitized_exc
     content = 'ls-secret ' + '\\"\n' * 16000
     legacy, genai = tracing.model_content([{'role': 'user', 'content': content}] * 5)
     for value in (legacy, genai):
-        assert len(value) <= 16000
-        assert len(json.loads(value)) == 5
+        assert len(value.encode()) <= MODEL_JSON_BYTES
+        messages = json.loads(value)
+        assert len(messages) == 5
+        assert all(message['content'] == content.replace('ls-secret', '[redacted]') for message in messages)
         assert 'ls-secret' not in value
     legacy, genai = tracing.model_content([{'role': 'assistant', 'content': None, 'tool_names': ['read_file']}])
     assert json.loads(legacy)[0]['content'] is None
@@ -127,11 +129,15 @@ async def test_message_json_stays_valid_when_large_and_errors_have_sanitized_exc
                             'end_ns': time.time_ns(), 'status': 'error', 'output': 'Failure ls-secret'})
     row = store.rows('SELECT payload FROM trace_outbox')[0]
     span = spans(row['payload'])[0]
-    assert span.status.message == 'Failure [redacted]'
+    attrs = {a.key: a.value.string_value for a in span.attributes}
+    assert attrs['output.value'] == attrs['gen_ai.tool.call.result'] == 'Failure [redacted]'
+    assert b'ls-secret' not in row['payload']
+    assert span.status.code == 2  # OTLP STATUS_CODE_ERROR
+    assert span.status.message == 'Operation error'
     event = span.events[0]
     assert event.name == 'exception'
-    assert event.attributes[0].key == 'exception.message'
-    assert event.attributes[0].value.string_value == 'Failure [redacted]'
+    exception = {a.key: a.value.string_value for a in event.attributes}
+    assert exception == {'exception.message': 'Operation error', 'exception.type': 'OperationError'}
     await tracing.close()
 
 

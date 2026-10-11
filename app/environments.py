@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import now
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
 from .environment_templates import TEMPLATES
 from .connector_errors import ConnectorError
 
@@ -27,12 +28,12 @@ class Recipe(BaseModel):
     ref: str = Field(default='main', min_length=1, max_length=200, pattern=r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
     clone_access: Literal['public', 'github'] = 'public'
     setup_mode: Literal['manual', 'detect'] = 'manual'
-    apt_packages: list[str] = Field(default_factory=list, max_length=40)
-    setup: str = Field(default='', max_length=24000)
-    startup: str = Field(default='', max_length=12000)
-    verify: str = Field(min_length=1, max_length=12000)
-    shutdown: str = Field(default='', max_length=6000)
-    instructions: str = Field(default='', max_length=12000)
+    apt_packages: list[str] = Field(default_factory=list)
+    setup: str = ''
+    startup: str = ''
+    verify: str = Field(min_length=1)
+    shutdown: str = ''
+    instructions: str = ''
 
 
 class SaveRecipe(BaseModel):
@@ -65,25 +66,8 @@ class Environments:
         self.manager, self.connectors, self.checkpoints = manager, connectors, checkpoints
         self.task = None
         self.last_sync = 0
-        store.execute('''CREATE TABLE IF NOT EXISTS environments (
-            id TEXT PRIMARY KEY, recipe TEXT NOT NULL, revision INTEGER NOT NULL,
-            active_build TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
-            is_default INTEGER NOT NULL DEFAULT 0, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
-        store.execute('''CREATE TABLE IF NOT EXISTS environment_builds (
-            id TEXT PRIMARY KEY, environment_id TEXT NOT NULL REFERENCES environments(id),
-            revision INTEGER NOT NULL, recipe TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'queued',
-            sandbox_id TEXT NOT NULL DEFAULT '', snapshot_id TEXT NOT NULL DEFAULT '',
-            commit_sha TEXT NOT NULL DEFAULT '', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL)''')
-        with store.connect() as conn:
-            if 'sandbox_provider' not in {r['name'] for r in conn.execute('PRAGMA table_info(environment_builds)')}:
-                conn.execute("ALTER TABLE environment_builds ADD COLUMN sandbox_provider TEXT NOT NULL DEFAULT 'modal'")
-            columns = {r['name'] for r in conn.execute('PRAGMA table_info(environments)')}
-            for name in ('refresh_daily', 'activate_on_ready'):
-                if name not in columns:
-                    conn.execute(f'ALTER TABLE environments ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
-            if 'resolved_recipe' not in {r['name'] for r in conn.execute('PRAGMA table_info(environment_builds)')}:
-                conn.execute("ALTER TABLE environment_builds ADD COLUMN resolved_recipe TEXT NOT NULL DEFAULT ''")
+        if store.schema_updates:
+            initialize_schema(store)
 
     async def sync_repositories(self):
         """Register authorized repos without allocating machines or overriding edits."""
@@ -94,7 +78,7 @@ class Environments:
         credentials = await self.connectors.github.ensure_connection()
         repositories = self.connectors.github.repository_options(credentials)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             existing = list(conn.execute('SELECT id,recipe FROM environments'))
             for option in repositories:
                 repository, repository_id = option['full_name'], option['id']
@@ -106,10 +90,38 @@ class Environments:
                 else:
                     recipe = Recipe(name=repository.split('/')[1][:68] + ' development', repository=repository, repository_id=repository_id,
                                     ref='HEAD', clone_access='github', setup_mode='detect', verify='git rev-parse --verify HEAD')
-                conn.execute('''INSERT OR IGNORE INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
-                    VALUES(?,?,1,1,?,?)''', (identity, recipe.model_dump_json(), 'Repository discovery', now()))
+                conn.execute('''INSERT INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
+                    VALUES(?,?,1,1,?,?) ON CONFLICT DO NOTHING''', (identity, recipe.model_dump_json(), 'Repository discovery', now()))
 
     async def prepare(self, run_id):
+        """Prepare one shared ancestor before a snapshotless worker can start.
+
+        Initial swarm workers are admitted before their coordinator provisions.
+        Follow that durable dependency rather than binding each worker to an
+        empty environment. Ordinary fan-out already carries a pinned build or
+        a workspace snapshot. The existing build journal coalesces concurrent
+        callers; each child keeps the ancestor's exact version after it is ready.
+        """
+        lineage, seen = [], set()
+        current = self.store.run(run_id)
+        while True:
+            if not current or current['id'] in seen:
+                raise HTTPException(409, 'The shared environment parent is missing or cyclic.')
+            seen.add(current['id'])
+            lineage.append(current['id'])
+            if (current.get('environment_build_id') or current.get('snapshot_id')
+                    or current.get('environment_id') == 'none' or not current.get('parent_run_id')):
+                break
+            current = self.store.run(current['parent_run_id'])
+        for identity in reversed(lineage):
+            if identity != lineage[-1]:
+                self.store.execute('''UPDATE runs SET environment_build_id=(
+                    SELECT environment_build_id FROM runs AS parent WHERE parent.id=runs.parent_run_id)
+                    WHERE id=? AND environment_build_id='' ''', (identity,))
+            project = await self._prepare(identity)
+        return project
+
+    async def _prepare(self, run_id):
         run = self.store.run(run_id)
         if run.get('repo_url') and self.connectors:
             try:
@@ -140,7 +152,7 @@ class Environments:
                 if not selected['active_build'] or self.build(selected['active_build']).get('sandbox_provider', 'modal') != run['sandbox_provider']:
                     if self.settings.missing_sandbox(run['sandbox_provider']):
                         raise HTTPException(503, 'Configure the sandbox provider before preparing this repository.')
-                    recent = self.store.rows('SELECT * FROM environment_builds WHERE environment_id=? AND revision=? AND sandbox_provider=? ORDER BY rowid DESC LIMIT 1',
+                    recent = self.store.rows('SELECT * FROM environment_builds WHERE environment_id=? AND revision=? AND sandbox_provider=? ORDER BY created_at DESC,id DESC LIMIT 1',
                                              (selected['id'], selected['revision'], run['sandbox_provider']))
                     build = recent[0] if recent else self.enqueue(selected['id'], selected['revision'], 'First session', provider=run['sandbox_provider'])
                     if build['phase'] == 'failed':
@@ -164,14 +176,18 @@ class Environments:
             recipe = json.loads(row['recipe'])
             value = {k: row[k] for k in ('id', 'revision', 'active_build', 'enabled', 'is_default', 'updated_at', 'refresh_daily')}
             value.update(name=recipe['name'], repository=recipe['repository'])
-            if not admin and row['active_build']:
-                active_recipe = json.loads(self.build(row['active_build'])['recipe'])
-                value.update(name=active_recipe['name'], repository=active_recipe['repository'])
+            value['prepared_build'] = None
+            if row['active_build']:
+                build = self.build(row['active_build'])
+                value['prepared_build'] = {k: build[k] for k in ('id', 'revision', 'commit_sha', 'sandbox_provider')}
+                if not admin:
+                    active_recipe = json.loads(build['recipe'])
+                    value.update(name=active_recipe['name'], repository=active_recipe['repository'])
             if admin:
                 value['activate_on_ready'] = row['activate_on_ready']
                 value['recipe'] = recipe
                 value['builds'] = self.store.rows('''SELECT id,revision,phase,commit_sha,error,created_at,finished_at
-                    FROM environment_builds WHERE environment_id=? ORDER BY rowid DESC LIMIT 10''', (row['id'],))
+                    FROM environment_builds WHERE environment_id=? ORDER BY created_at DESC,id DESC LIMIT 10''', (row['id'],))
             if admin or row['activate_on_ready'] or (row['enabled'] and row['active_build']):
                 items.append(value)
         return items
@@ -189,7 +205,7 @@ class Environments:
         if any(not re.fullmatch(r'[a-z0-9][a-z0-9+.-]{0,79}', p) for p in body.recipe.apt_packages):
             raise HTTPException(422, 'Use Debian package names without flags or versions.')
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             old = conn.execute('SELECT * FROM environments WHERE id=?', (identity,)).fetchone()
             if (old['revision'] if old else 0) != body.revision:
                 raise HTTPException(409, 'This environment changed. Reload before saving.')
@@ -206,7 +222,7 @@ class Environments:
     def enqueue(self, identity, revision, actor, provider=None):
         provider = provider or self.settings.sandbox_provider
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM environments WHERE id=?', (identity,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Project environment not found.')
@@ -269,7 +285,7 @@ class Environments:
         selected = self.choose(selection, repo_url, repository_id)
         if not selected or selected['active_build']:
             return ''
-        recent = self.store.rows('SELECT phase FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY rowid DESC LIMIT 1',
+        recent = self.store.rows('SELECT phase FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY created_at DESC,id DESC LIMIT 1',
                                  (selected['id'], selected['revision']))
         if not recent:
             return ''  # The first session still initiates automatic preparation.
@@ -307,7 +323,8 @@ class Environments:
         return {**recipe, 'build_id': identity, 'snapshot_id': build['snapshot_id'], 'commit_sha': build['commit_sha']}
 
     async def rpc(self, sandbox, action, *, token=''):
-        proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/environment_build.py', action,
+        proc = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                      RUNTIME_ROOT, 'environment_build.py', action,
                                       timeout=30, env={'MOYAI_CLONE_TOKEN': token} if token else {})
         output, _ = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
         if await proc.wait.aio() != 0:
@@ -354,7 +371,7 @@ class Environments:
             if not self.progress(identity, phase='building'):
                 return
         report = await self.rpc(sandbox, 'status')
-        self.update(identity, log=str(report.get('log', ''))[-48000:])
+        self.update(identity, log=str(report.get('log', '')))
         if not report.get('done'):
             return
         if not report.get('success'):
@@ -376,7 +393,7 @@ class Environments:
             return
         snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             # Respect a cancellation that arrived while snapshotting.
             if conn.execute('SELECT phase FROM environment_builds WHERE id=?', (identity,)).fetchone()['phase'] == 'cancelling':
                 return
@@ -400,7 +417,7 @@ class Environments:
                     pass  # Connection setup is shown in Connections; retry discovery later.
                 self.last_sync = time.monotonic()
             self.queue_refreshes()
-            builds = self.store.rows("SELECT * FROM environment_builds WHERE phase NOT IN ('ready','failed') OR sandbox_id!='' ORDER BY rowid LIMIT 1")
+            builds = self.store.rows("SELECT * FROM environment_builds WHERE phase NOT IN ('ready','failed') OR sandbox_id!='' ORDER BY created_at,id LIMIT 1")
             for build in builds:
                 try:
                     if build['phase'] not in {'ready', 'failed', 'cancelling'} and time.time() - datetime.fromisoformat(build['created_at']).timestamp() > 3900:
@@ -419,7 +436,7 @@ class Environments:
 
     def queue_refreshes(self):
         for row in self.store.rows('SELECT * FROM environments WHERE enabled=1 AND refresh_daily=1'):
-            recent = self.store.rows('SELECT revision,created_at FROM environment_builds WHERE environment_id=? ORDER BY rowid DESC LIMIT 1', (row['id'],))
+            recent = self.store.rows('SELECT revision,created_at FROM environment_builds WHERE environment_id=? ORDER BY created_at DESC,id DESC LIMIT 1', (row['id'],))
             if (not recent or recent[0]['revision'] != row['revision'] or
                     time.time() - datetime.fromisoformat(recent[0]['created_at']).timestamp() >= 86400):
                 self.enqueue(row['id'], row['revision'], 'Automatic refresh')
@@ -480,7 +497,7 @@ class Environments:
         async def policy(identity: str, body: Policy, request: Request):
             actor(request)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM environments WHERE id=?', (identity,)).fetchone()
                 if not row:
                     raise HTTPException(404, 'Project environment not found.')
@@ -504,9 +521,31 @@ class Environments:
             actor(request)
             self.build(identity)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 if conn.execute("UPDATE environment_builds SET phase='cancelling' WHERE id=? AND phase NOT IN ('ready','failed')", (identity,)).rowcount:
                     conn.execute('UPDATE environments SET activate_on_ready=0 WHERE id=(SELECT environment_id FROM environment_builds WHERE id=?)', (identity,))
             return {'ok': True}
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS environments (
+        id TEXT PRIMARY KEY, recipe TEXT NOT NULL, revision INTEGER NOT NULL,
+        active_build TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
+        is_default INTEGER NOT NULL DEFAULT 0, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+    store.execute('''CREATE TABLE IF NOT EXISTS environment_builds (
+        id TEXT PRIMARY KEY, environment_id TEXT NOT NULL REFERENCES environments(id),
+        revision INTEGER NOT NULL, recipe TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'queued',
+        sandbox_id TEXT NOT NULL DEFAULT '', snapshot_id TEXT NOT NULL DEFAULT '',
+        commit_sha TEXT NOT NULL DEFAULT '', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL)''')
+    with store.connect() as conn:
+        if 'sandbox_provider' not in conn.column_names('environment_builds'):
+            conn.execute("ALTER TABLE environment_builds ADD COLUMN sandbox_provider TEXT NOT NULL DEFAULT 'modal'")
+        columns = conn.column_names('environments')
+        for name in ('refresh_daily', 'activate_on_ready'):
+            if name not in columns:
+                conn.execute(f'ALTER TABLE environments ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+        if 'resolved_recipe' not in conn.column_names('environment_builds'):
+            conn.execute("ALTER TABLE environment_builds ADD COLUMN resolved_recipe TEXT NOT NULL DEFAULT ''")

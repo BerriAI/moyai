@@ -13,18 +13,33 @@ import httpx
 import pytest
 
 from app.security import digest
-from sandbox.agent import conversation_prompt
+from agent.agent import conversation_prompt
 from sandbox.broker_relay import BrokerRelay, EDGE_ERROR
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, cipher, seal, unseal
-from sandbox.sdk_failure import codex_details
-from sandbox.transport_recovery import retryable_failure
+from agent.harnesses.sdk_failure import codex_details
+from agent.transport_recovery import retryable_failure
 from test_spend import active
-from test_workspace import workspace, cloud_capability, wait_for
+from test_workspace import workspace, cloud_capability, wait_for, recovery_catalog
 
 CODE = '''Repro: curl -s localhost:4100/openapi.json | python3 -c "import json,sys; print(json.load(sys.stdin)['paths'])"
 Router already in sys.modules; check /v1/mcp/server/{server_id}/user-env-vars.
 Fix merged: https://github.com/BerriAI/litellm/pull/38416
 '''
+
+
+@pytest.mark.parametrize('sdk', ['codex', 'claude-agent-sdk'])
+def test_sdk_stream_failure_preserves_success_status_as_response_context(sdk):
+    from types import SimpleNamespace
+    from agent.harnesses.sdk_failure import failure_diagnostic, failure_summary
+    failure = {'http_status': 200, 'request_id': 'request-123'}
+    agent = SimpleNamespace(journal=SimpleNamespace(pending={}),
+                            context=SimpleNamespace(relay=SimpleNamespace(last_failure=failure)))
+    diagnostic = failure_diagnostic(agent, sdk, {'http_status': 200, 'code': 'responseStreamDisconnected'}
+        if sdk == 'codex' else {'http_status': 200, 'sdk_error': 'server_error'})
+    assert diagnostic['response_status'] == 200 and 'http_status' not in diagnostic
+    assert 'HTTP 200' not in failure_summary(diagnostic)
+    assert 'HTTP 200' not in failure_summary({**diagnostic, 'http_status': 200})
+    assert failure['http_status'] == 200, 'The transport/recovery descriptor keeps the actual wire status'
 
 
 @contextmanager
@@ -40,6 +55,23 @@ def diagnostic_relay(handler, *, remote=None):
             yield relay, client, diagnostics
     finally:
         relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('receipt', [None, 'a' * 32, 'private-invalid-receipt'])
+def test_local_input_rejection_preserves_only_a_safe_receipt(receipt):
+    from sandbox.broker_relay import InputPending
+    with diagnostic_relay(BaseHTTPRequestHandler) as (relay, client, diagnostics):
+        def reject(request):
+            raise InputPending(receipt)
+        relay.before_model = reject
+        response = client.post('/v1/messages', json={'messages': ['private-prompt']})
+        assert response.status_code == 400
+        error = response.json()['error']
+        assert error['code'] == 'moyai_input_pending'
+        assert error['message'] == ('A queued input is ready at this model boundary.'
+                                    + (' Receipt: ' + receipt if receipt == 'a' * 32 else ''))
+        assert 'private' not in response.text
+        assert not diagnostics and relay.last_failure is None and not relay.model_failed
 
 
 def test_refused_connection_preserves_cause_type_and_errno_without_endpoint():
@@ -61,7 +93,9 @@ def test_refused_connection_preserves_cause_type_and_errno_without_endpoint():
             assert 'private' not in json.dumps(saved) and '127.0.0.1' not in json.dumps(saved)
 
 
-def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
+@pytest.mark.parametrize('native_receipt', [False, True])
+def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend(native_receipt):
+    from sandbox.broker_relay import InputPending
     calls = []
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -95,7 +129,15 @@ def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
         assert client.get('/tools').status_code == 200
         assert relay.last_failure == saved and relay.last_error
         # The SDK may automatically retry 502; it must not resubmit inference.
-        assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 409
+        if native_receipt:
+            def blocked_receipt() -> InputPending:
+                return InputPending('a' * 32)
+            relay.on_model_blocked = blocked_receipt
+        blocked = client.post('/v1/messages', json={'messages': ['private-prompt']})
+        assert blocked.status_code == (400 if native_receipt else 409)
+        if native_receipt:
+            assert blocked.json()['error']['message'] == InputPending('a' * 32).message()
+        assert relay.last_failure is saved and relay.model_failed
         assert len(calls) == 1 and len(diagnostics) == 1
         # A live native continuation must explicitly consume this exact failure.
         assert not relay.resume_model(dict(saved))
@@ -111,7 +153,9 @@ def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
 
 
 @pytest.mark.parametrize('status,upstream,transient', [(502, 401, False), (502, 403, False),
-    (502, 429, True), (502, 503, True), (429, None, False), (425, None, True)])
+    (502, 429, True), (502, 503, True), (429, None, False), (425, None, True),
+    (524, None, True), (502, 524, True), (525, None, False), (400, None, False),
+    (403, None, False), (429, 429, True), (503, 503, True)])
 def test_failure_classification_uses_original_upstream_status(status, upstream, transient):
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -121,14 +165,20 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
             if upstream:
                 self.send_header('X-Moyai-Upstream-Status', str(upstream))
             self.send_header('X-Moyai-Model-Request-ID', 'ledger-id')
+            self.send_header('X-Moyai-Error-Code', 'rate_limit_error' if upstream == 429 else 'unknown')
+            self.send_header('X-Moyai-Error-Stage', 'upstream')
+            self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"detail":"Model gateway rejected the request."}')
     with diagnostic_relay(Edge) as (relay, client, diagnostics):
         assert client.post('/v1/responses', json={}).status_code == status
         assert relay.last_failure['upstream_status'] == upstream
+        assert relay.last_failure['stage'] == 'upstream'
+        assert relay.last_failure['error_code'] == ('rate_limit_error' if upstream == 429 else 'unknown')
         assert relay.last_failure['request_ids']['x-moyai-model-request-id'] == 'ledger-id'
         assert relay.last_failure['transient'] is transient
         assert relay.resume_model(relay.last_failure) is transient
+        assert bool(relay.last_error) is (not transient)
 
 
 @pytest.mark.parametrize('route,uncertain_tool', [('/v1/messages', False), ('/tools/call', True),
@@ -152,13 +202,10 @@ def test_dropped_connection_is_recorded_once_without_replaying_tools(route, unce
         assert relay.resume_model(saved) is (not uncertain_tool)
 
 
-@pytest.mark.parametrize('fault', ['http', 'disconnect', 'partial', 'permanent', 'exhausted'])
-def test_agent_read_reconnect_uses_broker_catalog_without_poisoning_model(workspace, monkeypatch, fault):
-    app, broker = workspace
-    run_id, headers = cloud_capability(app, [])
-    app.state.settings.temporal_enabled = True
-    app.state.store.execute('UPDATE runs SET chat_enabled=1 WHERE id=?', (run_id,))
-    catalog = broker.get(f'/broker/{run_id}/tools', headers=headers).json()
+@pytest.mark.parametrize('name', ['agents_results', 'github_repositories'])
+@pytest.mark.parametrize('fault', ['http', 'cloudflare', 'disconnect', 'partial', 'permanent', 'exhausted'])
+def test_agent_read_reconnect_uses_broker_catalog_without_poisoning_model(recovery_catalog, monkeypatch, name, fault):
+    catalog = recovery_catalog
     safe = {tool['name'] for tool in catalog if tool.get('annotations', {}).get('idempotentHint') is True}
     calls = []
     if fault == 'exhausted':
@@ -184,19 +231,19 @@ def test_agent_read_reconnect_uses_broker_catalog_without_poisoning_model(worksp
                     self.send_response(200); self.send_header('Content-Length', '100')
                     self.end_headers(); self.wfile.write(b'{"incomplete":')
                     self.close_connection = True; return
-                self.send_response(403 if fault == 'permanent' else 502)
+                self.send_response(403 if fault == 'permanent' else 524 if fault == 'cloudflare' else 502)
                 self.end_headers(); return
             self.send_response(200); self.end_headers()
             self.wfile.write(b'{"completed":2}')
 
     with diagnostic_relay(Edge) as (relay, client, diagnostics):
         assert client.get('/tools').status_code == 200
-        body = {'name': 'agents_results', 'arguments': {'group_id': 'a' * 32}}
+        body = {'name': name, 'arguments': {'group_id': 'a' * 32} if name == 'agents_results' else {}}
         response = client.post('/tools/call', json=body)
         recovers = fault not in {'permanent', 'exhausted'}
         expected = 200 if recovers else 503 if fault == 'exhausted' else 502
         assert response.status_code == expected, (response.status_code, relay.last_failure)
-        assert safe == {'agents_results', 'agents_read_artifact'}
+        assert name in safe and relay.retry_safe_tools == safe
         assert len(calls) == (2 if recovers else 1)
         assert all(call == ('/tools/call', body) for call in calls)
         if recovers:
@@ -210,6 +257,101 @@ def test_agent_read_reconnect_uses_broker_catalog_without_poisoning_model(worksp
         assert client.post('/tools/call', json=body).status_code == 200
         assert relay.last_failure is failed_model and relay.model_failed
         assert relay.resume_model(failed_model)
+
+
+def test_entire_broker_catalog_replays_only_declared_reads(recovery_catalog):
+    attempts = {}
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200); self.end_headers()
+            self.wfile.write(json.dumps(recovery_catalog).encode())
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            name = body['name']
+            attempts[name] = attempts.get(name, 0) + 1
+            self.send_response(524 if attempts[name] == 1 else 200)
+            self.end_headers(); self.wfile.write(b'{"ok":true}')
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.get('/tools').status_code == 200
+        safe = relay.retry_safe_tools
+        # Complete classification is independently pinned at the producer seam.
+        # Run safe reads first, then prove writes cannot borrow their permission.
+        names = sorted(safe) + sorted({tool['name'] for tool in recovery_catalog} - safe)
+        for name in names:
+            response = client.post('/tools/call', json={'name': name, 'arguments': {}})
+            assert response.status_code == (200 if name in safe else 524), name
+            assert attempts[name] == (2 if name in safe else 1), name
+            assert relay.uncertain_tool is (name not in safe), name
+        assert all(item['uncertain_tool'] for item in diagnostics)
+
+
+@pytest.mark.parametrize('independent', ['model', 'write'])
+@pytest.mark.parametrize('read_fails', [False, True])
+def test_inflight_safe_read_preserves_independent_failure(recovery_catalog, independent, read_fails):
+    arrived, release = threading.Event(), threading.Event()
+    calls = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200); self.end_headers()
+            self.wfile.write(json.dumps(recovery_catalog).encode())
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            calls.append((self.path, body))
+            if body.get('name') == 'github_repositories':
+                arrived.set()
+                assert release.wait(5)
+                self.send_response(403 if read_fails else 200)
+            else:
+                self.send_response(524)
+            self.end_headers(); self.wfile.write(b'{}')
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.get('/tools').status_code == 200
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(client.post, '/tools/call', json={'name': 'github_repositories', 'arguments': {}})
+            try:
+                assert arrived.wait(5)
+                route = '/v1/responses' if independent == 'model' else '/tools/call'
+                assert client.post(route, json={'name': 'slack_send', 'arguments': {}}).status_code == 524
+                saved, error = relay.last_failure, relay.last_error
+            finally:
+                release.set()
+            assert pending.result().status_code == (502 if read_fails else 200)
+        assert len(calls) == 2 and relay.last_failure is saved and relay.last_error == error
+        assert relay.uncertain_tool is (independent == 'write')
+        assert relay.resume_model(saved) is (independent == 'model')
+        if read_fails:
+            assert diagnostics[-1]['uncertain_tool'] is False
+
+
+def test_stop_revokes_safe_read_during_reconnect(workspace):
+    app, broker = workspace
+    run_id, headers = cloud_capability(app, ['github'])
+    calls = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            response = broker.get(f'/broker/{run_id}/tools', headers=headers)
+            self.send_response(response.status_code); self.end_headers()
+            self.wfile.write(response.content)
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            calls.append(body)
+            if len(calls) == 1:
+                app.state.store.update_run(run_id, status='stopping')
+                self.send_response(524); self.end_headers(); return
+            response = broker.post(f'/broker/{run_id}/tools/call', headers=headers, json=body)
+            self.send_response(response.status_code); self.end_headers()
+            self.wfile.write(response.content)
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.get('/tools').status_code == 200
+        assert client.post('/tools/call', json={'name': 'github_repositories', 'arguments': {}}).status_code == 401
+        assert len(calls) == 2 and not relay.uncertain_tool and not relay.last_error
+        assert diagnostics[-1]['http_status'] == 401
 
 
 @pytest.mark.parametrize('metadata', ['missing', 'read_only', 'string', 'duplicate', 'revoked', 'malformed', 'prior_write'])
@@ -443,7 +585,8 @@ def test_sealed_model_keeps_content_model_pin_usage_and_access_checks(workspace,
     guidance, *forwarded = received[0]['messages']
     assert guidance['role'] == 'system' and guidance['content'].startswith('MOYAI SKILLS FOR THE CURRENT REQUESTER.')
     assert json.loads(guidance['content'].split('\n', 1)[1]) == {
-        'turn_id': run['active_message_id'], 'matches': [], 'loaded': [], 'unavailable': []}
+        'turn_id': run['active_message_id'], 'available': [], 'omitted': 0,
+        'matches': [], 'loaded': [], 'unavailable': []}
     assert forwarded == payload['messages']
     assert received[0]['model'] == 'openai/gpt-6-astra'
     record = app.state.store.rows('SELECT * FROM model_requests')[0]
@@ -566,10 +709,12 @@ def test_edge_failure_is_actionable_and_does_not_guess_about_user_key():
         relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
 
 
-def test_slack_source_is_imported_once_and_current_followup_stays_current():
+def test_live_slack_source_remains_attributed_alongside_current_followup():
     spec={'prompt':'Find the existing PR', 'slack_source': {'messages':[{'text':'Issue LIT-6275'}]}}
     assert 'Issue LIT-6275' in conversation_prompt(spec)
-    assert conversation_prompt(spec,has_history=True)=='Find the existing PR'
+    followup = conversation_prompt(spec,has_history=True)
+    assert followup.startswith('CURRENT USER REQUEST:\nFind the existing PR')
+    assert 'Issue LIT-6275' in followup and 'untrusted source data' in followup
 
 
 def test_failed_turn_is_not_saved_as_a_completed_assistant_answer(workspace):
@@ -580,7 +725,9 @@ def test_failed_turn_is_not_saved_as_a_completed_assistant_answer(workspace):
     assert [m['status'] for m in app.state.store.messages(run['id'])]==['failed','failed']
 
 
-def test_relay_only_pauses_for_an_authenticated_delegation_response():
+@pytest.mark.parametrize('name', ['agents_fanout', 'swarm_start', 'agents_retry', 'agents_wait'])
+@pytest.mark.parametrize('multipart', [False, True])
+def test_relay_only_pauses_for_an_authenticated_delegation_response(name, multipart):
     group = 'f' * 32
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -599,7 +746,7 @@ def test_relay_only_pauses_for_an_authenticated_delegation_response():
         headers = {'Authorization': 'Bearer token'}
         httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'slack_search'})
         assert relay.wait_group == ''
-        response = httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'agents_fanout'})
+        response = httpx.post(relay.url + '/tools/call', headers=headers, json={'name': name, **({'moyai_payload': {'digest': 'a'*64, 'parts': 1}} if multipart else {})})
         assert response.json()['moyai_wait_group'] == relay.wait_group == group
     finally:
         relay.close()
@@ -638,8 +785,15 @@ def test_relay_retries_only_explicit_unbilled_model_admission(monkeypatch):
         relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
 
 
-def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkeypatch):
-    app, client = workspace
+@pytest.fixture
+def finite_model_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv('MAX_CONCURRENT_MODEL_REQUESTS', '8')
+    with contextmanager(workspace.__wrapped__)(tmp_path, monkeypatch) as value:
+        yield value
+
+
+def test_full_model_capacity_returns_unbilled_admission_marker(finite_model_workspace, monkeypatch):
+    app, client = finite_model_workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     run = active(app)
     received = []
@@ -658,7 +812,7 @@ def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkey
         calls = [pool.submit(client.post, endpoint, json={'messages':[]}, headers=headers) for _ in range(8)]
         try:
             wait_for(lambda: len(received) == 8)
-            queued = client.post(endpoint, json={'messages':[]}, headers=headers)
+            queued = pool.submit(client.post, endpoint, json={'messages':[]}, headers=headers).result(timeout=5)
             assert queued.status_code == 429 and queued.headers['X-Moyai-Model-Queue'] == '1'
             assert len(app.state.store.rows('SELECT * FROM model_requests')) == 8
         finally:
@@ -721,13 +875,16 @@ def test_superseded_model_wait_never_submits_another_gateway_call(monkeypatch):
 
 
 def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
+    import base64
+    import hashlib
+    from sandbox.broker_transport import send_payload
     received = []
     payload = {'name': 'github_create_pull_request', 'arguments': {'content': 'x' * (6 * 1024 * 1024)}}
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_POST(self):
             raw = self.rfile.read(int(self.headers['Content-Length']))
-            received.append(json.loads(unseal('runtime-token', self.path, raw)))
+            received.append((self.path, json.loads(unseal('runtime-token', self.path, raw))))
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -739,8 +896,18 @@ def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
     try:
         with httpx.Client(base_url=relay.url, timeout=10) as client:
             headers = {'Authorization': 'Bearer runtime-token'}
-            assert client.post('/tools/call', json=payload, headers=headers).json() == {'ok': True}
+            def send(path, body):
+                response = client.post(path, json=body, headers=headers)
+                assert response.status_code == 200, response.text
+                return response.json()
+            assert send_payload('/tools/call', payload, send) == {'ok': True}
             assert client.post('/v1/chat/completions', json=payload, headers=headers).status_code == 413
-        assert received == [payload]
+        parts, (path, manifest) = received[:-1], received[-1]
+        assert path == '/tools/call' and manifest['name'] == payload['name']
+        assert all(path == '/payloads' for path, _ in parts)
+        complete = b''.join(base64.b64decode(value['data']) for _, value in parts)
+        assert len(parts) == manifest['moyai_payload']['parts']
+        assert hashlib.sha256(complete).hexdigest() == manifest['moyai_payload']['digest']
+        assert json.loads(complete) == payload
     finally:
         relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)

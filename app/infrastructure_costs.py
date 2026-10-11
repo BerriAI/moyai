@@ -60,28 +60,8 @@ class InfrastructureCosts:
         self.task = None
         self.wake = asyncio.Event()
         self.modal_clients = ModalClients()
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS infrastructure_bills (
-                    provider TEXT NOT NULL, month TEXT NOT NULL, amount TEXT NOT NULL,
-                    kind TEXT NOT NULL, note TEXT NOT NULL, revision INTEGER NOT NULL,
-                    updated_at TEXT NOT NULL, actor TEXT NOT NULL, PRIMARY KEY(provider,month)
-                );
-                CREATE TABLE IF NOT EXISTS infrastructure_bill_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, month TEXT NOT NULL,
-                    actor TEXT NOT NULL, changed_at TEXT NOT NULL, previous TEXT NOT NULL, replacement TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS infrastructure_daily_costs (
-                    provider TEXT NOT NULL, scope TEXT NOT NULL, day TEXT NOT NULL, amount TEXT NOT NULL,
-                    synced_at TEXT NOT NULL, PRIMARY KEY(provider,scope,day)
-                );
-                CREATE TABLE IF NOT EXISTS infrastructure_sync_jobs (
-                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, scope TEXT NOT NULL,
-                    start TEXT NOT NULL, end TEXT NOT NULL, status TEXT NOT NULL,
-                    state TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
-                    UNIQUE(provider,scope,start,end)
-                );
-            ''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def scope(self, provider):
         if provider == 'modal':
@@ -125,8 +105,8 @@ class InfrastructureCosts:
                 spend += allocated
                 if bill['kind'] == 'estimate':
                     estimate += allocated
-            jobs = self.store.rows('''SELECT status,error,updated_at,start,end FROM infrastructure_sync_jobs
-                WHERE provider=? AND scope=? AND start<=? AND end>=? ORDER BY (status='pending') DESC,updated_at DESC LIMIT 1''',
+            jobs = self.store.rows('''SELECT status,error,updated_at,start,"end" FROM infrastructure_sync_jobs
+                WHERE provider=? AND scope=? AND start<=? AND "end">=? ORDER BY (status='pending') DESC,updated_at DESC LIMIT 1''',
                 (provider, self.scope(provider), end.isoformat(), start.isoformat()))
             providers.append({'provider': provider, 'name': PROVIDERS.get(provider, provider), 'spend': str(spend),
                               'estimated': str(estimate), 'missing_days': missing, 'covered_days': covered,
@@ -142,7 +122,7 @@ class InfrastructureCosts:
 
     def save_bill(self, bill, actor):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             old = conn.execute('SELECT * FROM infrastructure_bills WHERE provider=? AND month=?', (bill.provider, bill.month)).fetchone()
             if (old['revision'] if old else 0) != bill.revision:
                 raise HTTPException(409, 'This bill already exists or changed. Refresh and edit the saved bill.')
@@ -155,7 +135,7 @@ class InfrastructureCosts:
 
     def delete_bill(self, provider, month, revision, actor):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             old = conn.execute('SELECT * FROM infrastructure_bills WHERE provider=? AND month=?', (provider, month)).fetchone()
             if not old:
                 raise HTTPException(404, 'Bill not found.')
@@ -175,9 +155,9 @@ class InfrastructureCosts:
             upper = min(end, today - timedelta(days=1 if provider == 'modal' else 2))
             if start > upper:
                 continue
-            self.store.execute('''INSERT INTO infrastructure_sync_jobs(id,provider,scope,start,end,status,state,updated_at)
-                VALUES(?,?,?,?,?,'pending',?,?) ON CONFLICT(provider,scope,start,end) DO UPDATE SET
-                status='pending',error='',state=CASE WHEN status='pending' THEN state ELSE excluded.state END,updated_at=CASE WHEN status='pending' THEN updated_at ELSE excluded.updated_at END''',
+            self.store.execute('''INSERT INTO infrastructure_sync_jobs(id,provider,scope,start,"end",status,state,updated_at)
+                VALUES(?,?,?,?,?,'pending',?,?) ON CONFLICT(provider,scope,start,"end") DO UPDATE SET
+                status='pending',error='',state=CASE WHEN infrastructure_sync_jobs.status='pending' THEN infrastructure_sync_jobs.state ELSE excluded.state END,updated_at=CASE WHEN infrastructure_sync_jobs.status='pending' THEN infrastructure_sync_jobs.updated_at ELSE excluded.updated_at END''',
                 (str(uuid4()), provider, self.scope(provider), str(start), str(upper), json.dumps({'operation_id': str(uuid4())}), now()))
         self.wake.set()
 
@@ -276,3 +256,28 @@ class InfrastructureCosts:
             return {'ok': True}
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS infrastructure_bills (
+                provider TEXT NOT NULL, month TEXT NOT NULL, amount TEXT NOT NULL,
+                kind TEXT NOT NULL, note TEXT NOT NULL, revision INTEGER NOT NULL,
+                updated_at TEXT NOT NULL, actor TEXT NOT NULL, PRIMARY KEY(provider,month)
+            );
+            CREATE TABLE IF NOT EXISTS infrastructure_bill_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, month TEXT NOT NULL,
+                actor TEXT NOT NULL, changed_at TEXT NOT NULL, previous TEXT NOT NULL, replacement TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS infrastructure_daily_costs (
+                provider TEXT NOT NULL, scope TEXT NOT NULL, day TEXT NOT NULL, amount TEXT NOT NULL,
+                synced_at TEXT NOT NULL, PRIMARY KEY(provider,scope,day)
+            );
+            CREATE TABLE IF NOT EXISTS infrastructure_sync_jobs (
+                id TEXT PRIMARY KEY, provider TEXT NOT NULL, scope TEXT NOT NULL,
+                start TEXT NOT NULL, "end" TEXT NOT NULL, status TEXT NOT NULL,
+                state TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+                UNIQUE(provider,scope,start,"end")
+            );
+        ''')

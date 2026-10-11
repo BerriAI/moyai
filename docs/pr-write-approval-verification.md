@@ -8,7 +8,7 @@ Production:
 - `app/github_write_access.py`: persistence, lifecycle invalidation, exact requester/session/repository/PR scope, authenticated decisions and PR identity validation.
 - `app/github.py`: request/check tool schema and dispatch, common authorization for updates/comments, independent head-repository token for fork code writes, rechecks before mutations.
 - `app/main.py`: existing requester identity verifier, session response and authenticated CSRF-protected decision route.
-- `app/static/app.js`: approval, denial and revocation panel; editable continuation through the existing chat composer and message endpoint.
+- `app/static/app.js`: pending-only Approve / Not Approve panel; approval continues through the existing message endpoint without changing the composer draft.
 - `app/static/style.css`: scoped mobile touch targets and wrapping.
 - `sandbox/agent.py`, `sandbox/github_tools.py`: explicit consent instructions and checkout guidance. The request/check tool uses the existing generic broker wrapper; there is no new grant-capable sandbox tool.
 
@@ -28,7 +28,7 @@ From the checkout, run:
 .venv/bin/python scripts/pr_write_access_demo.py --port 8794
 ```
 
-Open `http://127.0.0.1:8794/demo`. Click **Start demo chat**, **Allow for this chat**, **Continue in chat**, then **Send message**. The actual broker update/comment results appear in the chat. Revoke access and send another message to observe refusal. Start another demo chat to exercise denial. The demo depends on installed dev dependencies and reuses `tests/test_github_write_access.py`'s controlled GitHub transport.
+Open `http://127.0.0.1:8794/demo`. Click **Start demo chat**, then **Approve**. The card disappears and the actual broker update/comment results appear in the chat automatically. Start another demo chat and select **Not Approve** to exercise denial. The demo depends on installed dev dependencies and reuses `tests/test_github_write_access.py`'s controlled GitHub transport.
 
 The chat UI, sign-in cookie, CSRF check, decision endpoint, message admission, broker and persistence are real. GitHub and the task runner are controlled in-process fixtures; no provider credentials, model calls or external PR writes are used. The demo changes its disposable run's execution mode while the fixture worker calls the real broker; this is not a cloud-runner demonstration. Ctrl-C removes its disposable database.
 
@@ -63,7 +63,7 @@ Final results:
 - GitHub has one configured installation in this application. Fork code writes require the head repository to be independently selected and able to receive a contents-write token in that installation; cross-installation forks remain unavailable. Base comments remain separately authorized.
 - Slack-to-web requester equivalence uses the existing fresh verified-profile matcher, never accounting/sidebar links. A stale or conflicting Slack profile fails closed.
 - Consent lasts in the exact saved chat and requester scope; stopping/deleting the chat revokes it. Connection replacement, closure, merge or retargeted head/base identity prevents writes. No arbitrary approval TTL was added.
-- The UI's continuation prepares an editable follow-up; the user sends it through normal queue/resume behavior. Approval alone does not execute a write.
+- Approve requests a continuation through normal queue/resume behavior using a stable per-request client ID. The saved approval remains scoped to the exact PR and requester in this session; the approved card is hidden. Denial does not enqueue a continuation. The revoke API remains supported for older clients.
 - The optional pinned Hermes integration test is skipped unless `HERMES_TEST_SOURCE` and `HERMES_TEST_PYTHON` are configured.
 - The normal app login/CSRF boundary is the consent trust boundary, not a cryptographic proof of human presence. Shared-password logins remain shared app identities.
 
@@ -72,3 +72,10 @@ Final results:
 The restored patch was exercised again through the browser: pending access, approval, explicit continuation, and successful update/comment receipts through the real broker with controlled GitHub transport. The complete Node suite passed again (373 tests). Stopping the demo exited successfully and removed its disposable database; its open SSE stream logged cancellation during the bounded shutdown.
 
 Reusable lesson: keep publication provenance separate from delegated authority, and bind consent to the exact requester, saved session, connection revision and PR identity. Test both granting and revocation at the final write boundary, including after asynchronous token and metadata reads.
+
+## Two-button flow verification
+
+With the local demo running, use `PR_ACCESS_URL=http://127.0.0.1:8794 node --test tests/browser/pr_write_access.cjs` (Node 22+).
+The browser regression exercises Approve and Not Approve at 1440, 768 and 320px, keyboard activation, retained composer drafts, saved status, automatic continuation only after approval, and hidden decisions after reload. This uses the real app UI and consent/message routes with controlled GitHub and task execution.
+
+The endpoint accepts `resume: true` from the new UI. Existing clients that omit it keep their previous behavior. Repeating the same approval request uses the same message client ID, so it cannot enqueue a second continuation.

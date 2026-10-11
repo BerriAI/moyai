@@ -16,7 +16,9 @@ from .spend import UsageCapture
 from .native_trace import NativeModelContent
 from .context_compaction import compaction_payload, private_compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
-from .broker_diagnostics import upstream_headers
+from .broker_diagnostics import model_gateway_error, upstream_headers, model_error, model_stage
+from sandbox.broker_failure import provider_error
+from .model_selection import ASTRA_ULTRAFAST, gateway_payload
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -26,6 +28,8 @@ def authorized_payload(body, route, model, context):
     """Apply server policy without changing the provider's native schema."""
     if not isinstance(body, dict):
         raise HTTPException(422, 'Expected a JSON object.')
+    if model == ASTRA_ULTRAFAST and route != '/v1/responses':
+        raise HTTPException(422, 'GPT-6 Astra Ultrafast requires the Responses API. Use Codex or regular GPT-6 Astra.')
     field = 'messages' if route == '/v1/messages' else 'input'
     if not isinstance(body.get(field), (list, str) if field == 'input' else list):
         raise HTTPException(422, f'{field} is required.')
@@ -56,8 +60,6 @@ def authorized_payload(body, route, model, context):
             payload['instructions'] = context + '\n\n' + (payload.get('instructions') or '')
     if route == '/v1/responses':
         payload['store'] = False
-        if model == 'openai/gpt-6-astra':
-            payload['service_tier'] = 'ultrafast'
     return payload
 
 
@@ -67,6 +69,7 @@ class NativeUsageCapture(UsageCapture):
         super().__init__(streaming)
         self.route = route
         self.failed = False
+        self.error = {}
         self.content = content
 
     def consume(self, value):
@@ -77,6 +80,7 @@ class NativeUsageCapture(UsageCapture):
         kind = value.get('type')
         if kind in {'error', 'response.failed', 'response.incomplete'} or value.get('status') in {'failed', 'incomplete'}:
             self.failed = True
+            self.error = model_error(stage='stream', code=provider_error(value))
         if kind == 'message_start':
             value = value.get('message', {})
         elif kind in {'response.completed', 'response.failed', 'response.incomplete'}:
@@ -113,10 +117,23 @@ class HarnessGateway:
         self.tracing = tracing
         self.context_budget = context_budget
         self.native_sessions = None
+        self.repository_context = None
         from .context_maintenance import ContextMaintenance
         self.maintenance = ContextMaintenance(self)
         from .live_context import LiveContext
         self.live_context = LiveContext(self)
+
+    async def library_context(self, run, model, budget=None, *, payload=None):
+        from .library_views import fit_context
+        budget = budget or await self.context_budget.allocation({**(payload or {}), 'model': model})
+        # This is a view allocation, derived from the actual input window. A
+        # byte per token is conservative; final admission still counts the wire.
+        allocation = max(1, budget.input_budget // 8)
+        reads = [asyncio.to_thread(self.skills.context, run), asyncio.to_thread(self.memory.context, run)]
+        if self.repository_context:
+            reads.append(asyncio.to_thread(self.repository_context.context, run))
+        contexts = await asyncio.gather(*reads)
+        return [fit_context(context, allocation) for context in contexts]
 
     async def context_window(self, run_id, request):
         run = self.require_run(run_id, request)
@@ -124,8 +141,8 @@ class HarnessGateway:
             model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
-        budget = await self.context_budget.measure({'model': model, 'messages': []})
-        context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+        budget = await self.context_budget.allocation({'model': model})
+        context = '\n\n'.join(x for x in await self.library_context(run, model, budget) if x)
         # The SDK cannot see broker-injected context. Reserve its byte bound as
         # well as room for a new tool result before the next native compact.
         window = max(1, budget.input_budget - len(context.encode()) - 4096)
@@ -141,6 +158,12 @@ class HarnessGateway:
         # rechecked for every inference attempt below.
         body = await self.read_body(request, route)
         return await self.summarize(run_id, request, body)
+
+    async def assess(self, run, request, system, data):
+        """Fresh, tool-free verification using ordinary admission and billing."""
+        response = await self._forward_once(run['id'], request, '/internal/assessment',
+            compaction_body={'system': system, 'data': data}, expected_run=dict(run))
+        return json.loads(response.body)['text']
 
     async def summarize_private(self, run, request, history: list[str], model: str, summary_bytes: int) -> str:
         response = await self.summarize(run['id'], request,
@@ -178,7 +201,8 @@ class HarnessGateway:
 
     async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None, *,
                             expected_run=None, private=False, expected_model=None):
-        compact = route == '/context/compact'
+        assessment = route == '/internal/assessment'
+        compact = route == '/context/compact' or assessment
         if (route not in NATIVE_ROUTES and not compact) or (private and not compact):
             raise HTTPException(404, 'Unsupported model endpoint.')
         def current_run():
@@ -195,12 +219,21 @@ class HarnessGateway:
                     raise HTTPException(409, 'The originating model has changed.')
             return current
         run = current_run()
+        if not compact and self.store.goals:
+            with self.store.connect() as conn:
+                goal = self.store.goals.current(conn, run_id)
+            if goal and goal['status'] == 'wrapping':
+                raise HTTPException(409, 'Goal work has ended. Save and deliver the goal report; no new task inference is admitted.')
+        if not compact:
+            model_stage(request, 'admission')
         # Internal private work already has a bounded snapshot. Let it queue
         # behind the foreground request that scheduled it, including capacity 1.
-        if self.model_slots.locked() and not private:
+        if not private and await self.model_slots.is_full():
+            self.model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
         slot_acquired = False
+        slot_permit = None
         client = None
         upstream = None
         request_id = None
@@ -210,12 +243,24 @@ class HarnessGateway:
         status = 'failed'
         started = time.time_ns()
         finished = False
+        error = {}
+        stage = 'validation'
+
+        def observe(value):
+            nonlocal error
+            # A later disconnect cannot erase a provider error already read.
+            error = {**value, **(capture.error if capture and capture.error.get('error_code') not in (None, 'unknown') else {})}
+            if not compact:
+                model_stage(request, stage, error=error)
 
         async def finish():
             nonlocal finished
             if finished:
                 return
             finished = True
+            if status != 'completed' and not error:
+                observe((capture.error if capture and capture.error else {}) or model_error(stage=stage,
+                    code='cancelled' if status == 'interrupted' else 'stream_incomplete' if capture else 'unknown'))
             try:
                 if upstream is not None:
                     await upstream.aclose()
@@ -229,13 +274,15 @@ class HarnessGateway:
                     if content is not None:
                         response = {**response, 'choices': content.choices}
                     self.tracing.model(run, request_id, started, content.messages if content else [],
-                        response, status, gateway_id=gateway_id)
+                        response, status, gateway_id=gateway_id, error=error)
                     await self.checkpoints.flush()
             finally:
                 if slot_acquired:
-                    self.model_slots.release()
+                    await self.model_slots.release_async(slot_permit)
 
         try:
+            if not compact:
+                model_stage(request, stage)
             try:
                 model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
             except ValueError as exc:
@@ -243,7 +290,20 @@ class HarnessGateway:
             if not compact:
                 expected_run, expected_model = dict(run), model
             body = compaction_body if compact else await self.read_body(request, route)
-            if compact:
+            partial_cursor = False
+            if assessment:
+                payload = {'model': model, 'stream': False, 'messages': [
+                    {'role': 'system', 'content': body['system']},
+                    {'role': 'user', 'content': json.dumps(body['data'], ensure_ascii=False)}]}
+            elif compact:
+                limits = await self.context_budget.limits(model)
+                allocation = max(1, min(limits.max_input_tokens, limits.context_window -
+                    (limits.default_output_tokens or limits.max_output_tokens)) // 8)
+                requested = body.get('summary_bytes')
+                if requested is None:
+                    body = {**body, 'summary_bytes': allocation}
+                elif type(requested) is not int or not 0 < requested <= allocation:
+                    raise HTTPException(422, 'Summary allocation exceeds the selected model context budget.')
                 # Both summary paths omit injections and content tracing. Only
                 # the public journal protocol can return a durable partial cursor.
                 payload = (private_compaction_payload(body['history'], model, body['summary_bytes'], attempt)
@@ -252,13 +312,16 @@ class HarnessGateway:
             else:
                 if self.native_sessions is not None:
                     self.native_sessions.observe_scope(run)
-                context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+                context = '\n\n'.join(x for x in await self.library_context(run, model, payload=body) if x)
                 payload = authorized_payload(body, route, model, context)
                 field = 'messages' if route == '/v1/messages' else 'input'
                 items = payload[field]
                 if isinstance(items, str):
                     items = [{'role': 'user', 'content': items}]
                 payload[field] = await asyncio.to_thread(self.store.attachments.with_images, run, items, protocol=route)
+            stage = 'context_preparation'
+            if not compact:
+                model_stage(request, stage)
             while True:
                 try:
                     if compact:
@@ -271,7 +334,7 @@ class HarnessGateway:
                         self.store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
                         await self.checkpoints.flush()
                         raise
-                    if private:
+                    if private or assessment:
                         raise SummaryFailure('summary_input_too_large', retryable=False) from None
                     if not partial_cursor:
                         raise HTTPException(422, 'Reconnect the runtime to compact smaller journal batches safely. Saved records are preserved.') from None
@@ -282,20 +345,26 @@ class HarnessGateway:
                     # exactly which records were summarized; the rest stay pending.
                     body = {**body, 'entries': body['entries'][:max(1, len(body['entries']) // 2)]}
                     payload = compaction_payload(body, model, attempt)
+            stage = 'admission'
+            if not compact:
+                model_stage(request, stage)
             current_run()
-            await self.model_slots.acquire()
+            slot_permit = await self.model_slots.acquire()
             slot_acquired = True
             current_run()
             admitted = self.store.execute(
                 "UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
                 "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
-                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ? "
-                "AND active_user_id IS ? AND active_model IS ? AND (coalesce(active_model,'')!='' OR model IS ?)",
+                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS NOT DISTINCT FROM ? "
+                "AND active_user_id IS NOT DISTINCT FROM ? AND active_model IS NOT DISTINCT FROM ? AND (coalesce(active_model,'')!='' OR model IS NOT DISTINCT FROM ?)",
                 (run_id, self.settings.max_agent_iterations, self.settings.max_agent_iterations * 3,
                  run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
-            request_id = self.spend.begin(run, model)
+            request_id = self.spend.begin(run, model, startup=not compact)
+            stage = 'upstream'
+            if not compact:
+                model_stage(request, stage, request_id=request_id)
             if self.tracing.enabled and not compact and not private_run(self.store, run['id']):
                 # A private working summary is model input, never a new public
                 # user message. Trace the original request's user text instead.
@@ -314,7 +383,8 @@ class HarnessGateway:
             base = self.settings.litellm_api_base.rstrip('/')
             upstream_route = '/v1/chat/completions' if compact else route
             url = base + upstream_route.removeprefix('/v1') if base.endswith('/v1') else base + upstream_route
-            upstream = await client.send(client.build_request('POST', url, json=payload, headers=headers), stream=True)
+            upstream = await client.send(client.build_request('POST', url,
+                json=gateway_payload(payload, upstream_route), headers=headers), stream=True)
             gateway_id = self.spend.headers(request_id, upstream, capture.streaming)
             if upstream.status_code >= 400:
                 raw_error = bytearray()
@@ -334,8 +404,7 @@ class HarnessGateway:
                     transient = upstream.status_code in {408, 429, 500, 502, 503, 504}
                     raise SummaryFailure('upstream_unavailable' if transient else 'upstream_rejected',
                                          retryable=transient, transient=transient)
-                raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}).',
-                                    headers=upstream_headers(request_id, upstream))
+                raise model_gateway_error(request_id, upstream, raw_error)
             if not capture.streaming:
                 raw = bytearray()
                 async for chunk in upstream.aiter_bytes():
@@ -344,7 +413,8 @@ class HarnessGateway:
                         raise HTTPException(502, 'Model response exceeded the size limit.')
                 capture.feed(bytes(raw))
                 capture.finish()
-                result = (JSONResponse({**compaction_result(raw, body.get('summary_bytes', 12_000)),
+                result = (JSONResponse({'text': compaction_result(raw)['summary']}) if assessment else
+                          JSONResponse({**compaction_result(raw, body['summary_bytes']),
                                        **({} if private else {'through_seq': body['entries'][-1]['seq']})})
                           if compact else Response(bytes(raw), media_type='application/json',
                                                    headers=upstream_headers(request_id, upstream)))
@@ -352,6 +422,7 @@ class HarnessGateway:
                 await finish()
                 return result
         except httpx.HTTPError as exc:
+            observe(model_error(exc, stage=stage))
             await finish()
             if compact:
                 error = SummaryFailure('gateway_unreachable', transient=True)
@@ -360,17 +431,21 @@ class HarnessGateway:
             raise HTTPException(502, 'Model gateway could not be reached.',
                                 headers=upstream_headers(request_id, error=exc)) from None
         except SummaryFailure as exc:
+            observe(model_error(exc, stage=stage))
             exc.request_id = request_id
             await finish()
             raise
         except BaseException as exc:
+            observe(model_error(exc, stage=stage))
             if isinstance(exc, asyncio.CancelledError):
                 status = 'interrupted'
             await finish()
             raise
 
         async def stream():
-            nonlocal status
+            nonlocal status, stage
+            stage = 'stream'
+            model_stage(request, stage)
             try:
                 async for chunk in upstream.aiter_bytes():
                     current = self.store.run(run_id)
@@ -382,8 +457,10 @@ class HarnessGateway:
                 capture.finish()
                 if status != 'interrupted':
                     status = 'completed' if capture.done and not capture.failed else 'failed'
-            except asyncio.CancelledError:
-                status = 'interrupted'
+            except BaseException as exc:
+                observe(model_error(exc, stage=stage))
+                if isinstance(exc, asyncio.CancelledError):
+                    status = 'interrupted'
                 raise
             finally:
                 await finish()

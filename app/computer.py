@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from . import captures
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
 from sandbox.computer import browser_state, PRIVATE_BODY_LIMIT
 
 
@@ -60,8 +61,8 @@ class DesktopConnection:
                 if native:
                     return await native(body)
                 if self.process is None:
-                    self.process = await self.sandbox.exec.aio('/usr/local/bin/python',
-                        '/opt/workspace-runner/computer.py', 'bridge', timeout=3600, bufsize=1)
+                    self.process = await self.sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                        RUNTIME_ROOT, 'computer.py', 'bridge', timeout=3600, bufsize=1)
                     self.reader = self.process.stdout.__aiter__()
                 self.process.stdin.write((json.dumps(body)+'\n').encode())
                 await self.process.stdin.drain.aio()
@@ -96,7 +97,8 @@ class Computer:
         self.checkpoint_locks = {}
         self.checkpoint_times = {}
         self.restore_failures = {}
-        store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def restore_error(self, connection, run_id, fingerprint, detail):
         self.restore_failures[run_id] = (connection.identity, fingerprint, time.monotonic() + 10, detail)
@@ -184,7 +186,8 @@ class Computer:
     def shutting_down(self, run_id, sandbox_id, lifecycle=None):
         if lifecycle is None:
             lifecycle = self.manager.computer_state(run_id) if hasattr(self.manager, 'computer_state') else {}
-        return (lifecycle.get('shutting_down', False) or self.store.run(run_id)['status'] == 'stopping' or
+        run = self.store.run(run_id)
+        return (lifecycle.get('shutting_down', False) or bool(run.get('deletion_requested_at')) or run['status'] == 'stopping' or
                 bool(sandbox_id and self.releasing.get(run_id) == sandbox_id))
 
     def authorize(self, request, run_id, mutation=False):
@@ -259,7 +262,8 @@ class Computer:
 
     async def execute(self, sandbox, *args, timeout=45):
         async with self.slots:
-            proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/computer.py', *args, timeout=timeout)
+            proc = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                          RUNTIME_ROOT, 'computer.py', *args, timeout=timeout)
             stdout, _ = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
             if await proc.wait.aio() != 0:
                 raise HTTPException(503, 'Computer is not ready in this workspace. Start a new response to update it.')
@@ -448,3 +452,7 @@ class Computer:
             return captures.response(captures.directory(self.settings, run_id) / name, request, download, store=self.store, actor=actor)
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')

@@ -1,5 +1,5 @@
 """Authenticated ASGI regressions for immutable owner-only sessions."""
-import sqlite3
+from app.database import INTEGRITY_ERRORS
 
 import pytest
 from fastapi import WebSocket
@@ -31,7 +31,7 @@ def test_private_creation_immutable_and_exact_retry(private_app):
     assert client.post('/api/runs', json=payload).json()['id'] == run['id']
     payload['private_session'] = False
     assert client.post('/api/runs', json=payload).status_code == 409
-    with pytest.raises(sqlite3.IntegrityError, match='immutable'):
+    with pytest.raises(INTEGRITY_ERRORS):
         app.state.store.execute("UPDATE runs SET private_owner_id='' WHERE id=?", (run['id'],))
     assert client.get('/api/runs/' + run['id']).status_code == 200
     assert NewRun(prompt='Default public').private_session is False
@@ -79,7 +79,7 @@ def test_private_derivation_denied_both_directions(private_app):
         response = client.post('/api/runs', json={'prompt': 'Side chat export', 'side_chat_of': parent,
                                                 'private_session': private})
         assert response.status_code in {403, 422}
-    with pytest.raises(sqlite3.IntegrityError, match='derivation'):
+    with pytest.raises(INTEGRITY_ERRORS):
         app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (run['id'], public['id']))
     sign_as(app, client, 'tin@berri.ai')
     assert client.post('/api/runs', json={'prompt': 'Stolen context', 'side_chat_of': run['id']}).status_code == 404
@@ -200,7 +200,7 @@ def test_default_shared_creation_cannot_be_retried_as_private(private_app):
     shared = client.post('/api/runs', json=payload).json()
     assert shared['private_owner_id'] == ''
     assert client.post('/api/runs', json={**payload, 'private_session': True}).status_code == 409
-    with pytest.raises(sqlite3.IntegrityError, match='immutable'):
+    with pytest.raises(INTEGRITY_ERRORS):
         app.state.store.execute('UPDATE runs SET private_owner_id=? WHERE id=?', ('google:maya', shared['id']))
 
 

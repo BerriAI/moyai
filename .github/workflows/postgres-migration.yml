@@ -1,0 +1,46 @@
+name: PostgreSQL migration rehearsal
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/test_postgres_migration.py'
+      - 'scripts/postgres_migration_smoke.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/postgres-migration.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'tests/test_postgres_migration.py'
+      - 'scripts/postgres_migration_smoke.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/postgres-migration.yml'
+permissions:
+  contents: read
+jobs:
+  migration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-migration-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-migration-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify real database fidelity, constraints, concurrency and rollback
+        run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_migration.py
+      - name: Run reproducible migration demonstration
+        run: uv run --frozen --extra postgres-migration --python 3.13 python scripts/postgres_migration_smoke.py

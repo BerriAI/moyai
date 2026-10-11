@@ -2,10 +2,14 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+import py_compile
+import shutil
+import subprocess
 import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import zlib
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import modal
@@ -191,6 +195,190 @@ async def test_chunked_unicode_writes_and_empty_overwrite(transport):
     assert (await sandbox.filesystem.read_bytes.aio(path)).decode() == value
     await sandbox.filesystem.write_text.aio('', path)
     assert await sandbox.filesystem.read_bytes.aio(path) == b''
+
+
+@pytest.fixture
+def runtime_transport(
+    transport: tuple[Sandbox, Path], monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]]:
+    from app import runtime_files
+
+    sandbox, tmp = transport
+    source, target = tmp / 'source', tmp / 'installed'
+    source.mkdir()
+    target.mkdir()
+    expected = {'agent/__init__.py': '', 'agent/agent.py': "VALUE = 'current ✓'\n",
+                'agent/tools/helper.py': 'UNCHANGED = True\n', 'agent/tools/new.py': 'NEW = True\n',
+                'agent/prompts/system.md': 'Agent instructions ✓\n',
+                'agent/skills/example/SKILL.md': 'Example skill ✓\n',
+                'sandbox/hermes-test.patch': 'runtime patch ✓\n'}
+    for name, content in expected.items():
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
+        (target / name).parent.mkdir(parents=True, exist_ok=True)
+        (source / name).write_text(content)
+        (target / name).write_text(content)
+    (source / 'README.md').write_text('not a runtime file')
+    (source / 'agent' / 'notes.txt').write_text('not a runtime file')
+    (source / 'app').mkdir()
+    (source / 'app' / 'ignored.py').write_text('controller code stays outside the guest')
+    (source / 'agent' / '__pycache__').mkdir()
+    (source / 'agent' / '__pycache__' / 'ignored.py').write_text('not source code')
+    (target / 'agent.py').write_text('raise RuntimeError("stale checkpoint entrypoint")\n')
+    (target / 'obsolete.py').write_text('preserved older runtime file')
+    (target / 'user-note.txt').write_text('preserved user file')
+    monkeypatch.setattr(runtime_files, 'RUNTIME_ROOT', str(target))
+    monkeypatch.setattr(runtime_files, 'SANDBOX_PYTHON', sys.executable)
+    writes: list[tuple[str, str]] = []
+    write = sandbox.filesystem.write_text.aio
+
+    async def capture(text: str, path: str) -> None:
+        writes.append((text, path))
+        await write(text, path)
+
+    monkeypatch.setattr(sandbox.filesystem, 'write_text', SimpleNamespace(aio=capture))
+    return sandbox, source, target, expected, writes
+
+
+async def test_runtime_sync_skips_real_http_uploads_for_matching_files(
+    runtime_transport: tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]],
+) -> None:
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, expected, writes = runtime_transport
+    before = {name: (target / name).stat().st_mtime_ns for name in expected}
+    await sync_runtime(sandbox, source)
+    assert writes == []
+    assert {name: (target / name).stat().st_mtime_ns for name in expected} == before
+
+
+async def test_runtime_sync_bundles_only_changed_files_without_following_symlinks(
+    runtime_transport: tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]],
+) -> None:
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, expected, writes = runtime_transport
+    (target / 'agent/agent.py').write_text(expected['agent/agent.py'].replace('current', 'outdate'))
+    bytecode = Path(py_compile.compile(str(target / 'agent/agent.py'), doraise=True))
+    (target / 'agent/tools/new.py').unlink()
+    (target / 'sandbox/hermes-test.patch').unlink()
+    (target / 'sandbox/hermes-test.patch').symlink_to(target / 'user-note.txt')
+    unchanged = (target / 'agent/tools/helper.py').stat().st_mtime_ns
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 1
+    text, path = writes[0]
+    contents = json.loads(zlib.decompress(base64.b64decode(text)))
+    assert set(contents) == {'agent/agent.py', 'agent/tools/new.py', 'sandbox/hermes-test.patch'}
+    assert path.startswith('/tmp/moyai-runtime-') and path.endswith('.bundle')
+    assert {name: (target / name).read_text() for name in expected} == expected
+    assert not (target / 'sandbox/hermes-test.patch').is_symlink()
+    assert (target / 'agent/tools/helper.py').stat().st_mtime_ns == unchanged
+    assert (target / 'user-note.txt').read_text() == 'preserved user file'
+    assert (target / 'obsolete.py').read_text() == 'preserved older runtime file'
+    assert not (target / 'README.md').exists() and not (target / 'app').exists()
+    assert not (target / 'agent/notes.txt').exists()
+    assert not (target / 'agent/__pycache__/ignored.py').exists()
+    assert not bytecode.exists()
+    process = await sandbox.exec.aio(sys.executable, '-I', '-c',
+        'import sys; sys.path.insert(0, sys.argv[1]); from agent import agent; print(agent.VALUE)', str(target), timeout=10)
+    out, err = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
+    assert await process.wait.aio() == 0 and out == 'current ✓\n' and not err
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 1
+
+
+@pytest.mark.parametrize('damage', ['bundle', 'unchanged_file'])
+async def test_runtime_sync_rejects_incomplete_update_and_recovers(
+    runtime_transport: tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch, damage: str,
+) -> None:
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, expected, writes = runtime_transport
+    (target / 'agent/agent.py').write_text('outdated runtime')
+    (target / 'agent/tools/new.py').unlink()
+    write = sandbox.filesystem.write_text.aio
+
+    async def corrupt(text: str, path: str) -> None:
+        if damage == 'bundle':
+            contents = json.loads(zlib.decompress(base64.b64decode(text)))
+            contents['agent/tools/new.py'] += 'corrupted in transit'
+            text = base64.b64encode(zlib.compress(json.dumps(contents).encode())).decode()
+        else:
+            # Simulate a changed file after comparison that was absent from the bundle.
+            (target / 'agent/tools/helper.py').write_text('changed between check and apply')
+        await write(text, path)
+
+    monkeypatch.setattr(sandbox.filesystem, 'write_text', SimpleNamespace(aio=corrupt))
+    with pytest.raises(RuntimeError):
+        await sync_runtime(sandbox, source)
+    assert len(writes) == 1
+    if damage == 'bundle':
+        assert (target / 'agent/agent.py').read_text() == 'outdated runtime'
+        assert not (target / 'agent/tools/new.py').exists()
+    monkeypatch.setattr(sandbox.filesystem, 'write_text', SimpleNamespace(aio=write))
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 2
+    assert {name: (target / name).read_text() for name in expected} == expected
+    assert (target / 'user-note.txt').read_text() == 'preserved user file'
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 2
+
+
+async def test_runtime_sync_installs_packages_on_an_old_flat_checkpoint(runtime_transport):
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, expected, writes = runtime_transport
+    shutil.rmtree(target / 'agent')
+    shutil.rmtree(target / 'sandbox')
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 1
+    assert {name: (target / name).read_text() for name in expected} == expected
+    assert (target / 'agent.py').read_text().startswith('raise RuntimeError')
+    assert (target / 'user-note.txt').read_text() == 'preserved user file'
+
+
+@pytest.mark.parametrize('when', ['before_check', 'before_install'])
+async def test_runtime_sync_rejects_symlink_parents(runtime_transport, monkeypatch, when):
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, _, writes = runtime_transport
+    outside = target.parent / 'outside'
+    outside.mkdir()
+    (outside / 'new.py').write_text('preserve outside file')
+    (target / 'agent/tools/new.py').write_text('outdated runtime')
+
+    def replace_parent():
+        shutil.rmtree(target / 'agent/tools')
+        (target / 'agent/tools').symlink_to(outside, target_is_directory=True)
+
+    write = sandbox.filesystem.write_text.aio
+    if when == 'before_check':
+        replace_parent()
+    else:
+        async def redirect(text, path):
+            replace_parent()
+            await write(text, path)
+        monkeypatch.setattr(sandbox.filesystem, 'write_text', SimpleNamespace(aio=redirect))
+
+    with pytest.raises(RuntimeError, match='runtime verification failed'):
+        await sync_runtime(sandbox, source)
+    assert (outside / 'new.py').read_text() == 'preserve outside file'
+    assert set(outside.iterdir()) == {outside / 'new.py'}
+    assert len(writes) == (0 if when == 'before_check' else 1)
+
+
+@pytest.mark.parametrize('name', ['', '.', '..', '../escaped.py', 'agent/../../escaped.py',
+                                  '/escaped.py', 'agent//agent.py', 'agent/./agent.py'])
+def test_runtime_sync_rejects_noncanonical_manifest_paths(tmp_path, name):
+    from app.runtime_files import SYNC_SCRIPT
+
+    root = tmp_path / 'runtime'
+    result = subprocess.run([sys.executable, '-I', '-c', SYNC_SCRIPT, str(root),
+                             json.dumps({name: 'unused-digest'}), ''],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert 'Invalid runtime path' in result.stderr
+    assert not root.exists()
 
 
 async def test_checkpoint_blocks_other_handle_requests_until_thawed():

@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 function setup(){
   const elements=new Map();
   const c={state:{role:'admin',pageVersion:1},esc:v=>String(v).replaceAll('<','&lt;'),spendCount:v=>String(v),URLSearchParams,document:{querySelector:()=>null},$:k=>{if(!elements.has(k))elements.set(k,{});return elements.get(k);},showError:()=>{}};

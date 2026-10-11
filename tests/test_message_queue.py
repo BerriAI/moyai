@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.security import digest
-from sandbox.continuation import AgentSteer
+from agent.continuation import AgentSteer
 from test_attachments import upload
 from test_durable import durable, drive  # noqa: F401
 from test_slack import slack_app  # noqa: F401
@@ -203,7 +203,9 @@ async def test_cross_scope_checkpointed_steering_keeps_the_saved_handoff(durable
     await drive(manager,run_id,phase='idle')
     assert manager.store.rows('SELECT status FROM messages WHERE id=?',(old,))[0]['status']=='steered'
     assert len(cloud.launches)==1 and cloud.snapshots==1
-    assert not [m for m in manager.store.messages(run_id) if m['role']=='assistant']
+    # The completed receipt was already published before this saved handoff.
+    answers=[m for m in manager.store.messages(run_id) if m['role']=='assistant']
+    assert len(answers)==1 and answers[0]['status']=='steered' and answers[0]['response_to_id']==old
     assert manager.store.has_queued_messages(run_id)
 
 
@@ -212,9 +214,9 @@ def test_slack_edits_and_deletes_retire_pending_inputs_and_correct_delivered_inp
     target=web(app,client,run_id).json()['id']
     assert change(client,run_id,target,'edit',content='New queued version').status_code==200
     assert app.state.store.rows("SELECT status FROM slack_outbox WHERE dedupe_key=?",(f'input:{target}:0',))[0]['status']=='skipped'
-    drain(app)
+    drain(app, client)
     assert any('New queued version' in post.get('text','') for post in mirror[3])
     assert not any('Continue from web' in post.get('text','') for post in mirror[3])
     assert change(client,run_id,target,'delete',1).status_code==200
-    drain(app)
+    drain(app, client)
     assert any('removed in Moyai' in post.get('text','') for post in mirror[3])

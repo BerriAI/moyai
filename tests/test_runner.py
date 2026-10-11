@@ -1,8 +1,11 @@
 import asyncio
+import base64
 import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import zipfile
+import zlib
 
 import pytest
 
@@ -155,14 +158,36 @@ def aio(function):
 
 async def test_snapshot_refresh_includes_runtime_fixes_without_touching_user_files():
     written = {}
+    manifests = []
     async def write(text, path):
         written[path] = text
-    await refresh_sandbox_files(SimpleNamespace(filesystem=SimpleNamespace(write_text=aio(write))))
-    assert '/opt/workspace-runner/hermes_compat.py' in written
-    assert '/opt/workspace-runner/hermes-steering.patch' in written
-    assert '/opt/workspace-runner/hermes-stop-reason.patch' in written
-    assert 'apply_hermes_patches()' in written['/opt/workspace-runner/agent.py']
-    assert all(path.startswith('/opt/workspace-runner/') for path in written)
+    async def execute(*command, **kwargs):
+        from app.runtime_files import SYNC_SCRIPT
+        assert command[:4] == ('/usr/local/bin/python', '-I', '-c', SYNC_SCRIPT)
+        assert command[4] == '/opt/workspace-runner'
+        expected = json.loads(command[5])
+        manifests.append(expected)
+        return ready_runtime([] if command[6] else list(expected))
+    await refresh_sandbox_files(SimpleNamespace(filesystem=SimpleNamespace(write_text=aio(write)), exec=aio(execute)))
+    assert len(written) == 1 and manifests[0] == manifests[1]
+    path, data = next(iter(written.items()))
+    assert path.startswith('/tmp/moyai-runtime-') and path.endswith('.bundle')
+    files = json.loads(zlib.decompress(base64.b64decode(data)))
+    assert {'sandbox/hermes_compat.py', 'sandbox/hermes-steering.patch', 'sandbox/hermes-stop-reason.patch'} <= files.keys()
+    assert 'apply_hermes_patches()' in files['sandbox/agent.py']
+    assert {'agent/__init__.py', 'agent/agent.py', 'agent/prompts/system.md', 'agent/tools/mcp_bridge.py'} <= files.keys()
+    assert any(name.startswith('agent/skills/') for name in files)
+    assert all(name.startswith(('agent/', 'sandbox/')) and name.endswith(('.py', '.md', '.patch')) for name in files)
+
+
+def ready_runtime(changed=()):
+    async def stdout():
+        return json.dumps(list(changed))
+    async def stderr():
+        return ''
+    async def wait():
+        return 0
+    return SimpleNamespace(stdout=SimpleNamespace(read=aio(stdout)), stderr=SimpleNamespace(read=aio(stderr)), wait=aio(wait))
 
 
 class Lines:
@@ -185,7 +210,9 @@ class FakeSandbox:
             archive.writestr("result.md", "Test result")
         self.archive = buffer.getvalue()
         self.completed = completed
-        self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read))
+        self.runtime_verified = False
+        self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read),
+                                          copy_to_local=aio(self.copy_to_local))
         self.terminate = aio(self.terminate_sandbox)
         self.wait = aio(self.wait_sandbox)
         self.exec = aio(self.execute)
@@ -200,6 +227,10 @@ class FakeSandbox:
     async def read(self, path):
         return self.archive
 
+    async def copy_to_local(self, source, destination):
+        assert source == '/artifacts/result.zip'
+        Path(destination).write_bytes(self.archive)
+
     async def terminate_sandbox(self):
         self.terminated = True
 
@@ -209,6 +240,10 @@ class FakeSandbox:
         return 0
 
     async def execute(self, *command, timeout=None, bufsize=-1, env=None):
+        if command[:3] == ('/usr/local/bin/python', '-I', '-c'):
+            self.runtime_verified = True
+            return ready_runtime()  # This lifecycle fixture has the baked runtime.
+        assert self.runtime_verified
         assert command[0] == "/opt/hermes-env/bin/python"
         async def wait():
             return 0 if self.completed else 1

@@ -1,6 +1,6 @@
 """Trace-only projection of native protocols; never used for billing or forwarding."""
 
-LIMIT = 16_000
+MODEL_TEXT_LIMIT = 1_000_000
 OMITTED = '[text omitted: trace size limit]'
 
 
@@ -26,7 +26,7 @@ class NativeModelContent:
             self.blocks(blocks, input_text=True)
             if self.text:
                 self.messages.append({'role': 'user', 'content': self.text})
-            if self.text is None or sum(len(m['content']) for m in self.messages) > LIMIT:
+            if self.text is None or sum(len(m['content']) for m in self.messages) > MODEL_TEXT_LIMIT:
                 # Bound the aggregate of all retained input, not each message.
                 self.messages = [{'role': 'user', 'content': OMITTED}]
                 break
@@ -38,7 +38,7 @@ class NativeModelContent:
 
     def append(self, text: object) -> None:
         if isinstance(text, str) and self.text is not None:
-            self.text = self.text + text if len(self.text) + len(text) <= LIMIT else None
+            self.text = self.text + text if len(self.text) + len(text) <= MODEL_TEXT_LIMIT else None
 
     def blocks(self, blocks: object, *, input_text: bool = False) -> None:
         for block in blocks if isinstance(blocks, list) else []:

@@ -39,6 +39,35 @@ def deliver(client, automation, number=1):
                        **signed('webhook', {'event': 'complaint.received', 'body': f'Complaint {number}'}, delivery=f'event-{number}'))
 
 
+def test_environment_reference_without_repository_pins_each_occurrence(workspace):
+    from test_automation_tools import runtime
+    from test_environments import prepared
+    app, client = workspace
+    runtime(app)
+    TemporalRunManager(app.state.store, app.state.settings)
+    env, store = app.state.environments, app.state.store
+    first_build = prepared(env, default=False)
+    automation = create(client, mode='modal', environment_id='e' * 32)
+    assert automation['definition']['repo_url'] == ''
+    assert automation['definition']['metadata'] == {}
+    path = '/api/automations/' + automation['id'] + '/run'
+    first = client.post(path, json={'revision': 1, 'client_id': 'first-prepared-run'}).json()
+    assert first['outcome'] == 'started'
+    context = client.portal.call(env.prepare, first['run_id'])
+    assert context['build_id'] == first_build and context['repository'] == 'BerriAI/litellm'
+    assert context['snapshot_id'] == 'im-project' and context['commit_sha'] == 'a' * 40
+    # Each later occurrence can use a refreshed build; the first stays pinned.
+    second_build = env.enqueue('e' * 32, 1, 'admin')
+    env.update(second_build['id'], phase='ready', snapshot_id='im-refreshed', commit_sha='b' * 40)
+    store.execute('UPDATE environments SET active_build=? WHERE id=?', (second_build['id'], 'e' * 32))
+    second = client.post(path, json={'revision': 1, 'client_id': 'second-prepared-run'}).json()
+    assert second['outcome'] == 'started'
+    refreshed = client.portal.call(env.prepare, second['run_id'])
+    assert refreshed['build_id'] == second_build['id'] and refreshed['commit_sha'] == 'b' * 40
+    assert client.portal.call(env.prepare, first['run_id'])['build_id'] == first_build
+    assert store.run(first['run_id'])['environment_id'] == store.run(second['run_id'])['environment_id'] == 'e' * 32
+
+
 def test_failed_environment_holds_events_across_restart_and_resumes_once_ready(blocked):
     app, client, a = blocked
     service, store, env = app.state.automations, app.state.store, app.state.environments
@@ -48,7 +77,7 @@ def test_failed_environment_holds_events_across_restart_and_resumes_once_ready(b
         asyncio.run(service.events.dispatch())
     assert not store.rows('SELECT id FROM runs')
     assert not store.rows('SELECT occurrence FROM automation_runs')
-    pending = store.rows('SELECT * FROM automation_events')
+    pending = store.rows('SELECT * FROM automation_events ORDER BY received_at,occurrence')
     assert all(e['status'] == 'pending' and 'Complaint' in e['context'] for e in pending)
     assert 'Project setup failed' in pending[0]['detail']
     public = client.get('/api/automations').json()['automations'][0]
@@ -63,7 +92,7 @@ def test_failed_environment_holds_events_across_restart_and_resumes_once_ready(b
     store.execute('UPDATE environments SET enabled=1,activate_on_ready=0,active_build=?', (build['id'],))
     assert client.get('/api/automations').json()['automations'][0]['environment_blocker'] == ''
     asyncio.run(service.events.dispatch())
-    runs = store.rows('SELECT * FROM runs ORDER BY rowid')
+    runs = store.rows('SELECT * FROM runs ORDER BY created_at,id')
     assert len(runs) == 3
     for number, run in enumerate(runs):
         assert f'Complaint {number}' in run['prompt']

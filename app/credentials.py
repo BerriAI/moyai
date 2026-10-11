@@ -1,9 +1,9 @@
 """Encrypted task credentials, their authorization, and durable access requests."""
+from . import slack_secrets
 import asyncio
 import hmac
 import json
 import re
-import sqlite3
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
@@ -12,7 +12,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
-from . import slack_secrets
+from .database import Connection, DatabaseRow
 from .db import now
 from .identities import PROFILE_MAX_AGE_SECONDS
 
@@ -237,12 +237,35 @@ class UpdateSecret(Arguments):
         return self
 
 
+# Loaded with credentials_run instead of occupying every task's system prompt.
+ONEPASSWORD_GUIDANCE = (
+    'Before asking for a provider key, inspect credential_sources from credentials_list for saved generic '
+    '1password-shared access, even when the provider-specific credentials list is empty. If authorized Shared access '
+    'exists, request it with provider=generic, name=1password-shared, format=env and input_fields=[{name: '
+    'OP_SERVICE_ACCOUNT_TOKEN, label: Service account token}]. Use credentials_run for all op commands; the token is '
+    'injected into that subprocess only and authenticates the CLI automatically, without interactive sign-in. If Shared '
+    'access has not been connected, offer the secure Settings > Secrets > Connect 1Password flow; never claim to have '
+    'checked the vault. Verify op whoami and op vault list first, then op item list --vault Shared. Scope all item '
+    'operations and secret references to Shared. Account permissions are enforced by 1Password, not by the vault name in '
+    'these instructions. Prefer a dedicated service account with Shared read_items/write_items only and no '
+    'vault-creation permission. Keep vault values out of all tool output and chat. To use a provider key, set only a '
+    'nonsecret op://Shared/<item>/credential reference in the command environment and use op run -- <process>, keeping '
+    'its output masking enabled. Never use --no-masking. For other reads, capture op read directly in memory inside the '
+    'same credentials_run command and pass it straight to the intended process; never print it. The generic executor '
+    'redacts the service-account token but cannot automatically redact newly read vault values. Before adding a key, '
+    'search Shared for an existing matching item and edit it; if matches are ambiguous, clarify the intended item. Only '
+    'create or edit vault items when the task authorizes it. Feed secret JSON templates to op item create/edit through '
+    'standard input, never arguments or on-disk templates. Capture their output in memory and report only nonsecret item '
+    'metadata. Do not copy a token from another agent or broaden vault permissions. An administrator supplies or rotates '
+    'the token through the secure credential form. '
+)
+
 TOOLS = {
     **slack_secrets.TOOLS,
     'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
     'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
-    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
+    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication. ' + ONEPASSWORD_GUIDANCE),
     'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication tries alternative saved access, then requires checking available credential_sources before opening a replacement form. No failed operation is replayed. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
     'credentials_http_request': (Invoke, 'Use an authorized inference-key request for a non-streaming inference or model-list API call. The server supplies authentication to fixed provider origins and paths. Responses contain no key. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
 }
@@ -253,52 +276,10 @@ class Credentials:
         self.store, self.security, self.settings = store, security, settings
         self.manager, self.checkpoints = manager, checkpoints
         self.personal_slack = None
-        self.slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS provider_secrets (
-                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
-                    scope TEXT NOT NULL, owner_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '',
-                    encrypted TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
-                    client_id TEXT NOT NULL, UNIQUE(owner_id,client_id)
-                );
-                CREATE TABLE IF NOT EXISTS credential_requests (
-                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
-                    message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    provider TEXT NOT NULL, reason TEXT NOT NULL, request_key TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending', secret_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL, resolved_at TEXT NOT NULL DEFAULT '',
-                    UNIQUE(run_id,message_id,request_key)
-                );
-                CREATE TABLE IF NOT EXISTS credential_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
-                    secret_id TEXT NOT NULL, action TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS credential_source_uses (
-                    run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL,
-                    secret_id TEXT NOT NULL, revision INTEGER NOT NULL,
-                    PRIMARY KEY(run_id,message_id,secret_id,revision)
-                );
-            ''')
-            for table, fields in {
-                'provider_secrets': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
-                    'env_var': "TEXT NOT NULL DEFAULT ''", 'lifetime': "TEXT NOT NULL DEFAULT 'persistent'",
-                    'expires_at': "TEXT NOT NULL DEFAULT ''", 'invalid_reason': "TEXT NOT NULL DEFAULT ''",
-                    'revision': 'INTEGER NOT NULL DEFAULT 1'},
-                'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
-                    'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
-                    'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
-                    'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
-                    'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'",
-                    'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
-                    'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
-            }.items():
-                columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
-                for field, declaration in fields.items():
-                    if field not in columns:
-                        conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
-            conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")
+        from .model_slots import ModelSlots
+        self.slots = ModelSlots(settings.max_concurrent_model_requests)
+        if store.schema_updates:
+            initialize_schema(store)
 
     def root(self, run):
         return self.store.root_id(run['id'])
@@ -423,14 +404,15 @@ class Credentials:
         secret_id = uuid4().hex
         fields.update(id=secret_id, owner_id=user_id, encrypted=self.security.encrypt(value), created_at=now(), client_id=body.client_id)
         columns = ','.join(fields)
-        conn.execute(f'INSERT INTO provider_secrets({columns}) VALUES({",".join(":" + key for key in fields)})', fields)
+        conn.execute(f'INSERT INTO provider_secrets({columns}) VALUES({",".join("?" for key in fields)})', tuple(fields.values()))
         self.audit_in(conn, user_id, secret_id, 'saved ' + body.scope + ' ' + body.lifetime, root_id)
         return secret_id
 
     def tools(self, run):
         if not self.settings.temporal_enabled or not run['chat_enabled']:
             return []
-        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema()}
+        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
+                 'annotations': {'readOnlyHint': name == 'credentials_list', 'idempotentHint': name == 'credentials_list'}}
                 for name, (schema, description) in TOOLS.items()
                 if name not in slack_secrets.TOOLS or slack_secrets.enabled(self, run)]
 
@@ -461,10 +443,10 @@ class Credentials:
         suffix = '' if request['provider'] == 'anthropic' else '/v1'
         return {**result, 'instructions': 'Use credentials_http_request with this request_id. For Python SDKs, base_url=os.environ["MOYAI_CREDENTIAL_PROXY_URL"] + "/' + request['id'] + suffix + '", api_key=os.environ["WORKSPACE_RUN_TOKEN"]. Set max_retries=0 and stream=False. The endpoint is rebuilt each turn; do not hard-code it. No raw provider key is available. Provider charges are separate from Moyai gateway spend.'}
 
-    def pending_rows(self, conn: sqlite3.Connection, run_id: str, *, include_children: bool = False) -> list[sqlite3.Row]:
+    def pending_rows(self, conn: Connection, run_id: str, *, include_children: bool = False) -> list[DatabaseRow]:
         # Pending access belongs to the session and requester, not its latest turn.
         return conn.execute(f"""SELECT q.* FROM credential_requests q JOIN runs r ON r.id=q.run_id
-            WHERE (r.id=? OR (? AND r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))) AND r.deleted_at=''
+            WHERE (r.id=? OR (?=1 AND r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))) AND r.deleted_at=''
             AND r.status IN ({','.join('?' for _ in ACCESSIBLE)}) AND q.status='pending'
             ORDER BY q.created_at,q.id""", (run_id, include_children, run_id, *ACCESSIBLE)).fetchall()
 
@@ -592,9 +574,7 @@ class Credentials:
         else:
             deny_export(self.store, run['id'])
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            # Bind existing personal tokens only. Never create an organization
-            # secret form or Shared vault lookup from private chat content.
+            conn.begin_write()
             if private_slack:
                 saved = self.saved_choice(conn, run, args.model_dump(), args.secret_id)
                 if not saved or saved['scope'] != 'personal':
@@ -660,7 +640,7 @@ class Credentials:
                        **args.model_dump(exclude={'secret_id', 'source_checks'}), 'input_fields': input_fields, 'status': 'provided' if secret else 'pending', 'secret_id': secret['id'] if secret else '',
                        'created_at': now(), 'resolved_at': now() if secret else '', 'generation': 0, 'failure': '',
                        'revision': 1, 'secret_revision': secret['revision'] if secret else 1}
-                conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join(":" + key for key in row)})', row)
+                conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join("?" for key in row)})', tuple(row.values()))
                 self.audit_in(conn, actor, row['secret_id'], 'reused' if secret else 'requested', run['id'])
             if row['status'] in {'provided', 'declined', 'satisfied'}:
                 self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
@@ -694,7 +674,7 @@ class Credentials:
         if not self.store.rows('SELECT 1 FROM credential_requests WHERE run_id=? AND resolution_pending=1 LIMIT 1', (run_id,)):
             return
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run:
                 return
@@ -715,9 +695,7 @@ class Credentials:
                     self.enqueue_resolution_in(conn, run, row)
                 except ValueError as exc:
                     conn.execute('ROLLBACK TO credential_delivery')
-                    count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-                    detail = ('This session reached its 100-turn limit. Start a new session to continue.'
-                              if count >= 100 else str(exc))
+                    detail = str(exc)
                     if detail != row['resolution_error']:
                         conn.execute('UPDATE credential_requests SET resolution_error=? WHERE id=?', (detail, row['id']))
                         conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'credential',?,?,?)",
@@ -746,7 +724,7 @@ class Credentials:
 
     def resolve_external(self, run: dict[str, object], args: ResolveExternal) -> dict[str, object]:
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             current = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
             if (not current or current['deleted_at'] or current['status'] != 'running'
                     or not current['active_user_id'] or not current['token_hash']
@@ -771,7 +749,7 @@ class Credentials:
 
     def resolve(self, request_id, body, user_id, admin):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Credential request not found.')
@@ -847,7 +825,7 @@ class Credentials:
 
     def materialize(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             accepted = []
             for request_id in args.request_ids:
                 row, secret = self.authorized_request(conn, run, request_id)
@@ -870,7 +848,7 @@ class Credentials:
                 self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
             for _, secret in accepted:
                 if secret['name'] == '1password-shared' and secret['format'] == 'env':
-                    conn.execute('INSERT OR IGNORE INTO credential_source_uses VALUES(?,?,?,?)',
+                    conn.execute('INSERT INTO credential_source_uses VALUES(?,?,?,?) ON CONFLICT DO NOTHING',
                                  (run['id'], run['active_message_id'], secret['id'], secret['revision']))
             return {'status': 'ready', 'bindings': [{'request_id': row['id'], 'revision': row['revision'],
                     'name': secret['name'], 'format': secret['format'], 'env_var': secret['env_var'],
@@ -878,7 +856,7 @@ class Credentials:
 
     def report_failure(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row, secret = self.authorized_request(conn, run, args.request_id)
             if (row['status'] != 'provided' or not secret or row['revision'] != args.revision
                     or row['secret_revision'] != secret['revision']):
@@ -928,7 +906,7 @@ class Credentials:
 
     async def invoke(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             request, secret = self.authorized_request(conn, run, args.request_id)
             if secret:
                 request = self.binding_in(conn, request, secret)
@@ -946,7 +924,7 @@ class Credentials:
             raise HTTPException(422, 'Only supported inference and model-list routes are allowed.')
         if args.body.get('stream') or args.body.get('background'):
             raise HTTPException(422, 'Use non-streaming, foreground requests through the credential proxy.')
-        if self.slots.locked():
+        if await self.slots.is_full():
             raise HTTPException(429, 'Provider request capacity is busy. No provider call was made.')
         async with self.slots:
             self.acknowledge(run['id'], run['active_message_id'], request['id'], request['generation'])
@@ -978,7 +956,7 @@ class Credentials:
 
     def update_secret(self, secret_id, body, user_id, admin):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM provider_secrets WHERE id=? AND revoked_at=\'\'', (secret_id,)).fetchone()
             if not row or (row['scope'] == 'organization' and not admin) or (row['scope'] != 'organization' and row['owner_id'] != user_id):
                 raise HTTPException(404, 'Credentials not found.')
@@ -1009,7 +987,7 @@ class Credentials:
                 values['invalid_reason'] = ''
             values['label'] = values['label'].strip()
             fields = ('label', 'scope', 'lifetime', 'root_id', 'expires_at', 'owner_id', 'client_id', 'encrypted', 'invalid_reason')
-            conn.execute('UPDATE provider_secrets SET ' + ','.join(key + '=:' + key for key in fields) + ',revision=revision+1 WHERE id=:id', values)
+            conn.execute('UPDATE provider_secrets SET ' + ','.join(key + '=?' for key in fields) + ',revision=revision+1 WHERE id=?', (*(values[key] for key in fields), secret_id))
             self.audit_in(conn, user_id, secret_id, 'updated', values['root_id'])
             saved = dict(conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone())
         return self.metadata(saved, user_id, admin)
@@ -1041,7 +1019,7 @@ class Credentials:
                 if body.scope == 'personal' and not self.same_requester(user, root['active_user_id']):
                     raise HTTPException(403, 'Choose your own session for personal credentials.')
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 identity = self.insert_secret(conn, body, user, admin)
             return {'id': identity, 'saved': True}
 
@@ -1054,7 +1032,7 @@ class Credentials:
         async def revoke_key(secret_id: str, request: Request):
             user, admin = actor(request, True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone()
                 if not row or not (row['owner_id'] == user or (row['scope'] == 'organization' and admin)):
                     raise HTTPException(404, 'Credentials not found.')
@@ -1073,3 +1051,51 @@ class Credentials:
             return {'saved': True}
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS provider_secrets (
+                id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
+                scope TEXT NOT NULL, owner_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '',
+                encrypted TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
+                client_id TEXT NOT NULL, UNIQUE(owner_id,client_id)
+            );
+            CREATE TABLE IF NOT EXISTS credential_requests (
+                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                provider TEXT NOT NULL, reason TEXT NOT NULL, request_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', secret_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, resolved_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(run_id,message_id,request_key)
+            );
+            CREATE TABLE IF NOT EXISTS credential_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
+                secret_id TEXT NOT NULL, action TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS credential_source_uses (
+                run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL,
+                secret_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                PRIMARY KEY(run_id,message_id,secret_id,revision)
+            );
+        ''')
+        for table, fields in {
+            'provider_secrets': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                'env_var': "TEXT NOT NULL DEFAULT ''", 'lifetime': "TEXT NOT NULL DEFAULT 'persistent'",
+                'expires_at': "TEXT NOT NULL DEFAULT ''", 'invalid_reason': "TEXT NOT NULL DEFAULT ''",
+                'revision': 'INTEGER NOT NULL DEFAULT 1'},
+            'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
+                'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
+                'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
+                'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'",
+                'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
+                'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
+        }.items():
+            columns = conn.column_names(table)
+            for field, declaration in fields.items():
+                if field not in columns:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
+        conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")

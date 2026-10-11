@@ -54,7 +54,8 @@ def test_tools_switch_next_inference_preserving_history_files_and_admission_rece
     assert response.json()['effective'] == 'next_model_request'
     history += [{'role': 'assistant', 'content': 'The model switch succeeded.'}, {'role': 'user', 'content': 'Continue the same task.'}]
     assert client.post(endpoint, headers=headers, json={'model': ASTRA, 'messages': history}).status_code == 200
-    assert captured[-1]['model'] == GLM and captured[-1]['messages'] == history
+    # Requester-scoped instructions may precede the unchanged conversation.
+    assert captured[-1]['model'] == GLM and captured[-1]['messages'][-len(history):] == history
     assert app.state.store.run(run['id'])['snapshot_id'] == 'existing-workspace-snapshot'
     assert len(app.state.store.messages(run['id'])) == 1  # No fabricated user turn or replay.
     app.state.store.finish_message(run['id'], run['active_message_id'], 'Done using GLM')

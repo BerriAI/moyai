@@ -9,9 +9,6 @@ from fastapi import HTTPException
 from sandbox.broker_transport import CONTENT_TYPE
 
 
-MAX_STATE_BYTES = 2 * 1024 * 1024
-
-
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
@@ -99,11 +96,9 @@ class NativeSessions:
             if not isinstance(body['state'], dict):
                 raise HTTPException(422, 'Native state must be an opaque JSON object.')
             try:
-                size = len(encoded(body).encode())
+                encoded(body)
             except (TypeError, ValueError, RecursionError):
                 raise HTTPException(422, 'Invalid native state JSON.') from None
-            if size > MAX_STATE_BYTES:
-                raise HTTPException(413, 'Native state exceeds its storage limit.')
 
     def restored(self, conn, row, run, scope, body):
         if run['checkpoint_error']:
@@ -147,7 +142,7 @@ class NativeSessions:
         self.validate(body)
         lease, action = body['lease'], body['action']
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if (not run or run['deleted_at'] or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                     or not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']

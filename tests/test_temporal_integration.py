@@ -1,22 +1,106 @@
 """Real Temporal dev-server tests; the Modal boundary is a deterministic fake."""
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
+from temporalio.testing import ActivityEnvironment
 
 from app.agents import AgentCoordinator, Fanout
 from app.db import Store
+from app.security import Security
+from app.session_lifecycle import SessionLifecycle
 from app.session_workflow import SessionWorkflow
 from app.temporal_runtime import TemporalRunManager
 from test_durable import durable  # noqa: F401 -- shared fixture
+from test_workspace import recovery_catalog  # noqa: F401 -- actual broker declarations
 
 
 async def eventually(predicate, seconds=60):
     async with asyncio.timeout(seconds):
         while not predicate():
             await asyncio.sleep(0.1)
+
+
+async def test_wake_failure_does_not_restart_running_worker(durable, monkeypatch, caplog):
+    manager, cloud, run_id = durable
+    cloud.finished = False
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        manager.connect_temporal = AsyncMock(return_value=env.client)
+        await manager.recover()
+        try:
+            await eventually(lambda: manager.state(run_id).get('phase') == 'monitor', seconds=25)
+            original_worker = manager.worker
+            original_task = manager.worker_task
+            start = env.client.start_workflow
+            failed = False
+            async def flaky_start(*args, **kwargs):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise ConnectionError('private-provider-detail')
+                return await start(*args, **kwargs)
+            monkeypatch.setattr(env.client, 'start_workflow', flaky_start)
+            manager.submit(manager.store.run(run_id))
+            await eventually(lambda: failed)
+            revision = manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,))[0]['revision']
+            await eventually(lambda: manager.store.rows('SELECT delivered FROM durable_sessions WHERE run_id=?', (run_id,))[0]['delivered'] >= revision)
+            assert manager.worker is original_worker and manager.worker_task is original_task
+            assert manager.ready.is_set() and not original_task.done()
+            assert cloud.machines[0].alive and not cloud.terminations
+            assert 'private-provider-detail' not in caplog.text
+            cloud.finished = True
+            await eventually(lambda: manager.store.run(run_id)['status'] == 'idle')
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
+            await handle.terminate('Integration test complete')
+        finally:
+            await manager.shutdown()
+        assert manager.diagnostics_task.done()
+
+
+@pytest.mark.parametrize('failure_point', ['advance', 'state'])
+async def test_activity_timings_preserve_errors_without_payloads(durable, caplog, failure_point):
+    manager, _, run_id = durable
+    caplog.set_level('INFO', logger='uvicorn.error.moyai.scheduling')
+    manager.advance = AsyncMock(side_effect=ValueError('private-provider-detail'))
+    if failure_point == 'state':
+        def fail_state(run_id):
+            raise ValueError('private-provider-detail')
+        manager.state = fail_state
+    from temporalio.exceptions import ApplicationError
+    with pytest.raises(ApplicationError):
+        await ActivityEnvironment().run(manager.advance_session, run_id)
+    record = json.loads(next(r.message for r in caplog.records if r.name == 'uvicorn.error.moyai.scheduling'))
+    assert record['event'] == 'session_activity'
+    assert record['phase'] == ('idle' if failure_point == 'advance' else 'unknown')
+    assert record['schedule_to_start_ms'] >= 0 and record['duration_ms'] >= 0
+    assert record['error_type'] == 'ValueError' and 'private-provider-detail' not in caplog.text
+
+
+async def test_queue_trace_uses_newly_claimed_turn_and_is_optional(durable, monkeypatch):
+    from unittest.mock import Mock
+    manager, _, run_id = durable
+    captured = Mock()
+    manager.store.tracing = SimpleNamespace(runtime_phase=captured)
+    assert await ActivityEnvironment().run(manager.advance_session, run_id) is True
+    current = manager.state(run_id)
+    args = captured.call_args_list[-1].args
+    assert args[:3] == (run_id, current['message_id'], 'activity_queue')
+    assert args[4] >= args[3]
+
+    # A failure to reload tracing metadata after the step must not mask its result.
+    manager.advance = AsyncMock(return_value='receipt')
+    monkeypatch.setattr(manager, 'state', Mock(side_effect=[current, ValueError('private body')]))
+    assert await ActivityEnvironment().run(manager.advance_session, run_id) == 'receipt'
+
+    captured.reset_mock()
+    monkeypatch.setattr(manager, 'state', Mock(return_value={**current, 'phase': 'warm'}))
+    assert await ActivityEnvironment().run(manager.advance_session, run_id) == 'receipt'
+    captured.assert_not_called()  # Idle cleanup must not extend the previous turn.
 
 
 async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable):
@@ -41,6 +125,8 @@ async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable
             successor.connect_temporal = connect
             await successor.recover()
             await eventually(lambda: len([m for m in successor.store.messages(run_id) if m['role'] == 'assistant']) == 2)
+            # Answer publication can precede checkpoint and sandbox settlement.
+            await eventually(lambda: successor.store.run(run_id)['status'] == 'idle')
             assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == 2
             assert successor.store.run(run_id)['status'] == 'idle'
             handle = env.client.get_workflow_handle('moyai-session-' + run_id)
@@ -153,6 +239,7 @@ async def test_real_temporal_idle_timer_wakes_reuses_and_survives_restart(durabl
             manager.store.enqueue_message(run_id, 'Within the idle window', 'warm-followup')
             manager.submit(manager.store.run(run_id))
             await eventually(lambda: len([m for m in manager.store.messages(run_id) if m['role'] == 'assistant']) == 2)
+            await eventually(lambda: manager.state(run_id).get('phase') == 'warm')
             assert len(cloud.machines) == 1 and len(cloud.launches) == 2
             assert cloud.launch_tokens[0] != cloud.launch_tokens[1]
             deadline = manager.state(run_id)['idle_until']
@@ -172,6 +259,90 @@ async def test_real_temporal_idle_timer_wakes_reuses_and_survives_restart(durabl
             assert deadline >= first_deadline
             await handle.terminate('Integration test complete')
         finally:
+            if successor:
+                await successor.shutdown()
+            await manager.shutdown()
+
+
+@pytest.mark.parametrize('restart_state', ['warm', 'claimed', 'missing_journal', 'injected'])
+async def test_real_temporal_restart_recovers_confirmed_delete_before_cleanup_starts(durable, restart_state):
+    manager, cloud, run_id = durable
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    manager.settings.sandbox_idle_seconds = 300
+    checkpoints = SimpleNamespace(flush=AsyncMock())
+    connected = asyncio.Event()
+    if restart_state == 'warm':
+        connected.set()  # A warm workspace already has a live workflow owner.
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        async def connect():
+            await connected.wait()
+            return env.client
+        manager.connect_temporal = connect
+        successor = lifecycle = None
+        try:
+            if restart_state == 'warm':
+                await manager.recover()
+                await eventually(lambda: manager.state(run_id).get('phase') == 'warm', seconds=25)
+            else:
+                # A crash after claim commits, before begin_turn saves prepare.
+                manager.save(run_id, {'phase': 'idle'})
+                manager.store.claim_message(run_id)
+                if restart_state == 'missing_journal':
+                    manager.store.execute('DELETE FROM durable_sessions WHERE run_id=?', (run_id,))
+                elif restart_state == 'injected':
+                    # Legacy receipt left by an earlier stop; no active turn
+                    # remains to own it or produce an assistant response.
+                    manager.store.execute("UPDATE messages SET status='injected' WHERE run_id=?", (run_id,))
+                    manager.store.execute('UPDATE durable_sessions SET delivered=revision WHERE run_id=?', (run_id,))
+            saved = manager.store.messages(run_id)
+            launches = len(cloud.launches)
+            await manager.shutdown()
+            # The process disappears after persisting confirmation, before
+            # scheduling cleanup. Startup must reconstruct that operation.
+            SessionLifecycle(manager.store, Security(manager.settings), manager, checkpoints).request_delete(run_id, '', True)
+            if restart_state == 'injected':
+                manager.store.update_run(run_id, status='cancelled')
+            assert manager.store.run(run_id)['deletion_requested_at']
+            assert not manager.store.run(run_id)['deleted_at']
+            successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+            successor.connect_temporal = connect
+            lifecycle = SessionLifecycle(successor.store, Security(successor.settings), successor, checkpoints)
+            await successor.recover()
+            lifecycle.start()
+            await eventually(lambda: bool(successor.store.run(run_id)['deleted_at']), seconds=25)
+            assert successor.state(run_id).get('phase', 'idle') == 'idle'
+            assert len(cloud.launches) == launches
+            assert not any(machine.alive for machine in cloud.machines)
+            messages = successor.store.messages(run_id)
+            if restart_state == 'warm':
+                assert len(cloud.terminations) == 1 and messages == saved
+            else:
+                assert len(messages) == len(saved) and all(m['status'] == 'cancelled' for m in messages)
+                assert [{k: v for k, v in m.items() if k != 'status'} for m in messages] == [
+                    {k: v for k, v in m.items() if k != 'status'} for m in saved]
+                assert not successor.ready.is_set()
+            # Idle cleanup may finish before Temporal connects. Wait for the
+            # durable wake acknowledgement before requesting workflow history.
+            connected.set()
+            await eventually(lambda: successor.store.rows(
+                'SELECT 1 FROM durable_sessions WHERE run_id=? AND delivered>=revision AND delivered>0',
+                (run_id,)), seconds=25)
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            async with asyncio.timeout(25):
+                while True:
+                    history = await handle.fetch_history()
+                    if any(event.HasField('activity_task_completed_event_attributes') for event in history.events):
+                        break
+                    await asyncio.sleep(0.1)
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(history)
+            # The late wake must observe the tombstone without replaying work.
+            assert successor.store.messages(run_id) == messages
+            assert len(cloud.launches) == launches
+            assert not any(machine.alive for machine in cloud.machines)
+            await handle.terminate('Integration test complete')
+        finally:
+            if lifecycle:
+                await lifecycle.close()
             if successor:
                 await successor.shutdown()
             await manager.shutdown()
@@ -203,6 +374,16 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             first_state = manager.state(run_id)
             first_message = first_state['message_id']
             original_deadlines = (first_state['turn_started'], first_state['startup_deadline'])
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            # SQLite records startup_wait before the activity returns its
+            # backoff. Replace the worker only after Temporal owns that timer,
+            # or this can test activity replay without ever creating a timer.
+            async with asyncio.timeout(10):
+                while True:
+                    history = await handle.fetch_history()
+                    if any(event.HasField('timer_started_event_attributes') for event in history.events):
+                        break
+                    await asyncio.sleep(0.05)
             await manager.shutdown()
             assert cloud.machines[0].alive
             recovered = True
@@ -215,7 +396,6 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             assert len(cloud.launches) == 2 and len(cloud.machines) == 1
             assert resumed_deadlines == [original_deadlines]
             assert [m['content'] for m in successor.store.messages(run_id) if m['role']=='assistant'] == ['Saved answer']
-            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
             history = await handle.fetch_history()
             assert any(event.HasField('timer_started_event_attributes') for event in history.events)
             await Replayer(workflows=[SessionWorkflow]).replay_workflow(history)
@@ -227,10 +407,12 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             await manager.shutdown()
 
 
-async def test_real_temporal_model_recovery_timer_survives_worker_replacement(durable, tmp_path, monkeypatch):
+@pytest.mark.parametrize('read_name,read_status', [('agents_results', 502), ('github_repositories', 524)])
+async def test_real_temporal_model_recovery_timer_survives_worker_replacement(
+        durable, tmp_path, monkeypatch, recovery_catalog, read_name, read_status):
     from http.server import BaseHTTPRequestHandler
     from sandbox.startup import _read_with_reconnect
-    from sandbox.transport_recovery import recovery_marker
+    from agent.transport_recovery import recovery_marker
     from test_broker_transport import diagnostic_relay
     from test_context_recovery import runtime
     from test_durable import transport_failure_report
@@ -245,11 +427,10 @@ async def test_real_temporal_model_recovery_timer_survives_worker_replacement(du
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps([{'name': 'agents_results', 'annotations': {
-                'readOnlyHint': True, 'idempotentHint': True}}]).encode())
+            self.wfile.write(json.dumps(recovery_catalog).encode())
         def do_POST(self):
             self.rfile.read(int(self.headers['Content-Length']))
-            self.send_response(502)
+            self.send_response(read_status if self.path == '/tools/call' else 502)
             self.end_headers()
             self.wfile.write(b'{}')
     def bounded_read(request, reader, **options):
@@ -260,8 +441,8 @@ async def test_real_temporal_model_recovery_timer_survives_worker_replacement(du
         with diagnostic_relay(Edge) as (relay, client, diagnostics):
             agent.context.relay = relay
             assert client.get('/tools').status_code == 200
-            agent.journal.tool_started('results', 'agents_results', {})
-            response = client.post('/tools/call', json={'name': 'agents_results', 'arguments': {}})
+            agent.journal.tool_started('results', read_name, {})
+            response = client.post('/tools/call', json={'name': read_name, 'arguments': {}})
             agent.journal.tool_finished('results', f'Tool failed (HTTP {response.status_code}).')
             assert not relay.uncertain_tool and not relay.last_error
             assert response.status_code == 503

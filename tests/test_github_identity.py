@@ -56,6 +56,30 @@ def test_rename_updates_labels_without_changing_selection_or_authorization(ident
     assert not any(path.startswith('/repos/') for _, path, _ in provider.calls)
 
 
+@pytest.mark.parametrize('name,arguments', [
+    ('github_repositories', {}),
+    ('github_repository', {'repository_id': 202}),
+    ('github_checkout', {'repository_id': 202}),
+])
+def test_repeatable_broker_metadata_preserves_selection_and_never_publishes(identity, name, arguments):
+    app, client, run, headers, github, provider = identity
+    select(app, (101, 202))
+    app.state.store.execute('UPDATE runs SET github_repository_id=101,repo_url=? WHERE id=?',
+                            ('https://github.com/BerriAI/litellm', run))
+    tool = next(t for t in client.get(f'/broker/{run}/tools', headers=headers).json() if t['name'] == name)
+    assert tool['annotations']['readOnlyHint'] is tool['annotations']['idempotentHint'] is True
+    first = call(client, run, headers, name, **arguments)
+    assert 'error' not in first
+    assert call(client, run, headers, name, **arguments) == first
+    assert app.state.store.run(run)['github_repository_id'] == 101
+    assert app.state.store.run(run)['repo_url'] == 'https://github.com/BerriAI/litellm'
+    assert github.saved_credentials()['repository_ids'] == [101, 202]
+    assert all(method == 'GET' or (method == 'POST' and path.endswith('/access_tokens'))
+               for method, path, _ in provider.calls)
+    assert not app.state.store.rows('SELECT 1 FROM github_publications')
+    assert not app.state.store.rows('SELECT 1 FROM github_followups')
+
+
 def test_legacy_migration_preserves_subset_and_resolves_redirect_once(identity):
     app, client, run, headers, github, provider = identity
     github.save_app({'id': 123, 'slug': 'fixture', 'pem': 'fixture-key'})
@@ -122,14 +146,15 @@ def test_picker_is_admin_only_persists_ids_and_does_not_select_discovered_repos(
     assert client.post('/api/connections/github/repositories', json={'repository_ids': [101]}).status_code == 403
 
 
-def test_discovery_paginates_and_never_changes_selection(identity):
+@pytest.mark.parametrize('full_pages', [1, 101])
+def test_discovery_paginates_and_never_changes_selection(identity, full_pages):
     _, _, _, _, github, provider = identity
-    provider.metadata_pages = [[{**repository_data('BerriAI/litellm'), 'id': i, 'full_name': f'BerriAI/repo-{i}'} for i in range(1000, 1100)],
+    provider.metadata_pages = [[{**repository_data('BerriAI/litellm'), 'id': i, 'full_name': f'BerriAI/repo-{i}'} for i in range(1000, 1100)]] * full_pages + [
                                [{**repository_data('BerriAI/moyai'), 'id': 1100}]]
     result = asyncio.run(github.discover_repositories(10))
     assert len(result['repository_ids']) == 101 and result['repository_ids'][-1] == 1100
     assert github.saved_credentials()['repository_ids'] == [101]
-    assert sum(path == '/installation/repositories' for _, path, _ in provider.calls) == 2
+    assert sum(path == '/installation/repositories' for _, path, _ in provider.calls) == full_pages + 1
 
 
 def test_ambiguous_old_name_requires_an_id(identity):

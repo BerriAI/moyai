@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const fs=require('node:fs'),vm=require('node:vm');
+const fs=require('node:fs'),vm=require('./helpers/ui-vm.cjs');
 const script=fs.readFileSync('app/static/personal-slack.js','utf8');
 function setup(overrides={}) {
   const connection={connected:true,available:true,oauth_configured:true,label:'Alice <personal>',effective_source:'personal',health:'healthy',...overrides};
@@ -57,7 +57,7 @@ const app=fs.readFileSync('app/static/app.js','utf8');
 for(const [checked,locked,expected] of [[false,false,false],[true,false,true],[false,true,true]])test(`new-session payload private=${checked}, inherited lock=${locked}`,async()=>{
  const fields=Object.fromEntries(Object.entries({'#prompt':'Read Slack','#repo':'','#project-environment':'auto','#mode':'demo','#new-model':'demo','#new-harness':''}).map(([key,value])=>[key,{value}]));
  fields['#private-session']={checked};fields['#task-form']={querySelector:()=>({isConnected:true})};let body;
- const context={state:{sending:new Set(),attachments:{ids:()=>[],clear(){},lock(){}},newDraft:{private_locked:locked}},$:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'new-request'},api:async(path,options)=>{body=JSON.parse(options.body);return {id:'run'};},refreshRuns:async()=>{},openRun:async()=>{},autoSize(){},toast(e){throw Error(e);}};
+ const context={state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>[],clear(){},lock(){}},newDraft:{private_locked:locked}},$:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'new-request'},api:async(path,options)=>{body=JSON.parse(options.body);return {id:'run'};},stopStream(){},setView(){},sessionTitle:()=>'',renderSessionSubmission(){},showError(e){throw e;},refreshRuns:async()=>{},openRun:async()=>{},autoSize(){},toast(e){throw Error(e);}};
  vm.createContext(context);vm.runInContext(app.slice(app.indexOf('async function submitTask('),app.indexOf('\nasync function openRun(')),context);await context.submitTask({preventDefault(){}});assert.equal(body.private_session,expected);assert.equal(body.client_id,'new-request');
 });
 test('private retry locks inherited context and both rendering paths show privacy',()=>{

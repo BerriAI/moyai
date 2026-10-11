@@ -1,15 +1,19 @@
+import asyncio
+from collections.abc import Callable
 import hashlib
 import json
 import os
-import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .database import PostgresDatabase, sqlite_connection
 from .attachments import Attachments
 from .blob_storage import ArtifactStore, ObjectStorage
 from .slack_mentions import SlackMentions
+from .scheduling_diagnostics import age_ms, record, slow_database
 
 
 # Shared by scoped selection (before LIMIT) and the returned match excerpts.
@@ -17,13 +21,13 @@ from .slack_mentions import SlackMentions
 SESSION_SEARCH_CTE = """WITH search_input(term) AS (VALUES {terms}),
     searchable_sessions AS (
         SELECT r.id,r.parent_run_id,roots.root_id,term,
-            instr(unicode_lower(r.display_title || ' ' || r.agent_label || ' ' || r.prompt || ' ' || r.summary),term)>0 AS title_match,
-            (SELECT substr(m.content,max(1,instr(unicode_lower(m.content),term)-50),200)
+            strpos(unicode_lower(r.display_title || ' ' || r.agent_label || ' ' || r.prompt || ' ' || r.summary),term)>0 AS title_match,
+            (SELECT substr(m.content,greatest(1,strpos(unicode_lower(m.content),term)-50),200)
              FROM messages m WHERE m.run_id=r.id AND m.status!='deleted'
-                AND m.role IN ('user','assistant') AND instr(unicode_lower(m.content),term)>0
+                AND m.role IN ('user','assistant') AND strpos(unicode_lower(m.content),term)>0
              ORDER BY m.id DESC LIMIT 1) AS message_match,
-            CASE WHEN instr(unicode_lower(r.summary),term)>0
-                 THEN substr(r.summary,max(1,instr(unicode_lower(r.summary),term)-50),200) END AS summary_match
+            CASE WHEN strpos(unicode_lower(r.summary),term)>0
+                 THEN substr(r.summary,greatest(1,strpos(unicode_lower(r.summary),term)-50),200) END AS summary_match
         FROM runs r JOIN run_roots roots ON roots.run_id=r.id CROSS JOIN search_input WHERE r.deleted_at=''
     ), session_matches AS (
         SELECT id,parent_run_id,root_id,term,coalesce(message_match,summary_match,'') AS search_snippet
@@ -35,6 +39,22 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def database[**P, T](operation: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    # Connections are opened and closed within the operation's thread. Finish
+    # an outstanding write before propagating cancellation to its caller.
+    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        try:
+            await task
+        except Exception as exc:
+            # A failed, drained operation must not turn shutdown into an
+            # ordinary retry. Preserve both the cancellation and its cause.
+            raise cancelled from exc
+        raise
+
+
 def require_database_owner(path: Path) -> None:
     if hasattr(os, 'geteuid'):
         owner = (path if path.exists() else path.parent).stat().st_uid
@@ -44,18 +64,69 @@ def require_database_owner(path: Path) -> None:
 
 
 class Store:
-    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None):
+    # The sidebar does not display saved answers, errors or sandbox state. Keep
+    # the original prompt for title fallback/search and pending_result for the
+    # same saving/deleting status projection used by session detail.
+    SIDEBAR_COLUMNS = ('id', 'prompt', 'repo_url', 'mode', 'status', 'created_at',
+                       'updated_at', 'owner_id', 'active_user_id', 'chat_enabled',
+                       'model', 'parent_run_id', 'agent_group_id', 'agent_label',
+                       'display_title', 'active_message_id', 'side_chat_of',
+                       'deletion_requested_at', 'deleted_at', 'pending_result', 'private_owner_id')
+    SIDEBAR_CHILD_COLUMNS = ('id', 'parent_run_id', 'agent_label', 'status', 'mode',
+                             'created_at', 'updated_at', 'active_message_id',
+                             'deletion_requested_at', 'deleted_at', 'pending_result', 'private_owner_id')
+
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False, database_pool_size=8, runtime_role='standalone', runtime_settings=None, schema_mode='auto'):
+        if schema_mode not in {'auto', 'verify', 'migrate'}:
+            raise ValueError('Unknown schema mode.')
+        if schema_mode != 'auto' and not database_url:
+            raise ValueError('Explicit schema modes require PostgreSQL.')
+        self.schema_updates = schema_mode != 'verify'
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
         self.generation = 0
+        self.commit_listeners = set()
         self.default_model = default_model
         self.tracing = None
         self.memory_review = None
+        self.skill_learning = None
+        self.goals = None
+        self.public_delivery = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
+        self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
+            application_instance=application_instance, pool_size=database_pool_size, runtime_role=runtime_role,
+            runtime_settings=runtime_settings, schema_mode=schema_mode) if database_url else None
+        try:
+            self._initialize(directory, default_model, object_storage)
+        except BaseException:
+            if self.database:
+                self.database.close()
+            raise
+
+    def _initialize(self, directory, default_model, object_storage):
+        if self.schema_updates:
+            self._initialize_schema(default_model)
+            from .session_privacy import initialize_schema as initialize_privacy
+            initialize_privacy(self)
+            from .swarms import initialize_schema
+            initialize_schema(self)
+            from .swarm_chat import initialize_schema as initialize_swarm_chat
+            initialize_swarm_chat(self)
+            from .performance import initialize_schema as initialize_performance
+            initialize_performance(self)
+        if not self.database:
+            self.path.chmod(0o600)
+        self.objects = object_storage if object_storage is not None else ObjectStorage()
+        self.artifacts = ArtifactStore(self, directory)
+        self.attachments = Attachments(self)
+        self.slack_mentions = SlackMentions(self)
+
+    def _initialize_schema(self, default_model):
         with self.connect() as conn:
+            if not self.database:
+                conn.execute('PRAGMA journal_mode=WAL')
             conn.executescript("""
-                PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, prompt TEXT NOT NULL, repo_url TEXT NOT NULL,
                     mode TEXT NOT NULL, status TEXT NOT NULL, plugins TEXT NOT NULL,
@@ -159,7 +230,6 @@ class Store:
                     run_id TEXT PRIMARY KEY REFERENCES runs(id), status TEXT NOT NULL DEFAULT '',
                     refreshed_at REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0
                 );
-                PRAGMA optimize;
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL, linked_user_id TEXT REFERENCES users(id),
@@ -188,23 +258,22 @@ class Store:
                     pinned_at TEXT NOT NULL, PRIMARY KEY(owner_id, run_id)
                 );
             """)
-            if 'metadata' not in {row['name'] for row in conn.execute('PRAGMA table_info(slack_outbox)')}:
+            if 'client' not in conn.column_names('login_states'):
+                conn.execute("ALTER TABLE login_states ADD COLUMN client TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE INDEX IF NOT EXISTS login_states_client ON login_states(client, expires)")
+            if 'metadata' not in conn.column_names('slack_outbox'):
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
             for table, names in [('runs', ('owner_id', 'active_user_id', 'private_owner_id')), ('messages', ('user_id',))]:
-                existing = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+                existing = conn.column_names(table)
                 for name in names:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
-            conn.execute("""CREATE TRIGGER IF NOT EXISTS immutable_private_owner
-                BEFORE UPDATE OF private_owner_id ON runs
-                WHEN NEW.private_owner_id != OLD.private_owner_id
-                BEGIN SELECT RAISE(ABORT, 'Session privacy is immutable'); END""")
-            if 'github_repository_id' not in {r['name'] for r in conn.execute('PRAGMA table_info(runs)')}:
+            if 'github_repository_id' not in conn.column_names('runs'):
                 conn.execute('ALTER TABLE runs ADD COLUMN github_repository_id INTEGER')
             for name, default in [('environment_id', 'auto'), ('environment_build_id', ''), ('harness', 'hermes'), ('sandbox_provider', 'modal')]:
-                if name not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+                if name not in conn.column_names('runs'):
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(users)')}
+            columns = conn.column_names('users')
             for name in ('link_method', 'link_status', 'profile_checked_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE users ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
@@ -213,93 +282,121 @@ class Store:
                     conn.execute(f'ALTER TABLE users ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
             # Every pre-existing link was explicitly chosen by an administrator.
             conn.execute("UPDATE users SET link_method='manual',link_status='manual' WHERE linked_user_id IS NOT NULL AND link_method=''")
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(identity_audit)')}
+            columns = conn.column_names('identity_audit')
             for name in ('reason', 'previous_target_id'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE identity_audit ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
-            if 'active_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+            if 'active_message_id' not in conn.column_names('runs'):
                 conn.execute('ALTER TABLE runs ADD COLUMN active_message_id INTEGER')
-            if "model_calls" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
+            if "model_calls" not in conn.column_names('runs'):
                 conn.execute("ALTER TABLE runs ADD COLUMN model_calls INTEGER NOT NULL DEFAULT 0")
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+            columns = conn.column_names('runs')
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at', 'deleted_at'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at', 'deleted_at', 'deletion_requested_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
-            for action in ('INSERT', 'UPDATE OF parent_run_id,side_chat_of,private_owner_id'):
-                suffix = 'insert' if action == 'INSERT' else 'update'
-                conn.execute(f"""CREATE TRIGGER IF NOT EXISTS private_derivation_{suffix}
-                    BEFORE {action} ON runs
-                    WHEN ((NEW.parent_run_id!='' OR NEW.side_chat_of!='') AND NEW.private_owner_id!='')
-                      OR EXISTS(SELECT 1 FROM runs p WHERE p.id IN (NEW.parent_run_id,NEW.side_chat_of)
-                                AND p.private_owner_id!='')
-                    BEGIN SELECT RAISE(ABORT, 'Private session derivation is disabled'); END""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_pending_deletion ON runs(deletion_requested_at,id) WHERE parent_run_id='' AND deletion_requested_at!='' AND deleted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_owner ON runs(owner_id,id)')
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_participant ON messages(user_id,run_id) WHERE role='user'")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_users_linked ON users(linked_user_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
             # Durable direct-parent edges own ancestry. UNION bounds corrupt
             # cycles; rootless/orphaned chains never gain another root's scope.
-            conn.execute("""CREATE VIEW IF NOT EXISTS run_ancestry AS
+            conn.create_view('run_ancestry', """
                 WITH RECURSIVE tree(ancestor_id,run_id) AS (
                     SELECT id,id FROM runs UNION
                     SELECT tree.ancestor_id,r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
                 ) SELECT ancestor_id,run_id FROM tree""")
-            conn.execute("""CREATE VIEW IF NOT EXISTS run_roots AS
+            conn.create_view('run_roots', """
                 SELECT a.run_id,r.id AS root_id FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id
                 WHERE r.parent_run_id=''""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_title_backfill ON runs(created_at DESC,id DESC) WHERE chat_enabled=1 AND parent_run_id='' AND agent_label='' AND display_title='' AND title_attempted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_side_chat ON runs(side_chat_of,created_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent_updated ON runs(parent_run_id,updated_at DESC,created_at DESC,id DESC)')
-            if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
+            if 'model' not in conn.column_names('messages'):
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}
+            columns = conn.column_names('messages')
+            for name, default in (('input_kind', 'user'), ('source_json', '{}'), ('reply_policy', 'respond')):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE messages ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             for name in ('revision', 'queue_locked', 'send_immediately'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE messages ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
             if 'started_at' not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
                 conn.execute("UPDATE messages SET started_at=created_at WHERE status!='queued'")
+            if 'response_to_id' not in columns:
+                conn.execute('ALTER TABLE messages ADD COLUMN response_to_id INTEGER')
+            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_response_to ON messages(run_id,response_to_id)')
             if 'steering_parent_id' not in columns:
                 conn.execute('ALTER TABLE messages ADD COLUMN steering_parent_id INTEGER')
-            if 'steer_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+            if 'steer_message_id' not in conn.column_names('runs'):
                 conn.execute('ALTER TABLE runs ADD COLUMN steer_message_id INTEGER')
             if default_model:
                 conn.execute("UPDATE runs SET model=? WHERE model=''", (default_model,))
                 conn.execute("UPDATE runs SET active_model=model WHERE active_model='' AND status NOT IN ('idle','completed','failed','cancelled','interrupted')")
                 conn.execute("UPDATE messages SET model=(SELECT model FROM runs WHERE runs.id=messages.run_id) WHERE model='' AND status IN ('queued','running')")
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(slack_events)")}
+            columns = conn.column_names('slack_events')
             for name, default in (("mention_ts", ""), ("context_status", "legacy"), ("context_json", "{}")):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE slack_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
-        self.path.chmod(0o600)
-        self.objects = object_storage if object_storage is not None else ObjectStorage()
-        self.artifacts = ArtifactStore(self, directory)
-        self.attachments = Attachments(self)
-        self.slack_mentions = SlackMentions(self)
 
     @contextmanager
-    def connect(self):
-        require_database_owner(self.path)
-        conn = sqlite3.connect(self.path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.create_function('unicode_lower', 1, str.lower, deterministic=True)
-        conn.execute("PRAGMA foreign_keys=ON")
+    def connect(self, *, write_scope=None):
+        started = time.monotonic()
         try:
-            with conn:
-                yield conn
-            if conn.total_changes:
-                self.generation += 1
+            if self.database:
+                with self.database.connect(write_scope=write_scope) as conn:
+                    conn.commit_callbacks = []
+                    yield conn
+                if conn.changed:
+                    self.generation += 1
+                    for listener in tuple(self.commit_listeners):
+                        listener()
+                for callback in conn.commit_callbacks:
+                    callback()
+                return
+            require_database_owner(self.path)
+            conn = sqlite_connection(self.path)
+            conn.commit_callbacks = []
+            try:
+                with conn:
+                    yield conn
+                if conn.total_changes:
+                    self.generation += 1
+                    for listener in tuple(self.commit_listeners):
+                        listener()
+                for callback in conn.commit_callbacks:
+                    callback()
+            finally:
+                conn.close()
         finally:
-            conn.close()
+            # Include pool acquisition, lock waits, commit/rollback and close
+            # for either backend, including failed connection attempts.
+            slow_database(started, backend='postgresql' if self.database else 'sqlite')
 
-    def execute(self, sql, params=()):
+    def close(self):
+        self.objects.close()
+        if self.database:
+            self.database.close()
+
+    def column_names(self, table):
         with self.connect() as conn:
+            return conn.column_names(table)
+
+    def table_names(self):
+        with self.connect() as conn:
+            return conn.table_names()
+
+    def execute(self, sql, params=(), *, write_scope=None):
+        with self.connect(write_scope=write_scope) as conn:
             return conn.execute(sql, params).rowcount
 
-    def rows(self, sql, params=()):
+    def rows(self, sql, params=(), *, connection=None):
+        if connection is not None:
+            return [dict(row) for row in connection.execute(sql, params)]
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params)]
 
@@ -332,8 +429,33 @@ class Store:
             result.update({row['id']: {key: bool(row[key]) for key in ('pinned', 'participated', 'slack_connected')} for row in rows})
         return result
 
+    def conversation_metadata_in(self, connection, run, actor):
+        """Read viewer/root labels together, using the message snapshot's slot."""
+        root_id = self.root_id_in(connection, run['id']) if run['parent_run_id'] else run['id']
+        prefix, params = self.sidebar_scope(actor)
+        row = self.rows(prefix + '''SELECT r.deleted_at,
+            owner.id AS owner_id,owner.email AS owner_email,owner.name AS owner_name,
+            COALESCE(NULLIF(linked.email,''),NULLIF(viewer.email,''),linked.name,viewer.name,'') AS feedback_author,
+            EXISTS(SELECT 1 FROM session_archives a WHERE a.run_id=r.id AND a.owner_id=?) AS archived,
+            EXISTS(SELECT 1 FROM session_pins p WHERE p.run_id=r.id AND p.owner_id=?) AS pinned,
+            (r.id IN (SELECT id FROM mine) AND r.owner_id NOT IN (SELECT id FROM identities)) AS participated,
+            (EXISTS(SELECT 1 FROM slack_events e WHERE e.run_id=r.id)
+                OR EXISTS(SELECT 1 FROM slack_threads t WHERE t.run_id=r.id)) AS slack_connected,
+            EXISTS(SELECT 1 FROM published_artifacts WHERE run_id=?) AS has_published_artifacts
+            FROM runs r LEFT JOIN users owner ON owner.id=?
+            LEFT JOIN users viewer ON viewer.id=? LEFT JOIN users linked ON linked.id=viewer.linked_user_id
+            WHERE r.id=?''', [*params, actor, actor, run['id'], run['owner_id'], actor, root_id],
+            connection=connection)[0]
+        return {'workflow_root_id': root_id,
+                'owner': {key: row['owner_' + key] for key in ('id', 'email', 'name')} if row['owner_id'] else None,
+                'feedback_author': row['feedback_author'] or actor,
+                'archived': bool(row['archived']),
+                'has_published_artifacts': bool(row['has_published_artifacts']),
+                'sidebar': {key: bool(row[key]) for key in ('pinned', 'participated', 'slack_connected')}
+                           if not row['deleted_at'] else {}}
+
     @staticmethod
-    def session_view_owner_in(conn: sqlite3.Connection, user_id: str) -> str:
+    def session_view_owner_in(conn, user_id: str) -> str:
         """Resolve shared-workspace view links, never authentication or authorship."""
         linked = conn.execute("""SELECT target.id FROM users source JOIN users target
             ON target.id=source.linked_user_id AND target.kind IN ('google','cloudflare')
@@ -377,7 +499,7 @@ class Store:
             if search_folders and archive_owner is not None and archived is False:
                 missing += """ AND NOT EXISTS(SELECT 1 FROM session_folder_memberships m
                     JOIN session_folders f ON f.id=m.folder_id AND f.owner_id=m.owner_id
-                    WHERE m.run_id=runs.id AND m.owner_id=? AND instr(unicode_lower(f.name),needle.term)>0)"""
+                    WHERE m.run_id=runs.id AND m.owner_id=? AND strpos(unicode_lower(f.name),needle.term)>0)"""
                 params.append(archive_owner)
             predicate += ' AND NOT EXISTS(SELECT 1 FROM search_input needle WHERE ' + missing + ')'
         predicate += " AND (private_owner_id='' OR private_owner_id=?)"
@@ -425,31 +547,50 @@ class Store:
     def subtree(self, run_id: str):
         return self.subtrees([run_id])
 
-    def subtrees(self, run_ids):
+    def subtrees(self, run_ids, *, sidebar=False):
         rows = []
+        columns = ','.join('r.' + key for key in self.SIDEBAR_CHILD_COLUMNS) if sidebar else 'r.*'
         for offset in range(0, len(run_ids), 400):
             batch = run_ids[offset:offset + 400]
             rows.extend(self.rows("""WITH RECURSIVE tree(ancestor_id,run_id) AS (
                 SELECT id,id FROM runs WHERE id IN (""" + ','.join('?' for _ in batch) + """) UNION
                 SELECT tree.ancestor_id,r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
-            ) SELECT r.*,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
+            ) SELECT """ + columns + """,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
         return rows
 
-    def run(self, run_id: str):
-        rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,))
+    def runs_by_ids(self, run_ids, *, sidebar=False):
+        """Read a bounded batch while retaining the caller's recency ordering."""
+        rows = {}
+        columns = ','.join(self.SIDEBAR_COLUMNS) if sidebar else '*'
+        for offset in range(0, len(run_ids), 400):
+            batch = run_ids[offset:offset + 400]
+            for row in self.rows('SELECT ' + columns + ' FROM runs WHERE id IN (' + ','.join('?' for _ in batch) + ')', batch):
+                if not sidebar:
+                    row['plugins'] = json.loads(row['plugins'])
+                rows[row['id']] = row
+        return [rows[run_id] for run_id in run_ids if run_id in rows]
+
+    def run(self, run_id: str, *, connection=None):
+        rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,), connection=connection)
         if not rows:
             return None
         row = rows[0]
         row["plugins"] = json.loads(row["plugins"])
+        mission = self.rows('SELECT * FROM swarm_missions WHERE run_id=?', (run_id,), connection=connection)
+        if mission:
+            from .swarms import public_mission
+            row['swarm'] = public_mission(mission[0])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, private_owner_id=''):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None, received_at=None, private_owner_id=''):
         if private_owner_id:
-            owners = self.rows("SELECT kind FROM users WHERE id=?", (private_owner_id,))
+            owners = self.rows('SELECT kind FROM users WHERE id=?', (private_owner_id,))
             if private_owner_id != user_id or not owners or owners[0]['kind'] not in {'google', 'cloudflare'}:
                 raise ValueError('Private sessions require a verified individual owner.')
-            if not chat_enabled or side_chat_of:
-                raise ValueError('Private sessions require a direct chat without derivation.')
+            if not chat_enabled or side_chat_of or swarm_budget_seconds is not None:
+                raise ValueError('Private sessions require a direct chat without derivation or swarms.')
+        if swarm_budget_seconds is not None and (not chat_enabled or mode != 'modal' or metadata_request or not durable_submit):
+            raise ValueError('Swarm mode requires a durable cloud chat session.')
         sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
         run_id = uuid4().hex
         stamp = now()
@@ -457,12 +598,19 @@ class Store:
         from .harnesses import validate_harness
         validate_harness(harness, model)
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at,r.private_owner_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at,r.deletion_requested_at,r.private_owner_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
-                    if previous['deleted_at']:
+                    if previous['deleted_at'] or previous['deletion_requested_at']:
                         raise ValueError('This session was deleted. Start a new session.')
+                    mission = conn.execute('SELECT budget_seconds FROM swarm_missions WHERE run_id=?', (previous['run_id'],)).fetchone()
+                    original_time = conn.execute("SELECT data FROM events WHERE run_id=? AND json_text(data,'phase')='swarm_initial_time' ORDER BY id LIMIT 1",
+                                                 (previous['run_id'],)).fetchone() if mission else None
+                    initial_budget = (json.loads(original_time['data'])['budget_seconds'] if original_time
+                                      else mission['budget_seconds'] if mission else None)
+                    if initial_budget != swarm_budget_seconds:
+                        raise ValueError('That submission ID was already used for different content.')
                     if (previous['private_owner_id'] != private_owner_id or previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
@@ -470,20 +618,20 @@ class Store:
                     return self.run(previous['run_id'])
             context = ''
             if side_chat_of:
-                parent = conn.execute("SELECT prompt,summary,private_owner_id FROM runs WHERE id=? AND deleted_at=''", (side_chat_of,)).fetchone()
+                parent = conn.execute("SELECT prompt,summary,private_owner_id FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''", (side_chat_of,)).fetchone()
                 if not parent:
                     raise ValueError('The original session no longer exists.')
                 if parent['private_owner_id']:
                     raise ValueError('Private sessions cannot create side chats.')
-                recent = conn.execute("SELECT role,content FROM messages WHERE run_id=? AND status NOT IN ('queued','deleted') ORDER BY id DESC LIMIT 30", (side_chat_of,)).fetchall()
-                context_data = {'task': parent['prompt'][:4000], 'latest_result': parent['summary'][:8000],
-                                'conversation': [dict(row) | {'content': row['content'][:3000]} for row in reversed(recent)]}
-                while len(json.dumps(context_data, ensure_ascii=False)) > 48000:
-                    if context_data['conversation']:
-                        context_data['conversation'].pop(0)
-                    else:
-                        field = max(('task', 'latest_result'), key=lambda key: len(context_data[key]))
-                        context_data[field] = context_data[field][:len(context_data[field]) // 2]
+                messages = conn.execute('''SELECT id,role,content,status,user_id,created_at,input_kind,source_json,response_to_id
+                    FROM messages WHERE run_id=? AND status!='deleted' ORDER BY id''', (side_chat_of,)).fetchall()
+                conversation = []
+                for row in messages:
+                    item = dict(row)
+                    item['source'] = json.loads(item.pop('source_json'))
+                    conversation.append(item)
+                context_data = {'source_run_id':side_chat_of, 'captured_at':stamp,
+                                'task':parent['prompt'], 'latest_result':parent['summary'], 'conversation':conversation}
                 context = json.dumps(context_data, ensure_ascii=False)
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
             if pending >= self.max_pending_runs and not metadata_request:
@@ -496,13 +644,22 @@ class Store:
             if side_chat_of:
                 conn.execute('UPDATE runs SET side_chat_of=?,side_chat_context=?,agent_label=? WHERE id=?', (side_chat_of, context, 'Side chat · ' + prompt[:70], run_id))
             if chat_enabled:
-                message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).lastrowid
+                message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?) RETURNING id", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).fetchone()[0]
                 self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
                 if metadata_request:
                     from .session_metadata import complete_in
                     complete_in(conn, run_id, message_id, stamp, initial=True)
+                else:
+                    from .performance import submitted_in
+                    submitted_in(conn, run_id, message_id, 'new_chat', stamp, received_at=received_at)
             elif attachment_ids:
                 raise ValueError('Attachments require a chat session.')
+            if swarm_budget_seconds is not None:
+                from .swarms import create_in
+                create_in(conn, run_id, swarm_budget_seconds, stamp)
+                if swarm_bootstrap:
+                    swarm_bootstrap(conn, run_id, message_id, stamp)
+                durable_submit(conn, {'id': run_id})
         if not metadata_request:
             self.event(run_id, "status", "Task queued")
         return self.run(run_id)
@@ -515,7 +672,7 @@ class Store:
         from .harnesses import validate_harness
         validate_harness(harness, model)
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.begin_write()
             if conn.execute("SELECT 1 FROM slack_events WHERE event_id=?", (event_id,)).fetchone():
                 return None
             actor_id = self.slack_identity_in(conn, team_id, user_id)
@@ -525,7 +682,7 @@ class Store:
             conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id,harness) VALUES(?,?,'','modal','queued',?,?,?,1,?,?,?)",
                          (run_id, prompt, json.dumps(plugins), stamp, stamp, model, actor_id, harness))
             conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (getattr(self, 'sandbox_provider', lambda: 'modal')(), run_id))
-            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, model, actor_id)).lastrowid
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?) RETURNING id", (run_id, prompt, stamp, model, actor_id)).fetchone()[0]
             self.slack_mentions.queue_in(conn, message_id, team_id, prompt)
             if file_ids:
                 message_id = conn.execute('SELECT id FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]
@@ -548,16 +705,19 @@ class Store:
             context.update(kind='thread', messages=messages,
                            truncated=any(item.get('text_truncated') for item in messages),
                            warning='Neighboring channel messages are excluded.')
+        elif getattr(self, 'slack_sources', None):
+            context.update(self.slack_sources.snapshot(run_id))
         return {**context, **row}
 
-    def messages(self, run_id):
+    def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
-            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,
-            COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
+            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,m.input_kind,m.source_json,m.reply_policy,
+            m.client_id LIKE 'swarm:%' AS swarm_generated,
+            CASE WHEN m.input_kind='observation' THEN 'Slack observation' WHEN m.input_kind='delegation' THEN 'Agent guidance' WHEN m.input_kind='automation' THEN 'Scheduled workflow' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),
-                (SELECT substr(m.user_id,7,instr(substr(m.user_id,7),':')-1) FROM slack_events e
+                (SELECT substr(m.user_id,7,strpos(substr(m.user_id,7),':')-1) FROM slack_events e
                  WHERE e.run_id=m.run_id AND m.client_id='initial'
                    AND m.user_id LIKE 'slack:%:'||e.user_id LIMIT 1)) AS slack_message_team,
             (SELECT r.user_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
@@ -568,8 +728,10 @@ class Store:
             LEFT JOIN users linked ON linked.id=u.linked_user_id
             WHERE m.run_id=? AND m.status!='deleted'
             ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,
-                COALESCE(NULLIF(m.started_at,''),m.created_at),m.id""", (run_id,))
+                COALESCE(NULLIF(m.started_at,''),m.created_at),m.id""", (run_id,), connection=connection)
         for message in messages:
+            if message.pop('swarm_generated'):
+                message['source'] = 'swarm'
             slack_user = message.pop('slack_reply_user')
             name, email = message.pop('sender_name'), message.pop('sender_email')
             prefix = f'Slack reply from {slack_user}:\n'
@@ -580,7 +742,7 @@ class Store:
                 if name in {'', slack_user, 'Slack ' + slack_user, message['user_id']}:
                     name = (email or '').strip() or 'Slack teammate'
                 message['display_content'] = f'Slack reply from {name}:\n' + message['content'][len(prefix):]
-        self.slack_mentions.decorate(messages)
+        self.slack_mentions.decorate(messages, connection=connection)
         # Inputs that never started (cancelled/failed while waiting) stay where
         # they were sent: before the first later-sent input that did run.
         ordered = [m for m in messages if not (m['role'] == 'user' and not m['started_at'])]
@@ -589,20 +751,20 @@ class Store:
                           and (m['created_at'], m['id']) > (orphan['created_at'], orphan['id'])), len(ordered))
             ordered.insert(index, orphan)
         messages = ordered + [m for m in messages if m['role'] == 'user' and not m['started_at'] and m['status'] == 'queued']
-        return self.attachments.messages(run_id, messages)
+        return self.attachments.messages(run_id, messages, connection=connection)
 
     def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.begin_write()
             result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=True)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, restore_archived):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, human_control=False, restore_archived):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        if row and row['deleted_at']:
+        if row and (row['deleted_at'] or row['deletion_requested_at']):
             raise ValueError('This session was deleted. Start a new session.')
         if not row or not row["chat_enabled"]:
             raise ValueError("This older task has no saved chat workspace. Start a new session.")
@@ -614,32 +776,39 @@ class Store:
                     or self.attachments.message_ids(conn, existing['id']) != set(attachment_ids or [])):
                 raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
+        from .swarms import execution_policy, prepare_human_message_in, remaining_seconds
+        # Only authenticated human transports opt into changing a swarm's
+        # lifetime. Tool/peer/automatic messages cannot renew their own budget.
+        # This follows the receipt check so retried extensions apply once.
+        if human_control and not metadata_request and not row['parent_run_id']:
+            prepare_human_message_in(conn, run_id, content)
+            row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+        mission = execution_policy(self, run_id, connection=conn)
+        if mission and (mission['status'] != 'active' or remaining_seconds(mission) <= 0):
+            if mission['status'] in {'paused', 'blocked'} and remaining_seconds(mission) > 0:
+                raise ValueError('Resume the swarm before sending a new message. Your draft has not been sent.')
+            raise ValueError('This swarm has ended. Start a new mission to continue.')
         if metadata_request:
             from .session_metadata import complete_in
-            count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-            if count >= 100:
-                raise ValueError('This session allows 100 turns. Start a new session.')
             stamp = now()
             model = model if model is not None else row['model'] or self.default_model
-            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?)",
-                                     (run_id, content, client_id, stamp, model, user_id)).lastrowid
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?) RETURNING id",
+                                     (run_id, content, client_id, stamp, model, user_id)).fetchone()[0]
             complete_in(conn, run_id, message_id, stamp)
             return {'id': message_id, 'status': 'completed', 'model': model}, True
         if row["status"] == "stopping":
             raise ValueError("Wait for the current response to stop before sending another message.")
         if send_now and not send_immediately and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():
             raise ValueError('Moyai is already picking up another queued message. Wait or queue this normally.')
-        pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
-        count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-        if pending >= 5 or count >= 100:
-            raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
         if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= self.max_pending_runs and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
             raise ValueError("The session queue is full. Wait for a response to finish.")
         stamp = now()
         model = model if model is not None else row['model'] or self.default_model
         from .harnesses import validate_harness
         validate_harness(row['harness'], model)
-        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?)", (run_id, content, client_id, stamp, model, user_id, send_immediately)).lastrowid
+        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?) RETURNING id", (run_id, content, client_id, stamp, model, user_id, send_immediately)).fetchone()[0]
+        from .performance import submitted_in
+        submitted_in(conn, run_id, message_id, 'follow_up', stamp, send_now=send_now, immediate=send_immediately)
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         if restore_archived:
             conn.execute('DELETE FROM session_archives WHERE owner_id=? AND run_id=?',
@@ -658,42 +827,94 @@ class Store:
 
     def claim_message(self, run_id):
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            run = conn.execute("SELECT status,steer_message_id,deleted_at FROM runs WHERE id=?", (run_id,)).fetchone()
-            if not run or run['deleted_at'] or run["status"] in {"stopping", "cancelled", "interrupted"}:
+            conn.begin_write()
+            run = conn.execute("SELECT status,steer_message_id,deleted_at,deletion_requested_at FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not run or run['deleted_at'] or run['deletion_requested_at'] or run["status"] in {"stopping", "cancelled", "interrupted"}:
                 return None
             if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone():
                 return None
-            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 WHEN send_immediately=1 THEN 1 ELSE 2 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
+            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 WHEN send_immediately=1 THEN 1 WHEN client_id LIKE 'swarm:%' THEN 3 ELSE 2 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
             if not row:
                 return None
-            conn.execute("UPDATE messages SET status='running',started_at=? WHERE id=?", (now(), row["id"]))
+            picked_at = now()
+            conn.execute("UPDATE messages SET status='running',started_at=? WHERE id=?", (picked_at, row["id"]))
+            from .performance import picked_up_in
+            picked_up_in(conn, row['id'], picked_at, 'turn')
             if row['id'] == run['steer_message_id']:
                 conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=?', (run_id,))
             conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',pending_result='',active_model=?,active_user_id=?,active_message_id=? WHERE id=?", (row['model'], row['user_id'], row['id'], run_id))
+        record('session_turn_claimed', run_id=run_id, message_id=row['id'], queue_wait_ms=age_ms(row['created_at']))
         self.event(run_id, "chat", "Response started", {"message_id": row["id"], "model": row['model']})
         return dict(row)
 
+    def save_answer_in(self, conn, run_id, message_id, content, status):
+        # Server-owned source identity survives receipt, settlement and restart.
+        # A replayed receipt cannot reopen or replace a settled answer.
+        conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id,response_to_id)
+            SELECT ?,'assistant',?,?,?,CASE WHEN r.active_message_id=m.id AND r.active_model!=''
+            THEN r.active_model ELSE m.model END,m.user_id,m.id
+            FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=? AND m.run_id=?
+            ON CONFLICT(run_id,response_to_id) DO UPDATE SET content=excluded.content,
+                status=excluded.status,model=excluded.model
+            WHERE messages.status='saving' AND excluded.status!='saving'""",
+                     (run_id, content, status, now(), message_id, run_id))
+
+    def finish_message_in(self, conn, run_id, message_id, content, status):
+        changed = conn.execute("UPDATE messages SET status=? WHERE id=? AND run_id=? AND status='running'", (status, message_id, run_id)).rowcount
+        if not changed:
+            # Older interruption paths may have settled the input alone. Repair
+            # only its still-saving answer, never rewrite a terminal outcome.
+            source = conn.execute("SELECT status FROM messages WHERE id=? AND run_id=? AND role='user'", (message_id, run_id)).fetchone()
+            answer = conn.execute('SELECT status FROM messages WHERE run_id=? AND response_to_id=?', (run_id, message_id)).fetchone()
+            goal = self.goals.current(conn, run_id) if self.goals else None
+            missing_goal_report = not answer and goal and goal['status'] in {'active', 'wrapping'}
+            if (not source or source['status'] != status or status in {'running', 'queued', 'injected'}
+                    or not ((answer and answer['status'] == 'saving') or missing_goal_report)):
+                return
+        conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
+        conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
+        if self.goals:
+            content = self.goals.settle_in(conn, run_id, message_id, content, status)
+        if status != 'steered':
+            self.save_answer_in(conn, run_id, message_id, content, status)
+        else:
+            conn.execute("UPDATE messages SET status='steered' WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id))
+        if self.public_delivery:
+            self.public_delivery(conn, run_id)
+        if self.tracing:
+            # Commit the answer and its pending span together. A crash
+            # after saving the answer must not lose its root trace.
+            self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
+        if status == 'completed' and self.memory_review:
+            self.memory_review.enqueue_in(conn, message_id)
+        if status == 'completed' and self.skill_learning:
+            self.skill_learning.enqueue_in(conn, message_id)
+        return content
+
     def finish_message(self, run_id, message_id, content, status="completed"):
-        with self.connect() as conn:
-            changed = conn.execute("UPDATE messages SET status=? WHERE id=? AND run_id=? AND status='running'", (status, message_id, run_id)).rowcount
-            if changed:
-                conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
-                conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
-                if status != 'steered':
-                    # Input models remain the original admission receipt. The
-                    # answer records the final model after a conversational switch.
-                    conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id)
-                        SELECT ?,'assistant',?,?,?,CASE WHEN r.active_message_id=m.id AND r.active_model!=''
-                        THEN r.active_model ELSE m.model END,m.user_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=?""",
-                                 (run_id, content, status, now(), message_id))
-                if self.tracing:
-                    # Commit the answer and its pending span together. A crash
-                    # after saving the answer must not lose its root trace.
-                    self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
-                if status == 'completed' and self.memory_review:
-                    self.memory_review.enqueue_in(conn, message_id)
+        with self.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            saved = self.finish_message_in(conn, run_id, message_id, content, status)
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
+        if saved is not None:
+            return saved
+        answers = self.rows('SELECT content FROM messages WHERE run_id=? AND response_to_id=?', (run_id, message_id))
+        return answers[0]['content'] if answers else content
+
+    def interrupt_messages(self, run_id, status='interrupted'):
+        """Retire orphaned inputs and published answers together, without replay."""
+        with self.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            conn.execute("UPDATE messages SET status=? WHERE run_id=? AND status IN ('running','queued','injected')", (status, run_id))
+            answers = conn.execute("""SELECT a.response_to_id,a.content,m.status FROM messages a
+                JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                WHERE a.run_id=? AND a.status='saving'""", (run_id,)).fetchall()
+            for answer in answers:
+                self.finish_message_in(conn, run_id, answer['response_to_id'], answer['content'], answer['status'])
+            if self.goals:
+                run = conn.execute('SELECT active_message_id FROM runs WHERE id=?', (run_id,)).fetchone()
+                if run and run['active_message_id']:
+                    self.finish_message_in(conn, run_id, run['active_message_id'], '', status)
 
     def has_queued_messages(self, run_id):
         return bool(self.rows("SELECT id FROM messages WHERE run_id=? AND status='queued' LIMIT 1", (run_id,)))
@@ -712,7 +933,7 @@ class Store:
             name = 'Local preview' if info.get('method') == 'local' else 'Shared password sign-in'
         stamp = now()
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             old = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
             conn.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name,updated_at=excluded.updated_at',
                          (user_id, kind, email, name, stamp, stamp))
@@ -720,6 +941,38 @@ class Store:
                 for value in {email, old['email'] if old else email}:
                     self.reconcile_email_in(conn, value)
         return user_id
+
+    def access_actor(self, identity):
+        """Read a pinned account from this request's verified Access claims."""
+        with self.connect() as conn:
+            return self.access_actor_in(conn, identity)
+
+    @staticmethod
+    def access_actor_in(conn, identity):
+        binding = conn.execute('''SELECT binding.user_id,binding.email AS access_email,
+            users.kind,users.email AS user_email FROM access_identities binding
+            LEFT JOIN users ON users.id=binding.user_id
+            WHERE binding.issuer=? AND binding.subject=?''', (identity['issuer'], identity['sub'])).fetchone()
+        if not binding:
+            return None
+        if (binding['kind'] not in {'google', 'cloudflare'}
+                or binding['access_email'] != identity['email'] or binding['user_email'] != identity['email']):
+            raise ValueError('Access account mapping requires administrator review.')
+        return binding['user_id']
+
+    def touch_access_identity(self, identity, actor, seen_at):
+        """Maintain an enrolled account without enrolling or rebinding it.
+
+        A queued update may run after an administrator changes a mapping. Check
+        it again under the writer lock before updating sign-in accounting.
+        """
+        with self.connect() as conn:
+            conn.begin_write()
+            if self.access_actor_in(conn, identity) != actor:
+                return
+            conn.execute('UPDATE users SET updated_at=CASE WHEN updated_at<? THEN ? ELSE updated_at END WHERE id=?',
+                         (seen_at, seen_at, actor))
+            self.reconcile_email_in(conn, identity['email'])
 
     def access_identity(self, identity):
         """Pin a verified Access subject to a person without changing ownership.
@@ -731,7 +984,7 @@ class Store:
         issuer, subject, email = identity['issuer'], identity['sub'], identity['email']
         stamp = now()
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             binding = conn.execute('SELECT * FROM access_identities WHERE issuer=? AND subject=?',
                                    (issuer, subject)).fetchone()
             if binding:
@@ -793,7 +1046,7 @@ class Store:
     @staticmethod
     def slack_identity_in(conn, team, user):
         user_id, stamp = f'slack:{team}:{user}', now()
-        conn.execute("INSERT OR IGNORE INTO users(id,kind,name,created_at,updated_at) VALUES(?,'slack',?,?,?)", (user_id, 'Slack ' + user, stamp, stamp))
+        conn.execute("INSERT INTO users(id,kind,name,created_at,updated_at) VALUES(?,'slack',?,?,?) ON CONFLICT DO NOTHING", (user_id, 'Slack ' + user, stamp, stamp))
         return user_id
 
     def update_run(self, run_id: str, **fields):
@@ -801,10 +1054,17 @@ class Store:
         if not fields.keys() <= allowed:
             raise ValueError("Unsupported run update")
         fields["updated_at"] = now()
-        keys = ",".join(f"{key}=?" for key in fields)
-        self.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id))
+        with self.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            if self.goals and fields.get('status') in {'completed', 'failed', 'cancelled', 'interrupted'}:
+                current = conn.execute('SELECT chat_enabled,summary FROM runs WHERE id=?', (run_id,)).fetchone()
+                if current and not current['chat_enabled']:
+                    fields['summary'] = self.goals.settle_in(conn, run_id, None,
+                        fields.get('summary', current['summary']) or fields.get('error', ''), fields['status'])
+            keys = ",".join(f"{key}=?" for key in fields)
+            conn.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id))
 
-    def event(self, run_id: str, kind: str, message: str, data=None):
+    def event(self, run_id: str, kind: str, message: str, data=None, *, turn_id=None):
         data = dict(data) if isinstance(data, dict) else {}
         # Publication is a server decision, shared by both web renderers and Slack.
         data.pop('public_update', None)
@@ -816,47 +1076,49 @@ class Store:
         if kind == 'status' and data.get('phase') == 'focus':
             from .progress import record_focus
             with self.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 record_focus(conn, run_id, message, data, now())
             return
         if kind == 'message' and data.get('phase') != 'processing':
             from .progress import record
             with self.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 record(conn, run_id, message, data, now())
+                if self.public_delivery:
+                    self.public_delivery(conn, run_id)
             return
         if kind != 'chat':
             # A queued user's creation time can precede the current response.
             # Bind work to the server's claimed turn, never a sandbox-supplied ID.
             active = self.rows('SELECT active_message_id FROM runs WHERE id=?', (run_id,))
-            data['turn_id'] = active[0]['active_message_id'] if active else 0
-        # Keep bounded event history even if an agent floods stdout.
-        count = self.rows("SELECT COUNT(*) AS n FROM events WHERE run_id=?", (run_id,))[0]["n"]
-        if count >= 2000 and kind not in {"result", "error", "artifact", "approval", "status", "chat"}:
-            if not self.rows("SELECT 1 FROM events WHERE run_id=? AND kind='status' AND message='Detailed activity limit reached' LIMIT 1", (run_id,)):
-                self.event(run_id, 'status', 'Detailed activity limit reached',
-                           {'detail': 'Additional tool details are no longer recorded for this session. Response and workspace saves continue.',
-                            'activity_version': 1, 'phase': 'limited'})
-            return
+            data['turn_id'] = turn_id if turn_id is not None else active[0]['active_message_id'] if active else 0
         self.execute(
             "INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)",
-            (run_id, kind, message[:32000], json.dumps(data or {}), now()),
+            (run_id, kind, message, json.dumps(data or {}), now()),
+            write_scope=run_id,
         )
 
-    def events(self, run_id: str, after: int = 0, limit: int = 200):
-        rows = self.rows("SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?", (run_id, after, limit))
+    def events(self, run_id: str, after: int = 0, limit: int = 200, *, connection=None):
+        rows = self.rows("SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?", (run_id, after, limit), connection=connection)
         for row in rows:
             row["data"] = json.loads(row["data"])
         return rows
 
-    def goal(self, run_id: str):
+    def goal(self, run_id: str, *, connection=None):
+        if self.goals:
+            if connection is None:
+                with self.connect() as conn:
+                    return self.goal(run_id, connection=conn)
+            state = self.goals.current(connection, run_id)
+            if state:
+                return state
         rows = self.rows("SELECT data FROM events WHERE run_id=? AND kind='status' "
-                         "AND json_extract(data, '$.goal_version')=1 AND json_extract(data, '$.phase')='goal' "
-                         "ORDER BY id DESC LIMIT 1", (run_id,))
+                         "AND json_number(data,'goal_version')=1 AND json_text(data,'phase')='goal' "
+                         "ORDER BY id DESC LIMIT 1", (run_id,), connection=connection)
         return json.loads(rows[0]['data']).get('goal') if rows else None
 
-    def approvals(self, run_id: str):
-        rows = self.rows("SELECT * FROM approvals WHERE run_id=? ORDER BY created_at", (run_id,))
+    def approvals(self, run_id: str, *, connection=None):
+        rows = self.rows("SELECT * FROM approvals WHERE run_id=? ORDER BY created_at", (run_id,), connection=connection)
         for row in rows:
             row["arguments"] = json.loads(row["arguments"])
         return rows

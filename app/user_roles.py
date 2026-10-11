@@ -26,13 +26,8 @@ class RoleChange(BaseModel):
 class UserRoles:
     def __init__(self, store, settings):
         self.store, self.settings = store, settings
-        store.execute('''CREATE TABLE IF NOT EXISTS user_roles (
-            email TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('admin','member')),
-            revision INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
-        store.execute('''CREATE TABLE IF NOT EXISTS user_role_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL,
-            previous_role TEXT NOT NULL, role TEXT NOT NULL,
-            actor TEXT NOT NULL, created_at TEXT NOT NULL)''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def eligible(self, email):
         return bool(email and email.rpartition('@')[2] in self.settings.google_domains())
@@ -56,7 +51,7 @@ class UserRoles:
 
     def directory(self):
         with self.store.connect() as conn:
-            conn.execute('BEGIN')
+            conn.begin_read()
             assignments = {row['email']: dict(row) for row in conn.execute('SELECT * FROM user_roles')}
             people = {email: {'email': email, 'name': '', 'has_signed_in': False, 'last_seen': None}
                       for email in set(self.settings.google_admins()) | assignments.keys() if self.eligible(email)}
@@ -85,7 +80,7 @@ class UserRoles:
         with self.store.connect() as conn:
             # Serialize authorization, the last-admin check, and the write. Two
             # concurrent demotions must never remove both remaining admins.
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             if actor.get('method') in {'google', 'cloudflare'}:
                 actor_email = actor['identity']['email'].strip().lower()
                 if not self.eligible(actor_email) or self.role_in(conn, actor_email) != 'admin':
@@ -128,3 +123,13 @@ class UserRoles:
             return self.change(body, security.session_info(request))
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS user_roles (
+        email TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('admin','member')),
+        revision INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+    store.execute('''CREATE TABLE IF NOT EXISTS user_role_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL,
+        previous_role TEXT NOT NULL, role TEXT NOT NULL,
+        actor TEXT NOT NULL, created_at TEXT NOT NULL)''')

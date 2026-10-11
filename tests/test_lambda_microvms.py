@@ -15,10 +15,10 @@ from modal.exception import NotFoundError
 import pytest
 
 from app.config import Settings
-from app.sandboxes import provider, provider_for_id
+from app.sandboxes import provider, provider_for_id, ProvisioningTerminated
 from app.sandboxes.lambda_microvm import LambdaProvider, Sandbox, MAX_ARCHIVE, TransientEndpointError
 from sandbox import lambda_checkpoint as checkpoint
-from sandbox.continuation import RotationDeadline
+from agent.continuation import RotationDeadline
 
 
 @pytest.fixture
@@ -115,6 +115,18 @@ async def test_sdk_contract_and_proxy_auth(settings, monkeypatch):
         stub.assert_no_pending_responses()
 
 
+async def test_checkpoint_upload_uses_sigv4_with_checksum_and_encryption_headers(settings):
+    from urllib.parse import parse_qs, urlsplit
+    backend = LambdaProvider(settings)
+    backend.session = boto3.Session(aws_access_key_id='test', aws_secret_access_key='test', region_name='us-east-1')
+    url = await backend.url('put_object', 'test/checkpoints/one.tar.gz',
+                            ChecksumSHA256='checksum', ServerSideEncryption='AES256')
+    query = parse_qs(urlsplit(url).query)
+    assert query['X-Amz-Algorithm'] == ['AWS4-HMAC-SHA256']
+    assert set(query['X-Amz-SignedHeaders'][0].split(';')) == {
+        'host', 'x-amz-checksum-sha256', 'x-amz-server-side-encryption'}
+
+
 @pytest.mark.parametrize('path', ['/start', '/computer', '/checkpoint', '/initialize'])
 @pytest.mark.parametrize('failure', ['connection', 'gateway'])
 async def test_uncertain_mutation_is_not_retried(settings, monkeypatch, path, failure):
@@ -132,6 +144,26 @@ async def test_uncertain_mutation_is_not_retried(settings, monkeypatch, path, fa
     with pytest.raises(httpx.ReadError if failure == 'connection' else RuntimeError):
         await sandbox.request(path, {'id': 'uncertain-action'})
     assert len(calls) == 1
+
+
+async def test_endpoint_token_refreshes_after_host_suspension(settings, monkeypatch):
+    from app.sandboxes import lambda_microvm
+    backend = LambdaProvider(settings)
+    sandbox = Sandbox(backend, vm())
+    backend.aws = AsyncMock(side_effect=[{'authToken': {'X-aws-proxy-auth': value}} for value in ['first', 'fresh']])
+    wall = [1000]
+    monkeypatch.setattr(lambda_microvm.time, 'time', lambda: wall[0])
+    tokens = []
+    def response(request):
+        tokens.append(request.headers['X-aws-proxy-auth'])
+        return httpx.Response(200, json={'ready': True})
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: client(transport=httpx.MockTransport(response), **kw))
+    await sandbox.request('/health', {})
+    wall[0] += 3600  # Wall time advances while the host's monotonic clock pauses.
+    await sandbox.request('/health', {})
+    assert tokens == ['first', 'fresh']
+    assert backend.aws.await_count == 2
 
 
 @pytest.mark.parametrize('path', ['/health', '/job', '/read', '/file/read', '/file/stat', '/checkpoint/finish'])
@@ -266,6 +298,58 @@ async def test_failed_initialization_confirms_termination(settings, monkeypatch)
     terminated.assert_awaited_once()
 
 
+@pytest.mark.parametrize('failure', [TimeoutError('bootstrap readiness'), ValueError('bad archive'), asyncio.CancelledError()])
+async def test_reattached_startup_failure_terminates_before_replacement(settings, monkeypatch, failure):
+    backend = LambdaProvider(settings)
+    sandbox = Sandbox(backend, vm())
+    backend.read = AsyncMock(return_value={'vm_id': sandbox.vm_id})
+    backend.get = AsyncMock(return_value=sandbox)
+    backend.initialize = AsyncMock(side_effect=failure)
+    backend.aws = AsyncMock(side_effect=[{}, vm('TERMINATING'), vm('TERMINATED')])
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
+    with pytest.raises(type(failure)):
+        await backend.find('interrupted-startup', initialize=True)
+    assert [call.args[1] for call in backend.aws.await_args_list] == [
+        'terminate_microvm', 'get_microvm', 'get_microvm']
+    # A later activity can replace this VM only after observing it is gone.
+    backend.get.return_value = Sandbox(backend, vm('TERMINATED'))
+    backend.aws.side_effect = [vm('TERMINATED')]
+    with pytest.raises(ProvisioningTerminated):
+        await backend.find('interrupted-startup', initialize=True)
+    assert backend.initialize.await_count == 1
+
+
+@pytest.mark.parametrize('state', ['TERMINATING', 'TERMINATED', 'ABSENT'])
+async def test_named_dead_startup_is_reported_only_after_confirmed_termination(settings, monkeypatch, state):
+    backend = LambdaProvider(settings)
+    backend.read = AsyncMock(return_value={'vm_id': 'mvm-test'})
+    backend.get = AsyncMock(side_effect=NotFoundError('gone')) if state == 'ABSENT' else AsyncMock(return_value=Sandbox(backend, vm(state)))
+    backend.initialize = AsyncMock()
+    waited = AsyncMock()
+    monkeypatch.setattr(Sandbox, 'wait', SimpleNamespace(aio=waited))
+    with pytest.raises(ProvisioningTerminated):
+        await backend.find('same-startup-name', initialize=True)
+    backend.initialize.assert_not_awaited()
+    assert waited.await_count == (0 if state == 'ABSENT' else 1)
+    if state == 'TERMINATING':
+        waited.side_effect = TimeoutError('termination unconfirmed')
+        with pytest.raises(TimeoutError):
+            await backend.find('same-startup-name', initialize=True)
+
+
+async def test_lost_bootstrap_ack_is_observed_without_resubmitting(settings, monkeypatch):
+    backend = LambdaProvider(settings)
+    sandbox = Sandbox(backend, vm())
+    sandbox.running = AsyncMock()
+    sandbox.request = AsyncMock(side_effect=[httpx.ReadTimeout('lost ACK'),
+        TransientEndpointError('AWS sandbox returned HTTP 502'), {'bootstrapped': False}, {'bootstrapped': True}])
+    sandbox.job = AsyncMock(return_value={'ready': True})
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
+    await backend.initialize(sandbox, {'request': {'clientToken': 'startup'}, 'snapshot_id': '', 'apt_packages': []})
+    assert [call.args[0] for call in sandbox.request.await_args_list] == ['/bootstrap', '/health', '/health', '/health']
+    assert sandbox.job.await_count == 1
+
+
 async def test_termination_waits_for_terminal_state(settings, monkeypatch):
     backend = LambdaProvider(settings)
     backend.aws = AsyncMock(side_effect=[{}, vm('TERMINATING'), vm('TERMINATING'), vm('TERMINATED')])
@@ -379,6 +463,54 @@ async def test_aws_runner_uses_actual_start_and_waits_for_confirmed_termination(
     assert manager.state(run_id)['phase'] == 'provision'
     await drive(manager, run_id)
     assert len(cloud.machines) == 2 and len(cloud.launches) == 2
+
+
+async def test_dead_startup_gets_a_persisted_new_name_without_replaying_agent_work(durable, monkeypatch):
+    from app.temporal_runtime import TemporalRunManager
+    from app.db import Store
+    manager, cloud, run_id = lambda_lifecycle(durable, monkeypatch)
+    backend = manager.provider()
+    find, create = backend.find, backend.create
+    async def failed_startup(**kwargs):
+        if cloud.machines:
+            assert not cloud.machines[0].alive
+        machine = await create(**kwargs)
+        if len(cloud.machines) == 1:
+            await machine.terminate.aio()
+            await machine.wait.aio()
+            raise TimeoutError('bootstrap readiness')
+        return machine
+    async def lookup(name, **kwargs):
+        if cloud.machines and name == cloud.machines[0].name:
+            assert not cloud.machines[0].alive
+            raise ProvisioningTerminated()
+        return await find(name, **kwargs)
+    backend.create, backend.find = failed_startup, lookup
+    await drive(manager, run_id, phase='provision')
+    with pytest.raises(TimeoutError):
+        await manager.advance(run_id)
+    assert not cloud.launches
+    await manager.advance(run_id)
+    assert manager.state(run_id)['provision_attempt'] == 1
+    manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    monkeypatch.setattr(manager, 'provider', lambda *a, **kw: backend)
+    await drive(manager, run_id)
+    assert len(cloud.machines) == 2 and len(cloud.launches) == 1
+    assert cloud.machines[1].name.endswith('-provision-1')
+
+
+async def test_repeated_dead_startups_fail_closed_instead_of_retrying_forever(durable, monkeypatch):
+    manager, cloud, run_id = lambda_lifecycle(durable, monkeypatch)
+    find = manager.provider().find
+    async def dead_startup(name, *, initialize=False, **kwargs):
+        if initialize:
+            raise ProvisioningTerminated()
+        return await find(name, **kwargs)
+    manager.provider().find = dead_startup
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'failed'
+    assert manager.state(run_id)['provision_attempt'] == 2
+    assert not cloud.machines and not cloud.launches
 
 
 async def test_aws_save_failure_preserves_answer_and_previous_checkpoint(durable, monkeypatch):

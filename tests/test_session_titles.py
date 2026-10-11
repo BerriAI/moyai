@@ -46,6 +46,7 @@ async def drain(service):
     await asyncio.wait_for(service.queue.join(),3)
 
 
+@pytest.mark.sqlite_only
 async def test_backfill_labels_shutdown_and_migration(tmp_path,monkeypatch):
     import sqlite3
     store=Store(tmp_path)

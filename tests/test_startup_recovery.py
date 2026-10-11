@@ -54,15 +54,16 @@ def error(code):
     return urllib.error.HTTPError('https://workspace.example/tools', code, 'private body', {}, BytesIO(b'private'))
 
 
-def test_bootstrap_waits_through_http_and_connection_outage():
-    fault = Outage([error(503), http.client.RemoteDisconnected(), b'{"tools":[]}'])
+@pytest.mark.parametrize('code', [503, 524])
+def test_bootstrap_waits_through_http_and_connection_outage(code):
+    fault = Outage([error(code), http.client.RemoteDisconnected(), b'{"tools":[]}'])
     assert fault.read() == b'{"tools":[]}'
     assert fault.calls == 3 and fault.now == 3
     assert len(fault.notifications) == 2
     assert 'reconnected' in fault.notifications[-1]
 
 
-@pytest.mark.parametrize('code', [401, 403, 404, 422])
+@pytest.mark.parametrize('code', [401, 403, 404, 422, 525, 526])
 def test_permanent_bootstrap_errors_are_not_retried(code):
     fault = Outage([error(code)])
     with pytest.raises(urllib.error.HTTPError):
@@ -70,11 +71,12 @@ def test_permanent_bootstrap_errors_are_not_retried(code):
     assert fault.calls == 1 and not fault.notifications
 
 
-def test_exhaustion_returns_only_safe_typed_diagnostics():
-    fault = Outage([error(502)] * 10)
+@pytest.mark.parametrize('code', [502, 524])
+def test_exhaustion_returns_only_safe_typed_diagnostics(code):
+    fault = Outage([error(code)] * 10)
     with pytest.raises(StartupUnavailable) as result:
         fault.read(budget=4)
-    assert result.value.stage == 'workspace_tools' and result.value.reason == 'HTTP 502'
+    assert result.value.stage == 'workspace_tools' and result.value.reason == f'HTTP {code}'
     assert 'private' not in str(result.value)
     assert fault.calls == 3 and fault.now == 4
 
@@ -116,7 +118,7 @@ def test_repository_metadata_reconnects_only_during_startup(route, name, startin
         relay.repository_startup = starting
         body = {'name': name, 'arguments': {'repository_id': 101}}
         response = client.post(route, json=body)
-        assert response.status_code == (200 if recovers else 502 if status == 403 else status)
+        assert response.status_code == (200 if recovers else status)
         assert calls == [(route, body)] * (2 if recovers else 1)
         if recovers:
             assert not diagnostics and not relay.last_error and not relay.uncertain_tool
@@ -129,7 +131,7 @@ def test_repository_metadata_reconnects_only_during_startup(route, name, startin
 @pytest.mark.parametrize('outcome', ['transient', 'legacy', 'git_failure', 'exhausted',
                                       'slow_success', 'slow_retry', 'slow_exhausted'])
 def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp_path, monkeypatch, outcome):
-    from sandbox import github_tools, harness_registry
+    from agent.tools import github_tools
     from sandbox.startup import _read_with_reconnect
     from sandbox.broker_relay import BrokerRelay
     from sandbox.access_transport import open_broker
@@ -194,7 +196,7 @@ def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp
     monkeypatch.setattr(agent, 'BrokerRelay', relay_factory)
     monkeypatch.setattr(agent, 'Path', lambda value: tmp_path / str(value).lstrip('/'))
     monkeypatch.setattr(agent, 'emit', lambda kind, message, data=None, **extra: events.append((kind, data, extra)))
-    monkeypatch.setattr(harness_registry, 'create_agent', enter_agent)
+    monkeypatch.setattr(agent, 'run_conversation', enter_agent)
     monkeypatch.setattr(github_tools, 'git', checked_git)
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     if outcome == 'exhausted':
@@ -246,13 +248,26 @@ def test_reconnecting_capability_still_works_and_stop_revokes_it(workspace):
 
 @pytest.mark.parametrize('harness,outcome', [
     (harness, outcome) for harness in ('codex', 'claude-agent-sdk', 'opencode', 'deepagents', 'tool-loop')
-    for outcome in ('transient', 'exhausted')
+    for outcome in ('transient', 'exhausted', 'runtime_transient', 'runtime_exhausted')
 ] + [('codex', outcome) for outcome in ('401', '403', 'invalid', 'late', 'followup', 'control', 'timeout')])
 def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, outcome):
-    from sandbox.context_store import ContextStore
-    from sandbox.harness_registry import resolve
+    from agent.context_store import ContextStore
+    from agent.harnesses.harness_registry import resolve
     from importlib import import_module
     events, reads, invocations = [], [], []
+    from app.session_journal import SessionJournal
+    from app.goals import Goals
+    startup_exhausted = outcome in {'exhausted', 'runtime_exhausted'}
+    startup_transient = outcome in {'transient', 'runtime_transient'}
+    # The prompt budget preflight and the runtime readiness check both read
+    # metadata before execution. Exercise outages at either boundary.
+    outage_read = 2 if outcome.startswith('runtime_') else 1
+    server_store = Store(tmp_path / 'broker')
+    server_run = server_store.create_run('Do the task', '', 'modal', [], chat_enabled=True, user_id='fixture')
+    server_store.claim_message(server_run['id'])
+    server_store.update_run(server_run['id'], status='running', token_hash='test-token')
+    server_run = server_store.run(server_run['id'])
+    journal, goals = SessionJournal(server_store), Goals(server_store)
     def started():
         return sum(data.get('phase') == 'execution_started' for _, data, _ in events)
     class Gateway(BaseHTTPRequestHandler):
@@ -261,17 +276,23 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
             assert self.path == '/context/window'
             assert self.headers['Authorization'] == 'Bearer test-token'
             reads.append(started())
-            unavailable = outcome == 'exhausted' or (outcome == 'transient' and len(reads) == 1) or (
-                outcome == 'late' and len(reads) > 1)
+            unavailable = ((startup_exhausted and len(reads) >= outage_read)
+                           or (startup_transient and len(reads) == outage_read)
+                           or (outcome == 'late' and started() > 0))
             self.send_response(int(outcome) if outcome in {'401', '403'} else 502 if unavailable else 200)
             self.end_headers()
             self.wfile.write(json.dumps({'input_budget': 0 if outcome == 'invalid' else
                                         64000 if not invocations else 32000}).encode())
         def do_POST(self):
-            self.rfile.read(int(self.headers['Content-Length']))
+            raw = self.rfile.read(int(self.headers['Content-Length']))
+            body = json.loads(unseal('test-token', self.path, raw))
+            if self.path == '/context/journal' and body.get('action') == 'append':
+                assert started() == 1
+            result = (journal.exchange(server_run, body) if self.path == '/context/journal' else
+                      goals.exchange(server_run, body, internal=True) if self.path == '/goal' else {})
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b'{}')  # Optional maintenance/native state unavailable.
+            self.wfile.write(json.dumps(result).encode())  # Optional maintenance/native state unavailable.
     async def invoke(runtime, prompt, system_message):
         assert started() == 1
         invocations.append(runtime.compaction_window)
@@ -281,7 +302,7 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
         return {'completed': True, 'final_response': 'Done', 'messages': runtime.journal.messages,
                 **({'pending_steer': 'Continue'} if len(invocations) == 1 and outcome in {'late', 'followup'} else {})}
     definition = resolve(harness)
-    runtime_type = getattr(import_module('sandbox.' + definition.module), definition.factory)
+    runtime_type = getattr(import_module('agent.harnesses.' + definition.module), definition.factory)
     monkeypatch.setattr(runtime_type, 'validate', lambda self: None)  # Dependencies are covered by SDK tests.
     monkeypatch.setattr(runtime_type, '_run', invoke)  # Scripted inference, real startup/journal/HTTP.
     if harness == 'opencode':
@@ -291,7 +312,7 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
     monkeypatch.setattr(agent, 'computer_request', lambda *args, **kwargs: {})
     monkeypatch.setattr(agent, 'collect_archive', lambda *args: None)
     monkeypatch.setattr('sandbox.broker_relay.read_with_reconnect', lambda request, reader, **kwargs:
-        read_with_reconnect(request, reader, **kwargs, budget=0 if outcome in {'exhausted', 'late'} else 5,
+        read_with_reconnect(request, reader, **kwargs, budget=0 if startup_exhausted or outcome == 'late' else 5,
                             sleep=lambda seconds: None))
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     monkeypatch.chdir(tmp_path)
@@ -308,25 +329,40 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
                 agent.run(spec)
             assert reads == [0] and not invocations and not started()
         else:
-            assert agent.run(spec) == (75 if outcome == 'exhausted' else 1 if outcome in {'late', 'timeout'} else 0)
+            assert agent.run(spec) == (75 if startup_exhausted else 1 if outcome in {'late', 'timeout'} else 0)
             final = next(extra for kind, _, extra in reversed(events) if kind == 'final')
-            assert bool(final.get('startup_retry')) is (outcome == 'exhausted')
-            assert started() == (0 if outcome == 'exhausted' else 1)
-            if outcome == 'exhausted':
+            assert bool(final.get('startup_retry')) is startup_exhausted
+            assert started() == (0 if startup_exhausted else 1)
+            if startup_exhausted:
                 assert final['startup_retry'] == {'version': 1, 'stage': 'context_window', 'reason': 'HTTP 502'}
-                assert reads == [0] and not invocations
+                assert reads == [0] * outage_read and not invocations
             elif outcome in {'control', 'timeout'}:
-                assert not invocations and len(reads) == (0 if outcome == 'control' else 1)
+                assert not invocations and reads == ([] if outcome == 'control' else [0, 0])
             else:
                 assert invocations == ([64000, 32000] if outcome == 'followup' else [64000])
-                assert reads == ([0, 0] if outcome == 'transient' else [0, 1])
-                store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
-                try:
-                    assert 'saved-receipt' in json.dumps(store.history()) and not store.pending
-                finally:
-                    store.close()
+                assert reads == ([0, 0, 0] if startup_transient else [0, 0, 1])
+                if outcome == 'late':
+                    assert final['context_failure'] == 'Context services did not reconnect. Completed work is preserved.'
+        store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
+        try:
+            history = store.history()
+            durable = journal.exchange(server_run, {'action': 'read'})
+            assert durable['next'] is None
+            assert history == [entry['message'] for entry in durable['entries']]
+            calls = [call for message in history for call in message.get('tool_calls', [])]
+            receipts = [message for message in history if message['role'] == 'tool']
+            assert len(calls) == len(receipts) == len(invocations)
+            assert len({call['id'] for call in calls}) == len(calls)
+            assert [message['tool_call_id'] for message in receipts] == [call['id'] for call in calls]
+            assert all(message['content'] == 'saved-receipt' for message in receipts)
+            assert not store.pending
+            if not started():
+                assert history == []
+        finally:
+            store.close()
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
+        server_store.close()
 
 
 def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
@@ -342,9 +378,13 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
         def run_conversation(self, *args, **kwargs):
             assert any(e[2].get('phase') == 'execution_started' for e in events)
             instructions = kwargs['system_message']
-            assert 'before the first tool call' in instructions
-            assert 'Do not send only a status tag as the opening' in instructions
-            assert 'Before delegating to agents' in instructions
+            assert 'concise visible opening update' in instructions
+            assert 'A status tag alone is not an opening update' in instructions
+            assert 'bundled_skill_read' in instructions and 'delegation' in instructions
+            assert 'default delivery includes a ready-for-review PR' in instructions
+            assert 'local-only work, no PR, or review/investigation only' in instructions
+            assert 'Final answers contain no status tags and distinguish verified results' in instructions
+            assert 'Do not push, merge, deploy, or publish unless explicitly requested' not in instructions
             calls.append('inference')
             self.commentary('<status>Auditing UI and schema changes</status>I’m checking the UI and schema before making changes.')
             self.commentary('<status>Verifying the corrected behavior</status>One public milestone.',
@@ -356,6 +396,7 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     relay.start = lambda: relay
     monkeypatch.setattr(agent, 'BrokerRelay', lambda *args, **kwargs: relay)
     monkeypatch.setattr(agent, 'apply_hermes_patches', lambda: None)  # This fixture supplies a fake Hermes runtime.
+    monkeypatch.setattr('agent.harnesses.hermes_harness.prepare_hermes_imports', lambda: None)
     monkeypatch.setattr(agent, 'prepare_attachments', lambda *args, **kwargs: None)
     monkeypatch.setattr(agent, 'collect_archive', lambda *args: None)
     monkeypatch.setattr(agent, 'Path', lambda value: tmp_path / str(value).lstrip('/'))

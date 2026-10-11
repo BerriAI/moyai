@@ -126,6 +126,38 @@ def test_selection_preference_disconnect_and_shared_denial(personal):
     assert 'organization' in search(personal, r).text
 
 
+@pytest.mark.parametrize('name,endpoint,extra', [
+    ('slack_channel', 'conversations.history', {}),
+    ('slack_thread', 'conversations.replies', {'thread_ts': '1791520602.639729'}),
+])
+def test_personal_conversation_reads_preserve_pagination(personal, monkeypatch, name, endpoint, extra):
+    app, client, service, _, _ = personal
+    connect(personal)
+    r = run(personal)
+    seen = []
+    async def upstream(method, url, **kwargs):
+        seen.append(kwargs)
+        assert url.endswith('/' + endpoint)
+        assert kwargs['headers']['Authorization'] == 'Bearer ' + PERSONAL
+        assert kwargs['params']['cursor'] == 'next'
+        return {'ok': True, 'messages': [{'text': 'private page'}], 'has_more': True,
+                'response_metadata': {'next_cursor': 'following'}}
+    monkeypatch.setattr(app.state.connectors, 'request', upstream)
+    response = client.post(f"/broker/{r['id']}/tools/call", headers={'Authorization': 'Bearer capability'},
+        json={'name': name, 'arguments': {'channel': 'C12345678', 'cursor': 'next', **extra}})
+    assert response.status_code == 200, response.text
+    assert len(seen) == 1
+    assert response.json()['next_arguments']['cursor'] == 'following'
+    async def revoked(method, url, **kwargs):
+        service.disconnect('google:alice')
+        return {'ok': True, 'messages': [{'text': 'revoked canary'}]}
+    monkeypatch.setattr(app.state.connectors, 'request', revoked)
+    response = client.post(f"/broker/{r['id']}/tools/call", headers={'Authorization': 'Bearer capability'},
+        json={'name': name, 'arguments': {'channel': 'C12345678', **extra}})
+    assert 'revoked canary' not in response.text
+    assert 'error' in response.json()
+
+
 @pytest.mark.parametrize('failure', ['decrypt', 'expired', 'provider', 'network', 'rate_limit'])
 def test_errors_never_fall_back_or_leak(personal, failure):
     app, _, service, requests, state = personal
@@ -160,7 +192,7 @@ def test_postawait_recheck_discards_content(personal, change):
         elif change == 'plugin':
             app.state.store.execute('UPDATE runs SET plugins=? WHERE id=?', ('[]', r['id']))
         else:
-            app.state.store.execute("INSERT OR REPLACE INTO connection_policies(provider,enabled) VALUES('slack',0)")
+            app.state.store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0) ON CONFLICT(provider) DO UPDATE SET enabled=excluded.enabled")
     state['hook'] = hook
     response = search(personal, r)
     assert 'matches' not in response.text, response.text
@@ -195,7 +227,7 @@ def test_personal_only_policy_and_unsupported_modes(personal):
     app.state.store.execute("DELETE FROM connections WHERE provider='slack'")
     assert app.state.connectors.allowed('slack_search', run=r)
     assert 'matches' in search(personal, r).text
-    app.state.store.execute("INSERT OR REPLACE INTO connection_policies(provider,enabled,read_only) VALUES('slack',1,1)")
+    app.state.store.execute("INSERT INTO connection_policies(provider,enabled,read_only) VALUES('slack',1,1) ON CONFLICT(provider) DO UPDATE SET enabled=excluded.enabled,read_only=excluded.read_only")
     assert 'matches' in search(personal, r).text
     app.state.store.execute("UPDATE connection_policies SET enabled=0 WHERE provider='slack'")
     before = len(requests)
@@ -343,7 +375,10 @@ def test_slack_webhook_source_context_obeys_personal_boundary(slack_app, monkeyp
     if configured:
         assert source['context_status'] == 'unavailable'
         assert 'private web chat' in source['warning']
-        assert not reads and not source['messages']
+        # Current Slack keeps the explicitly addressed webhook observation.
+        # Refusing a personal read must never import upstream/shared results.
+        assert not reads
+        assert all('shared-source-sentinel' not in message['text'] for message in source['messages'])
     else:
         assert source['context_status'] == 'ready'
         assert reads and set(reads) == {'Bearer provider-user-secret'}

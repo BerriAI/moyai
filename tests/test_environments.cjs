@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
 const {readFileSync} = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 function context(){const c={esc:s=>String(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]))};vm.createContext(c);vm.runInContext(readFileSync('app/static/environments.js','utf8'),c);return c;}
 function item(fields={}){return {id:'e'.repeat(32),name:'Project',repository:'owner/repo',revision:2,enabled:true,is_default:true,active_build:'ready-build',builds:[{id:'new-build',revision:2,phase:'failed',error:'Dependency failed'}],...fields};}
 test('environment and build data are escaped before rendering',()=>{const c=context();const html=c.environmentCard(item({name:'<img onerror=x>',builds:[{id:'x',revision:2,phase:'failed',error:'<script>bad</script>'}]}));assert.doesNotMatch(html,/<img|<script>/);assert.match(html,/&lt;script&gt;/);});

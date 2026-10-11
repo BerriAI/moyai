@@ -3,17 +3,25 @@ import asyncio
 import hashlib
 import json
 from pathlib import PurePath
+import re
+import tempfile
+from urllib.parse import urlsplit
 
-from agentchat import Attachment
-from agentchat.channels.slack_files import download_slack_file, slack_attachments
+import aiohttp
+from agentchat.channels.slack_files import slack_attachments
 
 from .audio import AUDIO_TYPES, AudioTranscriber, audio_type
-from .attachments import MAX_FILE, MAX_FILES, MAX_MESSAGE, filename, inspect_file
+from .attachments import filename, inspect_file
 
 
 def file_ids(files):
     """Persist SDK-normalized references; downloads happen on the claimed turn."""
-    return [item.id for item in slack_attachments(files, limit=MAX_FILES)]
+    if not isinstance(files, list):
+        return []
+    # The SDK normalizer has a per-call bound. Enumerate every transport batch
+    # without turning that implementation detail into a retained-source limit.
+    return list(dict.fromkeys(item.id for offset in range(0, len(files), 100)
+                              for item in slack_attachments(files[offset:offset+100], limit=100)))
 
 
 class SlackFiles:
@@ -47,22 +55,71 @@ class SlackFiles:
         async def guard():
             self.check_access(team)
 
-        file = await download_slack_file(Attachment(id=file_id), bot_token=token, request=request,
-                                         max_bytes=MAX_FILE, before_download=guard)
-        name, raw = filename(file.name), file.content
-        extension = PurePath(name).suffix.lower().lstrip('.')
-        if extension not in AUDIO_TYPES and (file.media_type or '').startswith('audio/'):
-            raise ValueError('Unsupported audio format. Send MP3, WAV, M4A, WebM, OGG or FLAC.')
-        if extension in AUDIO_TYPES:
-            media_type = audio_type(name, raw)
-            transcript = await self.transcriber.transcribe(raw, name, media_type)
+        if not re.fullmatch(r'F[A-Z0-9]{1,30}', file_id):
+            raise ValueError('Expected a Slack file identifier')
+        info = await request('files.info', {'file':file_id})
+        file = info.get('file')
+        if info.get('ok') is not True or not isinstance(file, dict) or file.get('id') != file_id or file.get('is_external'):
+            raise ValueError('This Slack file is unavailable. Upload the attachment again.')
+        size = file.get('size')
+        if type(size) is not int or size <= 0:
+            raise ValueError('Slack returned an invalid file size')
+        if size > self.owner.settings.attachment_storage_limit_mb * 1024 * 1024:
+            raise ValueError('This file exceeds the workspace attachment storage budget. Ask an administrator to increase it.')
+        # The SDK's byte-returning downloader cannot stream into durable parts.
+        # Preserve its exact private-host/redirect boundary in this host adapter.
+        url = file.get('url_private_download') or file.get('url_private')
+        try:
+            target = urlsplit(url) if isinstance(url, str) else None
+            if (not target or target.scheme != 'https' or target.hostname != 'files.slack.com'
+                    or target.port not in (None, 443) or target.username or target.password
+                    or target.fragment or not target.path.startswith('/files-pri/')):
+                raise ValueError
+        except ValueError:
+            raise ValueError('Slack returned an unsupported file location') from None
+        name = filename(file.get('name') or 'attachment')
+        raw = tempfile.TemporaryFile()
+        try:
+            await guard()
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=30)) as client:
+                async with client.get(url, headers=headers, allow_redirects=False) as response:
+                    if response.status != 200:
+                        raise ValueError('Could not read this Slack attachment. Upload it again.')
+                    received = 0
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        received += len(chunk)
+                        if received > size:
+                            raise ValueError('Slack file exceeded its declared size.')
+                        await asyncio.to_thread(raw.write, chunk)
+            if received != size:
+                raise ValueError('Slack file download was incomplete. Retry the attachment.')
+            await guard()
+            raw.seek(0)
+            inspected = await self.inspect(name, raw, file.get('mimetype') or '')
             self.check_access(team)
-            return name, raw, (media_type, b'', transcript)
-        inspected = await asyncio.to_thread(inspect_file, raw)
-        self.check_access(team)
-        if (file.media_type or '').startswith('image/') and not inspected[1]:
-            raise ValueError('This image could not be opened. Try exporting it as PNG or JPEG.')
-        return name, raw, inspected
+            raw.seek(0)
+            return name, raw, inspected
+        except BaseException:
+            raw.close()
+            raise
+
+    async def inspect(self, name, raw, claimed_type):
+        extension = PurePath(name).suffix.lower().lstrip('.')
+        media_type = ''
+        try:
+            if extension not in AUDIO_TYPES and claimed_type.startswith('audio/'):
+                raise ValueError('Unsupported audio preview format. The original file is available.')
+            if extension in AUDIO_TYPES:
+                media_type = audio_type(name, raw.read(16))
+                raw.seek(0)
+                transcript = await self.transcriber.transcribe(raw, name, media_type)
+                return media_type, b'', transcript
+            inspected = await asyncio.to_thread(inspect_file, raw)
+            if claimed_type.startswith('image/') and not inspected[1]:
+                raise ValueError('This image could not be opened. The original file is available.')
+            return inspected
+        except ValueError as exc:
+            return media_type or 'application/octet-stream', b'', '', str(exc)
 
     def include_context(self, run_id):
         """Recover files omitted by app_mention, plus files in the invoked thread.
@@ -75,7 +132,7 @@ class SlackFiles:
         if not source or source['context_status'] != 'ready':
             return
         with store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             message = conn.execute("SELECT id,status FROM messages WHERE run_id=? AND role='user' ORDER BY id LIMIT 1", (run_id,)).fetchone()
             if not message or message['id'] != run.get('active_message_id') or message['status'] != 'running':
                 return
@@ -84,12 +141,12 @@ class SlackFiles:
                 return
             ids = json.loads(pending['files_json']) if pending else []
             messages = source.get('messages', [])
-            # The directly addressed message wins the shared per-message file budget.
+            # Keep directly addressed files first without discarding later ones.
             messages = sorted(messages, key=lambda item: item['ts'] != source['mention_ts'])
             for item in messages:
                 if item['ts'] == source['mention_ts'] or source.get('kind') == 'thread':
                     ids.extend(item.get('file_ids', []))
-            ids = list(dict.fromkeys(ids))[:MAX_FILES]
+            ids = list(dict.fromkeys(ids))
             if ids:
                 conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?) '
                              'ON CONFLICT(message_id) DO UPDATE SET files_json=excluded.files_json',
@@ -105,30 +162,30 @@ class SlackFiles:
         for row in rows:
             team = row['user_id'].split(':')[1]
             store.event(run_id, 'context', 'Reading the files attached to your Slack message')
-            attachments, errors, total = [], [], 0
+            attachments, errors = [], []
             for file_id in json.loads(row['files_json']):
                 attachment_id = hashlib.sha256(f"slack:{row['message_id']}:{file_id}".encode()).hexdigest()[:32]
-                prior = store.rows('SELECT size FROM attachments WHERE id=? AND owner_id=?', (attachment_id, row['user_id']))
+                prior = store.rows("SELECT size FROM attachments WHERE id=? AND owner_id=? AND upload_state='ready'", (attachment_id, row['user_id']))
                 if prior:
-                    total += prior[0]['size']
                     attachments.append(attachment_id)
                     continue
                 try:
-                    async with self.slots, asyncio.timeout(125):
+                    async with self.slots:
                         item = await self.read(file_id, team)
                     name, raw, inspected = item
-                    if total + len(raw) > MAX_MESSAGE:
-                        raise ValueError('Attachments must total 20 MB or less per message.')
-                    await asyncio.to_thread(store.attachments.save, attachment_id, row['user_id'], name, raw, inspected,
-                                            self.owner.settings.attachment_storage_limit_mb * 1024 * 1024)
-                    total += len(raw)
+                    try:
+                        await asyncio.to_thread(store.attachments.save, attachment_id, row['user_id'], name, raw, inspected,
+                                                self.owner.settings.attachment_storage_limit_mb * 1024 * 1024)
+                    finally:
+                        if hasattr(raw, 'close'):
+                            raw.close()
                     attachments.append(attachment_id)
                 except ValueError as exc:
                     errors.append(str(exc))
                 except Exception:
                     errors.append('Could not read this Slack attachment. Upload it again or describe its contents.')
             with store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 current = conn.execute('SELECT status FROM messages WHERE id=?', (row['message_id'],)).fetchone()
                 if not current or current['status'] != 'running':
                     return

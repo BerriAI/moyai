@@ -1,36 +1,47 @@
 const $ = (s) => document.querySelector(s);
 const esc = (s = '') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = {view:'tasks', runs:[], folders:[], closedFolders:new Set(), runsRefresh:0, config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set(), expandedParents:new Set(), activeParentId:'',queueDrafts:{}};
+const state = {view:'tasks', runs:[], folders:[], closedFolders:new Set(), runsRefresh:0, config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set(), expandedParents:new Set(), activeParentId:'',queueDrafts:{},navigationCache:MoyaiNavigationCache.create()};
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
 let workspacePanel;
+let commandPalette;
 const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,size:fileSize,onOpen:(file,ref)=>workspacePanel?(file?workspacePanel.openFile(file,ref):workspacePanel.open('files')):false});
 const computer = MoyaiComputer.create({api,escape:esc,onCaptures:()=>workspacePanel?.open('captures')});
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'GitHub'};
 async function api(path, options = {}) {
-  const response = await fetch(path, {...options, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...options.headers}});
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const upload = options.method === 'PUT' && path.startsWith('/api/attachments/');
-    const fallback = upload ? (
-      response.status === 403 ? 'The hosting firewall blocked this upload (HTTP 403). Refresh the page and retry the file.' :
-      response.status === 413 ? 'This file is too large. Attach a file under 10 MB.' :
-      response.status === 429 ? 'Other files are uploading. Retry this file in a moment.' :
-      response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
-      `Upload failed (HTTP ${response.status}). Retry this file.`
-    ) : `The request could not be completed (HTTP ${response.status}).`;
-    const error = new Error(typeof body.detail === 'string' ? body.detail : fallback);
-    error.status = response.status;
-    throw error;
-  }
-  return body;
+  const {recent=false,...requestOptions}=options;
+  const read=(requestOptions.method||'GET').toUpperCase()==='GET';
+  const load=async()=>{
+    const response = await fetch(path, {...requestOptions, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...requestOptions.headers}});
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const upload = ['PUT','POST'].includes(options.method) && path.startsWith('/api/attachments/');
+      const fallback = upload ? (
+        response.status === 403 ? 'The hosting firewall blocked this upload (HTTP 403). Refresh the page and retry the file.' :
+        response.status === 413 ? 'The upload part was rejected. Refresh the page and retry the file.' :
+        response.status === 429 ? 'Other files are uploading. Retry this file in a moment.' :
+        response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
+        `Upload failed (HTTP ${response.status}). Retry this file.`
+      ) : `The request could not be completed (HTTP ${response.status}).`;
+      const error = new Error(typeof body.detail === 'string' ? body.detail : fallback);
+      error.status = response.status;
+      if(response.status===401||response.status===403)state.navigationCache?.clear();
+      throw error;
+    }
+    return body;
+  };
+  if(read)return state.navigationCache?state.navigationCache.read(path,load,{recent}):load();
+  // Clear at both boundaries: an overlapping read must not resurrect pre-edit data.
+  state.navigationCache?.clear();
+  try{return await load();}finally{state.navigationCache?.clear();}
 }
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)), hours=Math.floor(min/60), days=Math.floor(min/1440), months=Math.floor(days/30); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : hours < 24 ? `${hours} hour${hours===1?'':'s'} ago` : days < 30 ? `${days} day${days===1?'':'s'} ago` : months < 2 ? 'last month' : months < 12 ? `${months} months ago` : new Date(date).toLocaleDateString(); }
-function stopStream(){ resetCredentialNavigation();if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.sessionHeaderRun = null; savedFiles.reset(); }
+function stopStream(){ state.swarmChat?.dispose();state.swarmChat=null;state.swarmSpace?.dispose();state.swarmSpace=null;resetCredentialNavigation();if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.revealSessionAncestors=null; state.sessionHeaderRun = null; savedFiles.reset(); }
 async function showUnavailableSession(id){
+  state.navigationCache?.forget(`/api/runs/${id}?activity=summary`);
   if(state.selected!==id)return;
-  $('#content').innerHTML='<p role="status">This session is no longer available.</p>';
+  MoyaiUI.render($('#content'), '<p role="status">This session is no longer available.</p>');
   toast('This session is no longer available.');
   await navigate('tasks');
 }
@@ -57,7 +68,7 @@ function sessionMatches(run,search){
   return (run.search_query===term&&run.search_match)||[sessionTitle(run),run.agent_label,run.display_title,run.prompt].some(value=>typeof value==='string'&&value.toLowerCase().includes(term));
 }
 function sessionStatus(run){
-  return ({idle:'Ready',completed:'Completed',running:'Working now',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
+  return ({idle:'Ready',completed:'Completed',running:'Working now',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',deleting:'Deleting',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
 }
 function sessionRepository(run){
   try{const url=new URL(run.repo_url);return url.protocol==='https:'&&url.hostname==='github.com'?url.pathname.split('/').filter(Boolean).slice(0,2).join('/').replace(/\.git$/,''):'';}catch{return '';}
@@ -95,7 +106,7 @@ function markSessionRead(run){
 }
 function sessionIndicator(run){
   const label=sessionStatus(run);
-  if(['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'].includes(run.status))return `<span class="session-indicator" title="${esc(label)}" aria-hidden="true"><span class="session-spinner"></span></span>`;
+  if(['running','queued','provisioning','reconnecting','saving','waiting_children','stopping','deleting'].includes(run.status))return `<span class="session-indicator" title="${esc(label)}" aria-hidden="true"><span class="session-spinner"></span></span>`;
   const marker=sessionCompletion(run),unread=marker&&sessionReadMarker(run)!==marker;
   const remaining=(state.sessionReadFade?.get(sessionReadKey(run))||0)-Date.now();
   if(unread||marker&&remaining>0)return `<span class="session-indicator" title="${unread?'Unread completion':'Read'}" aria-hidden="true"><span class="session-completion${unread?'':' is-read'}"${unread?'':` style="animation-delay:-${350-remaining}ms"`}></span></span>`;
@@ -116,15 +127,13 @@ function harnessOptions(selected='',model=state.config.model,automatic=true){
 }
 function harnessPicker(selected='',model=state.config.model){return `<label class="model-picker harness-picker" title="Automatic chooses the harness for this model. An explicit choice stays fixed.">${harnessLogo(selected||defaultHarness(model))}<span class="sr-only">Engine for new session</span><select id="new-harness" aria-label="Engine for new session" aria-description="Automatic chooses the harness for this model. An explicit choice stays fixed.">${harnessOptions(selected,model)}</select>${pickerChevron()}</label>`;}
 function bindHarnessPicker(harness,model,onchange=()=>{},automatic=true){
-  const sync=()=>{harness.innerHTML=harnessOptions(harness.value,model.value,automatic);const logo=harness.parentElement.querySelector('.harness-logo');if(logo)MoyaiProviderLogos.sync(logo,harness.value||defaultHarness(model.value),MoyaiProviderLogos.harness);onchange();};
+  const sync=()=>{MoyaiUI.render(harness, harnessOptions(harness.value,model.value,automatic));const logo=harness.closest('.model-picker')?.querySelector('.harness-logo');if(logo)MoyaiProviderLogos.sync(logo,harness.value||defaultHarness(model.value),MoyaiProviderLogos.harness);onchange();};
   harness.addEventListener('change',sync);model.addEventListener('change',sync);
 }
 function harnessModels(harness){return state.config.models||[];}
 function providerLogo(model){const url=MoyaiProviderLogos.src(model);return `<img class="provider-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
 function modelPicker(id,selected,disabled=false,harness=state.config.harness||'claude-agent-sdk'){return `<label class="model-picker" title="Model">${providerLogo(selected)}<span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${harnessModels(harness).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select>${pickerChevron()}</label>`;}
 
-function openSessionSearch(){$('.session-search').hidden=false;$('#search-sessions').setAttribute('aria-expanded','true');$('#session-search').focus();}
-function closeSessionSearch(){if($('#session-search').value)return;$('.session-search').hidden=true;$('#search-sessions').setAttribute('aria-expanded','false');}
 function setSidebar(open){document.body.classList.toggle('sidebar-open',open);$('#sidebar-scrim').hidden=!open;$('#open-sidebar').setAttribute('aria-expanded',String(open));$('#sidebar').inert=matchMedia('(max-width:850px)').matches&&!open;}
 function sidebarGroups(runs,search){
   return runs.map(parent=>{
@@ -153,7 +162,7 @@ function sidebarRow(run,child=false){
   const pr=sessionPRMetadata(run);
   const progress=pr.label?`<span class="session-pr-label ${pr.label==='Review PR'?'pr-review':'pr-open'}" title="${pr.label==='Review PR'?'Reviewers requested on GitHub':'Open pull request ready for review on GitHub'}">${pr.label}</span>`:time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:'';
   const slack=run.slack_connected?'<img class="session-slack-logo" src="/static/slack-logo.svg" width="14" height="14" alt="Slack conversation" title="Conversation linked to Slack">':'';
-  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,unread?'Unread completion':'',run.pinned?'Pinned':'',context,time,pr.label,pr.description,run.slack_connected?'Slack conversation':''].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-title-row"><span class="session-link-title">${esc(title)}</span>${sessionIndicator(run)}</span><span class="session-link-meta">${[progress,pr.html,slack,context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''].filter(Boolean).join('<span class="session-meta-separator" aria-hidden="true">·</span>')}</span>${snippet}</span></button>`;
+  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,unread?'Unread completion':'',run.pinned?'Pinned':'',context,time,pr.label,pr.description,run.slack_connected?'Slack conversation':''].filter(Boolean).join(' · '))}" title="${esc(title)}"><span class="session-link-body"><span class="session-title-row">${child?globalThis.MoyaiAgentIcon?.(run.id)||'':''}<span class="session-link-title">${esc(title)}</span>${sessionIndicator(run)}</span><span class="session-link-meta">${[progress,pr.html,slack,context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''].filter(Boolean).join('<span class="session-meta-separator" aria-hidden="true">·</span>')}</span>${snippet}</span></button>`;
 }
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));
@@ -172,11 +181,11 @@ function sidebarSections(runs,folders,search){
 function sidebarPersonalSection(id,label,icon,groups,search){
   if(!groups.length)return '';
   const expanded=!!search||!state.closedFolders.has(id);
-  return `<section class="session-personal-section"><button class="session-section-heading" data-toggle-folder="${id}" aria-expanded="${expanded}" aria-controls="section-${id}">${globalThis.MoyaiIcon?.(icon,16)||''}<span>${label}</span><span class="session-section-count">${groups.length}</span>${globalThis.MoyaiIcon?.('chevron',12)||''}</button><div id="section-${id}" ${expanded?'':'hidden'}>${sidebarRenderSessions(groups,search)}</div></section>`;
+  return `<section class="session-personal-section" data-region-key="section:${esc(id)}"><button class="session-section-heading" data-toggle-folder="${id}" aria-expanded="${expanded}" aria-controls="section-${id}">${globalThis.MoyaiIcon?.(icon,16)||''}<span>${label}</span><span class="session-section-count">${groups.length}</span>${globalThis.MoyaiIcon?.('chevron',12)||''}</button><div id="section-${id}" data-region-key="body:${esc(id)}" ${expanded?'':'hidden'}>${expanded?sidebarRenderSessions(groups,search):''}</div></section>`;
 }
 function sidebarRenderSessions(groups,search,child=false){return groups.map(parent=>{
     const hasChildren=(parent.totalChildren??parent.children?.length??0)>0,expanded=!!search||state.expandedParents.has(parent.id);
-    return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent,child)}${child?'':`<button class="session-move" data-session-actions="${esc(parent.id)}" title="Session actions" aria-label="Session actions for ${esc(sessionTitle(parent))}" aria-controls="session-actions">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button>`}</div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${sidebarRenderSessions(parent.children,search,true)}</div>`:''}</div>`;
+    return `<div class="session-group" data-region-key="session:${esc(parent.id)}"><div class="parent-session" data-region-key="row:${esc(parent.id)}" data-region-leaf>${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}">${globalThis.MoyaiIcon?.('chevron',16)||''}</button>`:'<span class="agent-disclosure-space" aria-hidden="true"></span>'}${sidebarRow(parent,child)}${child?'':`<button class="session-move" data-session-actions="${esc(parent.id)}" title="Session actions" aria-label="Session actions for ${esc(sessionTitle(parent))}" aria-controls="session-actions">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button>`}</div>${hasChildren?`<div class="child-sessions" data-region-key="children:${esc(parent.id)}" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${expanded?sidebarRenderSessions(parent.children,search,true):''}</div>`:''}</div>`;
   }).join('');}
 function renderSidebar(){
   const summaries=sessionRows(state.runs),selected=summaries.find(run=>run.id===state.selected);
@@ -187,7 +196,7 @@ function renderSidebar(){
   if(typeof workspacePanel!=='undefined')workspacePanel?.syncTitles?.(summaries);
   // Polling must not replace the source element during a native drag.
   if(state.draggedSessionId)return;
-  const search=($('#session-search').value||'').trim().toLowerCase();
+  const search='';
   const sections=sidebarSections(state.runs,state.folders,search);
   $('#task-count').textContent=state.runs.length;
   $('#workspace-name').textContent=state.organization.name||'Workspace';
@@ -198,31 +207,30 @@ function renderSidebar(){
   const focusAttrs=['data-toggle-agents','data-toggle-folder','data-edit-folder','data-session-actions','data-run'];
   const focused=focusAttrs.map(attr=>[attr,document.activeElement?.getAttribute(attr)]).find(([,value])=>value);
   if(state.sessionSearchLoading){
-    list.innerHTML=`<p class="sidebar-empty" role="status">${search?'Searching sessions and messages…':'Loading sessions…'}</p>`;
+    MoyaiRegions.sync(list, `<p class="sidebar-empty" role="status">${search?'Searching sessions and messages…':'Loading sessions…'}</p>`);
     return;
   }
-  list.innerHTML=sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
+  MoyaiRegions.sync(list, sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
-    return `<section class="session-folder" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'}</div></section>`;
-  }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search)));
-  if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`;
-  if(search&&!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length){
-    list.innerHTML='<p class="sidebar-empty" role="status">No matching folders, sessions or messages. <button class="quiet" data-search-clear>Clear search</button></p>';
-    list.querySelector('[data-search-clear]').onclick=()=>{$('#session-search').value='';changeSessionSearch();$('#session-search').focus();};
-  }
+    return `<section class="session-folder" data-region-key="folder:${esc(folder.id)}" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${globalThis.MoyaiIcon?.('chevron',16)||''}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button></div><div class="folder-sessions" data-region-key="folder-body:${esc(folder.id)}" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${expanded?(sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'):''}</div></section>`;
+  }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section data-region-key="unfiled" class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search))));
+  if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)MoyaiRegions.sync(list, `<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`);
   if(state.sessionSearchError){
-    list.innerHTML=`<p class="sidebar-empty" role="status">Sessions could not ${state.runs.length?'refresh':'load'}. <button class="quiet" data-search-retry>Retry</button></p>`+(state.runs.length?list.innerHTML:'');
+    const notice=`<p class="sidebar-empty" role="status">Sessions could not ${state.runs.length?'refresh':'load'}. <button class="quiet" data-search-retry>Retry</button></p>`;
+    if(state.runs.length)MoyaiUI.insert(list, 'afterbegin', notice);else MoyaiRegions.sync(list, notice);
     list.querySelector('[data-search-retry]').onclick=()=>refreshRuns().catch(()=>{});
   }
   list.scrollTop=scroll;
   if(focused)list.querySelector(`[${focused[0]}="${CSS.escape(focused[1])}"]`)?.focus();
 }
 function setView(view,title){
+  state.spaceCleanup?.();state.spaceCleanup=null;
+  if(typeof commandPalette!=='undefined')commandPalette?.close();
   state.skillComposer?.destroy();state.skillComposer=null;
   state.attachments?.destroy();state.attachments=null;
   document.body.classList.toggle('chat-view',view==='chat');
   document.body.classList.toggle('home-view',view==='tasks');
-  document.body.classList.toggle('settings-view',settingsViews.has(view));
+  document.querySelectorAll('#sidebar, .workspace').forEach(root=>root.classList.toggle('settings-view',settingsViews.has(view)));
   $('#settings-navigation').hidden=!settingsViews.has(view);
   if(settingsViews.has(view))updateSettingsNavigation();
   document.title = title ? `${title} · Moyai` : 'Moyai';
@@ -234,9 +242,9 @@ function setView(view,title){
   const breadcrumb=settingsViews.has(view)&&view!=='settings';
   $('#page-title').title=title;
   $('#page-title').classList.toggle('settings-breadcrumb',breadcrumb);
-  if(breadcrumb)$('#page-title').innerHTML=`<a href="#settings">Settings</a><span aria-hidden="true">/</span><span aria-current="page">${esc(title)}</span>`;
+  if(breadcrumb)MoyaiUI.render($('#page-title'), `<a href="#settings">Settings</a><span aria-hidden="true">/</span><span aria-current="page">${esc(title)}</span>`);
   else $('#page-title').textContent=title;
-  $('#header-actions').innerHTML='';
+  MoyaiUI.render($('#header-actions'), '');
   setSidebar(false);renderSidebar();
 }
 function autoSize(input){input.style.height='auto';input.style.height=Math.min(input.scrollHeight,200)+'px';}
@@ -245,21 +253,24 @@ function bindComposer(input,form){
   input.addEventListener('input',()=>autoSize(input));
   const skills=bindInlineSkillPicker(input,form);state.skillComposer=skills;
   state.attachments=bindAttachments(input,form,input.id==='prompt'?((state.newDraft.attachment_key||'new')+(state.newDraft.private_session?':private':'')):state.selected);
-  input.addEventListener('keydown',e=>{if(skills.keydown(e))return;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();const now=(e.ctrlKey||e.metaKey)&&input.id==='followup';if(now&&!input.value.trim()&&!state.attachments.hasFiles()){state.messageQueue?.sendFirst();return;}if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit(now?form.querySelector('[data-send-now]'):undefined);}});
+  const history=input.id==='followup'?bindMessageHistory(input,()=>
+    (state.chatRun?.messages||[]).filter(message=>message.role==='user'&&message.user_id===state.userId).map(message=>message.display_content??message.content)
+  ):()=>false;
+  input.addEventListener('keydown',e=>{if(form.inert)return;if(skills.keydown(e))return;if(history(e))return;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(input.id==='followup'&&state.chatRun?.swarm&&!globalThis.MoyaiSwarm?.canSend(state.chatRun)){toast(globalThis.MoyaiSwarm?.composerNote(state.chatRun)||'Resume the swarm before sending.');return;}const now=(e.ctrlKey||e.metaKey)&&input.id==='followup';if(now&&!input.value.trim()&&!state.attachments.hasFiles()){state.messageQueue?.sendFirst();return;}if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit(now?form.querySelector('[data-send-now]'):undefined);}});
   autoSize(input);
 }
-async function navigate(view) {
+async function navigate(view,initialConfig) {
   if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
-  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections','personal-slack':'Personal Slack',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
+  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections','personal-slack':'Personal Slack',runtime:'Runtime',performance:'Performance',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(settingsViews.has(view)) {
-    $('#content').innerHTML='<p class="settings-loading" role="status">Loading…</p>';
+    MoyaiUI.render($('#content'), '<p class="settings-loading" role="status">Loading…</p>');
     $('#content').scrollTop=0;
   }
   try {
-  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='personal-slack')await renderPersonalSlack();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
+  if(view==='settings')await renderSettings(true);else if(view==='automations')await renderAutomations(false,true);else if(view==='tasks')await renderHome(initialConfig,true);else if(view==='connections')await renderConnections(true);else if(view==='personal-slack')await renderPersonalSlack();else if(view==='performance')await renderPerformance();else if(view==='spend')await renderSpend(false,true);else if(view==='users')await renderUsers(true);else if(view==='environments')await renderEnvironments(false,true);else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills(true);else if(view==='memory')await renderMemory(true);else await renderRuntime(true);
   } catch(error) {
     if(version!==state.pageVersion)return;
     if(!settingsViews.has(view))throw error;
@@ -272,32 +283,26 @@ async function navigate(view) {
   }
 }
 async function refreshRuns(){
-  const refresh=++state.runsRefresh,search=state.sessionSearch||'',focus=state.selected||parseSessionLink(location.hash)?.runId||'';
-  const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});
-  if(focus)params.set('focus',focus);if(search)params.set('search',search);
+  const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';
+  const params=new URLSearchParams({scope:sessionListScope(),view:'sidebar'});
+  if(focus)params.set('focus',focus);
   try{
     const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);
-    if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
-    state.runs=runs;state.folders=folders.folders;state.sessionSearchLoading=false;state.sessionSearchError=false;renderSidebar();
+    if(refresh!==state.runsRefresh)return;
+    if(state.selected&&focus!==state.selected&&!sessionRows(runs).some(run=>run.id===state.selected))return refreshRuns();
+    state.runs=runs;state.folders=folders.folders;state.sessionSearchLoading=false;state.sessionSearchError=false;state.revealSessionAncestors?.();renderSidebar();
   }catch(error){
-    if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
+    if(refresh!==state.runsRefresh)return;
     state.sessionSearchLoading=false;state.sessionSearchError=true;renderSidebar();throw error;
   }
 }
-function changeSessionSearch(){
-  const search=($('#session-search').value||'').trim().toLowerCase();
-  clearTimeout(state.sessionSearchTimer);
-  // Invalidate immediately: an old response can arrive during the debounce.
-  state.sessionSearch=search;state.runsRefresh++;state.runs=[];
-  state.sessionSearchLoading=true;state.sessionSearchError=false;renderSidebar();
-  state.sessionSearchTimer=setTimeout(()=>refreshRuns().catch(()=>{}),search?200:0);
-}
+function sessionListScope(){return state.role==='admin'&&state.sessionScope==='all'?'all':'mine';}
 function restoreSessionScope(){
   const canViewAll=state.authenticated&&state.role==='admin';
   state.sessionScope='mine';
   state.sessionScopeKey='moyai-session-scope:'+state.userId;
   try{if(canViewAll&&localStorage.getItem(state.sessionScopeKey)==='all')state.sessionScope='all';else if(!canViewAll)localStorage.setItem(state.sessionScopeKey,'mine');}catch{}
-  $('#session-scope').innerHTML='<option value="mine">My sessions</option>'+(canViewAll?'<option value="all">All sessions</option>':'');
+  MoyaiUI.render($('#session-scope'), '<option value="mine">My sessions</option>'+(canViewAll?'<option value="all">All sessions</option>':''));
   $('#session-scope').value=state.sessionScope;
   $('#session-scope').disabled=!canViewAll;
   $('#session-scope').title=(state.userId?.startsWith('google:')||state.userId?.startsWith('cloudflare:'))?'Sessions you created or messaged in, including linked Slack activity. Opening a link alone does not count.':'Sessions created or messaged in by this shared login. Sign in with Google for a personal view.';
@@ -308,81 +313,115 @@ function renderPrWriteAccess(run){
   const signature=JSON.stringify([run.id,run.pr_write_access]);
   if(area.dataset.signature===signature)return;
   area.dataset.signature=signature;
-  area.innerHTML=(run.pr_write_access||[]).map(a=>`<section class="approval" aria-label="PR write access">
+  MoyaiUI.render(area, (run.pr_write_access||[]).filter(a=>a.status==='pending').map(a=>`<section class="approval" aria-label="PR write access">
     <h3>${esc(a.repository)} #${a.number} · ${esc(a.status)}</h3>
-    <p>Allow repeated code changes and comments to this PR for you in this saved chat only.</p>
-    <div class="approval-actions">${a.status==='pending'?`<button class="primary small" data-pr-access="${a.id}" data-decision="approve">Allow for this chat</button><button class="small" data-pr-access="${a.id}" data-decision="deny">Deny</button>`:a.status==='approved'?`<button class="small" data-pr-access="${a.id}" data-decision="revoke">Revoke access</button><button class="primary small" data-pr-continue="${a.number}">Continue in chat</button>`:''}</div>
+    <p>Allow code changes and comments on this PR for this session. Approving continues the work.</p>
+    <div class="approval-actions"><button class="primary small" data-pr-access="${a.id}" data-decision="approve">Approve</button><button class="small" data-pr-access="${a.id}" data-decision="deny">Not Approve</button></div>
     <details><summary>PR details and write limits</summary><p>${esc(a.title)}</p>
       <p>Head repository ${a.head_repository_id}, branch ${esc(a.branch)} · Base ${esc(a.base_branch)}</p>
       <p>Other chats and requesters get no access. Code changes require the head repository to be independently enabled for writes.</p>
-      ${a.status==='approved'?'<p>Approval does not execute a write. Send a follow-up to continue the saved work.</p>':''}
     </details>
-  </section>`).join('');
+  </section>`).join(''));
   area.querySelectorAll('[data-pr-access]').forEach(button=>button.onclick=async()=>{
-    const id=run.id,version=state.pageVersion;button.disabled=true;
+    const id=run.id,version=state.pageVersion;
+    const actions=area.querySelectorAll('[data-pr-access]');actions.forEach(action=>action.disabled=true);
     try{
-      await api(`/api/runs/${id}/pr-write-access/${button.dataset.prAccess}`,{method:'POST',body:JSON.stringify({decision:button.dataset.decision})});
+      await api(`/api/runs/${id}/pr-write-access/${button.dataset.prAccess}`,{method:'POST',body:JSON.stringify({decision:button.dataset.decision,resume:button.dataset.decision==='approve'})});
       const updated=await api(`/api/runs/${id}`);
       if(state.selected===id&&state.pageVersion===version)renderPrWriteAccess(updated);
-    }catch(error){toast(error.message);button.disabled=false;}
-  });
-  area.querySelectorAll('[data-pr-continue]').forEach(button=>button.onclick=()=>{
-    const input=$('#followup');if(!input)return;
-    if(!input.value)input.value=`I approved access to PR #${button.dataset.prContinue} for this chat. Check the approval and continue the requested work.`;
-    input.focus();input.dispatchEvent(new Event('input',{bubbles:true}));
+    }catch(error){toast(error.message);actions.forEach(action=>action.disabled=false);}
   });
 }
 
 async function changeSessionScope(){
+  if(typeof commandPalette!=='undefined')commandPalette?.close();
   state.sessionScope=state.role==='admin'&&$('#session-scope').value==='all'?'all':'mine';
   $('#session-scope').value=state.sessionScope;
   try{localStorage.setItem(state.sessionScopeKey,state.sessionScope);}catch{}
   state.runs=[];state.sessionSearchLoading=true;state.sessionSearchError=false;renderSidebar();
   try{await refreshRuns();}catch(error){showError(error);}
 }
-async function renderHome(){
+async function renderHome(initialConfig,recent=false){
   const version=state.pageVersion;
   await modelPreferenceSave;
-  const [,connections,environments,config,personalSlack]=await Promise.all([refreshRuns(),api('/api/connections'),api('/api/environments'),api('/api/config'),api('/api/connections/slack/personal').catch(()=>null)]);
+  if(version!==state.pageVersion)return;
+  if(!initialConfig)refreshRuns().catch(showError);
+  const [connections,environments,config,personalSlack]=await Promise.all([api('/api/connections',{recent}),api('/api/environments',{recent}),initialConfig||api('/api/config',{recent}),api('/api/connections/slack/personal').catch(()=>null)]);
   if(version!==state.pageVersion)return;state.connections=connections;state.config=config;
   const apps=connections.filter(c=>c.enabled&&(c.connected||(c.id==='slack'&&personalSlack?.connected))),draft=state.newDraft;
-  $('#content').innerHTML=`<section class="new-conversation"><div class="welcome-mark"><img src="/static/favicon.svg?v=moyai-train-1" alt=""><span>Moyai</span></div><h1>What are we working on?</h1><p class="welcome-note">A teammate for your code, questions, and next steps.</p>
-    <div class="session-privacy-choice"><label><input id="private-session" type="checkbox" ${draft.private_session?'checked':''} ${draft.private_locked?'disabled':''} aria-describedby="session-privacy-description"> Private session · Only you</label><p id="session-privacy-description">${draft.private_session?'Owner-only web chat. It stays private and cannot be shared or delegated.':'Ordinary sessions are accessible to workspace members. Choose private to use personal Slack.'}</p></div>
-    <form id="task-form" class="composer"><textarea id="prompt" name="prompt" aria-label="Message Moyai" placeholder="Ask Moyai to build, investigate, or pick up a thread…" required minlength="3" maxlength="16000" rows="3"></textarea><div class="composer-toolbar"><details class="task-options"><summary aria-label="Session options">${globalThis.MoyaiIcon?.('sliders',16)||''}<span>Context</span></summary><div class="task-settings"><div class="field"><label for="repo">GitHub repository</label><input id="repo" type="url" placeholder="https://github.com/owner/repo" value="${esc(draft.repo||'')}"></div><div class="field"><label for="project-environment">Project environment</label><select id="project-environment">${environmentOptions(environments,draft.environment_id||'auto')}</select></div><div class="field"><label for="mode">Execution</label><select id="mode"><option value="modal" ${state.config.cloud_ready?'':'disabled'}>Cloud session</option><option value="demo" ${state.config.cloud_ready?'':'selected'}>Demo · simulated</option></select></div><div id="plugin-options"><span>Session connections</span>${apps.map(c=>`<label class="plugin-toggle"><input type="checkbox" name="plugin" value="${c.id}" ${!draft.plugins||draft.plugins.includes(c.id)?'checked':''}>${providerNames[c.id]}</label>`).join('')||'<small>Connect apps in organization settings.</small>'}</div></div></details><button type="button" class="quiet skill-picker-button" data-skill-picker="prompt" aria-label="Choose a skill" title="Skills · or type /">${globalThis.MoyaiIcon?.('slash',16)||'/'}</button><span class="composer-pickers">${harnessPicker(draft.harness,state.config.model)}${modelPicker('new-model',state.config.model,false,draft.harness)}</span><button class="send-button" type="submit" aria-label="Start session" title="Start session">${globalThis.MoyaiIcon?.('up',18)||'↑'}</button></div></form>
+  MoyaiUI.render($('#content'), `<canvas id="space-field" class="space-field" aria-hidden="true"></canvas><section class="new-conversation"><p class="welcome-eyebrow">A SPACE FOR YOUR NEXT BIG IDEA</p><h1>What are we working on?</h1><p class="welcome-note">From the first spark to the final commit. Make it happen with Moyai.</p><div class="welcome-signal" aria-hidden="true"><div id="home-hub" class="welcome-mark"><span class="welcome-orbit"></span><img src="/static/favicon.svg?v=moyai-train-1" alt=""></div><span class="signal-caption">MOYAI</span><span class="signal-label signal-label-left">CODE</span><span class="signal-label signal-label-right">CONTEXT</span></div>
+    <div class="new-session-mode"><div class="swarm-view-switch" role="group" aria-label="Session mode"><button type="button" class="quiet" data-new-session-mode="chat" aria-pressed="true">Chat</button><button type="button" class="quiet" data-new-session-mode="swarm" aria-pressed="false" ${config.cloud_ready&&config.parallel_agents_enabled&&!draft.private_session?'':'disabled'}>Swarm</button></div><div class="swarm-budget" hidden>${MoyaiSwarm.budgetFields('swarm-budget',draft.budget_seconds??0)}</div><span class="swarm-setup-note">${config.cloud_ready&&config.parallel_agents_enabled?'':'Swarm needs a connected cloud workspace with durable sessions.'}</span></div>
+    <div class="session-privacy-choice"><label><input id="private-session" type="checkbox" ${draft.private_session?'checked':''} ${draft.private_locked||!personalSlack?.available?'disabled':''} aria-describedby="session-privacy-description"> Private session · Only you</label><p id="session-privacy-description">${draft.private_session?'Owner-only web chat. It stays private and cannot be shared or delegated.':personalSlack?.available?'Ordinary sessions are accessible to workspace members. Choose private to use personal Slack.':'Private sessions require individual Google or Cloudflare sign-in.'}</p></div>
+    <form id="task-form" class="composer"><textarea id="prompt" name="prompt" aria-label="Message Moyai" placeholder="Ask Moyai to build, investigate, or pick up a thread…" required minlength="3" rows="3"></textarea><div class="composer-toolbar"><details class="task-options"><summary aria-label="Session options">${globalThis.MoyaiIcon?.('sliders',16)||''}<span>Context</span></summary><div class="task-settings"><div class="field"><label for="repo">GitHub repository</label><input id="repo" type="url" placeholder="https://github.com/owner/repo" value="${esc(draft.repo||'')}"></div><div class="field"><label for="project-environment">Project environment</label><select id="project-environment">${environmentOptions(environments,draft.environment_id||'auto')}</select></div><div class="field"><label for="mode">Execution</label><select id="mode"><option value="modal" ${state.config.cloud_ready?'':'disabled'}>Cloud session</option><option value="demo" ${state.config.cloud_ready?'':'selected'}>Demo · simulated</option></select></div><div id="plugin-options"><span>Session connections</span>${apps.map(c=>`<label class="plugin-toggle"><input type="checkbox" name="plugin" value="${c.id}" ${!draft.plugins||draft.plugins.includes(c.id)?'checked':''}>${providerNames[c.id]}</label>`).join('')||'<small>Connect apps in organization settings.</small>'}</div></div></details><button type="button" class="quiet skill-picker-button" data-skill-picker="prompt" aria-label="Choose a skill" title="Skills · or type /">${globalThis.MoyaiIcon?.('slash',16)||'/'}</button><span class="composer-pickers">${harnessPicker(draft.harness,state.config.model)}${modelPicker('new-model',state.config.model,false,draft.harness)}</span><button class="send-button" type="submit" aria-label="Start session" title="Start session">${globalThis.MoyaiIcon?.('up',18)||'↑'}</button></div></form>
     <div class="composer-caption"><span id="mode-note">${state.config.cloud_ready?'Your own cloud workspace':'Demo responses · audio uses transcription'}</span><span>Type / for skills · Enter to send</span></div>
-    <div class="suggestions"><button type="button" data-prompt="Help me investigate a bug. "><span aria-hidden="true">⌘</span> Investigate a bug</button><button type="button" data-prompt="Read the repository and explain how it works. Make no changes. "><span aria-hidden="true">⌑</span> Explore a codebase</button><button type="button" data-prompt="Find the team context for "><span aria-hidden="true">⌕</span> Find team context</button></div><p class="connected-note">${apps.length?`<span class="connected-dot"></span>${apps.map(c=>c.id==='slack'&&personalSlack?.connected?'Personal Slack':providerNames[c.id]).join(', ')} connected`:'Add your team’s apps in Connections'}</p></section>`;
+    <div class="suggestions"><button type="button" data-prompt="Help me investigate a bug. ">${globalThis.MoyaiIcon?.("bolt",20)||""}<span class="suggestion-copy"><strong>Investigate a bug</strong><small>Find the signal in the noise</small></span><span class="suggestion-arrow" aria-hidden="true">↗</span></button><button type="button" data-prompt="Read the repository and explain how it works. Make no changes. ">${globalThis.MoyaiIcon?.("terminal",20)||""}<span class="suggestion-copy"><strong>Explore a codebase</strong><small>Get the lay of the land</small></span><span class="suggestion-arrow" aria-hidden="true">↗</span></button><button type="button" data-prompt="Find the team context for ">${globalThis.MoyaiIcon?.("participants",20)||""}<span class="suggestion-copy"><strong>Find team context</strong><small>Connect the dots</small></span><span class="suggestion-arrow" aria-hidden="true">↗</span></button></div><p class="connected-note">${apps.length?`<span class="connected-dot"></span>${apps.map(c=>c.id==='slack'&&personalSlack?.connected?'Personal Slack':providerNames[c.id]).join(', ')} connected`:'Add your team’s apps in Connections'}</p></section>`);
+  state.spaceCleanup?.();
+  state.spaceCleanup=globalThis.MoyaiSpace?.mount($('#space-field'),{anchor:$('#home-hub')});
   $('#prompt').value=draft.prompt||'';
   if(draft.mode&&($('#mode option[value="'+draft.mode+'"]').disabled===false))$('#mode').value=draft.mode;
-  const saveDraft=()=>{state.newDraft={...state.newDraft,private_session:$('#private-session').checked,prompt:$('#prompt').value,repo:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,harness:$('#new-harness').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)};};
-  $('#private-session').onchange=()=>{saveDraft();state.attachments?.destroy();state.skillComposer?.destroy?.();renderHome().catch(showError);};
+  const readSwarmDraftBudget=()=>{try{return MoyaiSwarm.budgetValue(document,'swarm-budget');}catch{return state.newDraft.budget_seconds??0;}};
+  const saveDraft=()=>{state.newDraft={...state.newDraft,private_session:!!$('#private-session')?.checked,session_mode:state.newDraft.session_mode||'chat',budget_seconds:readSwarmDraftBudget(),prompt:$('#prompt').value,repo:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,harness:$('#new-harness').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)};};
+  $('#private-session').onchange=()=>{saveDraft();if(state.newDraft.private_session)state.newDraft.session_mode='chat';state.attachments?.destroy();state.skillComposer?.destroy?.();renderHome().catch(showError);};
   $('#task-form').oninput=saveDraft;$('#task-form').onchange=saveDraft;$('#task-form').onsubmit=submitTask;
   bindHarnessPicker($('#new-harness'),$('#new-model'),saveDraft);
   $('#mode').addEventListener('change',()=>{$('#new-model').disabled=$('#mode').value==='demo';$('#mode-note').textContent=$('#mode').value==='demo'?'Demo responses · audio uses transcription':'Your own cloud workspace';});
-  $('#mode').dispatchEvent(new Event('change'));
+  const syncSessionMode=()=>{
+    const swarm=state.newDraft.session_mode==='swarm';
+    document.querySelectorAll('[data-new-session-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.newSessionMode===(swarm?'swarm':'chat'))));
+    $('.swarm-budget').hidden=!swarm;
+    if(swarm){$('#mode').value='modal';$('#mode').disabled=true;}else $('#mode').disabled=false;
+    $('#mode').dispatchEvent(new Event('change'));
+    if(swarm)$('#mode-note').textContent=`${state.config.swarm_initial_team_size??20} agents · A shuffled mix of harnesses · Pause or stop anytime`;
+  };
+  if(draft.session_mode==='swarm'&&(draft.private_session||!config.cloud_ready||!config.parallel_agents_enabled))state.newDraft.session_mode='chat';
+  MoyaiSwarm.bindBudget(document,'swarm-budget',saveDraft);
+  document.querySelectorAll('[data-new-session-mode]').forEach(button=>button.addEventListener('click',()=>{state.newDraft.session_mode=button.dataset.newSessionMode;syncSessionMode();saveDraft();}));
+  syncSessionMode();
   bindComposer($('#prompt'),$('#task-form'));
   document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;saveDraft();autoSize($('#prompt'));$('#prompt').focus();});
+}
+function renderSessionSubmission(body, message='Creating session…', failed=false) {
+  MoyaiUI.render($('#content'), `<div class="chat-layout"><section class="chat-panel"><div class="conversation" role="log" aria-label="Conversation"><article class="chat-message user"><div class="message-content" style="white-space:pre-wrap">${esc(body.prompt)}</div>${body.attachment_ids.length?`<small>${body.attachment_ids.length} attachment${body.attachment_ids.length===1?'':'s'}</small>`:''}</article></div><div class="chat-bottom"><p role="${failed?'alert':'status'}">${esc(message)}</p>${failed?'<button id="retry-create" class="primary">Retry sending</button><button id="edit-create" class="quiet">Edit message</button>':''}</div></section></div>`);
 }
 async function submitTask(e){
   e.preventDefault();if(state.sending.has('new'))return;
   const files=state.attachments;let attachment_ids;
   try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
-  const form=$('#task-form'),input=$('#prompt'),submittedPrompt=input.value;
-  const button=form.querySelector('button[type="submit"]');button.disabled=true;state.sending.add('new');files.lock(true);if($('#private-session'))$('#private-session').disabled=true;
-  const body={private_session:!!(state.newDraft.private_locked||$('#private-session')?.checked),prompt:$('#prompt').value.trim()||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':''),repo_url:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,harness:$('#new-harness').value||undefined,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value),attachment_ids};
+  const input=$('#prompt'),submittedPrompt=input.value;
+  const body={private_session:!!(state.newDraft.private_locked||$('#private-session')?.checked),prompt:input.value.trim()||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':''),repo_url:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,harness:$('#new-harness').value||undefined,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value),attachment_ids};
+  if(state.newDraft.session_mode==='swarm'){try{body.swarm={budget_seconds:MoyaiSwarm.budgetValue(document,'swarm-budget')};}catch(error){toast(error.message);return;}}
   const signature=JSON.stringify(body);if(state.pendingNew?.signature!==signature)state.pendingNew={signature,client_id:crypto.randomUUID()};
-  try{
-    const run=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:state.pendingNew.client_id})});
-    // Clear the submitted DOM value too: removing a focused textarea fires a
-    // change event, which would otherwise save the old prompt back into newDraft.
-    // Keep text edited while the request was in flight, and keep drafts on failure.
-    if(input.value===submittedPrompt){input.value='';autoSize(input);}
-    if(state.newDraft.prompt===submittedPrompt)state.newDraft={};
-    files.clear(attachment_ids);state.pendingNew=null;
-    await refreshRuns();await openRun(run.id);
-  }
-  catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected){button.disabled=false;if($('#private-session'))$('#private-session').disabled=!!state.newDraft.private_locked;}}
+  const pending=state.pendingNew;
+  // Keep the draft and upload identities until acknowledgement, including a
+  // lost response. A retry must use the same idempotency key.
+  state.newDraft={...state.newDraft,prompt:submittedPrompt};
+  state.sending.add('new');files.lock(true);
+  stopStream();const version=++state.pageVersion;
+  setView('chat',sessionTitle(body));
+  const current=()=>state.pageVersion===version;
+  const send=async()=>{
+    if(!current())return;
+    state.sending.add('new');files.lock(true);
+    renderSessionSubmission(body);
+    try{
+      const run=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:pending.client_id})});
+      if(input.value===submittedPrompt)input.value='';
+      if(state.newDraft.prompt===submittedPrompt)state.newDraft={};
+      files.clear(attachment_ids);if(state.pendingNew===pending)state.pendingNew=null;
+      // Sidebar availability must never gate an accepted conversation. Leaving
+      // this page while creation is pending must not navigate the user back.
+      refreshRuns().catch(showError);
+      if(current())await openRun(run.id,'#run='+run.id,body);
+    }catch(error){
+      if(!current()){toast(error.message);return;}
+      renderSessionSubmission(body,error.message,true);
+      $('#retry-create').onclick=()=>send();
+      $('#edit-create').onclick=()=>navigate('tasks').catch(showError);
+    }finally{state.sending.delete('new');files.lock(false);}
+  };
+  await send();
 }
-async function openRun(id,hash='#run='+id){
+async function openRun(id,hash='#run='+id,submission=null){
   const link=parseSessionLink(hash);
   const sessionEdits=state.sessionEdits||0;
   const titleEdits=state.titleEdits||0;
@@ -390,23 +429,67 @@ async function openRun(id,hash='#run='+id){
   if(link?.runId===id&&link.credentialId)state.credentialLink={...link,pageVersion:version};
   const targetHash=link?.runId===id?link.hash:'#run='+id;
   history.replaceState(null,'',targetHash);
+  const cachedTitle=sessionRows(state.runs).find(run=>run.id===id);
+  setView('chat',cachedTitle?sessionTitle(cachedTitle):'Loading conversation');
+  const path=`/api/runs/${id}?activity=summary`;
+  // A recent same-tab snapshot can paint immediately while the mandatory read
+  // checks for new messages. Keep the preview bounded independently of reuse.
+  const cached=(!state.configReady||state.configLoaded)&&!state.configError?state.navigationCache?.get(path,5*60*1000):null;
+  const preview=!!cached?.chat_enabled;
+  if(preview){
+    if(cachedTitle)cached.display_title=cachedTitle.display_title;
+    state.activeParentId=cached.parent_run_id?(cached.workflow_root_id||cached.parent_run_id):'';
+    state.view='tasks';renderChat(cached);
+  }else if(submission)renderSessionSubmission(submission,'Opening conversation…');
+  else MoyaiUI.render($('#content'), '<div class="chat-loading" role="status">Loading conversation…</div>');
+  const refreshVersion=state.chatRefresh=(state.chatRefresh||0)+1;
   let run;
-  try{run=await api(`/api/runs/${id}`);}catch(error){
+  try{[run]=await Promise.all([api(path,{recent:!preview}),state.configReady]);}catch(error){
     if(version!==state.pageVersion)return;
+    if(preview&&refreshVersion!==state.chatRefresh)return;
     if(error.status===404){await showUnavailableSession(id);return;}
+    if(preview&&error.status!==401&&error.status!==403){
+      MoyaiUI.insert($('.chat-panel'),'afterbegin','<p class="error-banner" data-chat-refresh-error role="status">Showing the saved conversation. Could not check for updates. <button data-retry-chat>Retry</button></p>');
+      $('[data-retry-chat]').onclick=()=>refreshChat(id).catch(showError);
+      return;
+    }
+    if(preview)stopStream();
+    MoyaiUI.render($('#content'), '<div class="error-banner" role="alert">Could not load this conversation. <button data-retry-chat>Retry</button></div>');
+    $('#content [data-retry-chat]').onclick=()=>(state.configError?boot():openRun(id,hash)).catch(showError);
     throw error;
   }
-  if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id?(run.workflow_root_id||run.parent_run_id):'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.workflow_root_id||run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;let ancestor=run.parent_run_id;while(ancestor){state.expandedParents.add(ancestor);ancestor=sessionRows(state.runs).find(r=>r.id===ancestor)?.parent_run_id;}
+  if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id?(run.workflow_root_id||run.parent_run_id):'';
+  if(!run.parent_run_id&&run.agents?.groups?.length)state.expandedParents.add(id);
+  const revealed=new Set();
+  state.revealSessionAncestors=()=>{
+    if(version!==state.pageVersion||state.selected!==id)return;
+    const rows=new Map(sessionRows(state.runs).map(row=>[row.id,row])),visited=new Set();let ancestor=run.parent_run_id;
+    while(ancestor&&!visited.has(ancestor)){
+      visited.add(ancestor);
+      // Reveal each ancestor once for this route, including when its topology
+      // arrives later. A subsequent manual collapse remains the user's choice.
+      if(!revealed.has(ancestor)){state.expandedParents.add(ancestor);revealed.add(ancestor);}
+      const parent=rows.get(ancestor);if(!parent)return;ancestor=parent.parent_run_id;
+    }
+    state.revealSessionAncestors=null;
+  };
+  state.revealSessionAncestors();
+  if(!state.sessionSearchLoading&&!state.runs.some(r=>r.id===(run.workflow_root_id||run.parent_run_id||id)))refreshRuns().catch(showError);
   if(sessionEdits!==(state.sessionEdits||0))return openRun(id,hash);
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
-  if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'',targetHash);
-  if(run.chat_enabled){renderChat(run);if(link?.fileRef)await openLinkedFile(link,version);return;}
-  $('#content').innerHTML=`<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
-  ${run.private_owner_id?'<p class="session-privacy-notice">Private session · Only you. This session stays private and cannot be shared or delegated.</p>':''}<div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':esc(harnessName(run.harness))}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div><div class="timeline" id="timeline">${run.events.map(eventHTML).join('')}</div><div id="approvals"></div><div id="pr-write-access"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':(run.sandbox_provider==='substrate'?'Substrate sandbox':'Modal sandbox')}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':esc(harnessName(run.harness))}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai works inside a dedicated sandbox supplied by your selected provider.'}</div></aside></div>`;
+  if(!document.hidden)markSessionRead(run);state.view='tasks';
+  if(!preview||!run.chat_enabled)setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));
+  history.replaceState(null,'',targetHash);
+  if(run.chat_enabled){
+    if(preview){if(refreshVersion===state.chatRefresh)updateChat(run);}else renderChat(run);
+    if(link?.fileRef)await openLinkedFile(link,version);return;
+  }
+  MoyaiUI.render($('#content'), `<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
+  ${run.private_owner_id?'<p class="session-privacy-notice">Private session · Only you. This session stays private and cannot be shared or delegated.</p>':''}<div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':esc(harnessName(run.harness))}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div>${MoyaiActivity.terminalError(run)?`<div class="error-banner plain-text" role="alert">${esc(MoyaiActivity.terminalError(run))}</div>${MoyaiActivity.failureDetails(run)}`:''}<div class="timeline" id="timeline">${MoyaiActivity.visibleEvents(run.events).map(eventHTML).join('')}</div><div id="approvals"></div><div id="pr-write-access"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':(run.sandbox_provider==='substrate'?'Substrate sandbox':'Modal sandbox')}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':esc(harnessName(run.harness))}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai works inside a dedicated sandbox supplied by your selected provider.'}</div></aside></div>`);
   bindSessionHeaderActions(run);
   $('#back').onclick=()=>navigate('tasks').catch(showError);
   if($('#cancel'))$('#cancel').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await openRun(id);}catch(e){toast(e.message);}};
-  if($('#retry'))$('#retry').onclick=async()=>{state.newDraft={private_session:!!run.private_owner_id,private_locked:!!run.private_owner_id,attachment_key:'retry-'+crypto.randomUUID()};await navigate('tasks');$('#prompt').value=run.prompt;$('#repo').value=run.repo_url;$('#mode').value=run.mode;$('#mode').dispatchEvent(new Event('change'));document.querySelectorAll('[name="plugin"]').forEach(input=>input.checked=run.plugins.includes(input.value));$('#task-form').dispatchEvent(new Event('input',{bubbles:true}));};
+  if($('#retry'))$('#retry').onclick=async()=>{state.newDraft={private_session:!!run.private_owner_id,private_locked:!!run.private_owner_id,attachment_key:'retry-'+crypto.randomUUID()};await navigate('tasks');$('#prompt').value=run.prompt;$('#repo').value=run.repo_url;$('#mode').value=run.mode;$('#mode').dispatchEvent(new Event('change'));document.querySelectorAll('[name="plugin"]').forEach(input=>input.checked=run.plugins.includes(input.value));};
   renderApprovals(run.approvals || []);renderPrWriteAccess(run);
   if(link?.fileRef)await openLinkedFile(link,version);
   if(version!==state.pageVersion)return;
@@ -416,8 +499,8 @@ async function openRun(id,hash='#run='+id){
   if(typeof workspacePanel!=='undefined')workspacePanel?.syncSession(run);
   if(!terminal.has(run.status) || run.active){
     const cursor=run.events.at(-1)?.id||0; const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
-    source.onmessage=(e)=>{if(state.selected!==id)return;const event=JSON.parse(e.data);$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));if(event.kind==='approval') refreshApproval(id).catch(showError);};
-    source.addEventListener('run-status',e=>{if(state.selected===id)$('#run-status').innerHTML=statusLabel(JSON.parse(e.data).status);});
+    source.onmessage=(e)=>{if(state.selected!==id)return;const event=JSON.parse(e.data);run.events.push(event);syncEventTimeline($('#timeline'),run.events);if(event.kind==='approval') refreshApproval(id).catch(showError);};
+    source.addEventListener('run-status',e=>{if(state.selected===id)MoyaiUI.render($('#run-status'), statusLabel(JSON.parse(e.data).status));});
     source.addEventListener('settled',()=>{source.close();if(state.selected===id)openRun(id).catch(showError);});
     source.addEventListener('deleted',()=>{if(version===state.pageVersion&&state.source===source)showUnavailableSession(id).catch(showError);});
     source.onerror=()=>{if(source.readyState===EventSource.CLOSED)toast('Activity stream disconnected. Reopen this task to reconnect.');};
@@ -428,8 +511,8 @@ function toggleDetails(open){
   if(open)workspacePanel?.open('activity');else workspacePanel?.hide();
 }
 function initializeChatControls(){
-  $('#chat-working').insertAdjacentHTML('beforebegin','<section id="goal-status" class="goal-status" aria-label="Session goal" hidden></section>');
-  $('#session-details .activity-panel').innerHTML='<h3>Current activity</h3><p id="activity-summary"></p><details class="activity-history"><summary>Tool history <span id="activity-count"></span></summary><div id="activity-history"></div></details>';
+  MoyaiUI.insert($('#chat-working'), 'beforebegin', '<section id="goal-status" class="goal-status" aria-label="Session goal" hidden></section>');
+  MoyaiUI.render($('#session-details .activity-panel'), '<h3>Current activity</h3><p id="activity-summary"></p><details class="activity-history"><summary>Tool history <span id="activity-count"></span></summary><div id="activity-history"></div></details>');
 }
 async function openLinkedFile(link,version){
   const current=()=>version===state.pageVersion&&state.selected===link.runId;
@@ -444,12 +527,31 @@ function renderChat(run){
   const id=run.id;
   state.activityHistoryLimit=5;
   const icon=(name,size=17)=>globalThis.MoyaiIcon?.(name,size)||'';
-  $('#header-actions').innerHTML=`${(run.parent_run_id||run.side_chat_of)?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id||run.side_chat_of)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span>${run.mode==='modal'?`<button id="computer-button" class="quiet details-toggle header-icon" aria-label="Computer" title="Computer" aria-controls="workspace-panel">${icon('monitor')}</button>`:''}<button id="files-button" class="quiet details-toggle" aria-controls="workspace-panel" hidden>Files</button><button id="pull-requests-button" class="quiet details-toggle header-icon" aria-label="Pull requests" title="Pull requests" aria-controls="workspace-panel" hidden>${icon('pull')}</button><button id="subagents-button" class="quiet details-toggle header-icon" aria-label="Subagents" title="Subagents" aria-controls="workspace-panel" hidden>${icon('participants')}</button><button id="toggle-details" class="quiet details-toggle header-icon" aria-label="Activity" title="Activity" aria-expanded="false" aria-controls="session-details">${icon('list')}</button><button id="workspace-panel-toggle" class="quiet details-toggle header-icon" aria-label="Show workspace panel" title="Workspace panel" aria-controls="workspace-panel" aria-expanded="false">${icon('panel')}</button>`;
-  $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel">${run.private_owner_id?'<p class="session-privacy-notice">Private session · Only you. This session stays private and cannot be shared or delegated.</p>':''}<div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div id="pr-write-access"></div><div class="chat-working" id="chat-working" role="status"></div><section id="message-queue" class="message-queue" aria-label="Queued messages" hidden></section><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Respond to Moyai or ask something else"></textarea><div class="composer-toolbar"><button type="button" class="quiet skill-picker-button" data-skill-picker="followup" aria-label="Choose a skill" title="Skills · or type /">${icon('slash',16)}</button>${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model,false,run.harness)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message">${icon('up',18)}</button><button type="submit" data-send-now hidden>Send now</button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Type / for skills · Shift + Enter for a new line</span></div></div></section>
-  <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}${run.project_environment?.name?`<div class="detail-row"><span>Project environment</span><span>${esc(run.project_environment.name)} · ${esc(run.project_environment.commit_sha.slice(0,8))}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
+  MoyaiUI.render($('#header-actions'), `${run.private_owner_id?'<span class="session-privacy-badge">Private · Only you</span>':''}${(run.parent_run_id||run.side_chat_of)?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id||run.side_chat_of)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span><div class="swarm-view-switch" role="group" aria-label="Session view"><button type="button" class="quiet" data-session-view="chat" aria-pressed="true">Chat</button><button type="button" class="quiet" data-session-view="space" aria-pressed="false">Space</button></div>${run.swarm?'<button type="button" class="quiet" id="swarm-time" aria-label="Change swarm duration">Duration</button><button type="button" class="quiet" id="swarm-pause" hidden>Pause</button>':''}${run.mode==='modal'?`<button id="computer-button" class="quiet details-toggle header-icon" aria-label="Computer" title="Computer" aria-controls="workspace-panel">${icon('monitor')}</button>`:''}<button id="files-button" class="quiet details-toggle" aria-controls="workspace-panel" hidden>Files</button><button id="pull-requests-button" class="quiet details-toggle header-icon" aria-label="Pull requests" title="Pull requests" aria-controls="workspace-panel" hidden>${icon('pull')}</button><button id="subagents-button" class="quiet details-toggle header-icon" aria-label="Subagents" title="Subagents" aria-controls="workspace-panel" hidden>${icon('participants')}</button><button id="toggle-details" class="quiet details-toggle header-icon" aria-label="Activity" title="Activity" aria-expanded="false" aria-controls="session-details">${icon('list')}</button><button id="workspace-panel-toggle" class="quiet details-toggle header-icon" aria-label="Show workspace panel" title="Workspace panel" aria-controls="workspace-panel" aria-expanded="false">${icon('panel')}</button>`);
+  MoyaiUI.render($('#content'), `<div class="chat-layout"><section class="chat-panel">${run.private_owner_id?'<p class="session-privacy-notice">Private session · Only you. This session stays private and cannot be shared or delegated.</p>':''}<section id="swarm-space" class="swarm-space" aria-label="Agent space" hidden></section><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div id="pr-write-access"></div><div class="chat-working" id="chat-working" role="status"></div><section id="message-queue" class="message-queue" aria-label="Queued messages" hidden></section><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai</label><textarea id="followup" required rows="1" placeholder="Respond to Moyai or ask something else"></textarea><div class="composer-toolbar"><button type="button" class="quiet skill-picker-button" data-skill-picker="followup" aria-label="Choose a skill" title="Skills · or type /">${icon('slash',16)}</button>${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model,false,run.harness)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message">${icon('up',18)}</button><button type="submit" data-send-now hidden>Send now</button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>↑ / ↓ for history at text boundaries · Type / for skills · Shift + Enter for a new line</span></div></div></section>
+  <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}${run.project_environment?.name?`<div class="detail-row"><span>Project environment</span><span>${esc(run.project_environment.name)} · ${esc(run.project_environment.commit_sha.slice(0,8))}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`);
   bindSessionHeaderActions(run);
-  workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,statusFor:sessionStatus,user:state.userId||'shared:local:admin',models:harnessModels(run.harness),toast,onCreated:()=>refreshRuns().catch(showError)});
-  $('#workspace-panel-toggle').onclick=()=>workspacePanel.toggle();
+  workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,statusFor:sessionStatus,user:state.userId||'shared:local:admin',models:harnessModels(run.harness),toast,onActivity:loadAllActivity,onCreated:()=>refreshRuns().catch(showError)});
+  state.sessionViews??=new Map();
+  state.swarmChat=run.swarm?globalThis.MoyaiSwarmChat?.create({host:$('#conversation'),run,api,harnessName,modelName,markdown:renderMarkdown,jump:$('#jump-latest'),
+    attachments:(item,snapshot)=>item.kind==='human'?messageAttachments(snapshot.messages?.find(message=>item.id===`message:${message.id}`)?.attachments||[]):'',
+    onAgent:agent=>workspacePanel?.open('chat',{chatId:agent.id,title:agent.label}),
+    onAttachment:fileId=>{const file=state.chatRun?.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===fileId);if(file)showAttachment(file);},
+    onActivity:()=>workspacePanel?.open('activity'),publicMessages:snapshot=>MoyaiQueue.presentation(snapshot).transcript,
+    warning:snapshot=>{const text=snapshot.checkpoint_error||MoyaiActivity.terminalError(snapshot);return text?`<div class="error-banner plain-text" role="alert"><span>${esc(text)}</span><button type="button" class="quiet" data-room-activity>View activity</button></div>${MoyaiActivity.failureDetails(snapshot)}`:'';},
+    onFile:async(runId,fileRef)=>{try{if(state.selected!==runId)await openRun(runId);await openLinkedFile({runId,fileRef},state.pageVersion);}catch(error){showError(error);}},
+    copy:copyText,decorate:()=>savedFiles.decorate($('#conversation')),
+  }):null;
+  state.swarmSpace=globalThis.MoyaiSwarm?.create({host:$('#swarm-space'),layout:$('.chat-layout'),run,api,initialView:state.sessionViews.get(id),titleFor:sessionTitle,harnessName,modelName,onView:view=>{state.sessionViews.set(id,view);state.swarmChat?.setVisible(view==='chat');},onAgent:agent=>workspacePanel?.open('chat',{chatId:agent.id,title:agent.label}),onActivity:()=>workspacePanel?.open('activity'),onAllAgents:()=>workspacePanel?.open('agents')});
+  document.querySelectorAll('[data-session-view]').forEach(button=>button.addEventListener('click',()=>state.swarmSpace?.setView(button.dataset.sessionView,{focus:true})));
+  $('#swarm-time')?.addEventListener('click',()=>showSwarmTime(state.chatRun));
+  $('#swarm-pause')?.addEventListener('click',async()=>{
+    const button=$('#swarm-pause'),version=state.pageVersion,action=state.chatRun?.swarm?.status==='active'?'pause':'resume';
+    if(button.disabled)return;button.disabled=true;state.swarmControlPending=id;
+    try{const next=await api(`/api/runs/${id}/swarm/${action}`,{method:'POST'});if(state.pageVersion===version&&state.selected===id){updateChatStatus(next);await refreshChat(id);}}
+    catch(error){toast(error.message);}finally{if(state.swarmControlPending===id)state.swarmControlPending=null;if(state.pageVersion===version&&state.selected===id)syncSwarmControls(state.chatRun);}
+  });
+  $('#workspace-panel-toggle').addEventListener('click',()=>workspacePanel.toggle());
   $('#pull-requests-button').onclick=()=>workspacePanel.open('pulls');
   $('#subagents-button').onclick=()=>workspacePanel.open('agents');
   $('#toggle-details').onclick=()=>workspacePanel.open('activity');$('#close-details').onclick=()=>workspacePanel.hide();
@@ -461,33 +563,44 @@ function renderChat(run){
   if($('#chat-model'))$('#chat-model').onchange=()=>{state.modelDrafts[id]=$('#chat-model').value;};
   $('#followup').oninput=()=>{state.drafts[id]=$('#followup').value;};
   bindComposer($('#followup'),$('#message-form'));
-  state.messageQueue=MoyaiQueue.create({element:$('#message-queue'),runId:id,user:state.userId,role:state.role,sendImmediately:()=>state.preferences?.send_immediately===true,api,refresh:refreshChat,toast,attachments:messageAttachments,preview:showAttachment,focusComposer:()=>{if(state.selected===id&&(document.activeElement===document.body||$('#message-queue')?.contains(document.activeElement)))$('#followup')?.focus();},drafts:state.queueDrafts[id]??=new Map(),useDraft:content=>{const input=$('#followup');input.value=[input.value,content].filter(Boolean).join('\n\n');input.dispatchEvent(new Event('input'));input.focus();}});
-  const bottom=()=>{const box=$('#conversation');box.scrollTop=box.scrollHeight;};
+  state.messageQueue=MoyaiQueue.create({element:$('#message-queue'),runId:id,user:state.userId,role:state.role,sendImmediately:()=>state.preferences?.send_immediately===true,api,refresh:refreshChat,toast,attachments:messageAttachments,renderMessage:MoyaiSkillText.message,preview:showAttachment,focusComposer:()=>{if(state.selected===id&&(document.activeElement===document.body||$('#message-queue')?.contains(document.activeElement)))$('#followup')?.focus();},drafts:state.queueDrafts[id]??=new Map(),useDraft:content=>{const input=$('#followup');input.value=[input.value,content].filter(Boolean).join('\n\n');input.dispatchEvent(new Event('input'));input.focus();}});
+  const bottom=()=>{if(state.swarmChat){state.swarmChat.latest();return;}const box=$('#conversation');box.scrollTop=box.scrollHeight;};
   $('#jump-latest').onclick=bottom;
-  $('#conversation').onscroll=()=>{const box=$('#conversation');$('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;};
+  if(!state.swarmChat)$('#conversation').onscroll=()=>{const box=$('#conversation');$('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;};
   $('#stop-response').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await refreshChat(id);}catch(e){toast(e.message);}};
   $('#message-form').onsubmit=async e=>{
-    e.preventDefault();if(state.sending.has(id))return;
+    e.preventDefault();const form=e.currentTarget||$('#message-form'),input=$('#followup');
+    const current=()=>state.selected===id&&$('#message-form')===form;
+    if(!current()||form.inert||state.sending.has(id)||state.chatRun?.status==='deleting')return;
+    if(state.chatRun?.swarm&&!globalThis.MoyaiSwarm?.canSend(state.chatRun)){toast(globalThis.MoyaiSwarm?.composerNote(state.chatRun)||'Resume the swarm before sending.');return;}
     const send_now=e.submitter?.hasAttribute('data-send-now')||false;
     const files=state.attachments;let attachment_ids;
     try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
-    const original=$('#followup').value.trim(),content=original||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':'');if(!content)return;
-    const button=$('#message-form [type="submit"]');button.disabled=true;state.sending.add(id);files.lock(true);
+    const original=input.value.trim(),content=original||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':'');if(!content)return;
+    state.sending.add(id);syncChatComposer(state.chatRun);
     const model=$('#chat-model')?.value||run.model||state.config.model;
     let pending=state.pendingMessages[id];if(!pending||pending.content!==content||pending.model!==model||pending.send_now!==send_now||JSON.stringify(pending.attachment_ids)!==JSON.stringify(attachment_ids))pending=state.pendingMessages[id]={content,model,attachment_ids,send_now,client_id:crypto.randomUUID()};
-    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});state.sessionEdits=(state.sessionEdits||0)+1;files.clear(attachment_ids);delete state.pendingMessages[id];if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===original){$('#followup').value='';$('#followup').dispatchEvent(new Event('input',{bubbles:true}));autoSize($('#followup'));}await Promise.all([refreshChat(id),refreshRuns()]);if(state.selected===id)bottom();}
-    catch(error){toast(error.message);}finally{state.sending.delete(id);files.lock(false);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
+    // Show the input immediately; the next server snapshot that contains it replaces this placeholder.
+    const placeholder={id:2**52+(state.pendingSeq=(state.pendingSeq||0)+1),pending:true,known:new Set((state.chatRun?.messages||[]).map(m=>m.id)),role:'user',status:'queued',content,model,user_id:state.userId,user_name:state.chatRun?.messages?.findLast(m=>m.user_id===state.userId)?.user_name||'You',revision:0,queue_locked:0,send_immediately:send_now||state.preferences?.send_immediately===true?1:0,attachments:[]};
+    ((state.pendingQueued??={})[id]??=[]).push(placeholder);
+    input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);
+    if(state.chatRun?.id===id){updateChat(state.chatRun);bottom();}
+    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});state.sessionEdits=(state.sessionEdits||0)+1;files.clear(attachment_ids);delete state.pendingMessages[id];if(current()){if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(input.value.trim()===original){input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);}}await Promise.all([refreshChat(id),refreshRuns()]);if(current())bottom();}
+    catch(error){toast(error.message);if(current()&&!input.value.trim()){input.value=original;input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);}}
+    finally{const queued=state.pendingQueued[id]||[];queued.splice(queued.indexOf(placeholder)>>>0,1);if(state.chatRun?.id===id)updateChat(state.chatRun);state.sending.delete(id);if(state.selected===id)syncChatComposer(state.chatRun);}
   };
   updateChat(run,true);
   connectChatStream(run);
 }
 function connectChatStream(run){
-  const id=run.id;let cursor=run.events.at(-1)?.id||0;
+  const id=run.id;let cursor=Math.max(run.activity_cursor||0,run.events.at(-1)?.id||0);
+  let reconnect=false;
   const connect=()=>{
     if(state.selected!==id)return;
     const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
     const current=()=>state.selected===id&&state.source===source;
-    source.onopen=()=>{if(current()){$('#connection-state').hidden=true;renderLiveWork(null,false);refreshChat(id).catch(showError);}};
+    let opened=false;
+    source.onopen=()=>{if(current()){$('#connection-state').hidden=true;renderLiveWork(null,false);if(opened||reconnect)refreshChat(id).catch(showError);opened=true;}};
     source.onmessage=e=>{
       if(!current())return;
       const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;renderLiveWork(event,false);
@@ -502,39 +615,105 @@ function connectChatStream(run){
       $('#connection-state').hidden=false;renderLiveWork(null,true);
       // HTTP errors during a deploy can permanently close native EventSource.
       // Reopen from the last received event without replacing the composer.
-      source.close();clearTimeout(state.streamRetry);
+      reconnect=true;source.close();clearTimeout(state.streamRetry);
+      // Keep the last received cursor even if a detail refresh has a newer
+      // snapshot: the replay supplies events missed while disconnected.
       state.streamRetry=setTimeout(()=>{state.streamRetry=null;if(current())connect();},3000);
     };
   };
   connect();
 }
+function syncChatComposer(run){
+  const form=$('#message-form');if(!form||!run)return;
+  // Deletion is irreversible for this mount, including after an older response.
+  form.inert=!!form.inert||run.status==='deleting';
+  if(form.inert)run.status='deleting';
+  const deleting=form.inert,sending=state.sending.has(run.id||state.selected),swarmBlocked=!!run.swarm&&!globalThis.MoyaiSwarm?.canSend(run);
+  form.querySelectorAll('[type="submit"]').forEach(button=>button.disabled=deleting||sending||swarmBlocked);
+  for(const control of [$('#chat-model'),form.querySelector('[data-skill-picker]')])if(control)control.disabled=deleting;
+  $('#followup').contentEditable=String(!deleting);$('#followup').setAttribute('aria-disabled',String(deleting));
+  $('#stop-response').disabled=deleting||run.status==='stopping';
+  state.attachments?.lock(deleting||sending);
+}
+function showSwarmTime(run){
+  if(!run?.swarm)return;
+  const version=state.pageVersion,dialog=MoyaiUI.createDialog();
+  dialog.className='swarm-time-dialog';dialog.setAttribute('aria-labelledby','swarm-time-heading');
+  MoyaiUI.render(dialog,`<form class="swarm-time-form"><h2 id="swarm-time-heading">Swarm duration</h2><p>Set the time from now, or ask in chat: “Keep going for 2 more days.”</p>${MoyaiSwarm.budgetFields('swarm-time-budget',run.swarm.budget_seconds??0)}<p data-time-note></p><p class="swarm-time-error" data-time-error role="alert" aria-live="polite"></p><footer><button type="button" class="quiet" data-time-cancel>Cancel</button><button type="submit" class="primary">Save duration</button></footer></form>`);
+  document.body.append(dialog);dialog.addEventListener('close',()=>{dialog.remove();if(state.pageVersion===version)$('#swarm-time')?.focus();},{once:true});
+  const form=dialog.querySelector('form'),error=form.querySelector('[data-time-error]'),submit=form.querySelector('[type="submit"]');
+  MoyaiSwarm.bindBudget(form,'swarm-time-budget',()=>{form.querySelector('[data-time-note]').textContent=form.querySelector('#swarm-time-budget').value==='0'?'Keeps working until you pause or stop it.':'Your swarm pauses when this time is up. You can resume anytime.';error.textContent='';});
+  form.querySelector('[data-time-cancel]').addEventListener('click',()=>dialog.close());
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();if(submit.disabled)return;if(state.pageVersion!==version||state.selected!==run.id){dialog.close();return;}
+    if(!MoyaiSwarm.canSend(state.chatRun)){error.textContent='Saving current work… Try again when saving finishes.';return;}let budget_seconds;
+    try{budget_seconds=MoyaiSwarm.budgetValue(form,'swarm-time-budget');}catch(failure){error.textContent=failure.message;return;}
+    error.textContent='';submit.disabled=true;state.swarmControlPending=run.id;
+    try{
+      const next=await api(`/api/runs/${run.id}/swarm/time`,{method:'PATCH',body:JSON.stringify({budget_seconds})});
+      if(state.pageVersion===version&&state.selected===run.id){updateChatStatus(next);await refreshChat(run.id);}
+      dialog.close();
+    }catch(failure){error.textContent=failure.message||'The duration could not be saved.';}
+    finally{submit.disabled=false;if(state.swarmControlPending===run.id)state.swarmControlPending=null;if(state.pageVersion===version&&state.selected===run.id)syncSwarmControls(state.chatRun);}
+  });
+  dialog.showModal();
+}
+function syncSwarmControls(run){
+  const button=$('#swarm-pause');if(!button||!run)return;
+  const active=run.swarm?.status==='active',resumable=globalThis.MoyaiSwarm?.canResume(run);
+  button.hidden=!run.swarm;
+  button.textContent=active?'Pause':'Resume';
+  button.disabled=state.swarmControlPending===run.id||(!active&&!resumable)||['stopping','deleting'].includes(run.status);
+  button.title=active?'Pause the swarm and save its work':resumable?'Continue this swarm':'Saving current work…';
+  const time=$('#swarm-time');if(time)time.disabled=state.swarmControlPending===run.id||!globalThis.MoyaiSwarm?.canSend(run);
+}
 function updateChatStatus(run){
-  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});savedFiles.decorate($('#conversation'));}
+  run=state.chatRun?{...state.chatRun,...run}:run;
+  syncChatComposer(run);
+  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText,loadActivity});savedFiles.decorate($('#conversation'));}
   run=state.chatRun||run;
-  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;MoyaiProviderLogos.sync($('#chat-model').parentElement.querySelector('.provider-logo'),run.model);}
-  $('#run-status').innerHTML=statusLabel(run.status);
-  const busy=!terminal.has(run.status)||run.active;
-  $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
+  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;MoyaiProviderLogos.sync($('#chat-model').closest('.model-picker')?.querySelector('.provider-logo'),run.model);}
+  MoyaiUI.render($('#run-status'), run.swarm?`<span class="status ${esc(run.status)}">${esc(run.swarm.status==='active'?sessionStatus(run):globalThis.MoyaiSwarm?.clock(run)?.label||sessionStatus(run))}</span>`:statusLabel(run.status));
+  const busy=!terminal.has(run.status)||run.active,deleting=run.status==='deleting';
+  $('#stop-response').hidden=!busy&&!['active','paused'].includes(run.swarm?.status);
+  $('#stop-response').setAttribute('aria-label',run.swarm?'Stop swarm':'Stop response');
+  $('#stop-response').title=run.swarm?'Stop swarm':'Stop response';
+  syncSwarmControls(run);state.swarmSpace?.update(run);state.swarmChat?.update(run);
   const immediate=state.preferences?.send_immediately===true;
   const send=$('#message-form .send-button');if(send){send.title=busy?(immediate?'Send now':'Queue message'):'Send message';send.setAttribute('aria-label',send.title);}if($('#followup'))$('#followup').placeholder=busy?(immediate?'Send a follow-up now…':'Queue a follow-up… (Ctrl/⌘ Enter to send now)'):'Respond to Moyai or ask something else';
   $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?(immediate?'Enter to send now · Messages guide the active response.':'Enter to queue · Ctrl/⌘ Enter to send now.'):'Your conversation and files stay here.';
+  if(run.swarm){
+    if(!globalThis.MoyaiSwarm?.canSend(run))$('#followup').placeholder='Saving progress… Your draft stays here';
+    else $('#followup').placeholder='Guide your swarm, or ask it to keep going for 2 more days…';
+    const note=globalThis.MoyaiSwarm?.composerNote(run);if(note)$('#queue-note').textContent=note;
+  }
   if(state.activeParentId)$('#queue-note').textContent='Chatting with this agent directly. Results already sent to the parent stay saved.';
+  if(deleting){
+    $('#followup').placeholder='This session is being deleted…';
+    $('#queue-note').textContent='Deletion is in progress. Agents and sandboxes will close automatically.';
+  }
   renderChatWorking(run);
   syncRunSummary(run);
 }
 function renderChatWorking(run){
-  const current=MoyaiActivity.current(run),node=$('#chat-working');
+  const turns=MoyaiActivity.groups(run),current=MoyaiActivity.current(run,turns),node=$('#chat-working');
   node.classList.toggle('busy',current.pulse);
-  node.textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',reconnecting:'Reconnecting to workspace services. Your request will resume automatically…',running:current.headline,saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for access. Your work is saved and the sandbox is paused.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  node.textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',reconnecting:'Reconnecting to workspace services. Your request will resume automatically…',running:current.headline,saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for access. Your work is saved and the sandbox is paused.',stopping:'Stopping…',deleting:run.deletion_error?'Deleting session… '+run.deletion_error:'Deleting session…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  if(run.swarm?.status==='active'&&run.status==='waiting_children')node.textContent='Your team is working. Send a direction anytime.';
+  if(['paused','expired'].includes(run.swarm?.status))node.textContent=globalThis.MoyaiSwarm?.canResume(run)?'Swarm paused. Send a message or resume to keep going.':'Saving current work…';
+  if(run.swarm?.status==='stopped')node.textContent='Swarm stopped. Send a message to continue from your saved work.';
+  // A runtime crash can stop the turn before its final answer is saved.
+  const savedFailure=MoyaiActivity.terminalAnswer(run);
+  if(!savedFailure&&MoyaiActivity.terminalError(run))node.textContent=MoyaiActivity.terminalError(run);
   node.hidden=!node.textContent;
   node.title=node.textContent;
-  renderActivitySummary(run);
+  renderActivitySummary(run,turns);
   MoyaiGoal.render($('#goal-status'),run,esc);
 }
-function renderActivitySummary(run){
+function renderActivitySummary(run,groups=MoyaiActivity.groups(run)){
   const target=$('#activity-history');if(!target)return;
-  const turns=[...MoyaiActivity.groups(run).values()].filter(turn=>turn.rows.length||turn.live).reverse();
-  $('#activity-summary').textContent=MoyaiActivity.current(run).headline||'No active work';
+  const turns=[...groups.values()].filter(turn=>turn.rows.length||turn.live).reverse();
+  $('#activity-summary').textContent=MoyaiActivity.current(run,groups).headline||'No active work';
   $('#activity-count').textContent=`· ${turns.reduce((n,turn)=>n+turn.count,0)} actions`;
   const shown=turns.slice(0,state.activityHistoryLimit||5),signature=JSON.stringify(shown);
   if(target.dataset.signature===signature)return;
@@ -550,51 +729,125 @@ function renderActivitySummary(run){
   }
   existing.forEach(node=>node.remove());
   if(!shown.length)target.textContent='No tool activity yet.';
-  if(turns.length>shown.length){const more=document.createElement('button');more.className='quiet';more.dataset.moreHistory='';more.textContent='Show earlier turns';more.onclick=()=>{state.activityHistoryLimit+=5;target.dataset.signature='';renderActivitySummary(state.chatRun);};target.append(more);}
+  if(turns.length>shown.length){const more=MoyaiUI.createElement('button', document);more.className='quiet';more.dataset.moreHistory='';more.textContent='Show earlier turns';more.onclick=()=>{state.activityHistoryLimit+=5;target.dataset.signature='';renderActivitySummary(state.chatRun);};target.append(more);}
+}
+function showReplyFeedback(run,message){
+  const existing=message.feedback||{};
+  const dialog=MoyaiUI.createDialog();
+  dialog.className='reply-feedback-dialog';
+  dialog.setAttribute('aria-labelledby','reply-feedback-heading');
+  MoyaiUI.render(dialog, `<form class="reply-feedback-form"><h2 id="reply-feedback-heading">Reply feedback</h2><fieldset class="reply-feedback-scores" role="radiogroup" aria-required="true"><legend>How helpful was this reply?</legend><div>${Array.from({length:11},(_,score)=>`<label><input type="radio" name="score" value="${score}" ${existing.score===score?'checked':''} required><span>${score}</span></label>`).join('')}</div></fieldset><label for="reply-feedback-comment">Comment (optional)</label><textarea id="reply-feedback-comment" name="comment" maxlength="10000" rows="4">${esc(existing.comment||'')}</textarea><p class="reply-feedback-error" data-feedback-error role="alert" aria-live="polite"></p><footer><button type="button" class="quiet" data-feedback-cancel>Cancel</button><button type="submit" class="primary">Submit</button></footer></form>`);
+  document.body.append(dialog);
+  dialog.addEventListener('close',()=>{dialog.remove();document.querySelector(`[data-feedback-message="${message.id}"]`)?.focus();},{once:true});
+  const form=dialog.querySelector('form'),error=form.querySelector('[data-feedback-error]'),submit=form.querySelector('[type="submit"]');
+  form.addEventListener('invalid',()=>{error.textContent='Choose a score from 0 to 10.';},{capture:true});
+  form.querySelector('[data-feedback-cancel]').onclick=()=>dialog.close();
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const selected=form.querySelector('input[name="score"]:checked');
+    if(!selected){error.textContent='Choose a score from 0 to 10.';return;}
+    error.textContent='';submit.disabled=true;
+    try{
+      const result=await api(`/api/runs/${run.id}/messages/${message.id}/feedback`,{method:'POST',body:JSON.stringify({score:Number(selected.value),comment:form.elements.comment.value})});
+      if(state.chatRun?.id===run.id){
+        updateChat({...state.chatRun,messages:state.chatRun.messages.map(item=>String(item.id)===String(message.id)?{...item,feedback:result}:item)});
+      }
+      dialog.close();
+    }catch(failure){error.textContent=failure.message||'Feedback could not be saved.';}
+    finally{submit.disabled=false;}
+  });
+  dialog.showModal();
+  dialog.querySelector('input[name="score"]:checked')?.focus();
 }
 function updateChat(run,initial=false){
+  // Just-sent placeholders stay until a snapshot contains the saved message.
+  const placeholders=state.pendingQueued?.[run.id]||[];
+  if(placeholders.length||run.messages?.some(m=>m.pending)){
+    const saved=(run.messages||[]).filter(m=>!m.pending);
+    const sent=placeholder=>saved.some(m=>m.role==='user'&&!placeholder.known.has(m.id)&&m.user_id===placeholder.user_id&&m.content===placeholder.content);
+    run.messages=[...saved,...placeholders.filter(placeholder=>!sent(placeholder))];
+  }
+  syncChatComposer(run);
   const previous=state.chatRun?.id===run.id?state.chatRun:null;
-  const snapshotCursor=run.events?.at(-1)?.id||0;
+  run.loaded_activity=[...new Set([...(run.loaded_activity||[]),...(previous?.loaded_activity||[])])];
+  const snapshotCursor=run.activity_cursor??run.events?.at(-1)?.id??0;
   run.events=[...new Map([...(run.events||[]),...(previous?.events||[])].map(event=>[event.id,event])).values()].sort((a,b)=>a.id-b.id);
   const goalEvent=run.events.findLast(event=>event.data?.phase==='goal'&&event.data.goal_version===1);
   if(goalEvent&&goalEvent.id>snapshotCursor)run.goal=goalEvent.data.goal;
   run.activity_disconnected=previous?.activity_disconnected||false;state.chatRun=run;
   const box=$('#conversation');const atBottom=initial||box.scrollHeight-box.scrollTop-box.clientHeight<100;
   state.messageQueue?.render(run);
-  const {transcript}=MoyaiQueue.presentation(run);
-  const signature=JSON.stringify(transcript);
+  if(!state.swarmChat){
+  const {transcript:history}=MoyaiQueue.presentation(run);
+  // Retain a message boundary rather than a count: new replies must not evict
+  // history the reader has opened, or move their position during refreshes.
+  let start=box.firstMessageId==null?-1:history.findIndex(message=>String(message.id)===box.firstMessageId);
+  if(start<0)start=Math.max(0,history.length-40);
+  box.firstMessageId=history[start]?String(history[start].id):null;
+  const transcript=history.slice(start);
+  const diagnostics=transcript.map(m=>MoyaiActivity.failureDetails(run,m));
+  const signature=JSON.stringify([transcript,run.feedback_enabled,diagnostics,start>0,history[start-1]?.status]);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
-    const activitySlots=new Map([...box.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}<div id="credential-requests"></div></div>`;
-    box.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=activitySlots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
-    MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText});
+    const previousTemplates=box.messageTemplates||new Map(),templates=new Map();
+    const messages=transcript.map((m,index)=>{
+      const preceding=history[start+index-1];
+      const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(preceding?.status)?preceding.status:null;
+      const signature=JSON.stringify([m,m.feedback,failure,run.mode,run.feedback_enabled,diagnostics[index]]),previous=previousTemplates.get(m.id);
+      const feedback=m.role==='assistant'&&run.feedback_enabled&&!['running','streaming','queued','injected'].includes(m.status)?`<div class="message-actions"><button class="feedback-message primary" type="button" data-feedback-message="${esc(m.id)}" aria-label="${m.feedback?`Update feedback, score ${m.feedback.score} out of 10`:'Give feedback'}" title="${m.feedback?`Feedback ${esc(m.feedback.status||'pending')}`:'Give feedback on this reply'}">${globalThis.MoyaiIcon?.('chat',14)||''}<span>${m.feedback?`Feedback ${esc(m.feedback.score)}/10`:'Feedback'}</span></button></div>`:'';
+      const swarmMessage=m.source==='swarm'||String(m.client_id||'').startsWith('swarm:');
+      const html=previous?.signature===signature?previous.html:`<article data-region-key="message:${esc(m.id)}" data-region-leaf class="chat-message ${m.role==='user'?'user':'assistant'} ${swarmMessage?'swarm-continuation':''} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(swarmMessage?'Swarm continuation':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.pending||m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):renderMarkdown(m.content)}</div>${diagnostics[index]}${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>${feedback}`:''}</article>`;
+      templates.set(m.id,{signature,html});
+      return html+`${m.role==='user'?`<div data-region-key="activity:${esc(m.id)}" data-region-preserve data-activity-slot="${m.id}"></div>`:''}`;
+    }).join('');
+    box.messageTemplates=templates;
+    MoyaiRegions.sync(box, `<div class="conversation-inner" data-region-key="transcript">${start>0?'<div data-region-key="earlier-messages" data-region-leaf><button type="button" class="quiet" data-earlier-messages>Load earlier messages</button></div>':''}${messages}<div id="credential-requests" data-region-key="credentials" data-region-preserve></div></div>`);
+    const earlier=start>0?box.querySelector('[data-earlier-messages]:not([data-earlier-bound])'):null;
+    if(earlier){earlier.dataset.earlierBound='';earlier.addEventListener('click',()=>{
+      const current=state.chatRun;if(current?.id!==run.id||!box.isConnected)return;
+      const {transcript}=MoyaiQueue.presentation(current),index=transcript.findIndex(message=>String(message.id)===box.firstMessageId);
+      if(index<=0)return;
+      const scrollTop=box.scrollTop,height=box.scrollHeight,focused=box.querySelector('[data-earlier-messages]')===document.activeElement;
+      box.firstMessageId=String(transcript[Math.max(0,index-40)].id);
+      updateChat(current);
+      box.scrollTop=scrollTop+box.scrollHeight-height;
+      if(focused&&!box.querySelector('[data-earlier-messages]')){
+        const first=box.querySelector('.chat-message');if(first){first.tabIndex=-1;first.focus({preventScroll:true});}
+      }
+    });}
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
+    box.querySelectorAll('.feedback-message:not([data-feedback-bound])').forEach(button=>{
+      button.dataset.feedbackBound='';
+      button.addEventListener('click',()=>showReplyFeedback(
+        state.chatRun,
+        state.chatRun.messages.find(message=>String(message.id)===button.dataset.feedbackMessage),
+      ));
+    });
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
   $('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;
-  updateChatStatus(run);const focusedCredential=renderCredentialRequests(run.credential_requests||[]);if(atBottom&&!focusedCredential)box.scrollTop=box.scrollHeight;renderApprovals(run.approvals||[]);renderPrWriteAccess(run);renderSlackContext(run.slack_source);renderAgentDetails(run.agents);
+  }
+  updateChatStatus(run);if(run.credential_requests?.length||state.credentialLink)state.swarmSpace?.setView('chat');const focusedCredential=renderCredentialRequests(run.credential_requests||[]);if(atBottom&&!focusedCredential&&!state.swarmChat)box.scrollTop=box.scrollHeight;renderApprovals(run.approvals||[]);renderPrWriteAccess(run);renderSlackContext(run.slack_source);renderAgentDetails(run.agents);
   $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.checkpoint_error?(run.snapshot_id?'Latest save failed; earlier checkpoint retained':'Latest save failed; no saved checkpoint'):run.snapshot_id?'Saved for follow-ups':'Preparing';
   savedFiles.sync(run);
   if(typeof workspacePanel!=='undefined')workspacePanel?.syncSession(run);
-  $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
 }
 function renderLiveWork(event,disconnected){
   const run=state.chatRun;if(!run||run.id!==state.selected)return;
   run.activity_disconnected=disconnected;
   if(event&&!run.events.some(existing=>existing.id===event.id))run.events.push(event);
-  MoyaiActivity.sync($('#conversation'),run,{markdown:renderMarkdown,copy:copyText});
+  MoyaiActivity.sync($('#conversation'),run,{markdown:renderMarkdown,copy:copyText,loadActivity});
   savedFiles.decorate($('#conversation'));
-  renderChatWorking(run);
+  renderChatWorking(run);state.swarmSpace?.update(run);
 }
-async function copyText(text,button){try{await navigator.clipboard.writeText(text);if(button.dataset.copying)return;const html=button.innerHTML,label=button.getAttribute('aria-label'),title=button.title;button.dataset.copying='true';button.innerHTML=button.matches('.copy-message,.copy-update')?MoyaiIcon('check',16):'Copied';button.setAttribute('aria-label','Copied');button.title='Copied';setTimeout(()=>{button.innerHTML=html;if(label)button.setAttribute('aria-label',label);else button.removeAttribute('aria-label');button.title=title;delete button.dataset.copying;},1800);}catch{toast('Could not copy. You can select and copy the text.');}}
+async function copyText(text,button){try{await navigator.clipboard.writeText(text);if(button.dataset.copying)return;const html=button.innerHTML,label=button.getAttribute('aria-label'),title=button.title;button.dataset.copying='true';MoyaiUI.render(button, button.matches('.copy-message,.copy-update')?MoyaiIcon('check',16):'Copied');button.setAttribute('aria-label','Copied');button.title='Copied';setTimeout(()=>{MoyaiUI.render(button, html);if(label)button.setAttribute('aria-label',label);else button.removeAttribute('aria-label');button.title=title;delete button.dataset.copying;},1800);}catch{toast('Could not copy. You can select and copy the text.');}}
 function renderAgentDetails(team){
   const target=$('#agent-details');if(!target)return;
   const signature=JSON.stringify(team);if(target.dataset.team===signature)return;target.dataset.team=signature;
   const children=(team?.groups||[]).flatMap(g=>g.children);
-  target.innerHTML=children.length?`<section class="agent-summary"><h3>Parallel agents</h3><p>${children.filter(c=>['idle','completed'].includes(c.status)).length} of ${children.length} ready · Open agents from the Subagents toolbox or sidebar.</p>${team.spend!==null?`<p>${dollars(team.spend)} including parent${team.missing_costs?' · some costs missing':team.pending_costs?' · some costs pending':''}</p>`:''}</section>`:'';
+  MoyaiUI.render(target, children.length?`<section class="agent-summary"><h3>Parallel agents</h3><p>${children.filter(c=>['idle','completed'].includes(c.status)).length} of ${children.length} ready · Open agents from the Subagents toolbox or sidebar.</p>${team.spend!==null?`<p>${dollars(team.spend)} including parent${team.missing_costs?' · some costs missing':team.pending_costs?' · some costs pending':''}</p>`:''}</section>`:'');
   const parent=sessionRows(state.runs).find(r=>r.id===state.selected);
   if(parent&&children.length){
     parent.children=children.map(child=>({...parent.children?.find(c=>c.id===child.id),...child,parent_run_id:parent.id,mode:parent.mode}));
@@ -603,43 +856,86 @@ function renderAgentDetails(team){
 }
 function renderSlackContext(source){
   const target=$('#slack-context');if(!target)return;const signature=JSON.stringify(source);if(target.dataset.source===signature)return;target.dataset.source=signature;
-  if(!source){target.innerHTML='';return;}
+  if(!source){MoyaiUI.render(target, '');return;}
   const ready=source.context_status==='ready', messages=source.messages||[];
-  const status=ready?`${messages.length} messages from the ${source.kind}`:({pending:'Waiting to read the conversation…',fetching:'Reading the conversation…',unavailable:'Conversation could not be read',legacy:'This session started before automatic Slack context'})[source.context_status]||'Context unavailable';
-  target.innerHTML=`<section class="card source-context"><h3>Slack context</h3><p>${esc(status)}</p>${source.permalink?`<a href="${esc(source.permalink)}" target="_blank" rel="noopener noreferrer">Open source conversation ↗</a>`:''}${source.warning?`<p class="source-warning">${esc(source.warning)}</p>`:''}${ready?`<details><summary>View included messages</summary><div class="source-messages">${messages.map(m=>`<article><small>${esc(m.user)} · ${new Date(Number(m.ts)*1000).toLocaleString()}</small><p>${esc(m.text)}${m.text_truncated?'…':''}</p></article>`).join('')}</div></details>`:''}</section>`;
+  const status=ready?`${messages.length} messages from the ${source.kind}`:({pending:'Waiting to read the conversation…',fetching:'Reading the conversation…',unavailable:`Live synchronization unavailable · ${messages.length} saved messages`,legacy:'This session started before automatic Slack context'})[source.context_status]||'Context unavailable';
+  MoyaiUI.render(target, `<section class="card source-context"><h3>Slack context</h3><p>${esc(status)}</p>${source.permalink?`<a href="${esc(source.permalink)}" target="_blank" rel="noopener noreferrer">Open source conversation ↗</a>`:''}${source.warning?`<p class="source-warning">${esc(source.warning)}</p>`:''}${messages.length?`<details><summary>View observed messages</summary><div class="source-messages">${messages.map(m=>`<article><small>${esc(m.user)}${m.author_kind?' · '+esc(({self:'Moyai',bot:'Peer bot',human:'Human'})[m.author_kind]||m.author_kind):''} · ${new Date(Number(m.ts)*1000).toLocaleString()}</small><p>${esc(m.text)}${m.text_truncated?'…':''}</p></article>`).join('')}</div></details>`:''}</section>`);
 }
 async function refreshChat(id){
   const page=state.pageVersion,version=state.chatRefresh=(state.chatRefresh||0)+1;
   const current=()=>page===state.pageVersion&&version===state.chatRefresh&&state.selected===id;
   let run;
-  try{run=await api(`/api/runs/${id}`);}catch(error){
+  try{run=await api(`/api/runs/${id}?activity=summary`);}catch(error){
     if(!current())return;
     if(error.status===404){await showUnavailableSession(id);return;}
     throw error;
   }
-  if(current()&&$('#conversation'))updateChat(run);
+  if(current()&&$('#conversation')){$('[data-chat-refresh-error]')?.remove();updateChat(run);}
 }
-function eventHTML(event){if(MoyaiActivity.isFocus(event))return '';const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});const detail=event.data?.command||event.data?.detail;return `<div class="event event-${esc(event.kind)}"><span class="event-marker">${event.kind==='result'?'✓':event.kind==='tool'?'⌘':'·'}</span><div class="event-heading"><strong>${esc(event.message)}</strong><time>${stamp}</time></div>${detail?`<details class="event-detail"><summary>Details</summary><pre>${esc(typeof detail==='string'?detail:JSON.stringify(detail,null,2))}</pre></details>`:''}</div>`;}
-function renderApprovals(approvals){ if(!$('#approvals'))return;$('#approvals').innerHTML=approvals.filter(a=>a.status==='pending').map(a=>`<div class="approval"><h3>Approval needed: ${esc(a.tool)}</h3><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>${state.role==='admin'?`<div class="approval-actions"><button data-approval="${a.id}" data-decision="approve" class="primary small">Approve once</button><button data-approval="${a.id}" data-decision="deny" class="small">Deny</button></div>`:'<p>An organization administrator must approve this action.</p>'}</div>`).join('');document.querySelectorAll('[data-approval]').forEach(b=>b.onclick=async()=>{try{await api(`/api/approvals/${b.dataset.approval}`,{method:'POST',body:JSON.stringify({decision:b.dataset.decision})});await refreshApproval(state.selected);}catch(e){toast(e.message);}});}
-async function refreshApproval(id){if(state.selected!==id)return;const run=await api(`/api/runs/${id}`);if(state.selected===id){renderApprovals(run.approvals);$('#run-status').innerHTML=statusLabel(run.status);}}
-async function renderConnections(){
-  const version=state.pageVersion;const [connections,organization]=await Promise.all([api('/api/connections'),api('/api/organization')]);if(version!==state.pageVersion)return;state.connections=connections;state.organization=organization;renderSidebar();
+async function loadActivity(turnId){
+  const id=state.selected,page=state.pageVersion,run=state.chatRun;
+  if(!run||run.id!==id)return;
+  if(run.loaded_activity?.includes(String(turnId)))return;
+  state.activityRequests??=new Map();
+  const key=page+':'+turnId;
+  if(state.activityRequests.has(key))return state.activityRequests.get(key);
+  const current=()=>page===state.pageVersion&&state.selected===id&&state.chatRun?.id===id;
+  const promise=(async()=>{
+    let after=0,until;const events=[];
+    do{
+      const params=new URLSearchParams({message_id:turnId,after});if(until!=null)params.set('until',until);
+      const result=await api(`/api/runs/${id}/activity?${params}`);
+      if(!current())return;
+      events.push(...result.events);until=result.until;
+      if(!result.has_more)break;
+      if(result.next_after<=after)throw new Error('Could not load work history. Please retry.');
+      after=result.next_after;
+    }while(current());
+    if(!current())return;
+    const updated=state.chatRun;
+    updated.events=[...new Map([...updated.events,...events].map(event=>[event.id,event])).values()].sort((a,b)=>a.id-b.id);
+    updated.loaded_activity=[...new Set([...(updated.loaded_activity||[]),String(turnId)])];
+    MoyaiActivity.sync($('#conversation'),updated,{markdown:renderMarkdown,copy:copyText,loadActivity});
+    savedFiles.decorate($('#conversation'));renderActivitySummary(updated);
+  })();
+  state.activityRequests.set(key,promise);
+  try{return await promise;}finally{state.activityRequests.delete(key);}
+}
+async function loadAllActivity(){
+  const run=state.chatRun,page=state.pageVersion;if(!run)return;
+  // One turn at a time keeps a large session from flooding the server.
+  for(const id of run.deferred_activity||[]){if(page!==state.pageVersion||state.chatRun?.id!==run.id)return;await loadActivity(id);}
+}
+function syncEventTimeline(target,events){
+  const visible=MoyaiActivity.visibleEvents(events),ids=new Set(visible.map(event=>String(event.id)));
+  const nodes=new Map([...target.querySelectorAll('[data-event-id]')].map(node=>[node.dataset.eventId,node]));
+  for(const [id,node] of nodes)if(!ids.has(id)){
+    const region=node.parentElement;
+    // Streamed insertions own a component root; remove its region as well.
+    (region?.parentElement===target&&region.tagName==='MOYAI-REGION'?region:node).remove();
+  }
+  for(const event of visible)if(!nodes.has(String(event.id))){const markup=eventHTML(event);if(markup)MoyaiUI.insert(target,'beforeend',markup);}
+}
+function eventHTML(event){if(MoyaiActivity.isFocus(event))return '';const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});const detail=event.data?.command||event.data?.detail;return `<div class="event event-${esc(event.kind)}" data-event-id="${esc(event.id)}"><span class="event-marker">${event.kind==='result'?'✓':event.kind==='tool'?'⌘':'·'}</span><div class="event-heading"><strong>${esc(event.message)}</strong><time>${stamp}</time></div>${detail?`<details class="event-detail"><summary>Details</summary><pre>${esc(typeof detail==='string'?detail:JSON.stringify(detail,null,2))}</pre></details>`:''}</div>`;}
+function renderApprovals(approvals){ if(!$('#approvals'))return;MoyaiUI.render($('#approvals'), approvals.filter(a=>a.status==='pending').map(a=>`<div class="approval"><h3>Approval needed: ${esc(a.tool)}</h3><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>${state.role==='admin'?`<div class="approval-actions"><button data-approval="${a.id}" data-decision="approve" class="primary small">Approve once</button><button data-approval="${a.id}" data-decision="deny" class="small">Deny</button></div>`:'<p>An organization administrator must approve this action.</p>'}</div>`).join(''));document.querySelectorAll('[data-approval]').forEach(b=>b.onclick=async()=>{try{await api(`/api/approvals/${b.dataset.approval}`,{method:'POST',body:JSON.stringify({decision:b.dataset.decision})});await refreshApproval(state.selected);}catch(e){toast(e.message);}});}
+async function refreshApproval(id){if(state.selected!==id)return;const run=await api(`/api/runs/${id}`);if(state.selected===id){renderApprovals(run.approvals);MoyaiUI.render($('#run-status'), run.swarm?`<span class="status ${esc(run.status)}">${esc(run.swarm.status==='active'?sessionStatus(run):globalThis.MoyaiSwarm?.clock(run)?.label||sessionStatus(run))}</span>`:statusLabel(run.status));}}
+async function renderConnections(recent=false){
+  const version=state.pageVersion;const [connections,organization]=await Promise.all([api('/api/connections',{recent}),api('/api/organization',{recent})]);if(version!==state.pageVersion)return;state.connections=connections;state.organization=organization;renderSidebar();
   const admin=state.role==='admin', org=state.organization, slack=org.slack_sessions;
-  $('#content').innerHTML=`<div class="page-heading"><div><h1>Connections</h1><p class="subtext">Bring your team’s tools into every session.</p></div><span class="badge">${admin?'Administrator':'Member'}</span></div>
-    <p><a href="#personal-slack">Personal Slack</a> · Connect your own account for owner-only web chats.</p>
+  MoyaiUI.render($('#content'), `<div class="page-heading"><div><h1>Connections</h1><p class="subtext">Bring your team’s tools into every session.</p></div><span class="badge">${admin?'Administrator':'Member'}</span></div>
     <div class="org-summary"><div><strong>Shared with your organization</strong><p>Each session chooses which apps it uses. Credentials stay on the server.</p></div><span>${state.connections.filter(c=>c.connected).length} of ${state.connections.length} connected</span></div>
     <div class="connections-grid org-connections">${state.connections.map(c=>`<article class="connection-card"><div class="connection-top"><div class="app-icon ${c.id}">${providerNames[c.id][0]}</div><h2>${providerNames[c.id]}</h2><span class="connection-state ${c.connected&&c.enabled?'healthy':''}">${c.connected?(c.enabled?'Connected':'Paused'):'Not connected'}</span></div><p>${({linear:'Issues, requirements, and progress comments.',slack:'Conversation search and thread context.',notion:'Documentation, page context, and new notes.',github:'Read code and rulesets, maintain PRs, and update required reviewers when GitHub permissions allow.'})[c.id]}</p><dl class="connection-facts"><div><dt>Workspace</dt><dd>${c.id==='github'&&c.label?.length>80?`<details class="connection-repositories"><summary>View repositories</summary>${esc(c.label)}</details>`:esc(c.label||'—')}</dd></div><div><dt>Connection</dt><dd>${esc(c.identity)}</dd></div><div><dt>Access</dt><dd>${c.read_only?'Read only':c.id==='github'?'PRs and ruleset reviewers':'Read and write automatically'}</dd></div></dl><small>${c.check_status==='healthy'?'Verified '+relative(c.checked_at):c.check_status==='needs_attention'?'Connection needs attention':'Ready for a connection check'}</small><div class="connection-action"><button data-manage="${c.id}">${admin?'Manage':'View access'}</button></div></article>`).join('')}</div>
     <div class="org-lower"><section class="card org-slack"><div class="section-header"><h2>Start sessions from Slack</h2><span class="connection-state ${slack.enabled?'healthy':''}">${slack.enabled?'Enabled':'Setup needed'}</span></div><p>Mention <strong>@Moyai</strong> with a task in a channel the bot has joined. It reacts with 👀 when it picks up your message, then posts its answer in the thread. ${slack.thread_reply_ready?'Reply there to continue the same conversation; no repeat mention is needed.':'Mention the bot again in the same thread to continue. An administrator can reconnect Slack to enable replies without a mention.'}</p><p class="subtext">${slack.enabled?esc(slack.audience)+' can start sessions using enabled organization apps.':'The Slack workspace bot must be installed before mentions can start sessions.'} Everyone in that Slack thread can see the replies. Use stop, sleep, or wake to control the conversation. Enabled app tools run without an extra approval step.</p><p>${slack.direct_message_ready?'You can also message Moyai directly. Each new message starts a session. Reply in its thread to keep the same conversation and files.':'Direct messages need the bot’s DM access and message event subscription.'} DM sessions are also visible to signed-in BerriAI teammates in Moyai.</p>${slack.last_session?`<small>Latest request ${relative(slack.last_session.created_at)} · ${slack.last_session.reply_status==='sent'?'Reply sent':'Reply '+esc(slack.last_session.reply_status)}</small>`:''}</section>
     <section class="card org-access"><h2>Organization access</h2><p>Members can start sessions and use enabled app tools, including writes, without extra approval. Administrators manage connections and allowed actions.</p><p class="subtext">${org.google_signin?'Sign in with your BerriAI Google account. Administrators are assigned by email; other teammates join as members.':org.member_access_configured?'Separate administrator and member sign-ins are enabled.':'Currently using the shared administrator sign-in. Separate member access is not configured.'}</p>${admin?`<form id="org-name-form"><label for="org-name">Organization name</label><div class="inline-field"><input id="org-name" maxlength="80" required value="${esc(org.name)}"><button type="submit">Save</button></div></form>`:''}</section></div>
     <div class="note org-note"><strong>Shared connection, same provider identity</strong>A shared connection uses the account that authorized it. Sharing it here does not turn a personal account into a service account or expand its provider permissions. Conversational replies are posted automatically to the originating Slack conversation. All enabled app tools run without an extra approval step, including newly added tools and messages to other Slack conversations. Read-only and paused connection settings still apply.</div>
-    ${org.activity.length?`<details class="org-history"><summary>Connection activity</summary>${org.activity.map(a=>`<div><span>${esc(providerNames[a.provider]||'Organization')} · ${esc(a.action)}</span><small>${esc(a.actor)} · ${relative(a.created_at)}</small></div>`).join('')}</details>`:''}`;
+    ${org.activity.length?`<details class="org-history"><summary>Connection activity</summary>${org.activity.map(a=>`<div><span>${esc(providerNames[a.provider]||'Organization')} · ${esc(a.action)}</span><small>${esc(a.actor)} · ${relative(a.created_at)}</small></div>`).join('')}</details>`:''}`);
   document.querySelectorAll('[data-manage]').forEach(b=>b.onclick=()=>manageConnection(b.dataset.manage));
   if($('#org-name-form'))$('#org-name-form').onsubmit=async e=>{e.preventDefault();try{await api('/api/organization',{method:'PATCH',body:JSON.stringify({name:$('#org-name').value})});await renderConnections();toast('Organization updated.');}catch(err){toast(err.message);}};
 }
 function manageConnection(provider){
   const c=state.connections.find(c=>c.id===provider), name=providerNames[provider], admin=state.role==='admin';
   $('#connection-title').textContent=name+' · Organization access';
-  $('#connection-body').innerHTML=`<p>${c.connected?'Connected to '+esc(c.label)+' using '+esc(c.identity.toLowerCase())+'.':'No shared connection is installed.'}</p><ul class="tool-list">${c.tools.map(t=>`<li>${esc(t.description)}</li>`).join('')}</ul>${admin?`<label class="policy-check"><input id="connection-enabled" type="checkbox" ${c.enabled?'checked':''}>Available to organization sessions</label><div class="field"><label for="connection-access">Allowed actions</label><select id="connection-access"><option value="write" ${!c.read_only?'selected':''}>${provider==='github'?'Pull requests and ruleset reviewers':'Read and write automatically'}</option><option value="read" ${c.read_only?'selected':''}>Read only</option></select></div><p class="subtext">Pausing access or switching to read only blocks new writes. An action already sent cannot be recalled.</p><button class="primary full" type="submit">Save access</button><div class="connection-controls">${c.connected?'<button id="connection-check" type="button">Check connection</button>':''}${c.connected&&provider==='github'?'<button id="github-repositories" type="button">Choose repositories</button>':''}<button id="connection-reconnect" type="button">${c.connected?'Reconnect':'Connect'} ${name}</button>${c.connected?'<button id="connection-disconnect" class="danger" type="button">Disconnect</button>':''}</div>`:`<div class="note">${c.enabled?'Available to sessions.':'Paused for all sessions.'} ${c.read_only?'Read only.':provider==='github'?'PR creation, Moyai PR updates across chats, comments and requested ruleset reviewer edits execute directly. Ruleset edits require GitHub Administration write access. PR approval and merging are blocked.':'Enabled tools run automatically, including writes. No administrator approval step is required.'} Ask an organization administrator to change this connection.</div>`}<div id="connection-error" role="alert"></div>`;
+  MoyaiUI.render($('#connection-body'), `<p>${c.connected?'Connected to '+esc(c.label)+' using '+esc(c.identity.toLowerCase())+'.':'No shared connection is installed.'}</p><ul class="tool-list">${c.tools.map(t=>`<li>${esc(t.description)}</li>`).join('')}</ul>${admin?`<label class="policy-check"><input id="connection-enabled" type="checkbox" ${c.enabled?'checked':''}>Available to organization sessions</label><div class="field"><label for="connection-access">Allowed actions</label><select id="connection-access"><option value="write" ${!c.read_only?'selected':''}>${provider==='github'?'Pull requests and ruleset reviewers':'Read and write automatically'}</option><option value="read" ${c.read_only?'selected':''}>Read only</option></select></div><p class="subtext">Pausing access or switching to read only blocks new writes. An action already sent cannot be recalled.</p><button class="primary full" type="submit">Save access</button><div class="connection-controls">${c.connected?'<button id="connection-check" type="button">Check connection</button>':''}${c.connected&&provider==='github'?'<button id="github-repositories" type="button">Choose repositories</button>':''}<button id="connection-reconnect" type="button">${c.connected?'Reconnect':'Connect'} ${name}</button>${c.connected?'<button id="connection-disconnect" class="danger" type="button">Disconnect</button>':''}</div>`:`<div class="note">${c.enabled?'Available to sessions.':'Paused for all sessions.'} ${c.read_only?'Read only.':provider==='github'?'PR creation, Moyai PR updates across chats, comments and requested ruleset reviewer edits execute directly. Ruleset edits require GitHub Administration write access. PR approval and merging are blocked.':'Enabled tools run automatically, including writes. No administrator approval step is required.'} Ask an organization administrator to change this connection.</div>`}<div id="connection-error" role="alert"></div>`);
   $('#connection-form').onsubmit=async e=>{e.preventDefault();if(!admin)return;try{await api('/api/connections/'+provider+'/policy',{method:'PATCH',body:JSON.stringify({enabled:$('#connection-enabled').checked,read_only:$('#connection-access').value==='read'})});$('#connection-dialog').close();await renderConnections();toast(name+' access updated.');}catch(error){$('#connection-error').textContent=error.message;}};
   if($('#github-repositories'))$('#github-repositories').onclick=githubRepositoriesDialog;
   if($('#connection-reconnect'))$('#connection-reconnect').onclick=()=>{ $('#connection-dialog').close();connectionDialog(provider); };
@@ -649,11 +945,11 @@ function manageConnection(provider){
 }
 async function githubRepositoriesDialog(){
   $('#connection-title').textContent='GitHub · Repositories';
-  $('#connection-body').innerHTML='<p>Loading repositories…</p><div id="connection-error" role="alert"></div>';
+  MoyaiUI.render($('#connection-body'), '<p>Loading repositories…</p><div id="connection-error" role="alert"></div>');
   $('#connection-form').onsubmit=e=>e.preventDefault();
   try{
     const data=await api('/api/connections/github/repositories');
-    $('#connection-body').innerHTML=`<p>Choose the repositories Moyai can use. Renaming a repository keeps its connection and saved work.</p><div class="github-repository-options">${data.repositories.map(repo=>`<label class="policy-check"><input type="checkbox" name="repository-id" value="${repo.id}" ${data.selected_ids.includes(repo.id)?'checked':''}>${esc(repo.full_name)}</label>`).join('')}</div><p class="subtext">Missing a repository? <a href="${esc(data.installation_url)}" target="_blank" rel="noopener noreferrer">Manage the GitHub App’s access</a>, then refresh this list.</p><button id="github-repository-refresh" type="button">Refresh list</button><button class="primary full" type="submit">Save repositories</button><div id="connection-error" role="alert"></div>`;
+    MoyaiUI.render($('#connection-body'), `<p>Choose the repositories Moyai can use. Renaming a repository keeps its connection and saved work.</p><div class="github-repository-options">${data.repositories.map(repo=>`<label class="policy-check"><input type="checkbox" name="repository-id" value="${repo.id}" ${data.selected_ids.includes(repo.id)?'checked':''}>${esc(repo.full_name)}</label>`).join('')}</div><p class="subtext">Missing a repository? <a href="${esc(data.installation_url)}" target="_blank" rel="noopener noreferrer">Manage the GitHub App’s access</a>, then refresh this list.</p><button id="github-repository-refresh" type="button">Refresh list</button><button class="primary full" type="submit">Save repositories</button><div id="connection-error" role="alert"></div>`);
     $('#github-repository-refresh').onclick=githubRepositoriesDialog;
     $('#connection-form').onsubmit=async e=>{
       e.preventDefault();const button=e.currentTarget.querySelector('[type="submit"]');button.disabled=true;
@@ -672,7 +968,7 @@ function connectionDialog(provider){
   $('#connection-title').textContent='Connect '+name+' for your organization';
   if(provider==='github'){
     const repos=connection.repositories||[];
-    $('#connection-body').innerHTML=`<p>Connect once for your team. Choose repositories in Moyai after installing your organization’s GitHub App.</p><ul>${repos.map(repo=>`<li><strong>${esc(repo.full_name)}</strong></li>`).join('')}</ul><p>Moyai can read code, open normal pull requests, and update or comment on Moyai PRs created by any chat in this workspace under the current GitHub connection without an administrator approval step. It cannot approve or merge PRs, enable auto-merge, or change workflows and access controls.</p>${connection.app_registered?'<button class="primary full" type="submit">Continue with GitHub</button>':`<h3>Connect an existing GitHub App</h3><p>An organization App owner or manager can find the App ID and download a private key in GitHub’s App settings. Upload it here, never in chat. The key stays encrypted on Moyai’s server.</p><div class="field"><label for="github-app-id">GitHub App ID</label><input id="github-app-id" type="number" min="1" required autocomplete="off"></div><div class="field"><label for="github-app-key">Private key (.pem)</label><input id="github-app-key" type="file" accept=".pem" required><small>Used only to authenticate your organization’s GitHub App.</small></div><button class="primary full" type="submit">Verify app and continue</button><div class="divider">or</div><div class="field"><label for="github-organization">GitHub organization</label><input id="github-organization" placeholder="Your organization" autocomplete="off"></div><button class="quiet full" id="github-new-app" type="button">Register a new GitHub App</button>`}<div id="connection-error" role="alert"></div>`;
+    MoyaiUI.render($('#connection-body'), `<p>Connect once for your team. Choose repositories in Moyai after installing your organization’s GitHub App.</p><ul>${repos.map(repo=>`<li><strong>${esc(repo.full_name)}</strong></li>`).join('')}</ul><p>Moyai can read code, open normal pull requests, and update or comment on Moyai PRs created by any chat in this workspace under the current GitHub connection without an administrator approval step. It cannot approve or merge PRs, enable auto-merge, or change workflows and access controls.</p>${connection.app_registered?'<button class="primary full" type="submit">Continue with GitHub</button>':`<h3>Connect an existing GitHub App</h3><p>An organization App owner or manager can find the App ID and download a private key in GitHub’s App settings. Upload it here, never in chat. The key stays encrypted on Moyai’s server.</p><div class="field"><label for="github-app-id">GitHub App ID</label><input id="github-app-id" type="number" min="1" required autocomplete="off"></div><div class="field"><label for="github-app-key">Private key (.pem)</label><input id="github-app-key" type="file" accept=".pem" required><small>Used only to authenticate your organization’s GitHub App.</small></div><button class="primary full" type="submit">Verify app and continue</button><div class="divider">or</div><div class="field"><label for="github-organization">GitHub organization</label><input id="github-organization" placeholder="Your organization" autocomplete="off"></div><button class="quiet full" id="github-new-app" type="button">Register a new GitHub App</button>`}<div id="connection-error" role="alert"></div>`);
     async function githubSetup(existing){
       const buttons=document.querySelectorAll('#connection-form button');buttons.forEach(button=>button.disabled=true);
       try{
@@ -695,7 +991,7 @@ function connectionDialog(provider){
     $('#connection-dialog').showModal();return;
   }
 
-  $('#connection-body').innerHTML='<p>'+hints[provider]+'</p>'+(connection.oauth_configured?'<button class="primary full" id="oauth-connect" type="button">Continue with '+name+'</button><div class="divider">or use a token</div>':'<div class="note">One-click sign-in becomes available after an administrator configures this app’s OAuth client.</div>')+'<div class="field"><label for="connection-token">Access token</label><input id="connection-token" class="token-input" type="password" required minlength="8" maxlength="4096" autocomplete="off"><small>Validated with '+name+' and stored encrypted on the server.</small></div><div id="connection-error" role="alert"></div><button class="primary full" type="submit">Connect '+name+'</button>';
+  MoyaiUI.render($('#connection-body'), '<p>'+hints[provider]+'</p>'+(connection.oauth_configured?'<button class="primary full" id="oauth-connect" type="button">Continue with '+name+'</button><div class="divider">or use a token</div>':'<div class="note">One-click sign-in becomes available after an administrator configures this app’s OAuth client.</div>')+'<div class="field"><label for="connection-token">Access token</label><input id="connection-token" class="token-input" type="password" required minlength="8" maxlength="4096" autocomplete="off"><small>Validated with '+name+' and stored encrypted on the server.</small></div><div id="connection-error" role="alert"></div><button class="primary full" type="submit">Connect '+name+'</button>');
   $('#connection-form').onsubmit=async(e)=>{
     e.preventDefault();const button=$('#connection-form button[type="submit"]');button.disabled=true;
     try{await api('/api/connections/'+provider,{method:'POST',body:JSON.stringify({token:$('#connection-token').value})});$('#connection-token').value='';$('#connection-dialog').close();await renderConnections();toast(name+' connected.');}
@@ -704,20 +1000,72 @@ function connectionDialog(provider){
   if($('#oauth-connect'))$('#oauth-connect').onclick=async()=>{try{const result=await api('/api/connections/'+provider+'/oauth',{method:'POST'});window.location.assign(result.url);}catch(e){$('#connection-error').textContent=e.message;}};
   $('#connection-dialog').showModal();
 }
-async function renderRuntime(){const version=state.pageVersion;const config=await api('/api/config');if(version!==state.pageVersion)return;state.config=config;const fields=['LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];$('#content').innerHTML=`<div class="page-heading"><div><h1>Runtime</h1><p class="subtext">Cloud readiness, session limits, and recovery.</p></div><span id="runtime-readiness" class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Model gateway + ${esc((config.harnesses||[]).find(h=>h.id===config.harness)?.name||config.harness)}</h2><p class="subtext">The selected agent uses your model gateway to plan work and use tools.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Session recovery</span><span>${esc(state.config.execution_engine||"Local worker")}${state.config.execution_connected===false?" · reconnecting":""}</span></div>${state.config.checkpoint_interval_seconds?`<div class="detail-row"><span>Save progress</span><span>Every ${Math.round(state.config.checkpoint_interval_seconds/60)} minutes between tool rounds</span></div>`:""}<div class="detail-row"><span>Maximum active + idle sandboxes</span><span>${state.config.max_concurrent_runs}</span></div><div class="detail-row"><span>Parallel agents</span><span>${state.config.parallel_agents_enabled?'Up to '+state.config.max_parallel_agents+' workers per group':'Requires Temporal'}</span></div><div class="detail-row"><span>Idle sessions</span><span>${state.config.sandbox_idle_seconds?Math.round(state.config.sandbox_idle_seconds/60)+' minutes of sandbox reuse':'No running sandbox'}</span></div><div class="detail-row"><span>Response time limit</span><span>${state.config.run_timeout_seconds?Math.round(state.config.run_timeout_seconds/60)+' minutes':'No app limit'}</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Your administrator manages the cloud connection. Each response runs in an isolated workspace and saves its files for the next message. Long tasks automatically continue on a fresh machine at the configured rotation boundary.${state.config.sandbox_idle_seconds?' Idle sandboxes can be released sooner when another session needs capacity. Finished workers and coordinators waiting for workers release immediately.':''}</p></div></div>`;await renderSandboxConnection(version);}
+async function renderRuntime(recent=false){const version=state.pageVersion;const config=await api('/api/config',{recent});if(version!==state.pageVersion)return;state.config=config;const fields=['LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];MoyaiUI.render($('#content'), `<div class="page-heading"><div><h1>Runtime</h1><p class="subtext">Cloud readiness, session limits, and recovery.</p></div><span id="runtime-readiness" class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Model gateway + ${esc((config.harnesses||[]).find(h=>h.id===config.harness)?.name||config.harness)}</h2><p class="subtext">The selected agent uses your model gateway to plan work and use tools.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Session recovery</span><span>${esc(state.config.execution_engine||"Local worker")}${state.config.execution_connected===false?" · reconnecting":""}</span></div>${state.config.checkpoint_interval_seconds?`<div class="detail-row"><span>Save progress</span><span>Every ${Math.round(state.config.checkpoint_interval_seconds/60)} minutes between tool rounds</span></div>`:""}<div class="detail-row"><span>Maximum active + idle sandboxes</span><span>${state.config.max_concurrent_runs||'No limit'}</span></div><div class="detail-row"><span>Parallel agents</span><span>${state.config.parallel_agents_enabled?'Up to '+state.config.max_parallel_agents+' workers per group':'Requires Temporal'}</span></div><div class="detail-row"><span>Idle sessions</span><span>${state.config.sandbox_idle_seconds?Math.round(state.config.sandbox_idle_seconds/60)+' minutes of sandbox reuse':'No running sandbox'}</span></div><div class="detail-row"><span>Response time limit</span><span>${state.config.run_timeout_seconds?Math.round(state.config.run_timeout_seconds/60)+' minutes':'No app limit'}</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Your administrator manages the cloud connection. Each response runs in an isolated workspace and saves its files for the next message. Long tasks automatically continue on a fresh machine at the configured rotation boundary.${state.config.sandbox_idle_seconds?' Idle sandboxes can be released sooner when another session needs capacity. Finished workers and coordinators waiting for workers release immediately.':''}</p></div></div>`);await renderSandboxConnection(version);}
 function showError(error){toast(error.message);}
-document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view).catch(showError));
+function prefetchNavigation(target){
+  if(!state.authenticated||document.hidden||navigator.connection?.saveData)return;
+  const prLink=target?.closest('a[href^="https://github.com/"]');
+  const pr=state.chatRun?.pull_requests?.find(item=>item.url===prLink?.getAttribute('href'));
+  if(pr){
+    if(state.navigationCache.pendingCount<3)api(`/api/runs/${state.selected}/pull-request?url=${encodeURIComponent(pr.url)}`,{recent:true}).catch(()=>{});
+    return;
+  }
+  const link=target?.closest('[data-run], [data-view], [data-spend-tab], a[href^="#"], #new-task');
+  if(!link)return;
+  const hash=link.getAttribute('href')||'';
+  const paths=MoyaiNavigationCache.pathsFor({
+    runId:link.dataset.run||parseSessionLink(hash)?.runId,
+    view:link.dataset.view||(link.id==='new-task'?'tasks':hash.slice(1)),
+    role:state.role,start:spendState.start,end:spendState.end,
+  });
+  if(state.view==='spend'&&spendState.scope==='organization'){
+    const tab=link.dataset.spendTab,query=new URLSearchParams({start:spendState.start,end:spendState.end});
+    if(tab==='users')paths.push('/api/admin/adoption?'+query);
+    if(tab==='prs'||tab==='leaderboard')paths.push('/api/admin/pull-requests?'+query);
+  }
+  for(const path of paths){
+    if(state.navigationCache.pendingCount>=3)break;
+    api(path,{recent:true}).catch(()=>{});
+  }
+}
+let navigationIntent;
+document.addEventListener('pointerover',event=>{
+  clearTimeout(navigationIntent);
+  navigationIntent=setTimeout(()=>prefetchNavigation(event.target),80);
+});
+document.addEventListener('pointerout',()=>clearTimeout(navigationIntent));
+document.addEventListener('focusin',event=>prefetchNavigation(event.target));
+// Tooltip rerenders own the React onclick property; keep controller listeners separate.
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.view).catch(showError)));
 $('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).catch(showError);
 $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const actions=e.target.closest('[data-session-actions]');if(actions){const run=state.runs.find(r=>r.id===actions.dataset.sessionActions);if(run)showSessionActions(run,actions);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
 bindSessionFolderDragDrop($('#session-list'));
 $('#session-scope').onchange=changeSessionScope;
-$('#search-sessions').setAttribute('aria-controls','session-search-field');
+commandPalette=createCommandPalette();
+$('#new-task kbd').textContent=commandPalette.modifier+'⇧O';
+$('#new-task').setAttribute('aria-keyshortcuts','Meta+Shift+O Control+Shift+O');
+$('#command-menu kbd').textContent=commandPalette.modifier+'K';
+$('#command-menu').setAttribute('aria-keyshortcuts','Meta+K Control+K');
+$('#command-menu').onclick=()=>commandPalette.open();
+$('#search-sessions').setAttribute('aria-controls','command-palette');
+$('#search-sessions').setAttribute('aria-haspopup','dialog');
 $('#search-sessions').setAttribute('aria-expanded','false');
-$('#session-search').oninput=changeSessionSearch;
-$('#session-search').onkeydown=e=>{if(e.key==='Escape'){e.stopPropagation();$('#session-search').value='';changeSessionSearch();closeSessionSearch();$('#search-sessions').focus();}};
-const wideRail=()=>!matchMedia('(max-width:850px)').matches;$('#open-sidebar').onclick=()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);};$('#search-sessions').onclick=()=>{if(!wideRail())setSidebar(true);openSessionSearch();};$('#session-search').onblur=closeSessionSearch;$('#close-sidebar').onclick=()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);};$('#sidebar-scrim').onclick=()=>setSidebar(false);
-window.addEventListener('keydown',e=>{if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();$('#new-task').click();}});
+const wideRail=()=>!matchMedia('(max-width:850px)').matches;
+// Tooltip updates must not replace the sidebar controls' native handlers.
+$('#open-sidebar').addEventListener('click',()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);});
+$('#search-sessions').addEventListener('click',()=>commandPalette.open('sessions'));
+$('#close-sidebar').addEventListener('click',()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);});
+$('#sidebar-scrim').onclick=()=>setSidebar(false);
+window.addEventListener('keydown',e=>{
+  if(e.defaultPrevented||e.isComposing||e.repeat)return;
+  const shortcut=(e.metaKey||e.ctrlKey)&&!e.altKey;
+  if(shortcut&&!e.shiftKey&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();commandPalette.toggle();return;}
+  const overlay=document.querySelector('[data-slot="dialog-content"]');
+  if(shortcut&&e.shiftKey&&e.key.toLowerCase()==='o'&&state.csrf&&(!overlay||overlay.dataset.dialogId==='command-palette')){e.preventDefault();commandPalette.close();$('#new-task').click();return;}
+  if(overlay)return;
+  if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}
+});
 $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
   if(!state.csrf)return;
@@ -726,12 +1074,13 @@ window.addEventListener('hashchange',()=>{
 });
 document.querySelector('.skip-link')?.addEventListener('click',event=>{event.preventDefault();$('#content').focus();});
 async function boot(){
+  let page=state.pageVersion,loadingChat=false;
   try{
     const session=await api('/api/session');applyUserSession(session);restoreSessionFolderView();
     $('.rail-foot small').textContent=session.local?'Private · local preview':'Shared internal workspace';
     if(!session.authenticated){
       const passwordForm='<form id="login-form"><div class="field"><label for="password">Workspace password</label><input id="password" type="password" autocomplete="current-password" required></div><button class="primary full">Sign in</button></form>';
-      $('#content').innerHTML=`<div class="login"><div class="card"><div class="login-mark" aria-hidden="true">M</div><h1>Welcome to Moyai</h1><p class="subtext">${session.google_enabled?'Your team’s agent, one conversation away.':'Sign in to Moyai.'}</p>${session.google_enabled?`<button id="google-signin" class="google-signin full" type="button"><span class="google-letter" aria-hidden="true">G</span> Continue with Google</button><p class="login-domain">Use your ${session.google_domains.map(d=>'@'+esc(d)).join(' or ')} work account.</p>`:''}${session.password_enabled?(session.google_enabled?'<details class="password-fallback"><summary>Use workspace password</summary>'+passwordForm+'</details>':passwordForm):''}<p id="signin-error" class="signin-error" role="alert"></p></div></div>`;
+      MoyaiUI.render($('#content'), `<div class="login"><div class="card"><div class="login-mark" aria-hidden="true">M</div><h1>Welcome to Moyai</h1><p class="subtext">${session.google_enabled?'Your team’s agent, one conversation away.':'Sign in to Moyai.'}</p>${session.google_enabled?`<button id="google-signin" class="google-signin full" type="button"><span class="google-letter" aria-hidden="true">G</span> Continue with Google</button><p class="login-domain">Use your ${session.google_domains.map(d=>'@'+esc(d)).join(' or ')} work account.</p>`:''}${session.password_enabled?(session.google_enabled?'<details class="password-fallback"><summary>Use workspace password</summary>'+passwordForm+'</details>':passwordForm):''}<p id="signin-error" class="signin-error" role="alert"></p></div></div>`);
       if($('#login-form'))$('#login-form').onsubmit=async(e)=>{e.preventDefault();try{await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})});await boot();}catch(error){toast(error.message);}};
       if($('#google-signin'))$('#google-signin').onclick=async()=>{const button=$('#google-signin');button.disabled=true;try{const result=await api('/api/auth/google/start',{method:'POST',body:JSON.stringify({return_to:'/'+location.hash})});location.assign(result.url);}catch(error){button.disabled=false;$('#signin-error').textContent=error.message;}};
       const signInError=new URLSearchParams(location.search).get('signin');
@@ -739,34 +1088,50 @@ async function boot(){
       document.querySelectorAll('.rail button').forEach(b=>b.disabled=true);
       return;
     }
-    document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
-    [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
+    registerWebMCP();
+    // Select owns its permission-derived disabled state through the native bridge.
+    document.querySelectorAll('.rail button:not([data-slot="select-trigger"])').forEach(b=>b.disabled=false);
+    state.sessionSearchLoading=!state.runs.length;renderSidebar();
+    state.configError=null;state.configLoaded=false;
+    state.configReady=api('/api/config').then(config=>{state.config=config;state.configLoaded=true;}).catch(error=>{state.configError=error;throw error;});
+    api('/api/organization').then(value=>{state.organization=value;renderSidebar();}).catch(showError);
+    refreshRuns().catch(showError);
     $('#logout').hidden=!!session.local;
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';}
     $('#logout').onclick=async()=>{const button=$('#logout');button.disabled=true;try{const result=await api('/api/logout',{method:'POST'});if(result.logout_url==='/cdn-cgi/access/logout')location.assign(result.logout_url);else location.reload();}catch(error){button.disabled=false;showError(error);}};
-    const linkedRun=parseSessionLink(location.hash); if(linkedRun)await openRun(linkedRun.runId,linkedRun.hash);else await navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks');
+    // Navigation can supersede this route while authentication is pending,
+    // but identity, configuration and the sidebar still belong to the app.
+    if(page!==state.pageVersion){await state.configReady;return;}
+    const linkedRun=parseSessionLink(location.hash);
+    if(linkedRun){loadingChat=true;const opening=openRun(linkedRun.runId,linkedRun.hash);page=state.pageVersion;await opening;}
+    else {await state.configReady;if(page!==state.pageVersion)return;const navigation=navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks',state.config);page=state.pageVersion;await navigation;}
+    if(page!==state.pageVersion)return;
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
-    registerWebMCP();
-  }catch(e){$('#content').innerHTML='<div class="error-banner">'+esc(e.message)+'</div>';}
+  }catch(e){
+    if(page!==state.pageVersion||loadingChat)return;
+    MoyaiUI.render($('#content'), '<div class="error-banner" role="alert">'+esc(e.message)+' <button data-retry-start>Retry</button></div>');
+    $('#content [data-retry-start]').onclick=()=>boot().catch(showError);
+  }
 }
 function registerWebMCP(){
-  if(!document.modelContext?.registerTool)return;
+  if(!state.authenticated||state.webMCPRegistered||!document.modelContext?.registerTool)return;
+  state.webMCPRegistered=true;
   const abort=new AbortController();window.addEventListener('pagehide',()=>abort.abort(),{once:true});
   const tools=[
     {name:'list_workspace_tasks',description:'List the latest tasks in this workspace.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async()=>api('/api/runs')},
-    {name:'create_demo_task',description:'Create a simulated task to preview the workspace; no model, cloud machine, or connected app is used.',inputSchema:{type:'object',properties:{prompt:{type:'string',minLength:3,maxLength:16000}},required:['prompt'],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input)=>{if(typeof input.prompt!=='string'||input.prompt.trim().length<3)throw Error('Enter a task of at least three characters.');const run=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:input.prompt,mode:'demo',private_session:!!(state.chatRun?.private_owner_id||state.sessionHeaderRun?.private_owner_id||state.newDraft.private_session)})});await refreshRuns();await openRun(run.id);return {id:run.id,status:run.status,mode:run.mode};}}
+    {name:'create_demo_task',description:'Create a simulated task to preview the workspace; no model, cloud machine, or connected app is used.',inputSchema:{type:'object',properties:{prompt:{type:'string',minLength:3}},required:['prompt'],additionalProperties:false},annotations:{readOnlyHint:false},execute:async(input)=>{if(typeof input.prompt!=='string'||input.prompt.trim().length<3)throw Error('Enter a task of at least three characters.');const run=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:input.prompt,mode:'demo',private_session:!!(state.chatRun?.private_owner_id||state.sessionHeaderRun?.private_owner_id||state.newDraft.private_session)})});await refreshRuns();await openRun(run.id);return {id:run.id,status:run.status,mode:run.mode};}}
   ];
   tools.forEach(tool=>{try{Promise.resolve(document.modelContext.registerTool(tool,{signal:abort.signal})).catch(()=>{});}catch{}});
 }
 matchMedia('(max-width:850px)').addEventListener('change',()=>setSidebar(false));
-document.addEventListener('change',e=>{const picker=e.target.closest?.('.model-picker select'),logo=picker?.parentElement.querySelector('.provider-logo');if(logo&&picker.id!=='new-harness')MoyaiProviderLogos.sync(logo,picker.value,MoyaiProviderLogos.src);});
+document.addEventListener('change',e=>{const picker=e.target.closest?.('.model-picker select'),logo=picker?.closest('.model-picker')?.querySelector('.provider-logo');if(logo&&picker.id!=='new-harness')MoyaiProviderLogos.sync(logo,picker.value,MoyaiProviderLogos.src);});
 setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()=>{});},15000);
 boot();
 
-setInterval(()=>{if(state.authenticated&&!document.hidden&&state.selected&&(state.chatRun?.agents?.groups?.length||state.runs.find(r=>r.id===state.selected)?.children?.length))refreshChat(state.selected).catch(()=>{});},10000);
+setInterval(()=>{if(state.authenticated&&!document.hidden&&state.selected&&(state.chatRun?.swarm||state.chatRun?.agents?.groups?.length||state.runs.find(r=>r.id===state.selected)?.children?.length))refreshChat(state.selected).catch(()=>{});},10000);
 
 // Only elapsed labels change between actual events; drafts and expanded rows stay put.
-setInterval(()=>{MoyaiActivity.tick($('#conversation'));MoyaiActivity.tick($('#activity-history'));if(state.chatRun)MoyaiGoal.render($('#goal-status'),state.chatRun,esc);},1000);
+setInterval(()=>{MoyaiActivity.tick($('#conversation'));MoyaiActivity.tick($('#activity-history'));if(state.chatRun){MoyaiGoal.render($('#goal-status'),state.chatRun,esc);if(state.chatRun.swarm){syncChatComposer(state.chatRun);syncSwarmControls(state.chatRun);}}},1000);
 
 // Serialize picker saves so a slower earlier request cannot undo the latest choice.
 let modelPreferenceSave=Promise.resolve();

@@ -14,10 +14,10 @@ import uvicorn
 from app.config import Settings
 from app.main import create_app
 from app.security import digest
-from sandbox.activity import ActivityReporter
+from agent.activity import ActivityReporter
 from sandbox.broker_relay import BrokerRelay
-from sandbox.context_store import ContextStore
-from sandbox.harness_registry import create_agent
+from agent.context_store import ContextStore
+from agent.harnesses.harness_registry import create_agent
 
 
 def main():
@@ -60,7 +60,7 @@ def main():
     context.initialize([])
     agent = create_agent(harness, spec={'model': settings.agent_model, 'max_iterations': 12, 'timeout': 150}, relay=relay,
                         config={'mcp_servers': {'workspace': {'command': sys.executable,
-                            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox' / 'mcp_bridge.py')],
+                            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': token}}}},
                         activity=activity, step=lambda: None, cwd=str(root), context_store=context)
     try:

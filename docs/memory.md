@@ -22,6 +22,14 @@ You do not need to say “remember this.” Preferences, corrections, decisions 
 references can become notes; one-off instructions and temporary status do not.
 An empty review is a normal result, not a reason to invent a memory.
 
+General working preferences default to personal scope across repositories, even
+when the session has a repository selected. Only repository-specific notes use
+the `selected_repository_url` or a confirmed permanent `repository_id` from the
+current authorized GitHub connection. The latter works with an empty repository
+picker and does not imply that a checkout succeeded. A repository name mentioned
+in text alone is insufficient. A current-task constraint
+such as “do not merge this PR without my permission” stays in the conversation.
+
 User preferences, corrections and decisions require an exact quote from the
 requester's message. Corrections preserve the mistaken assumption, desired
 alternative and future rule when supported, without broadening what the user said.
@@ -33,8 +41,8 @@ evidence visible under **Why Moyai saved this**. They are agent-reported observa
 not server-authenticated tool receipts; they cannot establish user preferences or
 permission, overwrite user-backed/manual notes, or change an existing observation's
 scope. Tool/file/web instructions are not memory directives. Recheck observations
-when the environment changes. Selected-repository matching is enforced; without a
-selected repository, the named environment scope is guidance, not a retrieval partition.
+when the environment changes. Repository scope must match the selected or currently
+authorized repository identity; the named environment scope is also required.
 
 The reviewer waits 60 seconds after completion and defers while the session has
 queued or running messages. It uses the completed requester's messages and
@@ -50,8 +58,16 @@ historical import. Demo, failed, cancelled, subagent and automation turns are
 excluded. The Memory page shows pending reviews and whether the most recent
 review saved notes, found nothing new, or failed.
 
-- `memory_search` retrieves up to five relevant notes, with an 8,000-character
-  total payload budget. Nothing from the library loads until the agent searches.
+- Before the first inference, the broker recalls standing preferences/corrections
+  and task-relevant notes, fitted to the selected model's input window. Project/reference notes require a
+  keyword match. Ranking uses the current requester's message and acknowledged
+  steering; it never uses another participant's messages or tool output.
+- `memory_search` retrieves relevant notes with complete cursor pagination. Use
+  an empty query to enumerate the authorized library; follow `next` until null.
+  An optional repository filter narrows scope. Unfiltered results label repository
+  scope explicitly. Searched notes take priority over automatic recall.
+- `memory_read` selects an exact revision and optional character range privately.
+  Large bodies remain in storage; omitted context has a retrieval reference.
 - `memory_save` creates or updates a short note immediately. User-backed writes
   require an exact supporting quote from the current requester’s message, including
   acknowledged steering inputs. Observations instead require bounded scope and
@@ -60,11 +76,21 @@ review saved notes, found nothing new, or failed.
 - `memory_forget` removes a selected note when its owner asks. Deletion clears its
   stored body and active references; opaque tombstones prevent retry resurrection.
 
-These tools use Hermes tool search. Ownership comes from authenticated Google
+These tools use the selected runtime's tool discovery. Ownership comes from authenticated Google
 identity or a fresh, eligible Slack email match, never an accounting link or a
 model-supplied user ID. Each model call rechecks requester, settings, expiry,
 repository scope and current note revisions. Subagents and automation runs can
 recall authorized notes, but cannot automatically write personal memories.
+Pausing memory removes all recall; re-enabling it permits automatic recall again.
+Automatic selection does not write search selections or call a model. It scans
+the current owner's library on each inference to honor edits, deletion,
+expiry and scope changes immediately. Repository mentions do not select a repo.
+
+Rejected memory tool arguments, scope, permission or revision checks return an
+error receipt so the agent can correct supported arguments or continue without
+saving. A rejection never counts as a saved note and must not be bypassed by
+broadening its scope. Broker authentication and storage/connection failures keep
+their failure behavior; manual Settings API error statuses are unchanged.
 
 Slack profile verification refreshes automatically every 30 minutes, ahead of
 its one-hour authorization limit; users do not need to sign in again. The worker
@@ -88,18 +114,22 @@ responses; secret redaction stays on either way. Responses in shared chats can s
 remembered context; memory does not make those responses private. Deletion does
 not erase previous conversations, inference requests, or retained backups.
 
-Each library supports 200 notes, at most 1,200 characters per note. Project and
+There are no fixed note-count or body-length quotas. Project and
 reference notes expire after 90 days unless edited; preferences and corrections
 remain until deleted. Expired notes remain reviewable but are not retrieved.
 Known credential patterns are rejected; arbitrary sensitive data cannot be
 reliably detected, so keep secrets in the credential vault.
 
-This version uses bounded keyword retrieval and concise notes. It does not embed
+This version uses keyword ranking, complete metadata discovery, and direct reads. It does not embed
 or search whole transcripts or maintain a vector database. Shared reusable
 procedures belong in **Skills**. The background reviewer makes a separate,
 tool-free model request through the existing gateway, billed to the original
 requester and turn in the normal usage ledger. It uses the turn's configured
 model unless `MEMORY_REVIEW_MODEL` selects another enabled workspace model.
+Completed source messages are processed in pages derived from that model's input
+window, preserving original message IDs and offsets. Later text is not discarded.
+The reviewer may modify an existing note only when it saw that note's body;
+duplicate proposals within one response reject the review atomically.
 Foreground model requests can reclaim its slot. Each input has at most three
 attempts; failures never fail or replay the user's task.
 
@@ -128,6 +158,11 @@ It tests model choices with the production memory prompt and tools;
 it does not run a complete SDK or cloud sandbox, and is not a guarantee that
 every future preference will be captured. Use `--model` to test another model
 and `--report path.json` to save the evidence.
+
+Add `--scope-only` for five focused cases: a general preference with a selected
+repository, recall from another repository, a one-task approval constraint, a
+mentioned repository with no selection, and an explicit repository-specific
+decision. The same live-model limitations apply.
 
 To exercise the background path with a live model, run
 `uv run python -m scripts.memory_review_smoke --model openai/gpt-6-astra --report report.json`

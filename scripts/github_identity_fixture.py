@@ -41,6 +41,9 @@ class IdentityProvider:
                 repos = self.metadata_pages[int(request.url.params.get('page', '1')) - 1]
             else:
                 repos = [self.repos[i] for i in ids if i in self.installed]
+                size = int(request.url.params.get('per_page', '30'))
+                offset = (int(request.url.params.get('page', '1')) - 1) * size
+                repos = repos[offset:offset + size]
             return httpx.Response(200, json={'repositories': repos})
         if path.startswith('/repos/'):
             repo = next((r for r in self.repos.values() if r['full_name'].lower() == path[7:].lower()), None)
@@ -55,4 +58,3 @@ class IdentityProvider:
                 return httpx.Response(200, json={'object': {'sha': 'a' * 40}})
             return httpx.Response(200, json=self.repos[identity])
         raise AssertionError(path)
-

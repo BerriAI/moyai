@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const {readFileSync}=require('node:fs');
 const MoyaiFiles=require('../app/static/saved-files.js');
 const runId='a'.repeat(32),fileRef='/workspace/nightly-preflight/cutover-status.md';
@@ -18,7 +18,7 @@ test('file links round-trip encoded paths without accepting other destinations',
 
 function fixture(){
   const calls=[],paths=[],state={pageVersion:0,runs:[{id:runId}],expandedParents:new Set()},file={archive_path:'new-files/nightly-preflight/cutover-status.md',workspace_path:'nightly-preflight/cutover-status.md',name:'cutover-status.md'};
-  const context={state,MoyaiFiles,stopStream(){},document:{hidden:true},history:{replaceState:(_,__,path)=>paths.push(path)},setView(){},sessionTitle:()=>'',renderChat(){calls.push('render');},
+  const context={state,$:()=>({}),sessionRows:rows=>rows,MoyaiFiles,stopStream(){},document:{hidden:true},history:{replaceState:(_,__,path)=>paths.push(path)},setView(){},sessionTitle:()=>'',renderChat(){calls.push('render');},
     api:async url=>url.endsWith('/files')?{files:[file]}:{id:runId,chat_enabled:true},
     savedFiles:{open:async(f,ref)=>calls.push({file:f,ref})},workspacePanel:{open:kind=>calls.push(kind)},toast:message=>calls.push(message)};
   vm.createContext(context);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),context);

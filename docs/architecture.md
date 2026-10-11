@@ -14,7 +14,7 @@
 | Hermes | Source pinned to commit `7968c72a3cb80beaae51948378944dd6e3423b96`; dependencies prepared through Hermes PM; terminal, file, and workspace MCP tools. |
 | Model access | OpenAI Chat Completions through your LiteLLM-compatible gateway. The control plane pins the model, caps output and request count, and keeps the model key outside sandboxes. |
 | Native connections | First-class Linear, Slack, Notion, and GitHub cards; OAuth when app clients are configured; validated personal/integration-token alternative; encrypted token storage and OAuth refresh. |
-| Tool discovery | Hermes keeps terminal/file tools direct and exposes workspace MCP tools through `tool_search`, `tool_describe`, and `tool_call`. Full connector schemas load on demand; the upfront catalog listing has a 600 estimated-token budget. |
+| Tool discovery | Codex uses native client `tool_search` and Claude uses native `ToolSearch` to load authorized MCP schemas, then calls discovered tools directly. Hermes keeps terminal/file tools direct and uses `tool_search`, `tool_describe`, and `tool_call`; its upfront catalog listing has a 600 estimated-token budget. |
 | Organization controls | Shared connections, separate admin/member access, enabled/paused and read-only policies, health checks, and an audit history of connection changes. |
 | Slack sessions | Mention @Moyai in a channel the bot has joined. Signed, deduplicated events start one saved session per thread. AgentChat routes mentions, thread follow-ups, and direct messages into saved conversations. Each top-level DM starts a new session; replies and native working status stay in its thread. |
 | External writes | All enabled connected-app tools run directly, including new tools, GitHub PR creation/maintenance, Linear ticket creation/updates/comments, Slack messages and Notion writes. Read-only/paused policies still block writes. Ambiguous write failures are reported as uncertain and never retried automatically. |
@@ -62,9 +62,9 @@ Response states: `queued → provisioning → running → saving → idle` (show
 
 New requests and follow-ups to an idle session appear directly in the conversation as soon as the server accepts them, even before a worker claims them. Only messages waiting behind another input appear in the editable queue. The next dispatch candidate follows explicit Send now priority, automatic immediate follow-ups, then arrival order; durable queue and Temporal execution states stay unchanged. Starting a new request does not reopen the previous response's finished activity.
 
-Public progress is limited to two distinct updates per response: a brief opening and, when useful, one meaningful milestone. For multi-step tasks, the agent is instructed to emit a visible sentence explaining its next steps before the first tool call, outside the opening status tag. A status-only heading is not an opening chat update. Before a planned delegation or handoff, the agent should explain the handoff using the milestone slot if it is still available. Later focus-only changes need no additional chat message. Quick tasks can go straight to the final answer. The server selects and saves updates once for both the web conversation and its connected Slack thread; extra narration is discarded. Restarting or renewing a sandbox does not reset this allowance. One direct reply to each delivered mid-task input can bypass the limit, while final answers, errors, approvals, credential requests, and structured tool activity keep their existing paths. Legacy non-chat runs receive the same two-update limit for the run.
+Public progress retains complete, redacted updates throughout a response. The model decides when an opening update or a meaningful change deserves a message; there is no fixed update allowance. The server binds each update to its active input and deduplicates receipts and repeated text for that input across retries and computer replacement. Updates with stale or undelivered input identities are rejected. The same saved updates appear in the web conversation and connected Slack thread. Public text and Slack send intent commit together, and long updates use ordered transport parts. Completed-turn progress is retired in favor of the saved final answer.
 
-During longer tasks, a short current-focus description replaces the web work heading and Slack's native thread status as the work changes. These descriptions are separate from the two posted updates and do not create chat messages. Tool details start collapsed on the web and remain available to expand. The agent supplies the description through its public interim callback; until one arrives, the normal lifecycle label is shown. Waiting, reconnecting, stopping, and completion take precedence. Focus is scoped to the current delivered input, survives reload/recovery, and rapid Slack changes coalesce over five seconds. Native statuses apply only to threaded Slack conversations, with the existing `assistant:write` permission.
+During longer tasks, a short current-focus description replaces the web work heading and Slack's native thread status as the work changes. These descriptions are separate from public progress updates and do not create chat messages. Tool details start collapsed on the web and remain available to expand. The agent supplies the description through its public interim callback; until one arrives, the normal lifecycle label is shown. Waiting, reconnecting, stopping, and completion take precedence. Focus is scoped to the current delivered input, survives reload/recovery, and rapid Slack changes coalesce over five seconds. Native statuses apply only to threaded Slack conversations, with the existing `assistant:write` permission.
 
 Selected updates remain visible in the web conversation after tool history collapses, after completion, and on reload. Slack sends them through its existing outbox with replay protection, before the final answer. Unsent progress becomes obsolete when its response ends; adopting or waking a Slack thread does not backfill earlier updates. Unattempted progress survives worker recovery, while an uncertain send is never automatically retried. Existing historical web updates stay readable and are not backfilled to Slack.
 
@@ -258,11 +258,11 @@ matching the verified production configuration.
 
 The same rollout moved 27 existing sessions, 13 user profiles, all three encrypted organization connections, and 25 result archives into **Organization for Litellm → Litellm** on Render. Google SSO and all three provider health checks passed on the new origin. Slack's verified event endpoint and Slack/Notion OAuth callback configuration use the new origin. The existing gateway key and spend ledger were preserved. A follow-up in the existing #bot-spam thread restored its prior marker and file value `24` and posted one answer with a link to the new origin.
 
-`MAX_CONCURRENT_RUNS=100` is a workspace-wide ceiling on active and warm
-sandboxes, including delegated workers. It does not pre-provision 100 machines.
+`MAX_CONCURRENT_RUNS` is an optional workspace-wide ceiling on active and warm
+sandboxes, including delegated workers. The default `0` means no ceiling. A ceiling never pre-provisions machines.
 Ten executing agents need about ten sandboxes, plus recent chats within their
 five-minute idle window. Each completed response saves its filesystem immediately.
-Idle sandboxes incur compute charges and are reclaimed oldest-first when another
+Idle sandboxes incur compute charges and, with a ceiling, are reclaimed oldest-first when another
 session needs capacity; a sandbox with queued work is protected. Follow-ups reuse
 a warm machine or restore a new sandbox from the snapshot after release. Provisioning/cleanup and Modal quotas
 can temporarily change the observed count; capacity above the ceiling queues.
@@ -283,18 +283,26 @@ start fresh; child changes are not automatically merged. Workers can delegate th
 queue and concurrency bounds. Each level keeps its direct parent and original workflow ancestry;
 credentials still require the current requester and original session scope. Child agents follow the same policy: all enabled connected-app tools execute directly under the organization connection policies.
 
-After the delegation tool completes, the coordinator checkpoints between tool
-rounds, terminates its sandbox and waits durably. Its original user message stays
+Delegation returns handles after admission and the workspace snapshot. The parent
+can continue useful work, start another group, or read partial results.
+`agents_wait(after=cursor)` waits for changes without setting a child deadline.
+When dependencies are all that remain, `agents_wait(release=true)` or an initial
+`wait=true` checkpoints between tool rounds, releases the computer and waits durably. Its original user message stays
 open. Once every child and its descendants have settled (including failures), it reacquires capacity,
 restores its checkpoint and continues the same request with the worker reports.
 This works even with only one available sandbox slot. Each child is an ordinary
 Temporal `SessionWorkflow`; parent/group relationships and result data are stored
-in SQLite rather than as large Temporal history payloads. A waiting parent uses
+in the application database rather than as large Temporal history payloads. A waiting parent uses
 no Modal sandbox. It currently checks completion using a five-second Temporal
 timer; this is a workflow-history cost, not sandbox idle time.
 
-`agents_results` retrieves answers/statuses, and `agents_read_artifact` lists or
-reads a bounded UTF-8 file from a child's recovery archive (128 KiB per read).
+`agents_results` retrieves complete answers/statuses and freezes settled handoffs.
+`agents_read_artifact` lists files and published revisions, or reads complete byte
+ranges as text/base64. `agents_send` steers an active child or wakes an idle child
+with explicitly attributed agent guidance. Stable request keys prevent duplicate
+delivery; a parent follow-up reopens the group's result obligation.
+`agents_cancel(child_ids=[...])` stops selected children; omitting the list stops
+the entire group.
 Workers should save structured case results under `/workspace`; the parent can
 read and merge them into its own final result. Failure is not success or a zero
 cost. `agents_retry` accepts explicit recovery instructions for failed workers;
@@ -307,10 +315,10 @@ organization totals. Only the parent session mirrors its final answer to Slack.
 The Render process still hosts one shared Temporal worker and SQLite disk.
 `max_concurrent_activities` scales with the sandbox ceiling, but this does not
 horizontally autoscale Render workers. Running multiple control-plane replicas
-requires a shared database and artifact store first. Model response buffering is
-separately bounded by `MAX_CONCURRENT_MODEL_REQUESTS=32` on the deployed 1 CPU /
-2 GB Render instance (the local default remains 8); other agents can continue running sandbox commands while model calls
-queue. The worker pool size and Modal sandbox count are separate concepts.
+requires a shared database and artifact store first. Model calls are not
+queued by default (`MAX_CONCURRENT_MODEL_REQUESTS=0`). Set a positive value to
+bound response buffering on a small instance; other agents can continue running
+sandbox commands while model calls queue. The worker pool size and Modal sandbox count are separate concepts.
 Queued model calls retry in the sandbox only after an explicit unbilled
 admission response; each attempt refreshes its short-lived transport envelope.
 Gateway errors and uncertain network failures are not retried by this queue.
@@ -348,8 +356,8 @@ Authenticated web follow-ups can be sent directly to a child. They queue behind
 its current turn and are charged to the signed-in sender. While the parent is
 waiting, it waits for accepted follow-ups too, including messages arriving during
 capacity admission. A parent stop blocks new child messages until cleanup finishes.
-Workers still cannot create further agents, and organization connection policies
-apply to their tool calls.
+Workers can delegate within inherited scope, capacity and deadlines. Organization
+connection policies apply to their tool calls.
 
 At handoff, the parent receives saved answers and immutable archive versions.
 Later child chats can change their own workspace without silently changing those

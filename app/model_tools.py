@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .db import now
 from .model_preferences import save_model
+from .harnesses import validate_harness
 
 
 class Listing(BaseModel):
@@ -28,9 +29,8 @@ TOOL_NAMES = set(SPECS)
 class ModelTools:
     def __init__(self, store, settings):
         self.store, self.settings = store, settings
-        store.execute('''CREATE TABLE IF NOT EXISTS model_switch_operations (
-            run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, request_key TEXT NOT NULL,
-            model TEXT NOT NULL, PRIMARY KEY(run_id,turn_id,request_key))''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def current(self, conn, run, turn_id=None):
         fresh = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
@@ -51,7 +51,7 @@ class ModelTools:
             except HTTPException:
                 return []
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': name == 'model_list'}}
+                 'annotations': {'readOnlyHint': name == 'model_list', 'idempotentHint': name == 'model_list'}}
                 for name, (schema, description) in SPECS.items()]
 
     def state(self, run):
@@ -61,11 +61,12 @@ class ModelTools:
     def call(self, run, name, arguments):
         args = SPECS[name][0].model_validate(arguments)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             fresh = self.current(conn, run, getattr(args, 'turn_id', None))
             if name == 'model_list':
                 return self.state(fresh)
             selected = self.settings.resolve_model(args.model)
+            validate_harness(fresh['harness'], selected)
             operation = (run['id'], args.turn_id, args.request_key)
             prior = conn.execute('SELECT model FROM model_switch_operations WHERE run_id=? AND turn_id=? AND request_key=?', operation).fetchone()
             if prior:
@@ -90,3 +91,9 @@ class ModelTools:
             return {**self.state(updated), 'status': 'selected', 'selected_model': selected, 'replayed': False,
                     'effective': 'next_model_request', 'default_updated': not bool(queued),
                     'instruction': 'Continue the user’s remaining task. The next inference uses the selected model with the existing conversation and workspace. Already queued messages keep their assigned models.'}
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS model_switch_operations (
+        run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, request_key TEXT NOT NULL,
+        model TEXT NOT NULL, PRIMARY KEY(run_id,turn_id,request_key))''')

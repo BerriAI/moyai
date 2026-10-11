@@ -63,18 +63,23 @@ class ContextMaintenance:
         # One row bounds retained work per session. BEGIN IMMEDIATE is the
         # storage admission owner, including simultaneous/retried submissions.
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             current = conn.execute('SELECT operation_id,status FROM context_jobs WHERE run_id=?', (run_id,)).fetchone()
             if current and (current['operation_id'] != ack or current['status'] == 'running'):
                 return self.read(run_id)
             conn.execute('''INSERT INTO context_jobs(run_id,operation_id,snapshot,result,status) VALUES(?,?,?,'null','running')
                 ON CONFLICT(run_id) DO UPDATE SET operation_id=excluded.operation_id,
                 snapshot=excluded.snapshot,result='null',status='running' ''', (run_id, operation_id, serialized))
+            if owner := getattr(self.store, 'broker_work', None):
+                owner.claim_in(conn, 'context', operation_id)
         def settled(done):
             self.tasks.pop(operation_id, None)
             # Covers failed admission and cancellation before generate() starts.
-            self.store.execute("UPDATE context_jobs SET status='interrupted' WHERE run_id=? AND operation_id=? AND status='running'",
-                               (run_id, operation_id))
+            with self.store.connect() as conn:
+                conn.execute("UPDATE context_jobs SET status='interrupted' WHERE run_id=? AND operation_id=? AND status='running'",
+                             (run_id, operation_id))
+                if owner := getattr(self.store, 'broker_work', None):
+                    owner.release_in(conn, 'context', operation_id)
 
         try:
             await self.gateway.checkpoints.flush()
@@ -103,6 +108,9 @@ class ContextMaintenance:
             # as an error. The sandbox still owns all the original receipts.
             pass
         finally:
-            self.store.execute('UPDATE context_jobs SET status=?,result=? WHERE run_id=? AND operation_id=?',
-                               (status, json.dumps(result), run_id, operation_id))
+            with self.store.connect() as conn:
+                conn.execute('UPDATE context_jobs SET status=?,result=? WHERE run_id=? AND operation_id=?',
+                             (status, json.dumps(result), run_id, operation_id))
+                if owner := getattr(self.store, 'broker_work', None):
+                    owner.release_in(conn, 'context', operation_id)
             await self.gateway.checkpoints.flush()

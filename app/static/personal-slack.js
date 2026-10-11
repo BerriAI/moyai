@@ -7,7 +7,7 @@ async function renderPersonalSlack() {
   const status = !connection.connected ? 'Not connected' : healthy ? 'Connected' : 'Needs attention';
   const source = {personal:'Your personal Slack account', organization:'Organization Slack connection', none:'No Slack connection'}[connection.effective_source] || 'Unavailable';
   const focusId = document.activeElement?.id;
-  $('#content').innerHTML = `<section class="settings-page personal-slack-page">
+  MoyaiUI.render($('#content'), `<section class="settings-page personal-slack-page">
     <div class="page-heading"><div><h1>Personal Slack</h1><p class="subtext">Optionally connect your own Slack account for conversations you can access.</p></div></div>
     <section class="card"><div class="section-header"><h2>Your connection</h2><span class="connection-state ${healthy?'healthy':connection.connected?'needs-attention':''}">${status}</span></div>
       <dl class="connection-facts"><div><dt>Account</dt><dd>${esc(connection.label || 'No personal account connected')}</dd></div><div><dt>Effective read identity</dt><dd>${esc(source)}</dd></div><div><dt>Health</dt><dd>${esc(connection.health || 'Not checked')}</dd></div></dl>
@@ -24,7 +24,7 @@ async function renderPersonalSlack() {
       ${connection.limitation?`<p>${esc(connection.limitation)}</p>`:''}
       <p>Only you can open a private session. It stays private after disconnecting Slack and cannot be shared, delegated, or exported to a side chat. Organization connection policies still apply. Bot messages keep the organization bot identity.</p>
       <button id="personal-slack-new-chat" ${connection.available?'':'disabled'}>Start private web chat</button>
-    </section></section>`;
+    </section></section>`);
   if (focusId) document.getElementById(focusId)?.focus({preventScroll:true});
   const current = () => version === state.pageVersion;
   let busy = false;

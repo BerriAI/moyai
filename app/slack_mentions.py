@@ -18,51 +18,62 @@ def profile_name(value, user):
 class SlackMentions:
     def __init__(self, store):
         self.store = store
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS slack_mention_names (
-                    team_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                    name TEXT NOT NULL DEFAULT '', next_check REAL NOT NULL DEFAULT 0,
-                    PRIMARY KEY(team_id,user_id)
-                );
-                CREATE TABLE IF NOT EXISTS slack_message_mentions (
-                    message_id INTEGER NOT NULL REFERENCES messages(id),
-                    team_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                    PRIMARY KEY(message_id,team_id,user_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_slack_mention_due ON slack_mention_names(team_id,next_check);
-                CREATE INDEX IF NOT EXISTS idx_slack_mention_messages ON slack_message_mentions(team_id,user_id);
-            ''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     @staticmethod
     def queue_in(conn, message_id, team, content):
         if not re.fullmatch(r'T[A-Z0-9]{7,30}', team or ''):
             return
         users = list(dict.fromkeys(MENTION.findall(content)))[:MAX_MENTIONS]
-        conn.executemany('INSERT OR IGNORE INTO slack_mention_names(team_id,user_id) VALUES(?,?)',
+        SlackMentions.queue_users_in(conn, message_id, team, users)
+
+    @staticmethod
+    def queue_users_in(conn, message_id, team, users):
+        conn.executemany('INSERT INTO slack_mention_names(team_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING',
                          [(team, user) for user in users])
-        conn.executemany('INSERT OR IGNORE INTO slack_message_mentions VALUES(?,?,?)',
+        conn.executemany('INSERT INTO slack_message_mentions VALUES(?,?,?) ON CONFLICT DO NOTHING',
                          [(message_id, team, user) for user in users])
 
-    def decorate(self, messages):
+    def backfill(self, sources):
+        with self.store.connect() as conn:
+            for message_id, team, users in sources:
+                self.queue_users_in(conn, message_id, team, users)
+
+    def decorate(self, messages, *, connection=None):
         # Receipt-backed provenance only: never reinterpret web text or assistant
         # examples as Slack markup. This also discovers pre-upgrade history.
         sources = [(message, message.pop('slack_message_team')) for message in messages]
-        sources = [(message, team) for message, team in sources
-                   if team and message['role'] == 'user' and MENTION.search(message['content'])]
+        sources = [(message, team, tuple(dict.fromkeys(MENTION.findall(message['content'])))[:MAX_MENTIONS])
+                   for message, team in sources
+                   if re.fullmatch(r'T[A-Z0-9]{7,30}', team or '')
+                   and message['role'] == 'user' and MENTION.search(message['content'])]
         if not sources:
             return
         names = {}
-        with self.store.connect() as conn:
-            for message, team in sources:
-                self.queue_in(conn, message['id'], team, message['content'])
-                for row in conn.execute('''SELECT n.*,u.name AS sender_name,u.email AS sender_email
-                    FROM slack_message_mentions r JOIN slack_mention_names n USING(team_id,user_id)
-                    LEFT JOIN users u ON u.id='slack:'||n.team_id||':'||n.user_id
-                    WHERE r.message_id=? AND r.team_id=?''', (message['id'], team)):
+        pending = tuple((message['id'], team, users) for message, team, users in sources)
+
+        def read_names(conn):
+            for _message, team, users in sources:
+                targets = ','.join('(?)' for _ in users)
+                for row in conn.execute(f'''WITH targets(user_id) AS (VALUES {targets})
+                    SELECT targets.user_id,n.name,u.name AS sender_name,u.email AS sender_email
+                    FROM targets LEFT JOIN slack_mention_names n ON n.team_id=? AND n.user_id=targets.user_id
+                    LEFT JOIN users u ON u.id='slack:'||?||':'||targets.user_id''', (*users, team, team)):
                     names[team, row['user_id']] = (profile_name(row['sender_name'], row['user_id'])
                         or row['name'] or profile_name(row['sender_email'], row['user_id']))
-        for message, team in sources:
+
+        if connection is None:
+            with self.store.connect() as conn:
+                for message_id, team, users in pending:
+                    self.queue_users_in(conn, message_id, team, users)
+                read_names(conn)
+        else:
+            # Chat detail holds a read-only snapshot. Reuse its slot for names;
+            # Store.connect releases it before these legacy backfill writes run.
+            read_names(connection)
+            connection.commit_callbacks.append(lambda: self.backfill(pending))
+        for message, team, _users in sources:
             content = message.get('display_content', message['content'])
             displayed = MENTION.sub(lambda match: '@' + names[team, match[1]]
                 if names.get((team, match[1])) else match[0], content)
@@ -118,3 +129,21 @@ class SlackMentions:
                 for run in runs:
                     self.store.event(run['run_id'], 'chat', 'Slack mention names updated')
         return bool(rows)
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS slack_mention_names (
+                team_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '', next_check REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY(team_id,user_id)
+            );
+            CREATE TABLE IF NOT EXISTS slack_message_mentions (
+                message_id INTEGER NOT NULL REFERENCES messages(id),
+                team_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                PRIMARY KEY(message_id,team_id,user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_slack_mention_due ON slack_mention_names(team_id,next_check);
+            CREATE INDEX IF NOT EXISTS idx_slack_mention_messages ON slack_message_mentions(team_id,user_id);
+        ''')

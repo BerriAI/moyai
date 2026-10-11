@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
 const {test}=require('node:test');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
 function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',submitError=null,runs=[],userId='google:owner'}={}){
@@ -115,10 +115,11 @@ test('saved access and decline never transmit labeled input drafts',async()=>{
   }
 });
 
-test('new skill asks for scope and cannot submit until a choice is made',async()=>{
+test('new skill defaults to personal and organization remains an explicit choice',async()=>{
   const f=fixture();await f.ctx.openSkillEditor();
   const scope=f.element('skill-scope'),form=f.element('skill-form');
-  assert.equal(scope.value,'');assert.equal(scope.required,true);
+  assert.equal(scope.value,'personal');assert.equal(scope.required,true);
+  scope.value='';
   await form.onsubmit({preventDefault(){},currentTarget:form});
   assert.equal(f.posts.length,0);assert.match(f.element('skill-form-error').textContent,/Choose Personal or Organization/);
   scope.value='organization';f.element('skill-name').value='team';f.element('skill-description').value='Team workflow';f.element('skill-instructions').value='Run the workflow.';
@@ -130,7 +131,7 @@ test('editing preserves the existing choice; members see that organization requi
   const edit=fixture({skill:{id:'skill-one',name:'team',description:'Team workflow',instructions:'Workflow instructions',scope:'organization',revision:2,can_manage:true}});
   await edit.ctx.openSkillEditor('skill-one');assert.equal(edit.element('skill-scope').value,'organization');
   const member=fixture({admin:false});await member.ctx.openSkillEditor();
-  assert.equal(member.element('skill-scope').value,'');
+  assert.equal(member.element('skill-scope').value,'personal');
   assert.equal(member.element('skill-scope').options.find(o=>o.value==='organization').disabled,true);
 });
 
@@ -547,9 +548,10 @@ test('async session opening retains a target across metadata retry and ignores a
 
 function routeFixture(authenticated){
   const f=linkedFixture(),app=readFileSync('app/static/app.js','utf8'),opened=[],handlers={},redirects=[];
+  f.ctx.state.runs=[];
   for(const id of ['google-signin','signin-error','logout'])f.element(id);
   Object.assign(f.ctx,{location:{hash:accessLink(),search:'',assign:url=>redirects.push(url)},URLSearchParams,
-    applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
+    renderSidebar(){},showError:error=>{throw error;},applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
     registerWebMCP(){},navigate:async view=>opened.push({view}),openRun:async(id,hash)=>opened.push({id,hash}),
     settingsViews:new Set(['secrets','users']),window:{addEventListener:(event,handler)=>handlers[event]=handler},
     api:async(path,options)=>{
@@ -578,4 +580,41 @@ test('signed-out boot sends the complete credential target through Google sign-i
   assert.deepEqual(f.opened,[]);
   await f.element('google-signin').onclick();
   assert.deepEqual(f.posts,[{return_to:'/'+accessLink()}]);assert.deepEqual(f.redirects,['https://accounts.google.com/fixture']);
+});
+
+const workflowSuggestion={id:'draft-one',name:'fixture-review',description:'Review benchmark fixtures.',instructions:'Check offline fixtures before reporting results.',reason:'The completed workflow is reusable.',target_id:'',target_revision:0,evidence:[],sources:[]};
+test('a learned draft requires scope and saves edits through the atomic acceptance API',async()=>{
+  const f=fixture({kind:'skill'});
+  await f.ctx.openSkillEditor('',workflowSuggestion);
+  assert.equal(f.element('skill-scope').value,'');
+  await f.element('skill-form').onsubmit({preventDefault(){},currentTarget:f.element('skill-form')});
+  assert.equal(f.posts.length,0);
+  f.element('skill-scope').value='personal';
+  f.element('skill-instructions').value='My corrected workflow instructions.';
+  await f.element('skill-form').onsubmit({preventDefault(){},currentTarget:f.element('skill-form')});
+  assert.equal(f.posts[0].path,'/api/skill-learning/suggestions/draft-one/accept');
+  assert.equal(f.posts[0].body.instructions,'My corrected workflow instructions.');
+  assert.equal(f.posts[0].body.scope,'personal');
+});
+test('a failed suggested-skill save preserves edits and a stale update cannot open',async()=>{
+  const f=fixture({kind:'skill',submitError:'Skill changed'});
+  await f.ctx.openSkillEditor('',workflowSuggestion);
+  f.element('skill-scope').value='personal';f.element('skill-instructions').value='Corrected draft';
+  await f.element('skill-form').onsubmit({preventDefault(){},currentTarget:f.element('skill-form')});
+  assert.equal(f.element('skill-instructions').value,'Corrected draft');
+  assert.equal(f.element('skill-form-error').textContent,'Skill changed');
+  assert.equal(f.element('skill-dialog').open,true);
+  const stale=fixture({skill:{...workflowSuggestion,id:'saved-skill',scope:'personal',revision:3,can_manage:true,files:[]}});
+  await assert.rejects(()=>stale.ctx.openSkillEditor('saved-skill',{...workflowSuggestion,target_id:'saved-skill',target_revision:2}),/skill changed/);
+  assert.equal(stale.element('skill-dialog').open,undefined);
+});
+test('a delayed skill editor cannot open after navigation or an account change',async()=>{
+  for(const change of ['pageVersion','userId']){
+    const f=fixture();let resolve;
+    f.ctx.api=()=>new Promise(done=>resolve=done);
+    const opened=f.ctx.openSkillEditor('skill-id');
+    f.ctx.state[change]=change==='pageVersion'?2:'google:another';
+    resolve({...workflowSuggestion,can_manage:true,scope:'personal',revision:1,files:[]});
+    await opened;assert.equal(f.element('skill-dialog').open,undefined);
+  }
 });

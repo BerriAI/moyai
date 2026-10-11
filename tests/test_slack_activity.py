@@ -1,12 +1,13 @@
-import asyncio
 import json
 import time
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.db import Store
 from app.slack_activity import SlackActivity
-from sandbox.activity import ActivityReporter
+from agent.activity import ActivityReporter
 from test_slack import event, signed, slack_app
 from test_slack_chat import ROOT, dm_event, finish, start
 
@@ -15,11 +16,14 @@ from test_slack_chat import ROOT, dm_event, finish, start
 def activity(slack_app):
     app, client, _, _ = slack_app
     client.portal.call(app.state.slack.chat.shutdown)
+    app.state.activity_test_portal = client.portal
     return slack_app
 
 
 def sync(app):
-    asyncio.run(app.state.slack.chat.activity.sync())
+    # Concurrent status sends share the application's token-refresh lock;
+    # repeated polls must use its event loop, just like the real worker.
+    app.state.activity_test_portal.call(app.state.slack.chat.activity.sync)
 
 
 def test_native_working_refresh_clear_and_restart(activity):
@@ -52,7 +56,7 @@ def test_native_working_refresh_clear_and_restart(activity):
 
 
 @pytest.mark.parametrize('control', [None, 'continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential', 'incomplete', 'wrong_turn', 'empty', 'malformed', 'non_object'])
-def test_received_answer_shows_saving_without_delivering_before_checkpoint(activity, control):
+def test_received_answer_delivers_while_working_indicator_shows_saving(activity, control):
     app, _, run_id = start(activity)
     store = app.state.store
     turn = store.claim_message(run_id)
@@ -66,14 +70,20 @@ def test_received_answer_shows_saving_without_delivering_before_checkpoint(activ
     elif control:
         result[control] = True
     raw = '{' if control == 'malformed' else '[]' if control == 'non_object' else json.dumps(result)
-    store.update_run(run_id, status='running', pending_result=raw)
+    store.update_run(run_id, status='running')
+    if control in {'malformed', 'non_object'}:
+        store.update_run(run_id, pending_result=raw)
+    else:
+        app.state.manager.receive_result(run_id, result)
     sync(app)
     expected = 'is saving the work…' if control is None else 'is working…'
     assert activity[3][-1]['status'] == expected
     assert app.state.slack.chat.activity.desired_status(run_id) == expected
     app.state.slack.chat.collect()
-    assert not store.rows("SELECT 1 FROM slack_outbox WHERE kind='answer'")
-    assert not [m for m in store.messages(run_id) if m['role'] == 'assistant']
+    assert bool(store.rows("SELECT 1 FROM slack_outbox WHERE kind='answer'")) is (control is None)
+    answers = [m for m in store.messages(run_id) if m['role'] == 'assistant']
+    assert len(answers) == (0 if control else 1)
+    assert store.messages(run_id)[0]['status'] == 'running'
     store.update_run(run_id, status='failed')
     sync(app)
     assert activity[3][-1]['status'] == ''
@@ -89,6 +99,20 @@ def test_all_terminal_states_clear_indicator_without_a_reply(activity, state):
     assert activity[3][-1]['status'] == ''
 
 
+def test_pending_deletion_clears_working_indicator_without_a_reply(
+    activity: tuple[FastAPI, TestClient, list[dict[str, object]], list[dict[str, object]]],
+) -> None:
+    app, _, run_id = start(activity)
+    app.state.store.update_run(run_id, status='running')
+    sync(app)
+    assert activity[3][-1]['status'] == 'is working…'
+    app.state.session_lifecycle.request_delete(run_id, '', True)
+    assert app.state.slack.chat.activity.desired_status(run_id) == ''
+    sync(app)
+    assert activity[3][-1]['status'] == ''
+    assert not any('text' in item for item in activity[3])
+
+
 def test_paused_thread_clears_and_changed_workspace_never_receives_status(activity):
     app, _, run_id = start(activity)
     sync(app)
@@ -100,7 +124,7 @@ def test_paused_thread_clears_and_changed_workspace_never_receives_status(activi
     sync(app)
     assert len(activity[3]) == count
     with pytest.raises(RuntimeError, match='destination'):
-        asyncio.run(app.state.slack.channel.set_status(app.state.slack.channel.source_for_run(run_id), 'is working…'))
+        app.state.activity_test_portal.call(app.state.slack.channel.set_status, app.state.slack.channel.source_for_run(run_id), 'is working…')
 
 
 def test_connection_is_rechecked_after_token_refresh(activity, monkeypatch):
@@ -132,7 +156,7 @@ def test_uncertain_status_retries_but_completion_clears_immediately(activity, mo
     finish(app, run_id, 'Answer survived')
     sync(app)
     assert activity[3][-1]['status'] == ''
-    asyncio.run(app.state.slack.chat.deliver_one())
+    app.state.activity_test_portal.call(app.state.slack.chat.deliver_one)
     assert activity[3][-1]['text'].startswith('Answer survived')
     assert activity[3][-1]['blocks'][-1]['type'] == 'context'
 
@@ -146,7 +170,7 @@ def test_posting_during_work_refreshes_indicator_and_web_followup_starts_it(acti
     sync(app)
     assert activity[3][-1]['status'] == 'is getting ready…'
     before = len(activity[3])
-    asyncio.run(app.state.slack.chat.deliver_one())
+    app.state.activity_test_portal.call(app.state.slack.chat.deliver_one)
     sync(app)
     assert len(activity[3]) == before + 2
     assert activity[3][-1]['status'] == 'is getting ready…'

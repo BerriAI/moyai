@@ -9,10 +9,10 @@ import httpx
 import pytest
 
 from sandbox.broker_relay import BrokerRelay
-from sandbox.context_recovery import run_with_context_recovery
-from sandbox.context_store import ContextStore, ContextUnavailable
-from sandbox.harness_agent import TurnJournal
-from sandbox.transport_recovery import recovery_marker, retryable_failure, validate_recovery
+from agent.context_recovery import run_with_context_recovery
+from agent.context_store import ContextStore, ContextUnavailable
+from agent.harnesses.harness_agent import TurnJournal
+from agent.transport_recovery import recovery_marker, retryable_failure, validate_recovery
 
 
 def runtime(tmp_path):
@@ -59,7 +59,7 @@ def test_transport_recovery_requires_settled_durable_receipts(tmp_path, unsafe):
         assert bool(marker) is (unsafe == '')
         if marker:
             validate_recovery(store, marker)
-            assert 'receipt-one' in store.history()[0]['content']
+            assert any(m.get('role') == 'tool' and 'receipt-one' in m.get('content', '') for m in store.history())
             store.append({'role': 'user', 'content': 'A newer checkpoint'})
             with pytest.raises(ContextUnavailable, match='checkpoint'):
                 validate_recovery(store, marker)
@@ -147,7 +147,7 @@ def test_failed_compaction_keeps_cursor_and_receipts_across_cold_restore(tmp_pat
         agent.context_store.close()
     restored = ContextStore(tmp_path / 'context.db', 'run')
     assert restored.state()['cursor'] == 0 and not restored.pending
-    assert 'durable receipt' in restored.history()[0]['content']
+    assert any(m.get('role') == 'tool' and 'durable receipt' in m.get('content', '') for m in restored.history())
     restored.close()
 
 
@@ -338,8 +338,8 @@ def test_old_unknown_outcome_does_not_block_new_question_recovery(tmp_path):
 @pytest.mark.parametrize('harness', ['codex', 'claude-agent-sdk'])
 @pytest.mark.parametrize('final_failure', [False, True])
 def test_native_context_handoff_reports_only_terminal_failure(tmp_path, monkeypatch, harness, final_failure):
-    from sandbox.activity import ActivityReporter
-    from sandbox.harness_registry import create_agent
+    from agent.activity import ActivityReporter
+    from agent.harnesses.harness_registry import create_agent
     from test_codex_sdk import install_codex_client, sdk_event
     from claude_agent_sdk import ResultMessage
     original, summaries = runtime(tmp_path)

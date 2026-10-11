@@ -1,9 +1,10 @@
-"""Idempotent session steps. SQLite owns data; Temporal owns scheduling/retries.
+"""Idempotent session steps. The database owns data; Temporal owns scheduling/retries.
 
-Supported topology is one Render instance/one worker on the same disk. Moving
-workers to another service requires shared storage first, not a second SQLite.
+Standalone mode retains one application process. Distributed mode uses one
+coordinator and replicated workers with PostgreSQL leases and shared objects.
 """
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
@@ -14,53 +15,105 @@ import modal
 from fastapi import HTTPException
 from .environments import EnvironmentPending
 
-from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files
+from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files, stop_requested
 from .security import digest
-from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
+from .sandboxes import ProvisioningTerminated
+from .db import database
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
+from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
 
 class LostExecution(Exception):
     pass
 
 
+def swarm_wake_seconds(mission):
+    """Keep Temporal timers finite for swarms that run until explicitly stopped."""
+    from .swarms import remaining_seconds
+    if mission['status'] == 'paused':
+        return 60.0
+    return min(60.0, max(0.01, remaining_seconds(mission)))
+
+
+# Use one predicate for the partial index and its readers. Historical sessions
+# and durable waits that released their machine must not add admission work.
+from .database_schema import SQLITE_OCCUPIED_SESSION as OCCUPIED_SESSION, POSTGRES_OCCUPIED_SESSION
+
+
 class DurableRunner(RunManager):
     def __init__(self, store, settings):
         super().__init__(store, settings)
         self.locks = {}
-        self.admission_lock = asyncio.Lock()
-        store.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
-            run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
-            revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
+        from .runtime_coordination import AdmissionLock
+        self.coordinated_database = store.database if settings.moyai_runtime_role != 'standalone' else None
+        self.admission_lock = AdmissionLock(self.coordinated_database)
+        self.occupied_session = POSTGRES_OCCUPIED_SESSION if store.database else OCCUPIED_SESSION
+        if store.schema_updates:
+            initialize_schema(store)
+        from .prepared_sandboxes import PreparedSandboxes
+        self.prepared = PreparedSandboxes(self)
+        from .swarms import SwarmMissions
+        self.swarms = SwarmMissions(store, self)
+        from .independent_runtime import IndependentRuntime
+        self.agent_runtime = IndependentRuntime(self)
 
     def state(self, run_id):
         rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,))
         return json.loads(rows[0]['state']) if rows else {}
 
     def save(self, run_id, state):
-        self.store.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+        self.store.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id), write_scope=run_id)
+
+    @asynccontextmanager
+    async def session_guard(self, run_id, *, wait=True):
+        lock = self.locks.setdefault(run_id, asyncio.Lock())
+        if not wait and lock.locked():
+            yield False
+            return
+        async with lock:
+            if self.coordinated_database:
+                from .runtime_coordination import lease
+                async with lease(self.coordinated_database, 'session:' + run_id, wait=wait) as acquired:
+                    yield acquired
+            else:
+                yield True
 
     def submit_in(self, conn, run):
         if not run.get('deleted_at'):
             conn.execute('''INSERT INTO durable_sessions(run_id,revision) VALUES(?,1)
-                ON CONFLICT(run_id) DO UPDATE SET revision=revision+1''', (run['id'],))
+                ON CONFLICT(run_id) DO UPDATE SET revision=durable_sessions.revision+1''', (run['id'],))
 
     def submit(self, run):
         # The DB outbox owns dispatch, including a wake admitted with its state.
         with self.store.connect() as conn:
             self.submit_in(conn, run)
 
+    async def wait_for_stop(self, run_id):
+        # Temporal owns active turns, answers and warm/computer cleanup. Only
+        # an idle journal has no owner left to settle orphaned input rows.
+        while True:
+            async with self.session_guard(run_id):
+                if self.state(run_id).get('phase', 'idle') == 'idle':
+                    await super().cleanup(self.store.run(run_id), run_id)
+                    return
+            await asyncio.sleep(0.2)
+
     def running_status(self, run_id, status, token_hash=None):
         # Never overwrite a stop that arrived during an awaited provider call.
-        if self.store.run(run_id)['status'] == 'stopping':
+        run = self.store.run(run_id)
+        if stop_requested(run):
             return False
         fields = {'status': status}
         if token_hash is not None:
             fields['token_hash'] = token_hash
-        self.store.update_run(run_id, **fields)
-        return True
+        from .db import now
+        fields['updated_at'] = now()
+        return bool(self.store.execute('UPDATE runs SET ' + ','.join(key + '=?' for key in fields) +
+            " WHERE id=? AND status!='stopping' AND deletion_requested_at='' AND deleted_at=''",
+            (*fields.values(), run_id), write_scope=run_id))
 
-    def is_active(self, run_id):
-        row = self.store.run(run_id)
+    def is_active(self, run_id, *, run=None):
+        row = self.store.run(run_id) if run is None else run
         return bool(row and row['status'] not in TERMINAL)
 
     def token(self, run_id, message_id):
@@ -78,13 +131,21 @@ class DurableRunner(RunManager):
         if not row or row['deleted_at'] or row['mode'] != 'modal':
             action, notice = 'missing', 'Cloud session not found.'
             shutting_down = True
-        elif (self.closing or row['status'] == 'stopping' or phase in {'cleanup', 'warm_cleanup'}
+        elif (self.closing or stop_requested(row) or phase in {'cleanup', 'warm_cleanup'}
                 or (phase == 'warm' and not state.get('computer_only')
                     and row['status'] in {'cancelled', 'interrupted'})):
             notice = 'This workspace is shutting down. Try again after it finishes.'
             shutting_down = True
         elif state.get('computer_only') and phase in {'provision', 'install', 'waiting_environment'}:
             action, notice = 'pending', 'Waking your workspace. Your live computer will appear here.'
+        elif state.get('independent_runtime') and phase in {'prepare', 'provision', 'install', 'launch', 'monitor'}:
+            computer = state.get('computer', {})
+            if computer.get('phase') == 'ready':
+                action, notice = 'reuse', 'The workspace computer is ready.'
+            elif computer or state.get('computer_requested'):
+                action, notice = 'pending', 'Preparing the workspace computer. The agent can continue using connected apps.'
+            else:
+                action, notice = 'acquire', 'The agent is running. Wake its workspace computer when needed.'
         elif not state.get('computer_only') and phase in {'prepare', 'provision', 'install', 'launch', 'waiting_environment', 'startup_wait', 'transport_wait'}:
             starting = True
             notice = ('Preparing the workspace environment. The computer will appear when it is ready.'
@@ -106,14 +167,14 @@ class DurableRunner(RunManager):
         elif self.settings.missing_sandbox(row.get('sandbox_provider')):
             action, notice = 'unconfigured', 'Configure the session sandbox provider before waking its computer.'
         else:
-            action = 'reuse' if phase == 'warm' else 'start'
-        return {'can_wake': action in {'start', 'reuse'}, 'waking': action == 'pending',
+            action = 'reuse' if phase == 'warm' and not state.get('independent_runtime') else 'start'
+        return {'can_wake': action in {'start', 'reuse', 'acquire'}, 'waking': action == 'pending',
                 'starting': starting, 'shutting_down': shutting_down, 'wake_notice': notice, 'wake_action': action,
                 'wake_error': state.get('computer_error', '')}
 
     def computer_state(self, run_id):
         with self.store.connect() as conn:
-            conn.execute('BEGIN')
+            conn.begin_read()
             row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             state = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
             pending = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running','injected')", (run_id,)).fetchone()
@@ -121,25 +182,36 @@ class DurableRunner(RunManager):
                 json.loads(state['state']) if state else {}, bool(pending))
 
     async def wake_computer(self, run_id):
-        async with self.locks.setdefault(run_id, asyncio.Lock()):
+        async with self.session_guard(run_id):
             policy = self.computer_state(run_id)
             if policy['waking']:
                 return  # A retry observes the already persisted wake operation.
             if not policy['can_wake']:
                 raise HTTPException({'missing': 404, 'unconfigured': 503}.get(policy['wake_action'], 409), policy['wake_notice'])
+            state = self.state(run_id)
+            if state.get('independent_runtime') and policy['wake_action'] in {'acquire', 'reuse'}:
+                state['computer_requested'] = True
+                self.save(run_id, state)
+                self.submit(self.store.run(run_id))
+                await self.persist()
+                return
+            if state.get('independent_runtime') and state.get('phase') == 'warm':
+                # The idle control guest is not the user's computer. Release it
+                # before the normal, transactionally rechecked computer wake.
+                await self.release_warm(run_id, state, 'workspace computer requested')
             if policy['wake_action'] == 'reuse':
                 try:
                     await self.sandbox(self.state(run_id))
                     return
                 except LostExecution:
                     await self.release_warm(run_id, self.state(run_id), 'machine no longer available')
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id) as available:
+                if not available:
                     raise HTTPException(409, 'All workspaces are busy. Try waking this computer again shortly.')
                 # Delete and enqueue use the same write transaction boundary.
                 # Persist admission and its dispatch together before effects.
                 with self.store.connect() as conn:
-                    conn.execute('BEGIN IMMEDIATE')
+                    conn.begin_write()
                     row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
                     row = dict(row) if row else None
                     current = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
@@ -156,11 +228,12 @@ class DurableRunner(RunManager):
             await self.persist()
 
     async def advance_computer(self, run_id, state):
-        if self.store.run(run_id)['status'] == 'stopping' or state['phase'] == 'warm_cleanup':
+        run = await database(self.store.run, run_id)
+        if stop_requested(run) or state['phase'] == 'warm_cleanup':
             await self.release_warm(run_id, state, 'computer stopped')
-            if self.store.run(run_id)['status'] == 'stopping':
-                self.store.update_run(run_id, status='cancelled')
-            return self.store.has_queued_messages(run_id)
+            if (await database(self.store.run, run_id))['status'] == 'stopping':
+                await database(self.store.update_run, run_id, status='cancelled')
+            return await database(self.store.has_queued_messages, run_id)
         try:
             if state['phase'] in {'provision', 'waiting_environment'}:
                 result = await self.provision(run_id, state)
@@ -172,26 +245,36 @@ class DurableRunner(RunManager):
             if result.get('error') or not result.get('available'):
                 raise HTTPException(503, 'Computer could not start.')
             state.update(phase='warm', idle_until=time.time() + self.computer_idle_seconds(state))
-            self.save(run_id, state)
+            await database(self.save, run_id, state)
             return True
         except EnvironmentPending as pending:
             state.update(phase='waiting_environment', environment_build=pending.build_id)
-            self.save(run_id, state)
+            await database(self.save, run_id, state)
             return {'retry_seconds': 5}
         except (LostExecution, ValueError, HTTPException, modal.exception.ImageBuildError, modal.exception.InvalidError):
             # No synthetic message, answer, model invocation or chat failure.
             state.update(phase='warm_cleanup', computer_error='The computer could not start. Try waking it again.')
-            self.save(run_id, state)
+            await database(self.save, run_id, state)
             return True
 
     async def advance(self, run_id):
-        async with self.locks.setdefault(run_id, asyncio.Lock()):
+        async with self.session_guard(run_id):
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
-                self.credentials.reconcile_resolutions(run_id)
-            row = self.store.run(run_id)
+                await database(self.credentials.reconcile_resolutions, run_id)
+            row = await database(self.store.run, run_id)
             if not row or row['deleted_at']:
                 return False
-            state = self.state(run_id)
+            state = await database(self.state, run_id)
+            mission = await self.swarms.enforce(run_id)
+            row = await database(self.store.run, run_id)
+            if mission and mission['run_id'] == run_id and mission['status'] == 'active' and state.get('phase', 'idle') in {'idle', 'warm'}:
+                wait = await database(self.swarms.tick, run_id)
+                if wait:
+                    if state.get('phase') == 'warm':
+                        warm_result = await self.warm(run_id, state)
+                        if isinstance(warm_result, dict):
+                            wait['retry_seconds'] = min(wait['retry_seconds'], warm_result.get('idle_seconds', wait['retry_seconds']))
+                    return wait
             # Stop only at boundaries before a process is launched. Active
             # execution, checkpoint saving and cleanup keep running. The saved
             # state and inbox are resumed by the replacement worker.
@@ -206,40 +289,70 @@ class DurableRunner(RunManager):
             if state.get('phase') in {'warm', 'warm_cleanup'}:
                 reuse = await self.warm(run_id, state)
                 if reuse is not True:
+                    if reuse is False and mission and mission['run_id'] == run_id and mission['status'] == 'paused':
+                        return {'retry_seconds': swarm_wake_seconds(mission)}
                     return reuse
-                row = self.store.run(run_id)
-                state = self.state(run_id)
+                row = await database(self.store.run, run_id)
+                state = await database(self.state, run_id)
                 if state.get('phase') == 'warm':
                     # A queued follow-up claims the already occupied slot.
-                    if not self.begin_turn(run_id, row, state):
-                        return True
-                    state = self.state(run_id)
-            if not state or state.get('phase') == 'idle':
-                if row['status'] in {'cancelled', 'interrupted', 'stopping'}:
-                    if row['status'] == 'stopping':
-                        self.store.update_run(run_id, status='cancelled')
-                    return False
-                if not self.store.has_queued_messages(run_id) and not self.store.rows(
-                        "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
-                    return False
-                async with self.admission_lock:
-                    if not await self.make_capacity(run_id):
+                    started = await database(self.begin_turn, run_id, row, state)
+                    if started == 'capacity':
                         return 'capacity'
-                    if not self.begin_turn(run_id, self.store.run(run_id)):
+                    if not started:
                         return True
-                    state = self.state(run_id)
+                    state = await database(self.state, run_id)
+            if not state or state.get('phase') == 'idle':
+                # Only an idle journal has relinquished turn ownership. Repair
+                # old terminal inputs without interrupting a fresh queued turn.
+                for answer in (await database(self.store.rows, """SELECT a.response_to_id,a.content,m.status FROM messages a
+                        JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                        WHERE a.run_id=? AND a.status='saving' AND m.role='user'
+                        AND m.status IN ('completed','failed','cancelled','interrupted','steered','save_failed')""", (run_id,))):
+                    await database(self.store.finish_message, run_id, answer['response_to_id'], answer['content'], answer['status'])
+                if stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}:
+                    if row['status'] == 'stopping':
+                        await database(self.store.update_run, run_id, status='cancelled')
+                    if mission and mission['run_id'] == run_id and mission['status'] == 'paused':
+                        return {'retry_seconds': swarm_wake_seconds(mission)}
+                    return False
+                if not await database(self.store.has_queued_messages, run_id) and not await database(self.store.rows,
+                        "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
+                    if mission and mission['run_id'] == run_id and mission['status'] == 'paused':
+                        return {'retry_seconds': swarm_wake_seconds(mission)}
+                    return False
+                async with self.admission(run_id, prepared=True, agent_only=self.agent_runtime.supports(row)) as available:
+                    if not available:
+                        return 'capacity'
+                    started = await database(self.begin_turn, run_id, await database(self.store.run, run_id))
+                    if started == 'capacity':
+                        return 'capacity'
+                    if not started:
+                        return True
+                    state = await database(self.state, run_id)
                 if state.get('phase') == 'idle' or not state:
                     return False
             # Cancellation is persistent, including across worker restarts.
-            if self.store.run(run_id)['status'] == 'stopping' and state['phase'] not in {'cleanup', 'finish'}:
-                self.fail(run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
+            if stop_requested(await database(self.store.run, run_id)) and state['phase'] not in {'cleanup', 'finish'}:
+                await database(self.fail, run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
             try:
-                return await self.step(run_id, state)
+                result = await self.step(run_id, state)
+                mission = await database(self.swarms.get, run_id)
+                if mission and mission['status'] in {'active', 'paused'}:
+                    remaining = swarm_wake_seconds(mission)
+                    if mission['status'] == 'active' and state.get('phase') in {'idle', 'warm'} and mission['next_at']:
+                        remaining = min(remaining, max(0.01, mission['next_at'] - time.time()))
+                    if result is False:
+                        return {'retry_seconds': remaining}
+                    if isinstance(result, dict):
+                        key = 'idle_seconds' if 'idle_seconds' in result else 'retry_seconds'
+                        return {**result, key: min(result.get(key, remaining), remaining)}
+                return result
             except EnvironmentPending as pending:
                 if state.get('environment_build') != pending.build_id:
-                    self.store.event(run_id, 'status', str(pending), {'activity_version': 1, 'phase': 'environment'})
+                    await database(self.store.event, run_id, 'status', str(pending), {'activity_version': 1, 'phase': 'environment'})
                 state.update(phase='waiting_environment', environment_build=pending.build_id)
-                self.save(run_id, state)
+                await database(self.save, run_id, state)
                 return {'retry_seconds': 5}
             except LostExecution:
                 if ((state.get('reused_machine') and state['phase'] in {'prepare', 'install'})
@@ -249,30 +362,30 @@ class DurableRunner(RunManager):
                             and not state.get('execution_started'))):
                     # This new turn has not reached its launch boundary yet.
                     state.update(phase='provision', sandbox_id='', reused_machine=False)
-                    self.save(run_id, state)
+                    await database(self.save, run_id, state)
                     return True
-                self.fail(run_id, state,
+                await database(self.fail, run_id, state,
                           'The cloud process stopped before its work could be confirmed. The last checkpoint is preserved. '
                           'No unfinished actions were replayed; send a new message to inspect and continue.', 'interrupted')
                 return True
             except ValueError:
-                self.fail(run_id, state, 'This response cannot run with the current workspace configuration. '
+                await database(self.fail, run_id, state, 'This response cannot run with the current workspace configuration. '
                           'An administrator must check the selected model and runtime settings.')
                 return True
             except modal.exception.ImageBuildError:
                 # Retrying the same broken image leaves the UI provisioning
                 # forever. Finish this turn without exposing provider logs.
-                self.fail(run_id, state, 'The workspace image could not be built. '
+                await database(self.fail, run_id, state, 'The workspace image could not be built. '
                           'An administrator must fix the image build and redeploy before you retry.')
                 return True
             except HTTPException as exc:
                 # A disabled/deleted selection is a configuration failure, not
                 # a transient provider error for Temporal to retry indefinitely.
-                self.fail(run_id, state, str(exc.detail))
+                await database(self.fail, run_id, state, str(exc.detail))
                 return True
 
     def begin_turn(self, run_id, row, warm=None):
-        if row['status'] in {'stopping', 'cancelled', 'interrupted'}:
+        if stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}:
             return False
         messages = self.store.rows("SELECT * FROM messages WHERE run_id=? AND status='running'", (run_id,))
         message = messages[0] if messages else self.store.claim_message(run_id)
@@ -280,9 +393,34 @@ class DurableRunner(RunManager):
             return False
         state = {'version': 1, 'phase': 'prepare', 'message_id': message['id'], 'segment': 0,
                  'snapshot_id': row['snapshot_id'], 'sandbox_id': '', 'cursor': 0, 'turn_started': time.time()}
+        if self.agent_runtime.supports(row) and (not warm or warm.get('independent_runtime')):
+            state['independent_runtime'] = True
+            if warm:
+                state.update({key: warm[key] for key in
+                    ('sandbox_id', 'sandbox_name', 'machine_started', 'runtime_scope') if key in warm})
+                state['reused_machine'] = True
+        initial_group = self.swarms.initial_group(run_id, message['id']) if self.coordinator else None
+        if initial_group and initial_group['status'] == 'running':
+            # The initial team was committed with the mission. Wait without
+            # acquiring a sandbox or asking a model to invent the same team.
+            state.update(phase='waiting_children', wait_group=initial_group['id'], context_pending=True)
+            self.save(run_id, state)
+            self.store.update_run(run_id, status='waiting_children')
+            return True
+        if state.get('independent_runtime'):
+            self.save(run_id, state)
+            return True
         if warm and warm.get('sandbox_id'):
             state.update(sandbox_id=warm['sandbox_id'], machine_started=warm['machine_started'], reused_machine=True)
             self.store.event(run_id, 'status', 'Reusing the saved session sandbox for this response.')
+        elif self.prepared.assign(run_id, row, state):
+            return True
+        elif not self.has_capacity():
+            # A prepared entry may expire after admission's optimistic check.
+            # Keep the claimed input durable, but do not create a cold-machine
+            # reservation until ordinary capacity is available. Tell the
+            # workflow to use its normal capacity backoff before retrying.
+            return 'capacity'
         self.save(run_id, state)
         return True
 
@@ -296,46 +434,58 @@ class DurableRunner(RunManager):
                    state['machine_started'] + self.rotation_seconds(state))
 
     def computer_idle_seconds(self, state):
+        if state.get('independent_runtime'):
+            return self.agent_runtime.idle_seconds()
         return self.settings.sandbox_idle_seconds or (300 if state.get('computer_only') else 0)
+
+    def can_keep_warm(self, run, state):
+        return (bool(self.computer_idle_seconds(state)) and not run['parent_run_id']
+                and bool(state.get('sandbox_id'))
+                and time.time() < state['machine_started'] + self.rotation_seconds(state)
+                and (not state.get('independent_runtime') or self.agent_runtime.reusable(run, state)))
 
     async def release_warm(self, run_id, state, reason):
         # Persist before the provider call: a lost termination ACK is retryable
         # and never publishes the previous answer a second time.
         state.update(phase='warm_cleanup', idle_reason=reason)
-        self.save(run_id, state)
+        await database(self.save, run_id, state)
         await self.cleanup(state, run_id)
         state.update(phase='idle', sandbox_id='')
         state.pop('idle_until', None)
-        self.save(run_id, state)
-        self.store.update_run(run_id, sandbox_id='', token_hash='')
-        self.store.event(run_id, 'status', 'Idle sandbox released: ' + reason + '.')
+        await database(self.save, run_id, state)
+        await database(self.store.update_run, run_id, sandbox_id='', token_hash='')
+        await database(self.store.event, run_id, 'status', 'Idle sandbox released: ' + reason + '.')
 
     async def warm(self, run_id, state):
-        row = self.store.run(run_id)
-        if getattr(self, 'computer', None) and state.get('phase') == 'warm':
+        row = await database(self.store.run, run_id)
+        if (getattr(self, 'computer', None) and state.get('phase') == 'warm'
+                and not state.get('independent_runtime')):
             touched = self.computer.touched(run_id)
             if touched and state.get('idle_until') is not None:
                 state['idle_until'] = max(state['idle_until'], touched + self.computer_idle_seconds(state))
-                self.save(run_id, state)
-        stopping = row['status'] == 'stopping' or (not state.get('computer_only') and row['status'] in {'cancelled', 'interrupted'})
-        queued = self.store.has_queued_messages(run_id)
+                await database(self.save, run_id, state)
+        stopping = stop_requested(row) or (not state.get('computer_only') and row['status'] in {'cancelled', 'interrupted'})
+        queued = await database(self.store.has_queued_messages, run_id)
         expired = (time.time() >= state['machine_started'] + self.rotation_seconds(state)
                    or (not queued and time.time() >= self.idle_deadline(state)))
+        if state.get('independent_runtime') and not self.agent_runtime.reusable(row, state):
+            state['idle_reason'] = 'agent runtime configuration changed'
+            expired = True
         if (state['phase'] == 'warm_cleanup' or stopping or not self.computer_idle_seconds(state)
                 or expired):
             await self.release_warm(run_id, state, state.get('idle_reason', 'idle timeout' if not stopping else 'stop requested'))
-            row = self.store.run(run_id)
-            stopping = row['status'] in {'stopping', 'cancelled', 'interrupted'}
+            row = await database(self.store.run, run_id)
+            stopping = stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}
             if row['status'] == 'stopping':
-                self.store.update_run(run_id, status='cancelled')
-            return False if stopping else self.store.has_queued_messages(run_id)
+                await database(self.store.update_run, run_id, status='cancelled')
+            return False if stopping else (await database(self.store.has_queued_messages, run_id))
         if not queued:
             if state.get('idle_until') is None:
                 state['idle_until'] = time.time() + self.computer_idle_seconds(state)
-                self.save(run_id, state)
+                await database(self.save, run_id, state)
             return {'idle_seconds': max(0.01, self.idle_deadline(state) - time.time())}
         state['idle_until'] = None
-        self.save(run_id, state)
+        await database(self.save, run_id, state)
         try:
             await self.sandbox(state)
         except LostExecution:
@@ -343,33 +493,83 @@ class DurableRunner(RunManager):
             return True
         return True
 
-    async def make_capacity(self, run_id):
-        # Caller holds admission_lock until its own slot is persisted. Skip
-        # busy per-session locks rather than deadlocking competing admissions.
-        candidates = [(r['run_id'], json.loads(r['state'])) for r in self.store.rows('SELECT run_id,state FROM durable_sessions')]
+    @asynccontextmanager
+    async def admission(self, run_id, *, prepared=False, agent_only=False):
+        # Hold global admission only for the capacity check and the caller's
+        # persisted reservation. Provider cleanup keeps its session lease and
+        # occupied slot, but cannot prevent other sessions from claiming space.
+        if agent_only:
+            yield True
+            return
+        while True:
+            async with self.admission_lock:
+                if await database(self.has_capacity, run_id if prepared else None):
+                    yield True
+                    return
+            if not await self.make_capacity(run_id, prepared=prepared):
+                yield False
+                return
+            # Reclamation is not a reservation: another worker may have claimed
+            # the freed slot. Check again under global admission before yielding.
+
+    async def make_capacity(self, run_id, *, prepared=False):
+        # Best-effort reclamation outside global admission. The caller must use
+        # admission() to reserve the space. Skip owned sessions to avoid cycles
+        # between admissions that each already hold their own session lease.
+        if await database(self.has_capacity, run_id if prepared else None):
+            return True
+        if await self.prepared.reclaim():
+            return True
+        candidates = [(r['run_id'], json.loads(r['state'])) for r in await database(self.store.rows, f"""
+            SELECT run_id,state FROM durable_sessions WHERE {self.occupied_session}
+            AND json_text(state, 'phase') IN ('warm', 'warm_cleanup') ORDER BY run_id""")]
         for other, state in sorted(candidates, key=lambda entry: entry[1].get('idle_until') or float('inf')):
-            if self.has_capacity():
-                return True
             lock = self.locks.setdefault(other, asyncio.Lock())
             if other == run_id or lock.locked() or state.get('phase') not in {'warm', 'warm_cleanup'}:
                 continue
-            async with lock:
-                if self.store.has_queued_messages(other):
+            async with self.session_guard(other, wait=False) as acquired:
+                if not acquired:
+                    continue
+                if await database(self.has_capacity, run_id if prepared else None):
+                    return True
+                state = await database(self.state, other)
+                if state.get('phase') not in {'warm', 'warm_cleanup'}:
+                    continue
+                if await database(self.store.has_queued_messages, other):
                     continue
                 await self.release_warm(other, state, 'capacity needed by another session')
-        return self.has_capacity()
+                if await database(self.has_capacity, run_id if prepared else None):
+                    return True
+        return False
 
-    def has_capacity(self):
-        active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children', 'waiting_credential', 'waiting_environment'}
-                     for r in self.store.rows('SELECT state FROM durable_sessions'))
-        return active < self.settings.max_concurrent_runs
+    def has_capacity(self, run_id=None):
+        if not self.settings.max_concurrent_runs:
+            return True
+        # We only need to know whether the limit is reached. Ordered, bounded
+        # index reads also avoid Postgres overestimating JSON predicate matches
+        # and choosing a scan of retained history for an unbounded count.
+        active = self.store.rows(f"""SELECT COUNT(*) AS occupied
+            FROM (SELECT run_id FROM durable_sessions WHERE {self.occupied_session}
+                ORDER BY run_id LIMIT ?) AS slots""", (self.settings.max_concurrent_runs,))[0]['occupied']
+        if active >= self.settings.max_concurrent_runs:
+            return False
+        return (active + self.prepared.count() < self.settings.max_concurrent_runs
+                or bool(run_id and self.prepared.ready(run_id)))
 
     async def snapshot_for_children(self, run):
-        sandbox = await self.sandbox(self.state(run['id']))
+        state = self.state(run['id'])
+        if state.get('independent_runtime'):
+            state = state.get('computer', {})
+            if not state.get('sandbox_id'):
+                return run.get('snapshot_id') or ''
+        sandbox = await self.sandbox(state)
         snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds, ttl=None)
         return snapshot.object_id
 
     def fail(self, run_id, state, explanation, status='failed'):
+        if state['phase'] == 'provision' and not state.get('sandbox_id'):
+            # Recover provision journals written before sandbox_name existed.
+            state.setdefault('sandbox_name', f"moyai-{run_id}-{state['message_id']}-{state['segment']}")
         preserved = self.preserve_answer(run_id)
         state.update(phase='cleanup', outcome='save_failed' if preserved else status,
                      response=self.store.run(run_id)['summary'] if preserved else explanation)
@@ -386,33 +586,98 @@ class DurableRunner(RunManager):
             raise LostExecution()
         return sandbox
 
-    async def provision(self, run_id, state):
+    def provision_name(self, run_id, state):
+        suffix = f"-provision-{state['provision_attempt']}" if state.get('provision_attempt') else ''
+        return f"moyai-{run_id}-{state['message_id']}-{state['segment']}{suffix}"
+
+    async def provision(self, run_id, state, *, save=None, provisioned=None):
+        save = save or self.save
+        provisioned = provisioned or self.save_provisioned
         project = await self.environments.prepare(run_id) if self.environments else {}
-        if self.store.run(run_id)['status'] == 'stopping':
+        if stop_requested((await database(self.store.run, run_id))):
             return True
         if state['phase'] == 'waiting_environment':
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id) as available:
+                if not available:
                     return 'capacity'
-                if self.store.run(run_id)['status'] == 'stopping':
+                if stop_requested((await database(self.store.run, run_id))):
                     return True
                 state['phase'] = 'provision'
-                self.save(run_id, state)
-        backend = self.provider(self.store.run(run_id))
-        name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
+                await database(save, run_id, state)
+        backend = self.provider((await database(self.store.run, run_id)))
+        name = self.provision_name(run_id, state)
+        state['sandbox_name'] = name
+        await database(save, run_id, state)  # Keep create identity even if its ACK is lost.
         token = '' if state.get('computer_only') else self.token(run_id, state['message_id'])
         try:
-            sandbox = await backend.find(name, initialize=True, token=token)
-        except modal.exception.NotFoundError:
             try:
-                sandbox = await backend.create(name=name, snapshot_id=state['snapshot_id'] or project.get('snapshot_id') or '',
-                                               token=token)
-            except modal.exception.AlreadyExistsError:
                 sandbox = await backend.find(name, initialize=True, token=token)
+            except modal.exception.NotFoundError:
+                try:
+                    sandbox = await backend.create(name=name, snapshot_id=state['snapshot_id'] or project.get('snapshot_id') or '',
+                                                   token=token)
+                except modal.exception.AlreadyExistsError:
+                    sandbox = await backend.find(name, initialize=True, token=token)
+        except ProvisioningTerminated:
+            # Provisioning has not crossed the agent launch boundary. A new
+            # durable name is safe only after the provider confirms the old VM
+            # cannot run, and must survive worker restarts without duplication.
+            attempt = state.get('provision_attempt', 0)
+            if attempt >= 2:
+                if state.get('computer_only'):
+                    raise HTTPException(503, 'Computer startup failed repeatedly.')
+                await database(self.fail, run_id, state, 'Workspace startup failed repeatedly. The last checkpoint is preserved; '
+                          'no agent work was replayed. Try again when workspace services recover.')
+            else:
+                state['provision_attempt'] = attempt + 1
+                await database(save, run_id, state)
+                await database(self.store.event, run_id, 'status', 'Startup VM stopped. Retrying from the saved workspace.',
+                                 {'phase': 'provision', 'attempt': attempt + 1})
+            return True
         state.update(sandbox_id=sandbox.object_id, machine_started=getattr(sandbox, 'started_at', time.time()), phase='install')
-        self.save(run_id, state)
-        self.store.update_run(run_id, sandbox_id=sandbox.object_id)
+        await database(provisioned, run_id, state)
         return sandbox
+
+    def save_provisioned(self, run_id, state):
+        # Cancellation may detach the worker immediately after this commit.
+        # The resumed install and workspace APIs must agree about its machine.
+        with self.store.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            conn.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+            conn.execute('UPDATE runs SET sandbox_id=? WHERE id=?', (state['sandbox_id'], run_id))
+
+    async def prepare_cold_start(self, run_id, state):
+        """Overlap retryable source reads with the existing acquisition owner.
+
+        Provisioning persists its name and machine before acknowledging readiness.
+        Keep context_pending in that journal until both branches finish: a worker
+        lost after acquisition must still load context before writing a launch spec.
+        """
+        async def context():
+            if self.prepare_context:
+                await self.prepare_context(run_id)
+
+        acquisition = asyncio.create_task(self.provision(run_id, state))
+        source = asyncio.create_task(context())
+        try:
+            result, _ = await asyncio.gather(asyncio.shield(acquisition), source)
+        finally:
+            # Context is retryable. A cloud create is not: retain the session
+            # guard until its response/creation journal is accounted for, even
+            # when context fails or the activity is cancelled more than once.
+            source.cancel()
+            drained = asyncio.gather(acquisition, source, return_exceptions=True)
+            cancelled = None
+            while not drained.done():
+                try:
+                    await asyncio.shield(drained)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            if cancelled is not None:
+                raise cancelled
+        state.pop('context_pending', None)
+        await database(self.save, run_id, state)
+        return result
 
     def directory(self, state):
         suffix = f"-startup-{state['startup_attempt']}" if state.get('startup_attempt') else ''
@@ -421,7 +686,7 @@ class DurableRunner(RunManager):
     def startup_retry_allowed(self, run, state):
         marker = state.get('result', {}).get('startup_retry')
         return (isinstance(marker, dict) and marker.get('version') == 1
-                and marker.get('stage') in {'workspace_tools', 'attachments', 'repository_metadata', 'context_window'}
+                and marker.get('stage') in {'workspace_tools', 'attachments', 'repository_metadata', 'context_window', 'conversation_journal'}
                 and marker.get('reason') in {'network', 'HTTP 408', 'HTTP 425', 'HTTP 429',
                                              'HTTP 500', 'HTTP 502', 'HTTP 503', 'HTTP 504'}
                 and state.get('exit_code') == 75 and not state.get('execution_started')
@@ -465,7 +730,8 @@ class DurableRunner(RunManager):
         # Pass capabilities only in the exec environment, never in a persisted
         # task spec, command argument or Temporal payload. Reused machines have
         # an older creation-time environment, so every launch overrides it.
-        process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args,
+        process = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                         RUNTIME_ROOT, 'durable_process.py', *args,
                                          timeout=30, env=self.settings.broker_environment(token) if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
         if await process.wait.aio() != 0:
@@ -483,72 +749,182 @@ class DurableRunner(RunManager):
                 return {**result, 'completed': False, 'continuation': True, 'wait_group': group}
         return result
 
+    def record_report(self, run_id, state, report):
+        # Persist the complete received batch before cancellation detaches this
+        # worker. database() shields the operation and retains its session lease.
+        for event in report['events']:
+            if event.get('kind') == 'trace' and self.store.tracing:
+                self.store.tracing.tool(run_id, event.get('data'))
+            if event.get('kind') in {'tool', 'status', 'error', 'message'}:
+                self.store.event(run_id, event['kind'], str(event.get('message', '')), event.get('data', {}))
+            event_phase = event.get('data', {}).get('phase')
+            if event_phase == 'execution_started':
+                state['execution_started'] = True
+                self.acknowledge_credential(run_id, state)
+                state.pop('startup_deadline', None)
+                self.running_status(run_id, 'running')
+            elif (event.get('kind') == 'status' and event.get('data', {}).get('stage') == 'model_transport'
+                    and state.get('execution_started') and event_phase in {'reconnecting', 'recovered'}):
+                self.running_status(run_id, 'running' if event_phase == 'recovered' else 'reconnecting')
+            elif event_phase == 'reconnecting' and not state.get('execution_started'):
+                self.running_status(run_id, 'reconnecting')
+            if event.get('kind') == 'error':
+                state['last_error'] = str(event.get('message', ''))
+        state['cursor'] = report['cursor']
+        if report.get('final'):
+            # sandbox.agent can emit a completed/steered final only
+            # after resumed_context and execution_started. The final
+            # also acknowledges delivery if that event batch was lost.
+            if report['final'].get('completed') or report['final'].get('steer_message_id'):
+                self.acknowledge_credential(run_id, state)
+            self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
+            state['result'] = self.guard_agent_completion(
+                run_id, {**report['final'], 'message_id': state['message_id']})
+            attempts = report['final'].get('transport_attempt')
+            if type(attempts) is int and attempts >= 0:
+                state['transport_attempt'] = max(state.get('transport_attempt', 0),
+                                                 min(attempts, MAX_TRANSPORT_ATTEMPTS))
+            if not state['result'].get('startup_retry') and not state['result'].get('transport_retry'):
+                self.receive_result(run_id, state['result'])
+        self.save(run_id, state)
+
     async def step(self, run_id, state):
+        phase, message_id, segment = state['phase'], state.get('message_id'), state.get('segment', 0)
+        started = time.time_ns()
+        failed = True
+        try:
+            result = await self._step(run_id, state)
+            failed = False
+            return result
+        finally:
+            if self.store.tracing:
+                await database(self.store.tracing.runtime_phase, run_id, message_id, phase,
+                               started, time.time_ns(), segment=segment, failed=failed)
+
+    async def _step(self, run_id, state):
         phase = state['phase']
-        run = self.store.run(run_id)
+        run = await database(self.store.run, run_id)
         if phase in {'waiting_children', 'waiting_credential'}:
+            if state.get('independent_runtime') and state.get('sandbox_id'):
+                # A queued turn can enter a child wait before using its retained
+                # runtime. Do not hold that guest for the lifetime of the wait.
+                await self.cleanup(state, run_id)
+                state.update(sandbox_id='', reused_machine=False)
+                await database(self.save, run_id, state)
+                return True
             control = self.message_queue.live_control(run_id, state['message_id'], [], checkpointed=True)
             if control.get('handoff'):
                 # A different requester/model still needs a capability boundary.
                 # The checkpoint is already durable; no synthetic chat answer.
                 state.update(phase='finish', outcome='steered', response='', keep_warm=False)
-                self.save(run_id, state)
+                await database(self.save, run_id, state)
                 return True
             if control.get('input'):
-                async with self.admission_lock:
-                    if not await self.make_capacity(run_id):
+                async with self.admission(run_id, agent_only=bool(state.get('independent_runtime'))) as available:
+                    if not available:
                         return 'capacity'
-                    if self.store.run(run_id)['status'] == 'stopping':
+                    if stop_requested((await database(self.store.run, run_id))):
                         return True
                     # Resume the saved conversation under the same turn and scope.
                     # Leave the input pending until the restored agent acknowledges
                     # native delivery; a worker restart cannot lose the correction.
                     state.update(phase='provision', resume_group=state.get('wait_group'),
                                  resume_credential=state.get('wait_credential'))
-                    self.save(run_id, state)
-                self.running_status(run_id, 'provisioning')
+                    await database(self.save, run_id, state)
+                await database(self.running_status, run_id, 'provisioning')
                 return True
         if phase == 'prepare':
-            if self.prepare_context:
+            # Cold startup can read source context while the provider prepares
+            # the machine. Warm and demo turns retain their existing ordering.
+            cold = run['mode'] != 'demo' and not state.get('sandbox_id') and not state.get('independent_runtime')
+            if self.prepare_context and not cold:
                 await self.prepare_context(run_id)
-            if self.store.run(run_id)['status'] == 'stopping':
+            if stop_requested((await database(self.store.run, run_id))):
                 return True
             if run['mode'] == 'demo':
                 await self.demo(run)
-                if self.store.run(run_id)['status'] == 'stopping':
-                    self.fail(run_id, state, 'The response was stopped.', 'cancelled')
+                if stop_requested((await database(self.store.run, run_id))):
+                    await database(self.fail, run_id, state, 'The response was stopped.', 'cancelled')
                     return True
-                row = self.store.run(run_id)
+                row = await database(self.store.run, run_id)
                 state.update(phase='finish', outcome='steered' if row['status']=='steered' else 'completed', response=row['summary'])
             else:
+                if cold:
+                    state['context_pending'] = True
                 state['phase'] = 'install' if state.get('sandbox_id') else 'provision'
-                self.running_status(run_id, 'running' if state.get('sandbox_id') else 'provisioning')
-            self.save(run_id, state)
+                await database(self.running_status, run_id, 'running' if state.get('sandbox_id') else 'provisioning')
+            await database(self.save, run_id, state)
         elif phase in {'provision', 'waiting_environment'}:
-            result = await self.provision(run_id, state)
+            if state.get('independent_runtime'):
+                return await self.agent_runtime.provision(run_id, state)
+            result = (await self.prepare_cold_start(run_id, state) if state.get('context_pending')
+                      else await self.provision(run_id, state))
             if result == 'capacity':
                 return 'capacity'
         elif phase == 'install':
+            if (state.get('independent_runtime') and state.get('reused_machine')
+                    and not self.agent_runtime.reusable(run, state)):
+                # claim_message has now selected the next requester/model. A
+                # different scope must never inherit the old control filesystem.
+                await self.cleanup(state, run_id)
+                state.update(phase='provision', sandbox_id='', reused_machine=False)
+                await database(self.save, run_id, state)
+                return True
+            if state.get('context_pending'):
+                # Acquisition may have committed before context finished on a
+                # previous worker. These reads are idempotent; agent work has
+                # not started and must not observe an incomplete source.
+                if self.prepare_context:
+                    await self.prepare_context(run_id)
+                if stop_requested(await database(self.store.run, run_id)):
+                    return True
+                state.pop('context_pending', None)
+                await database(self.save, run_id, state)
             sandbox = await self.sandbox(state)
-            # Refresh protocol adapters on snapshots from older releases.
-            await refresh_sandbox_files(sandbox)
-            if getattr(self, 'computer', None):
-                await self.computer.restore(sandbox, run_id, required=False)
-            message = self.store.rows('SELECT content FROM messages WHERE id=?', (state['message_id'],))[0]
-            spec = self.spec({**run, 'prompt': message['content'], 'message_id': state['message_id'],
-                              'continuation': state['segment'] > 0})
+
+            async def prepare_files():
+                # A clean pool entry already has this exact runtime. Snapshots
+                # and entries claimed before an upgrade still need refreshing.
+                if state.get('prepared_build') != self.prepared.build:
+                    await refresh_sandbox_files(sandbox)
+                if getattr(self, 'computer', None) and not state.get('independent_runtime'):
+                    await self.computer.restore(sandbox, run_id, required=False)
+
+            def prepare_spec():
+                message = self.store.rows('SELECT content FROM messages WHERE id=?', (state['message_id'],))[0]
+                return self.spec({**run, 'prompt': message['content'], 'message_id': state['message_id'],
+                                  'continuation': state['segment'] > 0})
+
+            # Independent provider I/O and database reads overlap. Neither can
+            # launch the agent; both must finish before writing the launch spec.
+            preparation = [asyncio.create_task(prepare_files()), asyncio.create_task(database(prepare_spec))]
+            try:
+                _, spec = await asyncio.gather(*preparation)
+            finally:
+                # Keep the original exception type for advance's permanent-error
+                # handling, and finish cancellation before releasing ownership.
+                for task in preparation:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*preparation, return_exceptions=True)
+            state.pop('prepared_build', None)
+            spec['independent_runtime'] = bool(state.get('independent_runtime'))
             spec['rotation_seconds'] = self.settings.temporal_checkpoint_seconds
             if run.get('sandbox_provider') == 'lambda':
                 spec['rotation_at'] = state['machine_started'] + self.rotation_seconds(state)
             spec['chat_enabled'] = True
+            if (run['harness'] == 'codex' and self.settings.codex_runtime_reuse
+                    and self.settings.sandbox_idle_seconds and not run['parent_run_id']):
+                spec['codex_runtime_idle_seconds'] = min(300, self.settings.sandbox_idle_seconds)
+                spec['codex_runtime_scope'] = [run_id, run['active_user_id'], spec['model']]
             spec['transport_attempt'] = state.get('transport_attempt', 0)
             if state.get('resume_transport'):
                 spec['transport_recovery'] = state['resume_transport']
             if state.get('resume_group') and self.coordinator:
-                spec['agent_results'] = self.coordinator.results(run_id, state['resume_group'])
+                spec['agent_results'] = await database(self.coordinator.results, run_id, state['resume_group'])
             state.pop('credential_delivery', None)
             if state.get('resume_credential') and self.credentials:
-                spec['credential_resolution'] = self.credentials.resolution(run_id,state['resume_credential'])
+                spec['credential_resolution'] = await database(self.credentials.resolution, run_id,state['resume_credential'])
                 resolution = spec['credential_resolution']
                 if resolution['status'] in {'provided', 'declined', 'satisfied'} and 'generation' in resolution:
                     state['credential_delivery'] = {'request_id': state['resume_credential'],
@@ -556,95 +932,77 @@ class DurableRunner(RunManager):
             if self.settings.run_timeout_seconds:
                 remaining = self.settings.run_timeout_seconds - (time.time() - state['turn_started'])
                 if remaining <= 0:
-                    self.fail(run_id, state, 'This response reached its configured time limit.')
+                    await database(self.fail, run_id, state, 'This response reached its configured time limit.')
                     return True
                 spec['timeout'] = remaining
+            from .swarms import execution_policy, remaining_seconds
+            mission = await database(execution_policy, self.store, run_id)
+            if mission:
+                remaining = remaining_seconds(mission)
+                if mission['status'] != 'active' or remaining <= 0:
+                    await self.swarms.enforce(run_id)
+                    return True
+                # Mission timing is mutable and enforced by the durable host.
+                # Baking it into the native process would kill live agents at
+                # their old deadline even after a human extended the swarm.
+                # Administrator-configured per-response limits still apply.
+                spec['prompt'] += self.swarms.prompt(run_id)
             # Each piece gets its own immutable input and launch marker.
             spec_path = '/tmp/moyai-' + self.directory(state).rsplit('/', 1)[-1] + '.json'
             await sandbox.filesystem.write_text.aio(json.dumps(spec), spec_path)
-            state.update(phase='launch', startup_model_calls=self.store.run(run_id)['turn_model_calls'],
+            state.update(phase='launch', startup_model_calls=(await database(self.store.run, run_id))['turn_model_calls'],
                          execution_started=False)
-            self.save(run_id, state)
+            await database(self.save, run_id, state)
         elif phase == 'launch':
             sandbox = await self.sandbox(state)
-            if not self.running_status(run_id, 'running', digest(self.token(run_id, state['message_id']))):
+            await self.swarms.enforce(run_id)
+            if not (await database(self.running_status, run_id, 'running', digest(self.token(run_id, state['message_id'])))):
                 return True
             spec_path = '/tmp/moyai-' + self.directory(state).rsplit('/', 1)[-1] + '.json'
             await self.command(sandbox, 'start', self.directory(state), spec_path, token=self.token(run_id, state['message_id']))
             state['phase'] = 'monitor'
-            self.save(run_id, state)
+            await database(self.save, run_id, state)
         elif phase == 'monitor':
             sandbox = await self.sandbox(state)
             # One Activity may poll multiple times, keeping workflow history
             # small. Heartbeats are delivered independently by the worker.
             for _ in range(10):
-                if self.store.run(run_id)['status'] == 'stopping':
+                await self.swarms.enforce(run_id)
+                if stop_requested((await database(self.store.run, run_id))):
                     return True
+                if state.get('independent_runtime'):
+                    await self.agent_runtime.computer_step(run_id, state)
                 output = await self.command(sandbox, 'read', self.directory(state), str(state['cursor']))
                 for value in (self.token(run_id, state['message_id']), self.settings.litellm_api_key, self.settings.modal_token_secret,
                               self.settings.cloudflare_access_client_id, self.settings.cloudflare_access_client_secret):
                     if value:
                         output = output.replace(value, '[redacted]')
                 report = json.loads(output)
-                for event in report['events']:
-                    if event.get('kind') == 'trace' and self.store.tracing:
-                        self.store.tracing.tool(run_id, event.get('data'))
-                    if event.get('kind') in {'tool', 'status', 'error', 'message'}:
-                        self.store.event(run_id, event['kind'], str(event.get('message', '')), event.get('data', {}))
-                    event_phase = event.get('data', {}).get('phase')
-                    if event_phase == 'execution_started':
-                        state['execution_started'] = True
-                        self.acknowledge_credential(run_id, state)
-                        state.pop('startup_deadline', None)
-                        self.running_status(run_id, 'running')
-                    elif (event.get('kind') == 'status' and event.get('data', {}).get('stage') == 'model_transport'
-                            and state.get('execution_started') and event_phase in {'reconnecting', 'recovered'}):
-                        self.running_status(run_id, 'running' if event_phase == 'recovered' else 'reconnecting')
-                    elif event_phase == 'reconnecting' and not state.get('execution_started'):
-                        self.running_status(run_id, 'reconnecting')
-                    if event.get('kind') == 'error':
-                        state['last_error'] = str(event.get('message', ''))
-                state['cursor'] = report['cursor']
-                if report.get('final'):
-                    # sandbox.agent can emit a completed/steered final only
-                    # after resumed_context and execution_started. The final
-                    # also acknowledges delivery if that event batch was lost.
-                    if report['final'].get('completed') or report['final'].get('steer_message_id'):
-                        self.acknowledge_credential(run_id, state)
-                    self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
-                    state['result'] = self.guard_agent_completion(
-                        run_id, {**report['final'], 'message_id': state['message_id']})
-                    attempts = report['final'].get('transport_attempt')
-                    if type(attempts) is int and attempts >= 0:
-                        state['transport_attempt'] = max(state.get('transport_attempt', 0),
-                                                         min(attempts, MAX_TRANSPORT_ATTEMPTS))
-                    if not state['result'].get('startup_retry') and not state['result'].get('transport_retry'):
-                        self.receive_result(run_id, state['result'])
-                self.save(run_id, state)
+                await database(self.record_report, run_id, state, report)
                 if report['state'] == 'uncertain':
                     raise LostExecution()
                 if report['state'] == 'new':
                     # A launch RPC may have succeeded without its process
                     # starting yet. The supervisor safely arbitrates retries.
                     state['phase'] = 'launch'
-                    self.save(run_id, state)
+                    await database(self.save, run_id, state)
                     return True
                 if report['state'] == 'done' and len(report['events']) < 30:
                     state['exit_code'] = report['exit_code']
-                    if self.startup_retry_allowed(self.store.run(run_id), state):
-                        self.wait_for_startup(run_id, state)
+                    if self.startup_retry_allowed((await database(self.store.run, run_id)), state):
+                        await database(self.wait_for_startup, run_id, state)
                         return True
                     if state.get('result', {}).get('startup_retry'):
-                        self.fail(run_id, state, 'The agent stopped, but a safe startup retry could not be confirmed. '
+                        await database(self.fail, run_id, state, 'The agent stopped, but a safe startup retry could not be confirmed. '
                                   'No potentially completed work was replayed.')
                         return True
                     state['phase'] = 'save'
-                    self.save(run_id, state)
+                    await database(self.save, run_id, state)
                     return True
                 await asyncio.sleep(2)
         elif phase == 'startup_wait':
             if time.time() >= state['startup_deadline']:
-                self.wait_for_startup(run_id, state)
+                await database(self.wait_for_startup, run_id, state)
                 return True
             remaining = state['retry_at'] - time.time()
             if remaining > 0:
@@ -652,12 +1010,12 @@ class DurableRunner(RunManager):
             state.update(phase='install', cursor=0)
             for key in ('result', 'exit_code', 'last_error', 'save_attempts'):
                 state.pop(key, None)
-            self.save(run_id, state)
+            await database(self.save, run_id, state)
         elif phase == 'transport_wait':
-            self.running_status(run_id, 'reconnecting', '')
+            await database(self.running_status, run_id, 'reconnecting', '')
             if (self.settings.run_timeout_seconds and
                     time.time() - state['turn_started'] >= self.settings.run_timeout_seconds):
-                self.fail(run_id, state, 'This response reached its configured time limit while reconnecting. '
+                await database(self.fail, run_id, state, 'This response reached its configured time limit while reconnecting. '
                           'Completed work and error diagnostics are saved.')
                 return True
             remaining = state['retry_at'] - time.time()
@@ -671,24 +1029,26 @@ class DurableRunner(RunManager):
                          resume_transport=state['result']['transport_retry'])
             for key in ('result', 'exit_code', 'last_error', 'save_attempts', 'startup_attempt', 'startup_deadline'):
                 state.pop(key, None)
-            self.save(run_id, state)
+            await database(self.save, run_id, state)
         elif phase == 'save':
+            if state.get('independent_runtime'):
+                return await self.agent_runtime.checkpoint(run_id, state)
             sandbox = await self.sandbox(state)
             result = state.get('result', {})
             # Answer persisted above before archive/snapshot work.
             await self.save_artifact(sandbox, run_id)
-            if not self.running_status(run_id, 'saving', ''):
+            if not (await database(self.running_status, run_id, 'saving', '')):
                 return True
             try:
                 snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds, ttl=None)
             except Exception as exc:
                 state['save_attempts'] = state.get('save_attempts', 0) + 1
-                self.save(run_id, state)
-                self.store.event(run_id, 'error', 'Workspace checkpoint could not be confirmed.',
+                await database(self.save, run_id, state)
+                await database(self.store.event, run_id, 'error', 'Workspace checkpoint could not be confirmed.',
                                  {'stage': 'snapshot_filesystem', 'attempt': state['save_attempts'],
                                   'reason': safe_error_detail(exc, [self.settings.modal_token_secret])})
                 if state['save_attempts'] >= 3:
-                    self.fail(run_id, state, SAVE_WARNING if result else 'Workspace saving failed. No unfinished work was replayed.')
+                    await database(self.fail, run_id, state, SAVE_WARNING if result else 'Workspace saving failed. No unfinished work was replayed.')
                     return True
                 raise
             result.update(checkpoint_saved=True, exit_code=state['exit_code'])
@@ -701,38 +1061,41 @@ class DurableRunner(RunManager):
                              (snapshot.object_id, '' if result.get('transport_retry') else json.dumps(result), run_id))
         elif phase == 'checkpointed':
             # Also cover receipts checkpointed before this safeguard existed.
-            result = self.guard_agent_completion(run_id, state['result'])
+            result = await database(self.guard_agent_completion, run_id, state['result'])
             if result != state['result']:
                 state['result'] = result
-                self.save(run_id, state)
-                self.receive_result(run_id, result)
+                await database(self.save, run_id, state)
+                await database(self.receive_result, run_id, result)
             if result.get('transport_retry'):
                 if state['exit_code'] == 75 and valid_retry(result['transport_retry']) and not result.get('completed'):
                     self.wait_for_transport(run_id, state)
                 else:
-                    self.fail(run_id, state, 'A safe cloud recovery could not be confirmed. '
+                    await database(self.fail, run_id, state, 'A safe cloud recovery could not be confirmed. '
                               'Saved receipts and error diagnostics are preserved; no actions were replayed.')
                 return True
+            # This segment consumed the old transport checkpoint and saved a
+            # newer one. Child/credential handoffs must resume that new state,
+            # without asking the harness to verify the obsolete recovery marker.
+            state.pop('resume_transport', None)
             continuing = result.get('continuation') and state['exit_code'] == 0
             steered = (state['exit_code'] == 0 and
                        self.message_queue.accepted(run_id, result.get('steer_message_id')))
             if steered:
-                keep = (self.settings.sandbox_idle_seconds and not run['parent_run_id']
-                        and time.time() < state['machine_started'] + self.rotation_seconds(state))
+                keep = self.can_keep_warm(run, state)
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='steered', response='')
-                self.save(run_id, state)
+                await database(self.save, run_id, state)
             elif continuing and result.get('wait_credential') and self.credentials:
-                self.credentials.resolution(run_id,result['wait_credential'])
+                await database(self.credentials.resolution, run_id,result['wait_credential'])
                 await self.cleanup(state, run_id)
                 state.update(phase='waiting_credential',wait_credential=result['wait_credential'],sandbox_id='',
                              segment=state['segment']+1,cursor=0)
                 state.pop('result',None)
                 state.pop('save_attempts',None)
-                self.running_status(run_id,'waiting_credential','')
-                self.store.update_run(run_id,pending_result='',summary='',sandbox_id='')
-                self.store.event(run_id,'credential','Workspace saved. Waiting for access; sandbox released.',
+                await database(self.running_status, run_id,'waiting_credential','')
+                await database(self.store.update_run, run_id,pending_result='',summary='',sandbox_id='')
+                await database(self.store.event, run_id,'credential','Workspace saved. Waiting for access; sandbox released.',
                                  {'request_id':state['wait_credential']})
-                self.save(run_id,state)
+                await database(self.save, run_id,state)
             elif continuing and result.get('wait_group') and self.coordinator:
                 # Validate the control message against persisted ownership.
                 self.coordinator.group(run_id, result['wait_group'])
@@ -741,13 +1104,12 @@ class DurableRunner(RunManager):
                              segment=state['segment'] + 1, cursor=0)
                 state.pop('result', None)
                 state.pop('save_attempts', None)
-                self.running_status(run_id, 'waiting_children', '')
-                self.store.update_run(run_id, pending_result='', summary='')
-                self.store.event(run_id, 'agents', 'Workspace saved. Waiting for parallel agents; coordinator sandbox released.',
+                await database(self.running_status, run_id, 'waiting_children', '')
+                await database(self.store.update_run, run_id, pending_result='', summary='')
+                await database(self.store.event, run_id, 'agents', 'Workspace saved. Waiting for parallel agents; coordinator sandbox released.',
                                  {'group_id': state['wait_group']})
-                self.save(run_id, state)
+                await database(self.save, run_id, state)
             elif continuing:
-                state.pop('resume_transport', None)
                 if time.time() - state['machine_started'] >= self.rotation_seconds(state):
                     await self.cleanup(state, run_id)
                     state.update(sandbox_id='', phase='provision')
@@ -756,77 +1118,96 @@ class DurableRunner(RunManager):
                 state.update(segment=state['segment'] + 1, cursor=0)
                 state.pop('result', None)
                 state.pop('save_attempts', None)
-                self.running_status(run_id, 'running')
-                self.store.update_run(run_id, pending_result='', summary='')
-                self.store.event(run_id, 'status', 'Workspace checkpoint saved. Continuing the same request.')
-                self.save(run_id, state)
+                await database(self.running_status, run_id, 'running')
+                await database(self.store.update_run, run_id, pending_result='', summary='')
+                await database(self.store.event, run_id, 'status', 'Workspace checkpoint saved. Continuing the same request.')
+                await database(self.save, run_id, state)
             else:
                 completed = result.get('completed') and state['exit_code'] == 0
-                keep = (completed and self.settings.sandbox_idle_seconds and run['chat_enabled'] and not run['parent_run_id']
-                        and time.time() < state['machine_started'] + self.rotation_seconds(state))
+                keep = completed and run['chat_enabled'] and self.can_keep_warm(run, state)
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='completed' if completed else 'failed',
                              response=result.get('message') or state.get('last_error') or 'Hermes stopped without a final answer.')
-                self.save(run_id, state)
+                await database(self.save, run_id, state)
         elif phase == 'waiting_credential':
-            if not self.credentials or self.credentials.resolution(run_id,state['wait_credential'])['status']=='pending':
+            if not self.credentials or (await database(self.credentials.resolution, run_id,state['wait_credential']))['status']=='pending':
                 return False  # Temporal waits on a durable wake, without a sandbox or polling.
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id, agent_only=bool(state.get('independent_runtime'))) as available:
+                if not available:
                     return 'capacity'
                 state.update(phase='provision',resume_credential=state['wait_credential'])
-                self.save(run_id,state)
-            self.running_status(run_id,'provisioning')
-            self.store.event(run_id,'credential','Credential request resolved. Resuming the saved session.')
+                await database(self.save, run_id,state)
+            await database(self.running_status, run_id,'provisioning')
+            await database(self.store.event, run_id,'credential','Credential request resolved. Resuming the saved session.')
         elif phase == 'waiting_children':
             if not self.coordinator or not self.coordinator.settled(run_id, state['wait_group']):
                 return 'children'
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id, agent_only=bool(state.get('independent_runtime'))) as available:
+                if not available:
                     return 'capacity'
                 # Admission may await releasing another machine. A web user can
                 # queue a worker follow-up during that wait; recheck atomically.
                 if not self.coordinator.handoff(run_id, state['wait_group']):
                     return 'children'
                 state.update(phase='provision', resume_group=state['wait_group'])
-                self.save(run_id, state)
-            self.running_status(run_id, 'provisioning')
-            self.store.event(run_id, 'agents', 'Workers finished. Restoring the coordinator to gather results.', {'group_id': state['wait_group']})
-            self.save(run_id, state)
+                await database(self.save, run_id, state)
+            await database(self.running_status, run_id, 'provisioning')
+            await database(self.store.event, run_id, 'agents', 'Workers finished. Restoring the coordinator to gather results.', {'group_id': state['wait_group']})
+            await database(self.save, run_id, state)
         elif phase == 'cleanup':
             if self.coordinator and state.get('outcome') not in {'completed', 'steered'}:
                 await self.coordinator.cancel_children(run_id)
             await self.cleanup(state, run_id)
             state.update(phase='finish', keep_warm=False, sandbox_id='')
-            self.store.update_run(run_id, sandbox_id='')
-            self.save(run_id, state)
+            await database(self.store.update_run, run_id, sandbox_id='')
+            await database(self.save, run_id, state)
         elif phase == 'finish':
+            if state.get('independent_runtime') and state.get('keep_warm'):
+                # Checkpointed workspace bytes and receipts are already durable.
+                # Retain only the lightweight guest; release full-computer capacity.
+                await self.agent_runtime.cleanup_computer(run_id, state)
+                await database(self.agent_runtime.operations.abandon, run_id)
+                run = await database(self.store.run, run_id)
             if state['outcome'] == 'steered':
                 state['response'] = ''  # Also suppress notices checkpointed by an older worker.
-            if run['status'] == 'stopping':
+            if stop_requested(run):
                 state['outcome'] = 'cancelled'
                 if state.get('keep_warm'):
                     state.update(phase='cleanup', keep_warm=False)
-                    self.save(run_id, state)
+                    await database(self.save, run_id, state)
                     return True
-            self.store.finish_message(run_id, state['message_id'], state['response'], state['outcome'])
+            # Older cleanup could interrupt the source before this journal
+            # finished. Its owner must retire the receipt with that outcome.
+            retired = await database(self.store.rows, """SELECT a.content,m.status FROM messages a
+                JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                WHERE a.run_id=? AND a.response_to_id=? AND a.status='saving'
+                AND m.status IN ('completed','failed','cancelled','interrupted','steered','save_failed')""",
+                (run_id, state['message_id']))
+            if retired:
+                state.update(outcome=retired[0]['status'], response='' if retired[0]['status'] == 'steered' else retired[0]['content'])
+                if state['outcome'] not in {'completed', 'steered'} and state.get('keep_warm'):
+                    state.update(phase='cleanup', keep_warm=False)
+                    await database(self.save, run_id, state)
+                    return True
+            state['response'] = await database(self.store.finish_message, run_id, state['message_id'], state['response'], state['outcome'])
+            await database(self.swarms.settle, run_id, state)
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
                 self.credentials.reconcile_resolutions(run_id)
             status = 'idle' if state['outcome'] in {'completed', 'steered'} else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])
             if status != 'idle':
-                self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
-            self.store.update_run(run_id, status='queued' if status == 'idle' and self.store.has_queued_messages(run_id) else status,
+                await database(self.store.execute, "UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
+            await database(self.store.update_run, run_id, status='queued' if status == 'idle' and (await database(self.store.has_queued_messages, run_id)) else status,
                                   token_hash='', summary=state['response'])
-            self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
+            await database(self.store.execute, "UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
             state['phase'] = 'warm' if state.get('keep_warm') else 'idle'
             if state['phase'] == 'warm':
                 # Queued work has not gone idle, even if the worker restarts
                 # before it can claim the next message.
-                state['idle_until'] = (None if self.store.has_queued_messages(run_id)
-                                       else time.time() + self.settings.sandbox_idle_seconds)
-            self.save(run_id, state)
-            if state['phase'] == 'warm' and not self.store.has_queued_messages(run_id):
+                state['idle_until'] = (None if (await database(self.store.has_queued_messages, run_id))
+                                       else time.time() + self.computer_idle_seconds(state))
+            await database(self.save, run_id, state)
+            if state['phase'] == 'warm' and not (await database(self.store.has_queued_messages, run_id)):
                 return {'idle_seconds': max(0.01, self.idle_deadline(state) - time.time())}
-            return self.store.has_queued_messages(run_id)
+            return await database(self.store.has_queued_messages, run_id)
         return True
 
     def acknowledge_credential(self, run_id, state):
@@ -836,21 +1217,36 @@ class DurableRunner(RunManager):
             state.pop('resume_credential', None)
             state.pop('wait_credential', None)
 
-    async def cleanup(self, state, run_id):
-        if state.get('computer_only') and not state.get('sandbox_id'):
+    async def cleanup(self, state, run_id, *, save=None):
+        if state.get('independent_runtime'):
+            return await self.agent_runtime.cleanup(run_id, state)
+        save = save or self.save
+        name = state.get('sandbox_name')
+        if not name and state.get('computer_only'):
+            name = self.provision_name(run_id, state)
+        if name and not state.get('sandbox_id'):
             # Recover a create whose acknowledgement was lost before Stop.
             try:
-                sandbox = await self.provider(self.store.run(run_id)).find(
-                    f"moyai-{run_id}-{state['message_id']}-{state['segment']}")
+                sandbox = await self.provider(self.store.run(run_id)).find(name)
                 state['sandbox_id'] = sandbox.object_id
-                self.save(run_id, state)
+                save(run_id, state)
             except modal.exception.NotFoundError:
+                state.pop('sandbox_name', None)
                 return
-        if not state.get('sandbox_id'):
-            return
-        try:
-            sandbox = await self.provider(identity=state['sandbox_id']).get(state['sandbox_id'])
-            if await sandbox.poll.aio() is None:
-                await self.terminate(sandbox, run_id)
-        except modal.exception.NotFoundError:
-            pass  # A confirmed missing machine cannot still execute a tool.
+        await super().cleanup(state, run_id)
+        state.pop('sandbox_name', None)
+
+
+def initialize_schema(store):
+    # Auto-mode workers may initialize together. Hold the schema write lock
+    # through replacement so a predicate upgrade has no committed index gap.
+    with store.connect() as conn:
+        conn.begin_write()
+        conn.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
+            run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
+            revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
+        conn.execute('DROP INDEX IF EXISTS idx_durable_sessions_occupied')
+        conn.execute(f"""CREATE INDEX idx_durable_sessions_occupied
+            ON durable_sessions(run_id) WHERE {(POSTGRES_OCCUPIED_SESSION if store.database else OCCUPIED_SESSION)}""")
+        conn.execute('''CREATE INDEX IF NOT EXISTS idx_durable_sessions_wake
+            ON durable_sessions(run_id) WHERE revision>delivered''')

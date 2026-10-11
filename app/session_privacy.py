@@ -23,7 +23,8 @@ class SessionPrivacy:
         info = self.security.session_info(request)
         if not info or info.get('method') not in {'google', 'cloudflare'}:
             raise HTTPException(403, 'Private sessions require individual Google or Cloudflare sign-in.')
-        return self.store.identity(info)
+        actor = getattr(request.state, 'access_actor', None) if info['method'] == 'cloudflare' else None
+        return actor if actor is not None else self.store.identity(info)
 
     def require_request(self, request, run_or_id):
         info = self.security.session_info(request)
@@ -44,7 +45,7 @@ class SessionPrivacy:
             return True
         return not (write or name.startswith(('automation_', 'agents_'))
                     or name in {'media_share', 'media_revoke', 'skills_save', 'memory_save', 'memory_forget'}
-                    or (name.startswith('credentials_') and name not in {'credentials_list', 'credentials_http_request'}))
+                    or (name.startswith('credentials_') and name not in {'credentials_list', 'credentials_request', 'credentials_http_request'}))
 
     def guard_request(self, request):
         """Resolve indirect resource routes before their handlers can read content."""
@@ -61,3 +62,21 @@ class SessionPrivacy:
             run_id = rows[0]['run_id'] if rows else None
         if run_id:
             self.require_request(request, run_id)
+
+
+def initialize_schema(store):
+    """Privacy is immutable on both databases, including direct SQL writers.
+
+    The compatibility revision fences older APIs/workers before these sessions
+    can exist. This is a coordinated migration, not an additive rolling change.
+    """
+    with store.connect() as conn:
+        if 'private_owner_id' not in conn.column_names('runs'):
+            conn.execute("ALTER TABLE runs ADD COLUMN private_owner_id TEXT NOT NULL DEFAULT ''")
+        from .database_schema import PRIVATE_TRIGGERS, PRIVATE_FUNCTION, PRIVATE_POSTGRES
+        if store.database:
+            conn.execute(PRIVATE_FUNCTION)
+            conn.execute(PRIVATE_POSTGRES)
+        else:
+            for statement in PRIVATE_TRIGGERS.values():
+                conn.execute(statement.replace('CREATE TRIGGER ', 'CREATE TRIGGER IF NOT EXISTS ', 1))

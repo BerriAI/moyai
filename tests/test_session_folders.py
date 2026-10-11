@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import sqlite3
 
 import pytest
 from fastapi import FastAPI, Request
@@ -122,6 +123,7 @@ def test_filed_older_sessions_and_child_agents_remain_in_sidebar(users_app):
     assert client.get('/api/session-folders').json()['folders'][0]['session_count'] == 1
 
 
+@pytest.mark.sqlite_only
 def test_folders_survive_restart_and_database_checkpoint(users_app, tmp_path):
     app, client = users_app
     identity = sign_as(app, client, 'maya@berri.ai')['user_id']
@@ -129,12 +131,19 @@ def test_folders_survive_restart_and_database_checkpoint(users_app, tmp_path):
     checkpoints.settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path/'checkpoint'})
     commits = []
     async def commit():
-        commits.append(True)
+        # Background writers may checkpoint too. Inspect what each completed
+        # snapshot contains instead of counting all application-wide flushes.
+        with sqlite3.connect(checkpoints.settings.checkpoint_dir / 'workspace.db') as snapshot:
+            commits.append(tuple(snapshot.execute(f'SELECT count(*) FROM {table} WHERE owner_id=?',
+                (identity,)).fetchone()[0] for table in
+                ('session_folders', 'session_folder_memberships', 'session_pins')))
     checkpoints.commit = commit
     item, saved = run(app), folder(client, 'Persistent')
+    assert (1, 0, 0) in commits
     assert client.put('/api/runs/'+item['id']+'/folder', json={'folder_id': saved['id']}).status_code == 200
+    assert (1, 1, 0) in commits
     assert client.put('/api/runs/'+item['id']+'/pin', json={'pinned': True}).status_code == 200
-    assert len(commits) == 3
+    assert (1, 1, 1) in commits
     restored_settings = checkpoints.settings.model_copy(update={'data_dir': tmp_path/'restored'})
     restore_checkpoint(restored_settings)
     reopened = Store(restored_settings.data_dir)
@@ -199,7 +208,10 @@ def test_archive_filters_before_limit_and_keeps_agents_together(users_app):
     assert client.post('/api/runs/' + parent['id'] + '/archive', json={'archived': False}).status_code == 401
 
 
+@pytest.mark.sqlite_only
 def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, tmp_path):
+    from app.database_schema import SESSION_EVENT_TRIGGERS
+    from app.session_events import SessionEvents, initialize_schema as initialize_events
     from app.session_lifecycle import SessionLifecycle
 
     app, client = users_app
@@ -207,14 +219,21 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     item, removed = run(app), run(app, 'Delete after completion')
     store = app.state.store
     # Exercise the actual idempotent upgrade with a pre-field database.
-    # This newer trigger also references deleted_at and did not exist in that
-    # legacy schema. Remove it before reconstructing the old database.
+    # These newer schema objects reference deleted_at and did not exist in
+    # the legacy schema. Remove them before reconstructing the old database.
+    with store.connect() as conn:
+        for name in SESSION_EVENT_TRIGGERS:
+            conn.execute('DROP TRIGGER ' + name)
+        conn.execute('DROP TABLE session_event_inbox')
+        conn.execute('DROP TABLE session_event_consumers')
     store.execute('DROP TRIGGER revoke_github_write_access')
+    store.execute('DROP INDEX idx_runs_pending_deletion')
     store.execute('ALTER TABLE runs DROP COLUMN deleted_at')
     store.execute('DROP TABLE session_archives')
     reopened = Store(app.state.settings.data_dir)
     assert reopened.run(item['id'])['deleted_at'] == ''
-    # App startup initializes GitHub access after the Store schema upgrade.
+    # App startup initializes dependent schemas after the Store upgrade.
+    initialize_events(reopened)
     app.state.connectors.github.init_write_access()
     checkpoints = app.state.session_folders.checkpoints
     checkpoints.settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path/'checkpoint'})
@@ -233,6 +252,14 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     assert restored.run(removed['id'])['deleted_at']
     assert restored.sidebar_run_ids(actor, archive_owner=actor) == []
     assert restored.sidebar_run_ids(actor, archive_owner=actor, archived=True) == [item['id']]
+    # Checkpoint restoration must preserve the upgraded change-capture triggers.
+    with restored.connect() as conn:
+        SessionEvents.subscribe_in(conn, 'legacy-upgrade-check')
+        conn.execute('DELETE FROM session_event_inbox WHERE consumer=?', ('legacy-upgrade-check',))
+    restored.update_run(item['id'], status='completed')
+    assert restored.rows('SELECT run_id,kind FROM session_event_inbox WHERE consumer=?',
+                         ('legacy-upgrade-check',)) == [
+                             {'run_id': item['id'], 'kind': 'session.state_changed'}]
 
 
 def test_viewer_can_find_and_restore_archived_shared_link(users_app):
@@ -427,6 +454,9 @@ def test_session_search_matches_family_history_literal_terms_and_legacy_before_l
     assert rows[parent['id']]['chat_enabled'] and not rows[legacy['id']]['chat_enabled']
     assert rows[parent['id']]['archived'] and rows[parent['id']]['title']
     assert search_sessions(client, caller['id'], query=query + ' absent').json()['sessions'] == []
+    app.state.session_lifecycle.request_delete(parent['id'], actor, True)
+    pending = {row['id']: row for row in search_sessions(client, caller['id'], query=query).json()['sessions']}
+    assert pending[parent['id']]['status'] == 'deleting'
 
 
 @pytest.mark.parametrize('arguments', [{}, {'query': '  '}, {'query': 'x' * 201}, {'query': 'x', 'limit': 0},
@@ -589,7 +619,7 @@ def test_slack_resume_restores_current_view_owner_without_rewriting_sender_or_re
     for owner in (actor, other):
         lifecycle.archive(root, owner, True)
     store.execute('UPDATE users SET linked_user_id=? WHERE id=?', (actor, slack))
-    payload = send(client, 1, 'Continue the archived work')
+    payload = send(client, 1, '<@U99999999> Continue the archived work')
     assert lifecycle.archives(actor) == set() and lifecycle.archives(other) == {root}
     assert store.messages(root)[-1]['user_id'] == slack
     sign_in(app, client, 'maya', 'maya@berri.ai')
@@ -598,9 +628,9 @@ def test_slack_resume_restores_current_view_owner_without_rewriting_sender_or_re
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
     assert lifecycle.archives(actor) == {root} and len(store.messages(root)) == 2
     store.execute('UPDATE users SET linked_user_id=NULL WHERE id=?', (slack,))
-    send(client, 2, 'Continue while unlinked')
+    send(client, 2, '<@U99999999> Continue while unlinked')
     assert lifecycle.archives(actor) == lifecycle.archives(other) == {root}
     store.execute('UPDATE users SET linked_user_id=? WHERE id=?', (other, slack))
-    send(client, 3, 'Continue after the link changes')
+    send(client, 3, '<@U99999999> Continue after the link changes')
     assert lifecycle.archives(actor) == {root} and lifecycle.archives(other) == set()
     assert all(message['user_id'] == slack for message in store.messages(root))

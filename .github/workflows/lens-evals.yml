@@ -1,0 +1,131 @@
+name: Lens evals
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lens-evals-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  python-regressions:
+    name: Lens agent regression check
+    runs-on: ubuntu-24.04
+    container:
+      image: public.ecr.aws/docker/library/rust:1.99-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    env:
+      LENS_BASE_URL: ${{ vars.LENS_BASE_URL }}
+      MOYAI_EVAL_NAME: ${{ vars.MOYAI_EVAL_NAME || 'moyai-python-coding-regressions' }}
+      LITELLM_API_BASE: ${{ vars.MOYAI_EVAL_GATEWAY_URL }}
+      # Controlled-model code/SDK comparison. Production-only model setting
+      # changes need their own configuration comparison and are not covered here.
+      AGENT_MODEL: ${{ vars.MOYAI_EVAL_MODEL }}
+      LITELLM_TRACE_ENDPOINT: ${{ vars.LENS_TRACE_ENDPOINT }}
+      CARGO_BUILD_JOBS: '2'
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Require a trusted pull request for Lens evaluation
+        env:
+          EVAL_EVENT: ${{ github.event_name }}
+          EVAL_SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          EVAL_TARGET_REPOSITORY: ${{ github.repository }}
+          EVAL_ACTOR: ${{ github.actor }}
+        run: |
+          if [ "$EVAL_EVENT" != pull_request ] ||
+             [ "$EVAL_SOURCE_REPOSITORY" != "$EVAL_TARGET_REPOSITORY" ] ||
+             [ "$EVAL_ACTOR" = 'dependabot[bot]' ]; then
+            echo '::error::Lens requires a trusted same-repository PR. A maintainer must review and move this change to a trusted branch before evaluation. No PR code has been checked out.'
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: '0.10.9'
+          python-version: '3.13'
+          enable-cache: true
+      - name: Install the pinned Lens SDK and agent runtime
+        run: uv sync --frozen --group dev --group eval
+      - name: Validate Python integration without model calls
+        run: |
+          uv run --frozen --group dev --group eval pytest -q \
+            tests/test_python_evals.py tests/test_lens_evals.py \
+            tests/test_lens_eval_runtime.py
+      - name: Lens is running
+        id: announce
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: GITHUB_SHA="$HEAD_SHA" uv run --frozen --group eval python -m lens.cli report-start --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
+      - name: Prepare the same eval driver for before and after
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git worktree add --detach "$RUNNER_TEMP/moyai-before" "$BASE_SHA"
+          cp evals/agent.py evals/test_moyai.py evals/coding_cases.json "$RUNNER_TEMP/moyai-before/evals/"
+          mkdir -p "$GITHUB_WORKSPACE/lens-results"
+          printf '%s\n' "$BASE_SHA" "$HEAD_SHA" > "$GITHUB_WORKSPACE/lens-results/tested-commits.txt"
+      - name: Before — evaluate the PR base commit
+        id: baseline
+        continue-on-error: true
+        env:
+          LENS_API_KEY: ${{ secrets.LENS_API_KEY }}
+          LITELLM_API_KEY: ${{ secrets.MOYAI_EVAL_GATEWAY_KEY }}
+          LITELLM_TRACE_API_KEY: ${{ secrets.LENS_TRACE_API_KEY }}
+          LENS_VERSION: ${{ env.BASE_SHA }}
+          LENS_EVAL_BRANCH: main
+          LENS_EVAL_ROLE: baseline
+          LENS_REPORT_PATH: ${{ github.workspace }}/lens-results/before.json
+        run: |
+          cd "$RUNNER_TEMP/moyai-before"
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/moyai-before/.venv" \
+            uv run --frozen --group dev --group eval pytest evals/test_moyai.py -q --tb=short
+      - name: After — evaluate the PR head commit
+        id: candidate
+        continue-on-error: true
+        env:
+          LENS_API_KEY: ${{ secrets.LENS_API_KEY }}
+          LITELLM_API_KEY: ${{ secrets.MOYAI_EVAL_GATEWAY_KEY }}
+          LITELLM_TRACE_API_KEY: ${{ secrets.LENS_TRACE_API_KEY }}
+          LENS_VERSION: ${{ env.HEAD_SHA }}
+          LENS_EVAL_BRANCH: ${{ github.head_ref }}
+          LENS_EVAL_ROLE: candidate
+          LENS_EVAL_PR: ${{ github.event.pull_request.number }}
+          LENS_REPORT_PATH: ${{ github.workspace }}/lens-results/after.json
+        run: uv run --frozen --group dev --group eval pytest evals/test_moyai.py -q --tb=short
+      - name: Update the Lens PR benchmark comment
+        if: always() && steps.announce.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LENS_API_KEY: ${{ secrets.LENS_API_KEY }}
+        run: |
+          if [ -f lens-results/after.json ] && [ -f lens-results/before.json ]; then
+            uv run --frozen --group eval python -m lens.github lens-results/after.json
+          else
+            GITHUB_SHA="$HEAD_SHA" uv run --frozen --group eval python -m lens.cli report-failed --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: lens-before-after
+          path: lens-results/
+          if-no-files-found: ignore
+      - name: Enforce the regression result
+        if: always()
+        env:
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+        run: test "$BASELINE_OUTCOME" = success && test "$CANDIDATE_OUTCOME" = success

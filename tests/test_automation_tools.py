@@ -1,5 +1,6 @@
 """Real broker requests: requester isolation, durable retries and schedule confirmation."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -18,7 +19,7 @@ def definition(**changes):
 
 
 def call(client, run, name, **arguments):
-    if name not in {'automation_list', 'automation_webhook_info'}:
+    if name not in {'automation_list', 'automation_webhook_info', 'automation_environments', 'automation_history', 'automation_self_read'}:
         arguments.setdefault('turn_id', run['active_message_id'])
     return client.post(f"/broker/{run['id']}/tools/call", headers={'Authorization': 'Bearer capability'},
                        json={'name': name, 'arguments': arguments})
@@ -36,6 +37,26 @@ def runtime(app):
     app.state.settings.modal_token_secret = 'test-runtime-secret'
     app.state.settings.litellm_api_base = 'https://model.example/v1'
     app.state.settings.litellm_api_key = 'test-runtime-key'
+
+
+def test_full_capacity_metadata_round_trips_within_broker_response_limit(workspace):
+    from sandbox.broker_transport import MAX_BODY
+
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    metadata = {str(i): '\U0001f680' * 16384 for i in range(20)}
+    saved = create(client, run, metadata=metadata)
+    read = call(client, run, 'automation_list', automation_id=saved['id']).json()
+    assert read['automations'][0]['definition']['metadata'] == metadata
+    # The bridge may ASCII-escape supplementary Unicode; even that fits.
+    assert len(json.dumps(read, ensure_ascii=True).encode()) < MAX_BODY
+    summary = call(client, run, 'automation_list', limit=50).json()['automations'][0]
+    assert 'metadata' not in summary and 'definition' not in summary
+    changed = {**saved['definition'], 'metadata': {'notes': 'x' * 16384}}
+    updated = call(client, run, 'automation_update', automation_id=saved['id'], revision=1,
+                   request_key='update-large-metadata', definition=changed).json()
+    assert updated['definition']['metadata'] == changed['metadata']
 
 
 def test_tools_available_in_verified_chat_and_create_retries_are_atomic(workspace):
@@ -59,7 +80,8 @@ def test_tools_available_in_verified_chat_and_create_retries_are_atomic(workspac
     assert detail['definition']['triggers'][0]['schedule']['frequency'] == 'weekly'
     assert detail['revision'] == 1
     # Owner supplied by the model cannot override server identity.
-    assert call(client, run, 'automation_create', request_key='forged-owner', definition=definition(), owner_id='google:bob').status_code == 422
+    forged = call(client, run, 'automation_create', request_key='forged-owner', definition=definition(), owner_id='google:bob')
+    assert forged.status_code == 200 and forged.json()['status_code'] == 422
 
 
 def test_other_requester_cannot_read_edit_enable_or_pause_even_as_admin(workspace):
@@ -109,7 +131,7 @@ def test_automation_and_delegated_runs_cannot_create_recursive_schedules(workspa
     saved = create(client, run)
     app.state.store.execute("INSERT INTO automation_runs VALUES(?,?,1,?,'started','',?)", ('tick', saved['id'], run['id'], now()))
     assert call(client, run, 'automation_create', request_key='recursive-create', definition=definition()).status_code == 403
-    assert not app.state.automation_tools.tools(run)
+    assert [tool['name'] for tool in app.state.automation_tools.tools(run)] == ['automation_history']
     assert app.state.automations.tools(run)[0]['name'] == 'automation_claim_item'
 
 
@@ -178,7 +200,60 @@ def test_requester_or_cancellation_during_access_check_prevents_write(workspace,
         app.state.store.execute("UPDATE runs SET active_user_id='unverified' WHERE id=?", (run['id'],))
         return result
     monkeypatch.setattr(app.state.automation_tools, 'result', switch)
-    assert call(client, run, 'automation_list', automation_id=saved['id']).status_code == 403
+    assert call(client, run, 'automation_list', automation_id=saved['id']).status_code == 409
+
+
+def test_environment_discovery_exposes_reusable_build_not_setup_scripts(workspace):
+    from app.environments import Recipe, SaveRecipe
+    from test_environments import prepared
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    env = app.state.environments
+    build_id = prepared(env, default=False)
+    # Editing a recipe retains the previously validated version until rebuilt.
+    env.save_recipe('e' * 32, SaveRecipe(revision=1, recipe=Recipe(
+        name='Edited setup', repository='BerriAI/moyai', setup='private installation script', verify='true')), 'admin')
+    prepared(env, default=False, identity='f' * 32)
+    env.save_recipe('d' * 32, SaveRecipe(recipe=Recipe(
+        name='Disabled setup', repository='BerriAI/moyai', verify='true')), 'admin')
+    result = call(client, run, 'automation_environments', limit=1)
+    assert result.status_code == 200, result.text
+    assert result.json()['next_offset'] == 1
+    pages = [result.json(), call(client, run, 'automation_environments', offset=1, limit=1).json()]
+    assert pages[1]['next_offset'] is None
+    items = {item['id']: item for page in pages for item in page['environments']}
+    assert set(items) == {'e' * 32, 'f' * 32}
+    item = items['e' * 32]
+    assert item['revision'] == 2 and item['repository'] == 'BerriAI/litellm'
+    assert item['prepared_build'] == {'id': build_id, 'revision': 1, 'commit_sha': 'a' * 40, 'sandbox_provider': 'modal'}
+    assert item['setup_blocker'] == ''
+    assert not {'recipe', 'builds', 'setup', 'startup', 'verify', 'shutdown', 'instructions'} & item.keys()
+    assert 'private installation script' not in str(pages)
+    tools = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'}).json()
+    tool = next(tool for tool in tools if tool['name'] == 'automation_environments')
+    assert tool['annotations']['readOnlyHint'] is True
+    saved = create(client, run, environment_id=item['id'])
+    assert saved['definition']['environment_id'] == item['id']
+    assert saved['definition']['repo_url'] == '' and saved['definition']['metadata'] == {}
+    app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (run['id'], run['id']))
+    assert call(client, run, 'automation_environments').status_code == 403
+
+
+def test_environment_discovery_reports_unbuilt_setup_blocker(workspace):
+    from app.environments import Recipe, SaveRecipe
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    env = app.state.environments
+    env.save_recipe('e' * 32, SaveRecipe(recipe=Recipe(name='Database setup', repository='BerriAI/litellm', verify='true')), 'admin')
+    env.store.execute('UPDATE environments SET activate_on_ready=1')
+    build = env.enqueue('e' * 32, 1, 'admin')
+    env.update(build['id'], phase='failed')
+    item = call(client, run, 'automation_environments').json()['environments'][0]
+    assert item['prepared_build'] is None
+    assert 'Project setup failed' in item['setup_blocker']
+    assert len(env.store.rows('SELECT id FROM environment_builds')) == 1  # Discovery never retries setup.
 
 
 def test_list_paginates_without_exposing_saved_prompts(workspace):
@@ -196,6 +271,8 @@ def test_list_paginates_without_exposing_saved_prompts(workspace):
 
 async def test_committed_mutation_recovers_after_lost_checkpoint_ack(workspace, monkeypatch):
     app, client = workspace
+    # Keep unrelated Slack flushes from consuming the injected failure.
+    client.portal.call(app.state.slack.chat.shutdown)
     sign_in(app, client)
     run = active(app)
     args = {'turn_id': run['active_message_id'], 'request_key': 'lost-response', 'definition': definition()}
@@ -400,7 +477,8 @@ def test_webhook_catalog_and_storage_failure_are_safe(workspace, monkeypatch):
     args = dict(automation_id=saved['id'], revision=1, provider='webhook',
                 credential_request_id=handle, request_key='rollback-webhook')
     response = call(client, run, 'automation_webhook_setup', **args, secret='canary-never-echo')
-    assert response.status_code == 422 and 'canary-never-echo' not in response.text
+    assert response.status_code == 200 and response.json()['status_code'] == 422
+    assert 'canary-never-echo' not in response.text
     def fail_encrypt(value):
         raise RuntimeError('synthetic encryption failure')
     monkeypatch.setattr(app.state.security, 'encrypt', fail_encrypt)
@@ -454,3 +532,43 @@ def test_webhook_setup_does_not_extend_credential_expiration(workspace):
                     provider='webhook', credential_request_id=handle, request_key='expiring-secret')
     assert response.status_code == 422
     assert not app.state.store.rows('SELECT * FROM automation_webhooks')
+
+
+def test_argument_errors_identify_fields_without_rejected_values_and_allow_correction(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    rejected = call(client, run, 'automation_create', request_key='correct-fields', definition=definition(
+        name='x', metadata={'bootstrap_source': 'private-value-marker' + 'x' * (16385 - len('private-value-marker'))},
+        timing={'time': 'private-time-marker', 'timezone': 'private-zone-marker'}))
+    assert rejected.status_code == 200
+    result = rejected.json()
+    assert result['status_code'] == 422 and result['error']
+    errors = {error['field']: error for error in result['validation_errors']}
+    assert errors['definition.name']['type'] == 'string_too_short'
+    assert 'definition.triggers.0.schedule.time' in errors
+    assert 'definition.triggers.0.schedule.timezone' in errors
+    assert 'definition.metadata.bootstrap_source' not in errors
+    assert 'IANA timezone' in errors['definition.triggers.0.schedule.timezone']['message']
+    assert 'private-' not in rejected.text
+    assert all(set(error) == {'field', 'type', 'message'} for error in errors.values())
+    assert not app.state.store.rows('SELECT * FROM automations')
+    assert not app.state.store.rows('SELECT * FROM automation_operations')
+    corrected = call(client, run, 'automation_create', request_key='correct-fields', definition=definition())
+    assert corrected.status_code == 200 and corrected.json()['status'] == 'paused'
+    assert len(app.state.store.rows('SELECT * FROM automations')) == 1
+    assert call(client, run, 'automation_create', request_key='correct-fields', definition=definition()).json() == corrected.json()
+    assert len(app.state.store.rows('SELECT * FROM automation_operations')) == 1
+
+
+def test_invalid_saved_state_is_not_reported_as_rejected_tool_arguments(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    saved = create(client, run)
+    app.state.store.execute('UPDATE automations SET definition=? WHERE id=?',
+                            ('{"private-saved-marker": "invalid"}', saved['id']))
+    response = call(client, run, 'automation_list', automation_id=saved['id'])
+    assert response.status_code == 500
+    assert response.json() == {'detail': 'The saved automation could not be validated.'}
+    assert 'private-saved-marker' not in response.text

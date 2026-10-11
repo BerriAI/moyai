@@ -7,7 +7,7 @@ from threading import Thread
 
 import pytest
 
-from sandbox import github_tools as local
+from agent.tools import github_tools as local
 
 
 def git(directory, *args):
@@ -106,22 +106,28 @@ def test_packages_committed_uncommitted_new_deleted_executable_and_ignores_ignor
     assert payload['base_sha'] == json.loads((repo / '.git/moyai.json').read_text())['base_sha']
 
 
-@pytest.mark.parametrize('kind', ['symlink', 'binary', 'credential', 'workflow', 'large'])
+@pytest.mark.parametrize('kind', ['symlink', 'credential'])
 def test_unsafe_working_tree_changes_never_leave_sandbox(checkout, kind):
     repo, _, _, _, _ = checkout
     if kind == 'symlink':
         (repo / 'link').symlink_to(repo.parent / 'outside')
-    elif kind == 'binary':
-        (repo / 'blob').write_bytes(b'x\0y')
     elif kind == 'credential':
         (repo / '.env.secret').write_text('test secret')
-    elif kind == 'workflow':
-        (repo / '.github/workflows').mkdir(parents=True)
-        (repo / '.github/workflows/test.yml').write_text('test')
-    else:
-        (repo / 'large').write_bytes(b'x' * (local.MAX_FILE + 1))
     with pytest.raises(local.GitHubToolError):
         local.collect(str(repo), 'Test PR', 'Body', 'request-123')
+
+
+def test_collects_complete_workflows_and_composite_actions(checkout):
+    repo, _, _, _, _ = checkout
+    contents = {'.github/workflows/test.yml': 'name: CI\non: push\n',
+                '.github/actions/test/action.yml': 'name: Test\nruns:\n  using: composite\n',
+                '/'.join(['nested']*30)+'/test.py': 'print(42)\n'}
+    for name, content in contents.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    payload = local.collect(str(repo), 'Test PR', 'Body', 'request-123')
+    assert {f['path']: f['content'] for f in payload['files']} == contents
 
 
 def test_escape_and_existing_nonrepo_refused(checkout):
@@ -169,6 +175,9 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
             target = source / change['path']
             if change['content'] is None:
                 target.unlink()
+            elif change.get('encoding') == 'base64':
+                import base64
+                target.write_bytes(base64.b64decode(change['content']))
             else:
                 target.write_text(change['content'])
         git(source, 'add', '.')
@@ -181,11 +190,12 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
     remote = f'http://127.0.0.1:{server.server_port}'
     (repo / 'schema.d.ts').write_text('x' * 2_931_023)
     (repo / 'new.py').write_text('keep = True\n')
+    (repo / 'image.bin').write_bytes(b'\x89PNG\x00\xff\x80complete bytes')
     result = local.call('github_create_pull_request', {'directory': str(repo), 'title': 'Large schema',
         'body': 'First publication', 'request_key': 'first-publication'}, broker, remote, 'current-capability')
     assert 'checkout_warning' not in result
     assert local.metadata(repo)['base_sha'] == result['commit']
-    with pytest.raises(local.GitHubToolError, match='between 1 and 100'):
+    with pytest.raises(local.GitHubToolError, match='no changed files'):
         local.collect(str(repo), 'No edits', 'Body', 'no-new-edits')
     (repo / 'edit.py').write_text('after = 2\n')
     result = local.call('github_update_pull_request', {'directory': str(repo), 'number': 100,
@@ -200,19 +210,24 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
     assert receipt['base_sha'] == result['commit'] and receipt['number'] == 100
     assert (fresh / 'edit.py').read_text() == 'after = 2\n'
     assert (fresh / 'schema.d.ts').stat().st_size == 2_931_023
+    assert (fresh / 'image.bin').read_bytes() == b'\x89PNG\x00\xff\x80complete bytes'
     (repo / 'new.py').unlink()
     payload = local.collect(str(repo), 'Remove new file', 'Body', 'remove-new-file')
     assert payload['files'] == [{'path': 'new.py', 'content': None, 'executable': False}]
     assert 'current-capability' not in (fresh / '.git/config').read_text()
 
 
-def test_local_total_budget_and_byte_limits(checkout, monkeypatch):
+def test_local_collection_keeps_large_binary_and_more_than_one_hundred_files(checkout):
+    import base64
     repo, _, _, _, _ = checkout
-    monkeypatch.setattr(local, 'MAX_TOTAL', 10)
-    (repo / 'one').write_text('123456')
-    (repo / 'two').write_text('123456')
-    with pytest.raises(local.GitHubToolError, match='20 MiB'):
-        local.collect(str(repo), 'Total budget', 'Body', 'total-budget')
+    raw = b'\x00\xff\x80' + b'x' * (11 * 1024 * 1024)
+    (repo / 'image.bin').write_bytes(raw)
+    for index in range(105):
+        (repo / f'new-{index}.txt').write_text('Complete content')
+    payload = local.collect(str(repo), 'Complete files', 'Body', 'complete-files')
+    assert len(payload['files']) == 106
+    binary = next(file for file in payload['files'] if file['path'] == 'image.bin')
+    assert binary['encoding'] == 'base64' and base64.b64decode(binary['content']) == raw
 
 
 def test_advertised_update_packages_local_files():

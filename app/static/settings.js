@@ -16,6 +16,7 @@ const settingsGroups = [
   ]},
   {id:'administration', title:'Administration', admin:true, items:[
     {view:'users', title:'Users', description:'Manage workspace members and roles.', admin:true},
+    {view:'performance', title:'Performance', description:'Measure startup and Send now latency.', admin:true},
     {view:'spend', title:'Spend & usage', description:'Review team costs, model usage, and human activity.', admin:true},
   ]},
 ];
@@ -36,19 +37,20 @@ function settingsNavigation(view, role) {
 
 function updateSettingsNavigation() {
   const nav = $('#settings-navigation');
-  if (nav) nav.innerHTML = settingsNavigation(state.view, state.role);
+  if (nav) MoyaiUI.render(nav, settingsNavigation(state.view, state.role));
 }
 
 function settingsLoadError(title, error, retry) {
-  $('#content').innerHTML = `<section class="settings-load-error"><h1>${esc(title)}</h1><div role="alert"><h2>Unable to load this page</h2><p>${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="settings-retry">Try again</button></section>`;
+  MoyaiUI.render($('#content'), `<section class="settings-load-error"><h1>${esc(title)}</h1><div role="alert"><h2>Unable to load this page</h2><p>${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="settings-retry">Try again</button></section>`);
   $('#settings-retry').onclick = retry;
 }
 
 function confirmSettingsAction(title, description, action) {
   return new Promise(resolve => {
-    const dialog = document.createElement('dialog');
+    const dialog = MoyaiUI.createDialog();
+    dialog.dataset.dialogScope = 'settings';
     dialog.setAttribute('aria-label', title);
-    dialog.innerHTML = `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`;
+    MoyaiUI.render(dialog, `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`);
     document.body.append(dialog);
     dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
     dialog.querySelector('[data-confirm]').onclick = () => dialog.close('confirmed');
@@ -64,7 +66,8 @@ function confirmSettingsAction(title, description, action) {
 
 // Background polling must not replace the control someone is using.
 function settingsInteractionActive() {
-  return !!document.querySelector('dialog[open]') ||
+  return !!document.querySelector('[data-slot="dialog-content"][data-state="open"]') ||
+    !!document.querySelector('[data-slot="select-trigger"][data-state="open"]') ||
     !!(document.querySelector('#content')?.contains(document.activeElement) &&
       document.activeElement?.matches('button,a,input,select,textarea,summary,[tabindex="0"]'));
 }
@@ -104,6 +107,7 @@ function settingsIcon(view) {
     'personal-slack':'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     connections:'<path d="m10 13 4-4M8 15l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 3 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(1 0)"/>',
     secrets:'<circle cx="8" cy="9" r="5"/><path d="m12 13 8 8m-4-4 3-3m-6 3 3-3"/>',
+    performance:'<path d="M3 17l5-6 4 3 8-10M3 21h18"/>',
     runtime:'<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4M7 8l3 3-3 3m6 0h4"/>',
     environments:'<path d="M3 8h18v12H3Zm0 0V4h7l3 4m-5 6 2 2-2 2m5-2h4"/>',
     users:'<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-15a3 3 0 0 1 0 6m4 9v-3a6 6 0 0 0-3-5"/>',
@@ -113,15 +117,15 @@ function settingsIcon(view) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[view] || ''}</svg>`;
 }
 
-async function renderSettings() {
+async function renderSettings(recent=false) {
   const version = state.pageVersion;
-  $('#content').innerHTML = '<p class="subtext" role="status">Loading settings…</p>';
-  const session = await api('/api/session');
+  MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading settings…</p>');
+  const session = await api('/api/session',{recent});
   if (version !== state.pageVersion) return;
   applyUserSession(session);
   if (!session.authenticated) { await boot(); return; }
   const admin = state.role === 'admin';
-  $('#content').innerHTML = `<section class="settings-page">
+  MoyaiUI.render($('#content'), `<section class="settings-page">
     <div class="page-heading"><div><h1>Settings</h1><p class="subtext">Make Moyai work the way your team does.</p></div></div>
     <div class="settings-grid">${settingsGroups.filter(group => !group.admin || admin).map(group => `
       <section class="settings-group" aria-labelledby="settings-${group.id}">
@@ -138,6 +142,13 @@ async function renderSettings() {
       <div><h2 id="preferences-title">Preferences</h2><p class="subtext">Saved for your account.${session.identity?'':' Shared password and local sign-ins use a shared profile.'}</p></div>
       <div class="settings-preferences">
         <div class="settings-preference">
+          <label for="slack-notifications">
+            <span class="settings-copy"><strong id="slack-notifications-title">Slack session notifications</strong><span id="slack-notifications-description">On by default for chats outside Slack. Get a DM when your session has a response ready, needs approval or access, or fails. Chats already in Slack keep their updates there. Requires your work account and the connected Moyai Slack bot.</span></span>
+            <input id="slack-notifications" type="checkbox" ${state.preferences.slack_notifications?'checked':''} role="switch" aria-labelledby="slack-notifications-title" aria-describedby="slack-notifications-description slack-notifications-status">
+          </label>
+          <p id="slack-notifications-status" class="subtext" role="status">${state.preferences.slack_notifications?'On':'Off'}</p>
+        </div>
+        <div class="settings-preference">
           <label for="send-immediately">
             <span class="settings-copy"><strong id="send-immediately-title">Send messages immediately</strong><span id="send-immediately-description">Send follow-ups into the active response instead of queueing them while Moyai is working.</span></span>
             <input id="send-immediately" type="checkbox" ${state.preferences.send_immediately?'checked':''} role="switch" aria-labelledby="send-immediately-title" aria-describedby="send-immediately-description send-immediately-status">
@@ -153,9 +164,9 @@ async function renderSettings() {
         </div>
       </div>
     </section>
-  </section>`;
+  </section>`);
   const userId=state.userId;
-  for(const key of ['send_immediately','omit_private_tool_payloads']){
+  for(const key of ['send_immediately','omit_private_tool_payloads','slack_notifications']){
     const id=key.replaceAll('_','-'),input=$('#'+id),status=$('#'+id+'-status');
     input.onchange=async()=>{
       const previous=state.preferences[key],hadFocus=document.activeElement===input;
@@ -181,7 +192,7 @@ async function renderSettings() {
     };
   }
   try{
-    const saved=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
+    const saved=await api('/api/settings/session-titles',{recent});if(version!==state.pageVersion)return;
     $('#title-model').value=saved.model;
     $('#title-model-status').textContent=!saved.enabled?'Title generation is disabled by the server.':!saved.gateway_configured?'Gateway access must be configured on the server.':admin?'Enter the exact model ID enabled on your gateway.':'Only administrators can change the workspace title model.';
     $('#title-model-form').onsubmit=async event=>{

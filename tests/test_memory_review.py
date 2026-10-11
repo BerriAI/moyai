@@ -6,11 +6,12 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.config import Settings
+from app.config import ModelContextLimits, Settings
 from app.db import Store
 from app.main import create_app
 from app.memory import Note
 from app.model_slots import ModelSlots
+from app.model_selection import ASTRA, ASTRA_ULTRAFAST
 
 
 @pytest.fixture
@@ -19,11 +20,18 @@ def review_app(tmp_path):
     values.update(data_dir=tmp_path, litellm_api_base='https://gateway.example/v1', litellm_api_key='test-key',
                   google_client_id='test', google_client_secret='test', google_admin_emails='alice@berri.ai',
                   session_secret='test-session-secret', memory_review_idle_seconds=0,
-                  auto_prepare_repositories=False, session_titles_enabled=False)
-    app = create_app(Settings(_env_file=None, **values))
+                  auto_prepare_repositories=False, session_titles_enabled=False,
+                  model_context_limits={values['agent_model']: {'context_window': 128000, 'max_input_tokens': 120000,
+                      'max_output_tokens': 8000, 'default_output_tokens': 4000}})
+    settings = Settings(_env_file=None, **values)
+    settings.model_context_limits[settings.resolve_model()] = ModelContextLimits.model_validate({
+        'context_window': 128000, 'max_input_tokens': 120000,
+        'max_output_tokens': 8000, 'default_output_tokens': 4000})
+    app = create_app(settings)
     for user in ('alice', 'bob'):
         app.state.store.identity({'method': 'google', 'identity': {'sub': user, 'email': user+'@berri.ai'}})
-    return app
+    yield app
+    app.state.store.close()
 
 
 def turn(app, text='For benchmark reports, I prefer p95 latency and error rate.', *, actor='google:alice',
@@ -79,17 +87,26 @@ async def test_finished_turn_is_captured_without_agent_save_and_recalled_after_r
     assert note['source']['message_id'] == message_id and note['source']['capture'] == 'background'
     assert app.state.memory.listing('google:bob') == []
     assert 'p95' not in json.dumps(jobs(app))
-    assert 'p95' not in app.state.store.rows('SELECT encrypted FROM personal_memories')[0]['encrypted']
+    ciphertext = app.state.store.rows('SELECT encrypted FROM personal_memories')[0]['encrypted']
+    # A short word can occur by chance in random base64 ciphertext. Verify the
+    # encryption round trip and absence of the complete plaintext instead.
+    plaintext = app.state.security.decrypt(ciphertext)
+    assert ciphertext != plaintext and note['content'] not in ciphertext
+    assert json.loads(plaintext)['content'] == note['content']
     assert 'p95' not in json.dumps(app.state.store.rows('SELECT * FROM events'))
     billed = app.state.store.rows('SELECT * FROM model_requests')[0]
     assert (billed['message_id'], billed['user_id'], billed['status'], billed['total_tokens']) == (message_id, 'google:alice', 'completed', 130)
     assert billed['cost'] == '0.001'
+    app.state.store.close()  # A restart releases the previous process fence.
     restarted = create_app(app.state.settings)
-    new = restarted.state.store.create_run('Prepare benchmark report', '', 'modal', [], chat_enabled=True, user_id='google:alice')
-    restarted.state.store.claim_message(new['id'])
-    new = restarted.state.store.run(new['id'])
-    assert restarted.state.memory.search(new, 'google:alice', 'benchmark')['loaded'] == 1
-    assert 'p95' in restarted.state.memory.context(new)
+    try:
+        new = restarted.state.store.create_run('Prepare benchmark report', '', 'modal', [], chat_enabled=True, user_id='google:alice')
+        restarted.state.store.claim_message(new['id'])
+        new = restarted.state.store.run(new['id'])
+        assert restarted.state.memory.search(new, 'google:alice', 'benchmark')['loaded'] == 1
+        assert 'p95' in restarted.state.memory.context(new)
+    finally:
+        restarted.state.store.close()
 
 
 async def test_bounded_backfill_merges_corrections_without_duplicate_notes(review_app):
@@ -365,3 +382,37 @@ async def test_shutdown_drains_in_flight_review_cleanup(review_app, monkeypatch,
     async with asyncio.timeout(3):
         async with service.slots:
             pass
+
+
+async def test_ultrafast_memory_review_uses_the_base_gateway_model(review_app):
+    app = review_app
+    run, message_id = turn(app)
+    app.state.store.execute('UPDATE messages SET model=? WHERE id=?', (ASTRA_ULTRAFAST, message_id))
+    requests = []
+    await process(app, lambda request: requests.append(request) or completion([]))
+    assert jobs(app)[0]['status'] == 'completed'
+    body = json.loads(requests[0].content)
+    assert body['model'] == ASTRA and 'service_tier' not in body
+
+
+async def test_large_turn_reviews_every_page_and_captures_late_correction(review_app):
+    app = review_app
+    selected = app.state.settings.resolve_model()
+    app.state.settings.model_context_limits[selected] = {'context_window': 32000, 'max_input_tokens': 28000,
+        'max_output_tokens': 4000, 'default_output_tokens': 4000}
+    tail = 'For benchmark reports, always include uncertainty and evidence.'
+    original = ('Reference information. ' * 2000) + tail
+    run, message_id = turn(app, original)
+    observed = []
+    def gateway(request):
+        data = json.loads(json.loads(request.content)['messages'][1]['content'])
+        observed.extend(data['messages'])
+        if tail in data['messages'][-1]['content']:
+            return completion([proposal(request, content='Include uncertainty and evidence in benchmark reports.', source_quote=tail)])
+        return completion([])
+    await process(app, gateway)
+    assert len(observed) > 3
+    assert ''.join(item['content'] for item in observed) == original
+    note = app.state.memory.listing('google:alice')[0]
+    assert note['source']['quote'] == tail
+    assert note['source']['message_id'] == message_id

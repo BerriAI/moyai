@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 function setup(){
  const c={esc:v=>String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),modelName:v=>v,dollars:v=>'$'+Number(v).toFixed(6),spendCount:v=>String(v),spendState:{user:''}};
  vm.createContext(c);for(const file of ['analytics','spend-analytics'])vm.runInContext(readFileSync('app/static/'+file+'.js','utf8'),c);return c;

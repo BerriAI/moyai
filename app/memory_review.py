@@ -16,6 +16,7 @@ from pydantic import Field
 from .db import now
 from .memory import Form, KINDS, Note, check_content, fingerprint, search_terms
 from .spend import UsageCapture
+from .model_selection import gateway_model
 
 log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
@@ -38,25 +39,44 @@ Never overwrite a manual note. Repository decisions use repository_specific=true
 general working preferences use false. Do not turn a local preference into a
 global rule. Every proposal needs a source_message_id and an exact source_quote
 from the supplied user's own words. Never invent evidence or use another source.
-Return only JSON with a memories array (zero to three entries). Each entry has:
-key (lowercase hyphenated, max 80 chars), title (3-120 chars), content (3-1200 chars),
+Return only JSON with a memories array. Include each supported distinct lasting note; an empty array is valid. Each entry has:
+key (lowercase hyphenated, max 80 chars), title (3-120 chars), content (at least 3 chars),
 kind (preference, feedback, project, reference), repository_specific (boolean),
-source_message_id (integer), source_quote (exact excerpt, 8-800 chars).
+source_message_id (integer), source_quote (exact excerpt, at least 8 chars).
 """
 
 
 class Proposal(Form):
     key: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=80)
     title: str = Field(min_length=3, max_length=120)
-    content: str = Field(min_length=3, max_length=1200)
+    content: str = Field(min_length=3)
     kind: KINDS
     repository_specific: bool
     source_message_id: int = Field(ge=1)
-    source_quote: str = Field(min_length=8, max_length=800)
+    source_quote: str = Field(min_length=8)
 
 
 class Review(Form):
-    memories: list[Proposal] = Field(max_length=3)
+    memories: list[Proposal]
+
+
+def review_pages(sources, byte_budget):
+    """Exhaust original source text in model-sized pages, preserving offsets."""
+    pages, current = [], []
+    for source in sources:
+        text, offset = source['content'], 0
+        while offset < len(text):
+            # JSON can use six bytes per character for control characters.
+            end = min(len(text), offset + max(1, (byte_budget - 256) // 6))
+            item = {**source, 'content': text[offset:end], 'offset': offset, 'characters': len(text)}
+            if current and len(json.dumps([*current, item], ensure_ascii=False).encode()) > byte_budget:
+                pages.append(current)
+                current = []
+            current.append(item)
+            offset = end
+    if current:
+        pages.append(current)
+    return pages
 
 
 class MemoryReview:
@@ -64,12 +84,10 @@ class MemoryReview:
         self.memory, self.store, self.settings = memory, memory.store, settings
         self.spend, self.slots = spend, slots
         self.worker = self.current = self.client = None
-        self.store.execute('''CREATE TABLE IF NOT EXISTS memory_reviews (
-            message_id INTEGER PRIMARY KEY REFERENCES messages(id), run_id TEXT NOT NULL,
-            actor_id TEXT NOT NULL, owner_id TEXT NOT NULL, preferences_revision INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
-            available_at TEXT NOT NULL, updated_at TEXT NOT NULL, saved_count INTEGER NOT NULL DEFAULT 0)''')
-        self.store.execute('CREATE INDEX IF NOT EXISTS memory_review_queue ON memory_reviews(status,available_at,message_id)')
+        from .context_budget import ContextBudget
+        self.context_budget = ContextBudget(settings)
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     @property
     def configured(self):
@@ -84,7 +102,7 @@ class MemoryReview:
     def allowed_in(self, conn, source, *, owner='', revision=None):
         if source and private_run(self.store, source['run_id'], conn):
             return None
-        if (not source or source['role'] != 'user' or source['status'] != 'completed'
+        if (not source or source['role'] != 'user' or source['input_kind'] != 'user' or source['status'] != 'completed'
                 or source['steering_parent_id'] or not source['chat_enabled'] or source['parent_run_id']
                 or source['deleted_at'] or source['automated'] or source['mode'] == 'demo'):
             return None
@@ -108,17 +126,17 @@ class MemoryReview:
         if authorized:
             owner, revision = authorized
             available = (datetime.now(timezone.utc) + timedelta(seconds=self.settings.memory_review_idle_seconds)).isoformat()
-            conn.execute('''INSERT OR IGNORE INTO memory_reviews
+            conn.execute('''INSERT INTO memory_reviews
                 (message_id,run_id,actor_id,owner_id,preferences_revision,available_at,updated_at)
-                VALUES(?,?,?,?,?,?,?)''', (message_id, source['run_id'], source['user_id'], owner, revision, available, now()))
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING''', (message_id, source['run_id'], source['user_id'], owner, revision, available, now()))
 
     def backfill(self):
         # One bounded seed from recent sessions, not an unbounded transcript scan.
         since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             rows = conn.execute('''SELECT m.id FROM messages m JOIN runs r ON r.id=m.run_id
-                WHERE m.role='user' AND m.status='completed' AND m.steering_parent_id IS NULL
+                WHERE m.role='user' AND m.input_kind='user' AND m.status='completed' AND m.steering_parent_id IS NULL
                 AND m.created_at>=? AND r.chat_enabled=1 AND r.parent_run_id='' AND r.deleted_at=''
                 AND r.mode!='demo' AND NOT EXISTS(SELECT 1 FROM automation_runs a WHERE a.run_id=r.id)
                 ORDER BY m.id DESC LIMIT ?''', (since, self.settings.memory_review_backfill_limit)).fetchall()
@@ -163,33 +181,27 @@ class MemoryReview:
             await asyncio.sleep(1 if processed else 5)
 
     def inputs(self, job):
-        sources, remaining = [], 24000
-        for row in self.store.rows('''SELECT id,content FROM messages WHERE run_id=? AND user_id=? AND role='user'
+        sources = []
+        for row in self.store.rows('''SELECT id,content FROM messages WHERE run_id=? AND user_id=? AND role='user' AND input_kind='user'
             AND status='completed' AND (id=? OR steering_parent_id=?) ORDER BY id''',
                 (job['run_id'], job['actor_id'], job['message_id'], job['message_id'])):
-            text = row['content'][:remaining]
+            text = row['content']
             try:
                 check_content(text)
             except HTTPException:
                 continue
             if text.strip():
                 sources.append({'id': row['id'], 'content': text})
-                remaining -= len(text)
-            if remaining <= 0:
-                break
         return sources
 
     def notes(self, owner, repo, sources):
         notes = [n for n in self.memory.listing(owner) if not n['repo_url'] or n['repo_url'] == repo]
         terms = search_terms(' '.join(s['content'] for s in sources))
         notes.sort(key=lambda n: (len(terms & search_terms(n['title']+' '+n['content'])), n['updated_at']), reverse=True)
-        detailed, size = [], 0
+        detailed = []
         for note in notes:
             item = {k: note[k] for k in ('key','title','content','kind','repo_url','revision')}
             item['manual'] = note['source']['type'] == 'manual'
-            size += len(json.dumps(item))
-            if size > 24000:
-                break
             detailed.append(item)
         return notes, detailed
 
@@ -197,7 +209,7 @@ class MemoryReview:
         if not self.configured:
             return False
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             job = conn.execute("SELECT * FROM memory_reviews WHERE status='pending' AND available_at<=? ORDER BY message_id LIMIT 1", (now(),)).fetchone()
             if not job:
                 return False
@@ -230,13 +242,36 @@ class MemoryReview:
         return True
 
     async def extract(self, job, source, sources, notes, detailed):
+        from .library_views import fit_context
+        model = self.settings.resolve_model(fallback=self.settings.memory_review_model or source['model'])
+        budget = await self.context_budget.measure({'model': model, 'messages': []})
+        pages = review_pages(sources, max(1, budget.input_budget // 2))
+        # Existing notes stay in storage; the reviewer can modify only bodies it
+        # actually saw. Larger libraries never justify guessing an old note.
+        view = json.loads(fit_context('Existing scoped memories\n' + json.dumps({'notes': detailed}, ensure_ascii=False),
+                                      max(1, budget.input_budget // 4)).split('\n', 1)[1])
+        visible = [note for note in view['notes'] if not note.get('content_omitted')]
+        combined = {}
+        for selected in pages:
+            review = await self.extract_page(job, source, selected, view['notes'], visible)
+            if len({item.key for item in review.memories}) != len(review.memories):
+                raise ValueError('Duplicate memory proposals in one review')
+            for item in review.memories:
+                combined[item.key] = item
+        detailed[:] = visible
+        return Review(memories=list(combined.values()))
+
+    async def extract_page(self, job, source, sources, notes, detailed):
         model = self.settings.resolve_model(fallback=self.settings.memory_review_model or source['model'])
         run = {**self.store.run(job['run_id']), 'active_user_id': job['actor_id'], 'active_message_id': job['message_id']}
-        payload = {'model': model, 'stream': False, 'max_completion_tokens': 2048,
+        limits = await self.context_budget.limits(model)
+        payload = {'model': gateway_model(model), 'stream': False,
+            'max_completion_tokens': limits.default_output_tokens or limits.max_output_tokens,
             'response_format': {'type': 'json_object'}, 'messages': [
                 {'role': 'system', 'content': INSTRUCTIONS},
                 {'role': 'user', 'content': json.dumps({'repository': source['repo_url'], 'messages': sources,
-                    'existing_memories': detailed, 'memory_index': [{'key': n['key'], 'title': n['title']} for n in notes]}, ensure_ascii=False)}]}
+                    'existing_memories': detailed, 'memory_index': [{'key': n.get('key', ''), 'title': n['title']} for n in notes]}, ensure_ascii=False)}]}
+        await self.context_budget.check(payload)
         status, capture, request_id = 'failed', UsageCapture(False), None
         async with self.slots:
             try:
@@ -250,11 +285,8 @@ class MemoryReview:
                                  'X-LiteLLM-Call-ID': request_id}) as response:
                         self.spend.headers(request_id, response, False)
                         response.raise_for_status()
-                        chunks, size = [], 0
+                        chunks = []
                         async for chunk in response.aiter_bytes():
-                            size += len(chunk)
-                            if size > 64000:
-                                raise ValueError('Memory response exceeds limit')
                             chunks.append(chunk)
                 result = json.loads(b''.join(chunks))
                 capture.consume(result)
@@ -276,7 +308,7 @@ class MemoryReview:
         visible_keys = {n['key'] for n in detailed}
         source_by_id = {s['id']: s['content'] for s in sources}
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             fresh = self.source_in(conn, job['message_id'])
             if (not self.allowed_in(conn, fresh, owner=job['owner_id'], revision=job['preferences_revision'])
                     or fresh['user_id'] != job['actor_id'] or fresh['repo_url'] != source['repo_url']):
@@ -322,3 +354,12 @@ class MemoryReview:
         if self.client:
             await self.client.aclose()
             self.client = None
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS memory_reviews (
+        message_id INTEGER PRIMARY KEY REFERENCES messages(id), run_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL, owner_id TEXT NOT NULL, preferences_revision INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL, updated_at TEXT NOT NULL, saved_count INTEGER NOT NULL DEFAULT 0)''')
+    store.execute('CREATE INDEX IF NOT EXISTS memory_review_queue ON memory_reviews(status,available_at,message_id)')

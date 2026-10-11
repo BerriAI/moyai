@@ -167,7 +167,7 @@ def seeded_group(app):
     return parent['id'], child['id'], group
 
 
-def test_sidebar_nests_children_without_losing_other_parent_sessions(workspace):
+def test_sidebar_nests_children_without_losing_other_parent_sessions(workspace: tuple[FastAPI, TestClient]) -> None:
     app, client = workspace
     parent, child, group = seeded_group(app)
     second, second_child, _ = seeded_group(app)
@@ -179,6 +179,11 @@ def test_sidebar_nests_children_without_losing_other_parent_sessions(workspace):
     assert c['agent_label'] == 'Cases 1–20' and c['status'] == 'idle'
     assert not {'summary','prompt','token_hash','pending_result'}.intersection(c)
     assert client.get('/api/runs/'+child).json()['parent_run_id'] == parent
+    app.state.session_lifecycle.request_delete(parent, '', True)
+    rows = {row['id']: row for row in client.get('/api/runs').json()}
+    assert rows[parent]['status'] == rows[parent]['children'][0]['status'] == 'deleting'
+    assert rows[second]['status'] == rows[second]['children'][0]['status'] == 'idle'
+    assert client.get('/api/runs/'+parent).json()['agents']['groups'][0]['children'][0]['status'] == 'deleting'
 
 
 def test_child_deep_link_keeps_older_parent_visible_beyond_list_limit(workspace):
@@ -378,7 +383,7 @@ def test_session_search_treats_sql_characters_literally_and_bounds_input(workspa
     assert client.get('/api/runs', params={'search': 'user_name'}).status_code == 401
 
 
-def test_nested_search_participation_archive_restore_and_delete_are_root_scoped(workspace, monkeypatch):
+def test_nested_search_participation_archive_restore_and_delete_are_root_scoped(workspace: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch) -> None:
     app, client = workspace
     store = app.state.store
     parent, batch, group = seeded_group(app)
@@ -397,9 +402,7 @@ def test_nested_search_participation_archive_restore_and_delete_are_root_scoped(
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     assert client.post('/api/runs/' + reviewer + '/messages', json={'content': 'Inspect the saved result', 'client_id': 'restore-deep'}).status_code == 202
     assert not client.get('/api/runs/' + parent).json()['archived']
-    assert client.delete('/api/runs/' + parent).status_code == 409
-    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (reviewer,))
-    store.update_run(reviewer, status='idle')
     assert client.delete('/api/runs/' + parent).status_code == 200
+    assert store.rows("SELECT status FROM messages WHERE run_id=? AND client_id='restore-deep'", (reviewer,)) == [{'status': 'cancelled'}]
     assert all(store.run(identity)['deleted_at'] for identity in (parent, batch, middle, reviewer))
     assert client.get('/api/runs/' + reviewer).status_code == 404

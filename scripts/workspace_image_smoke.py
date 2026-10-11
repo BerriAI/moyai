@@ -30,8 +30,8 @@ async def main() -> None:
         sandbox = await modal.Sandbox.create.aio(
             'bash', '-lc', 'cd /opt/hermes && /opt/hermes-env/bin/python -c '
             "\"from run_agent import AIAgent; import pip, claude_agent_sdk; print('Hermes and Claude SDK imports passed')\" && "
-            '/opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py && '
-            'codex --version && opencode --version && echo WORKSPACE_READY',
+            '/opt/hermes-env/bin/python /opt/workspace-runner/sandbox/harness_dependencies.py && '
+            'codex --version && opencode --version && pi --version && echo WORKSPACE_READY',
             image=image, app=app, client=client, timeout=120, cpu=2, memory=4096)
         try:
             await sandbox.wait.aio()

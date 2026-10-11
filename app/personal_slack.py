@@ -12,9 +12,9 @@ from fastapi.responses import RedirectResponse
 from .connector_errors import ConnectorError
 from .security import digest
 
-LIMITATION = 'Personal Slack reads require your private web chat. Start a private chat, or disconnect personal Slack in Connections to use organization access.'
-FAILURE = 'Personal Slack access failed. Retry, or reconnect personal Slack in Connections. Organization access was not used.'
-KEYS = ('active_user_id', 'active_message_id', 'owner_id', 'private_owner_id', 'chat_enabled', 'token_hash', 'status', 'plugins', 'parent_run_id', 'deleted_at')
+LIMITATION = 'Personal Slack reads require your private web chat. Start a private chat, or disconnect personal Slack in Settings > Personal Slack to use organization access.'
+FAILURE = 'Personal Slack access failed. Retry, or reconnect personal Slack in Settings > Personal Slack. Organization access was not used.'
+KEYS = ('active_user_id', 'active_message_id', 'owner_id', 'private_owner_id', 'chat_enabled', 'token_hash', 'status', 'plugins', 'parent_run_id', 'deleted_at', 'deletion_requested_at')
 
 
 @dataclass
@@ -31,12 +31,8 @@ class PersonalSlack:
         self.store, self.security, self.settings, self.connectors = store, security, settings, connectors
         self.same_requester = same_requester
         self.locks = {}
-        store.execute('''CREATE TABLE IF NOT EXISTS personal_slack_grants (
-            owner_id TEXT PRIMARY KEY, revision TEXT NOT NULL, encrypted TEXT,
-            label TEXT NOT NULL DEFAULT '', health TEXT NOT NULL DEFAULT 'absent')''')
-        store.execute('''CREATE TABLE IF NOT EXISTS personal_slack_states (
-            state_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL, owner_id TEXT NOT NULL,
-            revision TEXT NOT NULL, expires REAL NOT NULL)''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def owner(self, actor):
         rows = self.store.rows('SELECT * FROM users WHERE id=?', (actor,)) if actor else []
@@ -78,7 +74,7 @@ class PersonalSlack:
         return bool(row and row['encrypted'] is not None)
 
     def revision(self, owner):
-        self.store.execute('INSERT OR IGNORE INTO personal_slack_grants(owner_id,revision) VALUES(?,?)', (owner, secrets.token_hex(24)))
+        self.store.execute('INSERT INTO personal_slack_grants(owner_id,revision) VALUES(?,?) ON CONFLICT(owner_id) DO NOTHING', (owner, secrets.token_hex(24)))
         return self.row(owner)['revision']
 
     def save(self, owner, credentials, label, revision):
@@ -86,7 +82,7 @@ class PersonalSlack:
             WHERE owner_id=? AND revision=?''', (self.security.encrypt(json.dumps(credentials)), label,
                 secrets.token_hex(24), owner, revision))
         if not changed:
-            raise ConnectorError('Personal Slack changed. Retry from Connections.')
+            raise ConnectorError('Personal Slack changed. Retry from Settings > Personal Slack.')
 
     def record_error(self, owner, revision):
         self.store.execute("UPDATE personal_slack_grants SET health='error' WHERE owner_id=? AND revision=?", (owner, revision))
@@ -106,6 +102,7 @@ class PersonalSlack:
 
     def eligible(self, run, owner):
         if (not run or run.get('private_owner_id') != owner or not run.get('chat_enabled')
+                or run.get('deleted_at') or run.get('deletion_requested_at') or run.get('swarm')
                 or run.get('parent_run_id') or self.store.slack_source(run['id'])
                 or self.store.rows('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],))):
             raise ConnectorError(LIMITATION)
@@ -242,7 +239,7 @@ class PersonalSlack:
             if not row:
                 raise HTTPException(400, 'Expired or invalid personal Slack request. Start again.')
             if error or not code:
-                return RedirectResponse('/?connection=cancelled#connections', status_code=303)
+                return RedirectResponse('/?connection=cancelled#personal-slack', status_code=303)
             try:
                 credentials = await self.exchange(code=code)
                 label = await self.verify(credentials)
@@ -251,7 +248,7 @@ class PersonalSlack:
             except Exception:
                 raise HTTPException(409, FAILURE) from None
             await flush()
-            return RedirectResponse('/?connection=success#connections', status_code=303)
+            return RedirectResponse('/?connection=success#personal-slack', status_code=303)
 
         @app.delete('/api/connections/slack/personal')
         async def disconnect(request: Request):
@@ -276,3 +273,12 @@ class PersonalSlack:
                 raise HTTPException(409, FAILURE) from None
             await flush()
             return self.status(owner)
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS personal_slack_grants (
+        owner_id TEXT PRIMARY KEY, revision TEXT NOT NULL, encrypted TEXT,
+        label TEXT NOT NULL DEFAULT '', health TEXT NOT NULL DEFAULT 'absent')''')
+    store.execute('''CREATE TABLE IF NOT EXISTS personal_slack_states (
+        state_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL, owner_id TEXT NOT NULL,
+        revision TEXT NOT NULL, expires REAL NOT NULL)''')

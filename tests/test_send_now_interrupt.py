@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import uvicorn
 
-from sandbox.continuation import AgentSteer
+from agent.continuation import AgentSteer
 from test_spend import active
 from test_workspace import workspace  # noqa: F401
 

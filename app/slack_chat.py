@@ -12,7 +12,7 @@ from uuid import uuid4
 from agentchat.models import Message, Sender
 
 from .model_preferences import preferred_model, save_model
-from .db import now
+from .db import database, now
 from .file_links import file_link
 from .progress import active_turn
 from .pr_delivery import link_captures, select_captures, select_prs
@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 USER_MENTION = re.compile(r'<@([UW][A-Z0-9]{7,30})(?:\|[^>\n]*)?>')
+
+
+def explicit_control(text):
+    """Syntactic product controls bypass participation judgment."""
+    value = text.strip().lower().lstrip('/')
+    return (value in COMMANDS or value.split(maxsplit=1)[:1] in [['model'], ['harness'], ['goal']] or
+            is_session_id_request(text))
 
 
 def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
@@ -89,8 +96,13 @@ class SlackChat:
         self.owner = owner
         self.store, self.settings = owner.store, owner.settings
         self.watcher = None
+        self.media_watcher = None
         self.wake = asyncio.Event()
+        self.media_wake = asyncio.Event()
         self.last_post = {}
+        self.delivering: set[int] = set()
+        self.delivery_claim = asyncio.Lock()
+        self.closing = False
         self.activity = SlackActivity(owner)
 
 
@@ -107,11 +119,11 @@ class SlackChat:
             return None
         return 'paused' if rows[0]['paused'] else 'active'
 
-    def queue(self, conn, run_id, key, kind, text, metadata=None):
+    def queue(self, conn, run_id, key, kind, text, metadata=None, *, status='pending'):
         if private_run(self.store, run_id, conn):
             return
-        conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata) VALUES(?,?,?,?,?,?)',
-                     (run_id, key, kind, text, now(), json.dumps(metadata or {})))
+        conn.execute('INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata,status) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
+                     (run_id, key, kind, text, now(), json.dumps(metadata or {}), status))
 
     def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False):
         """Save a verified web input and its mirror in the same transaction.
@@ -122,10 +134,8 @@ class SlackChat:
         enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
         team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
-            if private_run(self.store, run_id, conn):
-                binding = None
             if binding:
                 allowed = enabled and binding['team_id'] == team
                 # Preserve chronology when the previous answer has been saved
@@ -133,7 +143,7 @@ class SlackChat:
                 # before saving a possible instant answer to this new input.
                 self.collect_answers_in(conn, binding, allowed)
                 self.collect_progress_in(conn, binding, allowed)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, restore_archived=not metadata_request)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, human_control=True, restore_archived=not metadata_request)
             if created and binding:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
@@ -187,8 +197,10 @@ class SlackChat:
         # belong to their session's original provider, even after a switch.
         return [key for key in missing if not key.startswith(('MODAL_', 'SUBSTRATE_'))] + self.settings.missing_sandbox(provider)
 
-    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=()):
+    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=(), reference=''):
         """Reserve the physical Slack message and queue its turn atomically."""
+        if re.match(r'^\s*(?:!aside|\(aside\))(?:\s|$)', prompt, re.I):
+            return None
         original_prompt, selected_model, model_error = prompt, None, ''
         selected_harness, harness_error = None, ''
         harness_directive = re.fullmatch(r'/?harness(?:[ \t]+([^\n]+))?(?:\n([\s\S]*))?', prompt.strip(), re.I)
@@ -214,10 +226,12 @@ class SlackChat:
                 command = 'model'
         # Directives and attachments carry additional intent; only an otherwise
         # standalone question is answered by the control plane.
-        if not directive and not harness_directive and not file_ids and is_session_id_request(prompt):
+        if not directive and not harness_directive and not file_ids and not reference and is_session_id_request(prompt):
             command = 'session-id'
+        # Only authored text participates in command/model/harness parsing.
+        prompt += reference
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             if conn.execute('SELECT 1 FROM slack_receipts WHERE event_id=? OR (team_id=? AND channel=? AND message_ts=?)',
                             (event_id, team, channel, ts)).fetchone():
                 return None
@@ -279,7 +293,7 @@ class SlackChat:
                 # An adopted session may already have web-only updates.
                 self.collect_progress_in(conn, binding, False)
             run_id = binding['run_id']
-            if conn.execute("SELECT 1 FROM runs WHERE id=? AND deleted_at!=''", (run_id,)).fetchone():
+            if conn.execute("SELECT 1 FROM runs WHERE id=? AND (deleted_at!='' OR deletion_requested_at!='')", (run_id,)).fetchone():
                 return None  # Retain the binding and receipts; never restart a deleted thread.
             if Decimal(ts) < Decimal(binding['started_ts']):
                 return None
@@ -289,6 +303,7 @@ class SlackChat:
                 # Replies completed while asleep must not be backfilled even
                 # when wake arrives before the periodic collector runs.
                 conn.execute('UPDATE slack_threads SET last_message_id=(SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?) WHERE run_id=?', (run_id, run_id))
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='answer_settlement' AND status='waiting'", (run_id,))
                 self.collect_progress_in(conn, binding, False)
             message_id, submit = None, False
             current = conn.execute('SELECT harness,model,sandbox_provider FROM runs WHERE id=?', (run_id,)).fetchone()
@@ -309,7 +324,7 @@ class SlackChat:
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Model changed for new messages',?,?)", (run_id, json.dumps({'model':selected_model}), now()))
                 if command == 'sleep':
                     conn.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (run_id,))
-                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending' AND kind IN ('answer','input','input_update','progress','approval')", (run_id,))
+                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status IN ('pending','waiting') AND kind IN ('answer','answer_settlement','input','input_update','progress','approval')", (run_id,))
                 elif command == 'wake':
                     conn.execute('UPDATE slack_threads SET paused=0 WHERE run_id=?', (run_id,))
                 if command in {'stop', 'sleep'}:
@@ -389,20 +404,39 @@ class SlackChat:
         if private_run(self.store, binding['run_id'], conn):
             return
         run_id = binding['run_id']
-        turn_id = active_turn(conn, run_id)
+        turn_id = self.progress_turn_in(conn, run_id)
         # Completed-turn progress is obsolete; its final answer is authoritative.
         conn.execute("""UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='progress'
-            AND status='pending' AND json_extract(metadata,'$.turn_id') IS NOT ?""", (run_id, turn_id))
+            AND status='pending' AND json_number(metadata,'turn_id') IS DISTINCT FROM ?""", (run_id, turn_id))
         events = conn.execute("""SELECT id,message FROM events WHERE run_id=? AND kind='message'
-            AND json_extract(data,'$.public_update')=1 AND json_extract(data,'$.turn_id')=? ORDER BY id""",
+            AND json_number(data,'public_update')=1
+            AND json_number(data,'turn_id')=? ORDER BY id""",
                               (run_id, turn_id)).fetchall()
         for event in events:
-            key = f"progress:{event['id']}"
             text = slack_text(self.scrub(event['message']))
-            self.queue(conn, run_id, key, 'progress', text + '\n\n' + self.link(run_id),
-                       {'event_id': event['id'], 'turn_id': turn_id})
-            if not allowed or binding['paused']:
-                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
+            chunks = split_reply(text)
+            for index, chunk in enumerate(chunks):
+                key = f"progress:{event['id']}" + (f':part:{index}' if index else '')
+                self.queue(conn, run_id, key, 'progress', chunk + ('\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''),
+                           {'event_id': event['id'], 'turn_id': turn_id})
+                if not allowed or binding['paused']:
+                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
+
+    def progress_turn_in(self, conn, run_id):
+        turn_id = active_turn(conn, run_id)
+        if turn_id and conn.execute("""SELECT 1 FROM messages WHERE run_id=? AND role='assistant'
+                AND response_to_id=? AND status='saving'""", (run_id, turn_id)).fetchone():
+            return None  # A received answer supersedes progress while files save.
+        return turn_id
+
+    def settle_public_in(self, conn, run_id):
+        """Commit saved public text and its existing delivery intent together."""
+        binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+        if binding:
+            allowed = (self.settings.slack_thread_chat_enabled and self.owner.status()['enabled'] and
+                       binding['team_id'] == self.owner.connectors.slack_installation().get('team_id'))
+            self.collect_answers_in(conn, binding, allowed)
+            self.collect_progress_in(conn, binding, allowed)
 
     def collect_answers_in(self, conn, binding, allowed):
         if private_run(self.store, binding['run_id'], conn):
@@ -410,16 +444,19 @@ class SlackChat:
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
         for message in messages:
-            if allowed and not binding['paused'] and message['status'] != 'steered':
+            policy = conn.execute('SELECT input_kind,reply_policy FROM messages WHERE id=? AND run_id=?',
+                                  (message['response_to_id'], run_id)).fetchone()
+            direct = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND steering_parent_id=? AND input_kind='user' AND status!='deleted'", (run_id, message['response_to_id'])).fetchone()
+            silent = policy and policy['input_kind'] == 'observation' and policy['reply_policy'] == 'silent' and not direct
+            if allowed and not binding['paused'] and message['status'] != 'steered' and not silent:
                 value = self.scrub(message['content'])
                 if message['status'] in {'failed', 'cancelled', 'interrupted'}:
                     value = 'Response ' + message['status'] + ':\n\n' + value
-                if len(value) > 32000:
-                    value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
                 prs = select_prs(conn, run_id, value)
                 for pr in prs:
                     pr.title = self.scrub(pr.title)
-                media = select_captures(self.settings, run_id, value, store=self.store, conn=conn) if message['status'] == 'completed' else []
+                media = (select_captures(self.settings, run_id, value, store=self.store, conn=conn)
+                         if message['status'] in {'saving', 'completed'} else [])
                 value = link_captures(self.settings, run_id, value, media)
                 if binding['channel'].startswith('D') and not conn.execute(
                     "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
@@ -428,62 +465,139 @@ class SlackChat:
                 parts = reply_parts(value, lambda text: slack_text(
                     text, mentions, public_url=self.settings.public_url, run_id=run_id), split_reply)
                 table_parts = parts if any(blocks for _, blocks in parts) else None
-                if media:
-                    self.queue(conn, run_id, f"answer:{message['id']}:media", 'answer',
-                               'Saved demo captures.\n\n' + self.link(run_id),
-                               {'captures': [item.model_dump() for item in media]})
                 chunks = split_reply(slack_text(value, self.mentionable_in(conn, run_id),
                                                public_url=self.settings.public_url, run_id=run_id))
+                feedback_message_id = (message['id'] if message['status'] in {'saving', 'completed'}
+                                       and self.owner.lens_feedback and self.owner.lens_feedback.enabled else None)
                 for index, chunk in enumerate(chunks):
                     suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
-                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else None
+                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
+                    if suffix and feedback_message_id is not None:
+                        metadata['feedback_message_id'] = feedback_message_id
                     if table_parts:
                         # Queue the structured answer once; text chunks remain the fallback.
                         if index == 0:
-                            self.queue_table_parts(conn, run_id, message['id'], table_parts, prs)
+                            self.queue_table_parts(conn, run_id, message['id'], table_parts, prs,
+                                                   feedback_message_id)
                     else:
-                        self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
+                        self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix,
+                                   metadata or None)
+                if media and message['status'] == 'completed':
+                    self.queue_media_in(conn, run_id, message['id'], media)
+                if message['status'] == 'saving':
+                    self.queue(conn, run_id, f"answer:{message['id']}:settlement", 'answer_settlement', '',
+                               {'message_id': message['id']}, status='waiting')
             conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
+        self.collect_settlements_in(conn, binding, allowed)
 
-    def queue_table_parts(self, conn, run_id, message_id, parts, prs):
+    def queue_media_in(self, conn, run_id, message_id, media):
+        self.queue(conn, run_id, f'answer:{message_id}:media', 'answer',
+                   'Saved demo captures.\n\n' + self.link(run_id),
+                   {'captures': [item.model_dump() for item in media]})
+
+    def collect_settlements_in(self, conn, binding, allowed):
+        """Settle an already-published answer without replaying its text."""
+        if private_run(self.store, binding['run_id'], conn):
+            return
+        run_id = binding['run_id']
+        if not allowed or binding['paused']:
+            conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='answer_settlement' AND status='waiting'", (run_id,))
+            return
+        waiting = conn.execute("""SELECT m.*,o.id AS settlement_id FROM slack_outbox o
+            JOIN messages m ON m.id=json_number(o.metadata,'message_id') AND m.run_id=o.run_id
+            WHERE o.run_id=? AND o.kind='answer_settlement' AND o.status='waiting' ORDER BY o.id""", (run_id,)).fetchall()
+        for message in waiting:
+            if message['status'] not in TERMINAL | {'save_failed', 'steered'}:
+                continue
+            if message['status'] == 'completed':
+                media = select_captures(self.settings, run_id, self.scrub(message['content']), store=self.store, conn=conn)
+                if media:
+                    self.queue_media_in(conn, run_id, message['id'], media)
+            elif message['status'] in {'save_failed', 'failed', 'cancelled', 'interrupted'}:
+                notice = ('Your answer is saved, but the latest workspace files could not be saved. '
+                          'Open Moyai for the workspace recovery details.' if message['status'] == 'save_failed' else
+                          'Response ' + message['status'] + ' after the answer was received. Open Moyai for details.')
+                self.queue(conn, run_id, f"answer:{message['id']}:outcome", 'answer', notice + '\n\n' + self.link(run_id))
+            conn.execute("UPDATE slack_outbox SET status='settled' WHERE id=? AND status='waiting'", (message['settlement_id'],))
+
+    def queue_table_parts(self, conn, run_id, message_id, parts, prs, feedback_message_id=None):
         for index, (chunk, blocks) in enumerate(parts):
             suffix = '\n\n' + self.link(run_id) if index == len(parts) - 1 else ''
             metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
+            if suffix and feedback_message_id is not None:
+                metadata['feedback_message_id'] = feedback_message_id
             if blocks:
                 metadata['blocks'] = blocks
             self.queue(conn, run_id, f'answer:{message_id}:{index}', 'answer', chunk + suffix, metadata)
 
     def collect(self):
-        enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
-        team = self.owner.connectors.slack_installation().get('team_id')
-        with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
-                run_id = binding['run_id']
-                if private_run(self.store, run_id, conn):
-                    conn.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE run_id=? AND status='pending'", (run_id,))
-                    continue
-                allowed = enabled and binding['team_id'] == team and not binding['deleted_at']
-                if not allowed:
-                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending'", (run_id,))
-                self.collect_answers_in(conn, binding, allowed)
-                self.collect_progress_in(conn, binding, allowed)
-                if not allowed or binding['paused']:
-                    continue
-                for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
-                    self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
-                               'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
-                # A child can ask while the Slack-linked parent waits for it.
-                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential_requests'").fetchone():
-                    self.owner.access.collect_in(conn, binding)
-                if binding['status'] == 'interrupted':
-                    self.queue(conn, run_id, f"interrupted:{run_id}:{binding['updated_at']}", 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
+        # Each thread has its own cursor and deduplicated outbox. Release the
+        # global write lock between threads so historical Slack conversations
+        # cannot hold up every API, broker and worker write for the whole scan.
+        for row in self.store.rows('SELECT run_id FROM slack_threads ORDER BY run_id'):
+            self.collect_thread(row['run_id'])
 
-    async def deliver_one(self):
-        for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending' ORDER BY o.id LIMIT 100"):
-            if private_run(self.store, row['run_id']):
-                self.store.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE id=?", (row['id'],))
+    def collect_thread(self, run_id):
+        if private_run(self.store, run_id):
+            self.store.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
+            return
+        with self.store.connect() as conn:
+            conn.begin_write()
+            # Re-read the binding and policy after acquiring the lock: it may
+            # have been removed, paused or disabled since the candidate scan.
+            binding = conn.execute("""SELECT t.*,r.status,r.updated_at,r.deleted_at,r.deletion_requested_at
+                FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?""", (run_id,)).fetchone()
+            if not binding:
+                return
+            enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
+            team = self.owner.connectors.slack_installation().get('team_id')
+            allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
+            if not allowed:
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
+            self.collect_answers_in(conn, binding, allowed)
+            self.collect_progress_in(conn, binding, allowed)
+            if not allowed or binding['paused']:
+                return
+            for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
+                self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
+                           'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
+            # A child can ask while the Slack-linked parent waits for it.
+            if 'credential_requests' in conn.table_names():
+                self.owner.access.collect_in(conn, binding)
+            if binding['status'] == 'interrupted':
+                # An injected input belongs to its parent's answer, while
+                # an unstarted follow-up still needs its own stop notice.
+                source = conn.execute("""SELECT m.id,a.id AS answer_id FROM messages m
+                    LEFT JOIN messages a ON a.run_id=m.run_id AND a.response_to_id=m.id
+                    WHERE m.run_id=? AND m.role='user'
+                    AND (m.steering_parent_id IS NULL OR m.started_at='')
+                    ORDER BY m.id DESC LIMIT 1""", (run_id,)).fetchone()
+                key = (f"answer:{source['answer_id']}:outcome" if source and source['answer_id'] else
+                       f"interrupted:{run_id}:{source['id'] if source else binding['updated_at']}")
+                self.queue(conn, run_id, key, 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
+
+    def reconcile_sending(self) -> None:
+        # The supported single process owns every live send. A lost receipt
+        # without its task is uncertain, never permission to send it again.
+        active = tuple(self.delivering)
+        exclude = ' AND id NOT IN (' + ','.join('?' for _ in active) + ')' if active else ''
+        self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'" + exclude, active)
+
+    def next_delivery(self, *, media=None):
+        """Inspect durable candidates while the caller holds delivery_claim."""
+        self.reconcile_sending()
+        self.store.execute("""UPDATE slack_outbox SET status='skipped',text='',metadata='{}'
+            WHERE run_id IN (SELECT id FROM runs WHERE COALESCE(private_owner_id,'')<>'')
+            AND status IN ('pending','waiting','uncertain','skipped')""")
+        lane = (" AND o.dedupe_key LIKE 'answer:%:media'" if media else
+                " AND o.dedupe_key NOT LIKE 'answer:%:media'") if media is not None else ''
+        for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending'" + lane + " ORDER BY o.id LIMIT 100"):
+            if row['id'] in self.delivering:
                 continue
+            if row['dedupe_key'].endswith(':media') and self.store.rows("""SELECT 1 FROM slack_outbox
+                    WHERE run_id=? AND id<? AND status IN ('pending','sending')
+                    AND dedupe_key NOT LIKE 'answer:%:media' LIMIT 1""", (row['run_id'], row['id'])):
+                continue  # Media cannot overtake the answer's remaining chunks.
             if self.skip_stale_progress(row):
                 continue
             if self.last_post.get(row['channel'], 0) > time.monotonic() - 1.1:
@@ -493,108 +607,186 @@ class SlackChat:
                     or (row['paused'] and row['kind'] in {'answer', 'input', 'input_update', 'progress', 'approval', 'reaction'})):
                 self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=?", (row['id'],))
                 continue
-            if not self.store.execute("""UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'
-                    AND EXISTS(SELECT 1 FROM runs WHERE id=slack_outbox.run_id AND deleted_at='')""", (row['id'],)):
-                continue
+            return row
+
+    async def claim_delivery(self, *, media=None):
+        # Offloading adds yield points. Serialize both lanes until the durable
+        # claim has an in-memory owner, before either can reconcile or send it.
+        async with self.delivery_claim:
+            if self.closing:
+                return None
+            row = await database(self.next_delivery, media=media)
+            if row is None:
+                return None
+            self.delivering.add(row['id'])
             try:
-                # Persist before external side effects. Ambiguous sends are
-                # marked uncertain and never replayed automatically.
-                await self.owner.checkpoints.flush()
-                if private_run(self.store, row['run_id']):
-                    self.store.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE id=?", (row['id'],))
-                    continue
-                if self.skip_stale_progress(row):
-                    continue
-                if row['kind'] == 'reaction':
-                    await self.owner.channel.acknowledge(row['run_id'], row['text'])
-                    sent_ts = row['text']
-                elif row['kind'] == 'input':
-                    data = json.loads(row['metadata'])
-                    source = self.owner.channel.source_for_run(row['run_id'])
-                    message = Message(id=data['message_id'], conversation_id=source.conversation_id,
-                        channel='web', sender=Sender(id=data['sender_id'], display_name=data['sender_name']),
-                        text=row['text'], role='user')
-                    response = await self.owner.agentchat.mirror(self.owner.channel, source, message, origin='Moyai web')
-                    sent_ts = response.metadata['slack_ts']
+                claimed = await database(self.store.execute, """UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'
+                    AND EXISTS(SELECT 1 FROM runs WHERE id=slack_outbox.run_id AND deleted_at='' AND deletion_requested_at='')""", (row['id'],))
+            except asyncio.CancelledError:
+                # database() drains the write. No external send has begun, so
+                # this known-unsent claim can safely remain pending on shutdown.
+                try:
+                    await database(self.store.execute, "UPDATE slack_outbox SET status='pending' WHERE id=? AND status='sending'", (row['id'],))
+                finally:
+                    self.delivering.discard(row['id'])
+                raise
+            except Exception:
+                self.delivering.discard(row['id'])
+                raise
+            if not claimed:
+                self.delivering.discard(row['id'])
+                return None
+            self.last_post[row['channel']] = time.monotonic()
+            return row
+
+    async def deliver_one(self, *, media=None):
+        row = await self.claim_delivery(media=media)
+        if row is None:
+            return
+        delivered = None
+        try:
+            # Persist before external side effects. Ambiguous sends are
+            # marked uncertain and never replayed automatically.
+            await self.owner.checkpoints.flush()
+            if await database(private_run, self.store, row['run_id']):
+                await database(self.store.execute, "UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE id=?", (row['id'],))
+                return
+            if await database(self.skip_stale_progress, row):
+                return
+            if row['kind'] == 'reaction':
+                await self.owner.channel.acknowledge(row['run_id'], row['text'])
+                sent_ts = row['text']
+            elif row['kind'] == 'input':
+                data = json.loads(row['metadata'])
+                source = await database(self.owner.channel.source_for_run, row['run_id'])
+                message = Message(id=data['message_id'], conversation_id=source.conversation_id,
+                    channel='web', sender=Sender(id=data['sender_id'], display_name=data['sender_name']),
+                    text=row['text'], role='user')
+                response = await self.owner.agentchat.mirror(self.owner.channel, source, message, origin='Moyai web')
+                sent_ts = response.metadata['slack_ts']
+            else:
+                data = json.loads(row['metadata'])
+                source = await database(self.owner.channel.source_for_run, row['run_id'], {**data, 'kind': row['kind']})
+                if data.get('credential_request_id'):
+                    sent_ts, delivered = await self.owner.channel.credential_card(source, row['id'])
+                elif data.get('captures'):
+                    sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
                 else:
-                    data = json.loads(row['metadata'])
-                    source = self.owner.channel.source_for_run(row['run_id'], {**data, 'kind': row['kind']})
-                    if data.get('credential_request_id'):
-                        sent_ts, delivered = await self.owner.channel.credential_card(source, row['id'])
-                        self.store.execute("UPDATE slack_outbox SET status=CASE WHEN metadata=? THEN 'sent' ELSE 'pending' END,slack_ts=? WHERE id=?", (delivered, sent_ts, row['id']))
-                    elif data.get('captures'):
-                        sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
+                    if data.get('pull_requests') or data.get('blocks') or data.get('feedback_message_id') is not None:
+                        content = self.owner.channel.build_rich_reply(
+                            source, row['text'], data.get('pull_requests', ()), data.get('blocks'),
+                            data.get('feedback_message_id'))
+                        response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
                     else:
-                        if data.get('pull_requests') or data.get('blocks'):
-                            content = self.owner.channel.build_rich_reply(source, row['text'], data.get('pull_requests', ()), data.get('blocks'))
-                            response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
-                        else:
-                            response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
-                        sent_ts = response.metadata['slack_ts']
-                if not json.loads(row['metadata']).get('credential_request_id'):
-                    self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
-                if row['kind'] != 'reaction':
-                    self.activity.posted(row['run_id'])
-                if row['kind'] in {'ack', 'reaction'}:
-                    self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
-            except (Exception, asyncio.CancelledError) as exc:
-                self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE id=?", (row['id'],))
-                if row['kind'] in {'ack', 'reaction'}:
-                    self.store.execute("UPDATE slack_events SET reply_status='uncertain' WHERE run_id=?", (row['run_id'],))
-                self.store.event(row['run_id'], 'status',
-                    'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
-                    if row['kind'] == 'reaction' else
-                    'Slack access card update could not be confirmed. It will be retried in the same message.'
-                    if row['slack_ts'] and json.loads(row['metadata']).get('credential_request_id') else
-                    'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
-            finally:
+                        response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
+                    sent_ts = response.metadata['slack_ts']
+        except (Exception, asyncio.CancelledError) as exc:
+            await database(self.record_uncertain_delivery, row)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+        else:
+            # A confirmed send stays confirmed if cancellation arrives while
+            # database() drains its receipt. Keep this outside the send handler
+            # and drain all related bookkeeping in the same operation.
+            await database(self.record_delivery, row, sent_ts, delivered)
+        finally:
+            try:
                 self.last_post[row['channel']] = time.monotonic()
                 await self.owner.checkpoints.flush()
-            return
+            finally:
+                self.delivering.discard(row['id'])
+
+    def record_delivery(self, row, sent_ts, delivered):
+        if json.loads(row['metadata']).get('credential_request_id'):
+            self.store.execute("UPDATE slack_outbox SET status=CASE WHEN metadata=? THEN 'sent' ELSE 'pending' END,slack_ts=? WHERE id=?", (delivered, sent_ts, row['id']))
+        else:
+            self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
+        if row['kind'] != 'reaction':
+            self.activity.posted(row['run_id'])
+        if row['kind'] in {'ack', 'reaction'}:
+            self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
+
+    def record_uncertain_delivery(self, row):
+        # One drained operation also preserves the acknowledgment and user
+        # notice when shutdown interrupts recording an ambiguous send.
+        self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE id=?", (row['id'],))
+        if row['kind'] in {'ack', 'reaction'}:
+            self.store.execute("UPDATE slack_events SET reply_status='uncertain' WHERE run_id=?", (row['run_id'],))
+        self.store.event(row['run_id'], 'status',
+            'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
+            if row['kind'] == 'reaction' else
+            'Slack access card update could not be confirmed. It will be retried in the same message.'
+            if row['slack_ts'] and json.loads(row['metadata']).get('credential_request_id') else
+            'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
 
     def skip_stale_progress(self, row):
         if row['kind'] != 'progress':
             return False
         with self.store.connect() as conn:
-            current = active_turn(conn, row['run_id'])
-            if current is not None and json.loads(row['metadata']).get('turn_id') == current:
+            current = self.progress_turn_in(conn, row['run_id'])
+            metadata = json.loads(row['metadata'])
+            # Eligibility comes from the saved server-owned event, not outbox
+            # metadata alone. Every public update uses the same turn fence.
+            reply = conn.execute("""SELECT 1 FROM events WHERE run_id=? AND id=? AND kind='message'
+                AND json_number(data,'public_update')=1
+                AND json_number(data,'turn_id')=?""", (row['run_id'], metadata.get('event_id'), current)).fetchone()
+            if current is not None and metadata.get('turn_id') == current and reply:
                 return False
             conn.execute("UPDATE slack_outbox SET status='skipped' WHERE id=? AND status IN ('pending','sending')", (row['id'],))
         return True
 
-    async def watch(self):
-        while True:
+    async def watch(self, *, media=False):
+        wake = self.media_wake if media else self.wake
+        while not self.closing:
             try:
-                self.wake.clear()
-                for row in self.store.rows('SELECT event_id,run_id FROM slack_receipts WHERE handled=0'):
-                    await self.owner.manager.cancel(row['run_id'])
-                    self.store.execute('UPDATE slack_receipts SET handled=1 WHERE event_id=?', (row['event_id'],))
-                self.collect()
-                await self.deliver_one()
-                await self.activity.sync()
+                wake.clear()
+                if not media:
+                    for row in await database(self.store.rows, 'SELECT event_id,run_id FROM slack_receipts WHERE handled=0'):
+                        await self.owner.manager.cancel(row['run_id'])
+                        await database(self.store.execute, 'UPDATE slack_receipts SET handled=1 WHERE event_id=?', (row['event_id'],))
+                    await database(self.collect)
+                    self.media_wake.set()
+                await self.deliver_one(media=media)
+                if not media and not self.closing:
+                    await self.activity.sync()
                 await self.owner.checkpoints.flush()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 # A provider outage must not kill the durable delivery worker.
                 logger.warning('Slack reply worker will retry after %s', type(exc).__name__)
+            # A database operation can fail while database() is draining a
+            # cancelled thread. Shutdown must not turn that error into a retry.
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
             try:
-                await asyncio.wait_for(self.wake.wait(), timeout=1)
+                await asyncio.wait_for(wake.wait(), timeout=1)
             except TimeoutError:
                 pass
 
     def recover(self):
-        self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'")
-        self.store.execute("UPDATE slack_outbox SET status='pending' WHERE status='uncertain' AND slack_ts!='' AND json_extract(metadata,'$.credential_request_id') IS NOT NULL")
+        self.reconcile_sending()
+        self.store.execute("UPDATE slack_outbox SET status='pending' WHERE status='uncertain' AND slack_ts!='' AND json_text(metadata,'credential_request_id') IS NOT NULL")
         self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND "
-                           "(kind='ack' OR (kind='progress' AND json_extract(metadata,'$.event_id') IS NULL) "
+                           "(kind='ack' OR (kind='progress' AND json_number(metadata,'event_id') IS NULL) "
                            "OR (kind='control' AND dedupe_key LIKE 'received:%'))")
         if not self.watcher or self.watcher.done():
             self.watcher = asyncio.create_task(self.watch())
+        if not self.media_watcher or self.media_watcher.done():
+            self.media_watcher = asyncio.create_task(self.watch(media=True))
 
-    async def shutdown(self):
-        if self.watcher:
-            self.watcher.cancel()
-            await asyncio.gather(self.watcher, return_exceptions=True)
+    def begin_drain(self):
+        self.closing = True
+        self.wake.set()
+        self.media_wake.set()
+
+    async def shutdown(self, *, graceful=False):
+        tasks = [task for task in (self.watcher, self.media_watcher) if task]
+        if graceful:
+            # Planned ownership transfer must preserve an admitted external
+            # send and its durable receipt before the successor recovers.
+            self.begin_drain()
+        else:
+            for task in tasks:
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

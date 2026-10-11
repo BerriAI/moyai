@@ -5,6 +5,7 @@ import time
 
 import httpx
 import jwt
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.requests import HTTPConnection
@@ -122,7 +123,9 @@ class CloudflareAccessMiddleware:
                                                Headers(scope=scope).get('cf-access-jwt-assertion', ''))
             cookie = None
             if identity is not None:
-                cookie = self.security.access_session(HTTPConnection(scope), identity)
+                # Account enrollment can wait for a database write lock. Keep
+                # that wait from blocking unrelated requests on the event loop.
+                cookie = await run_in_threadpool(self.security.access_session, HTTPConnection(scope), identity)
         except (jwt.PyJWTError, ValueError, TypeError):
             status, detail = 401, 'Cloudflare Access authentication required.'
         except AccessUnavailable:

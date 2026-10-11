@@ -37,6 +37,11 @@ def test_side_chat_is_durable_isolated_and_attributed_to_its_requester(workspace
     assert client.post('/api/runs/'+side['id']+'/messages', json={'content':'Clarify required fields', 'client_id':'side-followup-one'}).status_code == 202
     assert store.messages(parent['id']) == before
     assert store.messages(side['id'])[-1]['user_id'] == 'google:bob'
+    original = store.run(parent['id'])
+    app.state.session_lifecycle.request_delete(side['id'], '', True)
+    listed = client.get('/api/runs/' + parent['id'] + '/side-chats').json()[0]
+    assert listed['status'] == client.get('/api/runs/' + side['id']).json()['status'] == 'deleting'
+    assert store.run(parent['id']) == original
 
 
 def test_side_chat_security_and_retry_scope(workspace, monkeypatch):
@@ -56,28 +61,45 @@ def test_side_chat_security_and_retry_scope(workspace, monkeypatch):
     assert client.get('/api/runs/'+first['id']+'/side-chats').status_code == 401
 
 
-def test_side_context_is_bounded_and_never_a_live_link(workspace, monkeypatch):
+def test_side_context_is_complete_attributed_and_never_a_live_link(workspace, monkeypatch):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     store=app.state.store
     parent=store.create_run('Original task', '', 'demo', [], chat_enabled=True)
     for i in range(35):
         store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant',?,'completed','2026-10-02')", (parent['id'],str(i)+'🗿'*5000))
+    queued, _ = store.enqueue_message(parent['id'], 'Queued human direction', 'side-human', user_id='google:bob')
+    delegated, _ = store.enqueue_message(parent['id'], 'Agent guidance', 'side-agent', user_id='google:alice')
+    store.execute("UPDATE messages SET input_kind='delegation',source_json=? WHERE id=?",
+        (json.dumps({'kind':'agent', 'run_id':'coordinator'}), delegated['id']))
+    deleted, _ = store.enqueue_message(parent['id'], 'Deleted message', 'side-deleted')
+    store.execute("UPDATE messages SET status='deleted' WHERE id=?", (deleted['id'],))
     side=client.post('/api/runs', json={'prompt':'Explain', 'mode':'demo','side_chat_of':parent['id']}).json()
     context=store.run(side['id'])['side_chat_context']
-    assert len(context)<=48000 and json.loads(context)['conversation']
+    snapshot = json.loads(context)
+    assert snapshot['source_run_id'] == parent['id'] and snapshot['captured_at']
+    conversation = snapshot['conversation']
+    assert [m['content'] for m in conversation if m['role'] == 'assistant'] == [str(i)+'🗿'*5000 for i in range(35)]
+    assert [m['id'] for m in conversation] == sorted(m['id'] for m in conversation)
+    human = next(m for m in conversation if m['id'] == queued['id'])
+    assert human['status'] == 'queued' and human['user_id'] == 'google:bob' and human['input_kind'] == 'user'
+    guidance = next(m for m in conversation if m['id'] == delegated['id'])
+    assert guidance['input_kind'] == 'delegation' and guidance['source'] == {'kind':'agent', 'run_id':'coordinator'}
+    assert all(m['id'] != deleted['id'] for m in conversation)
     store.update_run(parent['id'],summary='Changed after the side conversation started')
+    store.enqueue_message(parent['id'], 'Later direction', 'side-later')
     assert store.run(side['id'])['side_chat_context']==context
     assert 'side_chat_context' not in client.get('/api/runs/'+side['id']).json()
     assert all('side_chat_context' not in r for r in client.get('/api/runs').json())
 
 
-def test_escaped_snapshot_text_still_obeys_size_limit(workspace, monkeypatch):
+def test_snapshot_preserves_complete_escaped_task_and_result(workspace, monkeypatch):
     app,client=workspace
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
-    parent=app.state.store.create_run('\x00'*16000,'','demo',[],chat_enabled=True)
-    app.state.store.update_run(parent['id'],summary='\x00'*16000)
+    content = '\n"\\🗿'*16000
+    parent=app.state.store.create_run(content,'','demo',[],chat_enabled=True)
+    app.state.store.update_run(parent['id'],summary=content)
     side=client.post('/api/runs',json={'prompt':'Explain','side_chat_of':parent['id']}).json()
     context=app.state.store.run(side['id'])['side_chat_context']
-    assert len(context)<=48000
-    assert json.loads(context)['task']
+    assert json.loads(context)['task'] == content
+    assert json.loads(context)['latest_result'] == content

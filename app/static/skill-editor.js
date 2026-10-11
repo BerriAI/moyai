@@ -58,29 +58,10 @@ function bindSkillEditor(textarea, form) {
     const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
   };
   function render(value, caret = null) {
-    const fragment = document.createDocumentFragment();
-    let last = 0;
-    for (const match of value.matchAll(/\/(?:personal|org):[a-z0-9]+(?:-[a-z0-9]+)*/g)) {
-      const end = match.index + match[0].length;
-      const range = slashSkillQuery(value, end);
-      const skill = catalog.get(match[0].slice(1));
-      if (!skill || !range || range.start !== match.index || range.end !== end) continue;
-      fragment.append(document.createTextNode(value.slice(last, match.index)));
-      const chip = document.createElement('span');
-      chip.className = 'composer-skill'; chip.contentEditable = 'false';
-      chip.dataset.skillReference = skill.reference;
-      const scope = skill.scope === 'personal' ? 'Personal' : 'Organization';
-      chip.title = `${scope} skill: ${skill.name}`;
-      chip.setAttribute('aria-label', chip.title);
-      chip.innerHTML = skillIcon(skill);
-      chip.append(document.createTextNode(skill.name));
-      fragment.append(chip); last = end;
-    }
-    fragment.append(document.createTextNode(value.slice(last)));
+    input.innerHTML = MoyaiSkillText.render(value, [...catalog.values()]);
     if (value.endsWith('\n')) {
-      const tail = document.createElement('br'); tail.dataset.editorTail = 'true'; fragment.append(tail);
+      const tail = document.createElement('br'); tail.dataset.editorTail = 'true'; input.append(tail);
     }
-    input.replaceChildren(fragment);
     input.dataset.empty = String(!value);
     if (caret) input.setSelectionRange(...caret);
   }
@@ -133,7 +114,7 @@ function bindSkillEditor(textarea, form) {
     if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
       event.preventDefault(); replace(...selection(), '\n'); return;
     }
-    if (event.data && input.value.length - (input.selectionEnd - input.selectionStart) + event.data.length > input.maxLength)
+    if (input.maxLength > 0 && event.data && input.value.length - (input.selectionEnd - input.selectionStart) + event.data.length > input.maxLength)
       event.preventDefault();
   });
   input.addEventListener('keydown', event => {
@@ -168,9 +149,10 @@ function bindSkillEditor(textarea, form) {
   input.addEventListener('drop', event => {if (!event.dataTransfer.files.length) event.preventDefault();});
   form.addEventListener('submit', event => {
     const length = input.value.length;
-    if ((input.required && !length) || (length && length < input.minLength) || length > input.maxLength) {
+    if ((input.required && !length) || (length && length < input.minLength) || (input.maxLength > 0 && length > input.maxLength)) {
       event.preventDefault(); event.stopImmediatePropagation(); input.focus();
-      toast(`Enter ${input.minLength > 0 ? input.minLength : 1}–${input.maxLength} characters, or attach a file.`);
+      const minimum = input.minLength > 0 ? input.minLength : 1;
+      toast(input.maxLength > 0 ? `Enter ${minimum}–${input.maxLength} characters, or attach a file.` : `Enter at least ${minimum} characters, or attach a file.`);
     }
   }, true);
   textarea.replaceWith(input); input.value = initial;
