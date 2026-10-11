@@ -11,7 +11,6 @@ dependencies = [
   # Compatible SDK usage schema; covered by real SDK transport tests.
   "openai==3.28.0",
   "pydantic-ai-slim[openai,temporal]==2.55.0",
-  "pydantic-ai-harness==0.55.0",
   "cryptography>=44",
   "pydantic-settings>=2.8,<3",
   "modal>=1.4,<2",

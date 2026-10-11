@@ -13,9 +13,8 @@ Only the catalog is in the initial prompt. Relevant instructions load on demand.
 | Owner | Responsibility |
 | --- | --- |
 | PydanticAI | Typed model/tool protocol, tool validation, cancellation snapshots and conversation execution |
-| PydanticAI Harness | Summarizing compaction, preserving user intent and tool pairing |
 | Temporal | Persisted model/tool activity outcomes, bounded retries, workflow replay and worker recovery |
-| Moyai broker | Model pinning, budgets, spend, permissions, skill/memory scope, approvals and tool authorization |
+| Moyai broker | Background input compaction, model pinning, budgets, spend, permissions, skill/memory scope, approvals and tool authorization |
 | Moyai session controller | Input ownership, Stop, child/credential waits, goals, answer settlement and computer lifecycle |
 | Moyai computer receipts | Stable operation identities, launch reconciliation and unknown-write outcomes |
 
@@ -31,10 +30,24 @@ use `<TEMPORAL_TASK_QUEUE>-agents-v1`. These are two pollers in the same worker
 process, so computer-waiting tools cannot consume every controller activity slot.
 A computer is acquired only when needed. Every 50 model requests, the agent yields
 at a completed tool boundary to checkpoint and bound workflow history.
-Library compaction uses a conservative UTF-8 byte counter aligned with broker
-admission, rather than the library's default characters-per-token estimate. The
-broker still rejects oversized requests, including a single input/tool result that
-cannot fit; the framework does not guarantee that every possible input fits a model.
+The broker is the sole compaction owner, using the same background flow as the
+native harnesses ([details](harnesses.md)). At 75% of the verified
+input budget it summarizes an older, closed prefix while fitting model requests
+and tools continue. Later requests adopt a valid summary plus every item appended
+since the snapshot. Instructions, first/latest user requests, unresolved tool groups
+and opaque media stay in order. Only a request that no longer fits waits for
+compaction, before acquiring a model slot; foreground work can preempt maintenance.
+The blocking PydanticAI Harness compactor is deliberately not installed.
+
+Compaction projects the provider input without rewriting PydanticAI's typed history.
+Summary failure preserves the original history and the last valid projection.
+The private summary cache is bounded and local to the gateway process, not a Temporal
+activity/checkpoint: a gateway restart may regenerate a summary from the preserved
+history. Temporal reuses completed model/tool activities, so a worker restart does
+not repeat their completed writes. Native compaction's capability, turn, requester,
+model and prefix checks still fence adoption. The full typed transcript continues
+to grow in encrypted storage; this change does not make it an unlimited context.
+The broker still rejects an input that cannot safely be reduced to fit.
 
 ## Recovery guarantees and limits
 
@@ -101,9 +114,18 @@ uv run --frozen --python 3.13 python -m scripts.pydantic_temporal_probe --output
 ```
 
 The tests use a real local Temporal server and PydanticAI graph. They cover worker
-restart without repeating a completed write, uncertain writes, replay, compaction,
+restart without repeating a completed write, uncertain writes, replay, background compaction,
 steering, Stop, scope fencing, private payload storage, the real skill broker and
 answer settlement. The provider-transport test exercises the installed official SDK
 against a local sealed Responses endpoint. Provider responses and cloud computers
 are controlled test fixtures; live model quality and cloud-provider behavior require
 deployment qualification.
+
+The focused compaction proof uses the installed Responses SDK, sealed transport,
+real broker, PydanticAI graph and a local Temporal server. It holds a scripted
+summary open while two model/tool steps complete, verifies only an oversized third
+request waits, then restarts the worker and checks exact tail adoption and replay:
+
+```sh
+uv run --frozen --python 3.13 pytest -q -s tests/test_pydantic_runtime.py::test_background_compaction_keeps_working_preserves_tail_and_replays
+```

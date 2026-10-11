@@ -21,7 +21,6 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.models import Model
     from pydantic_ai.toolsets import FunctionToolset
     from pydantic_ai.usage import UsageLimits
-    from pydantic_ai_harness.compaction import SummarizingCompaction
     from .pydantic_context import current_runtime
 
 
@@ -76,12 +75,6 @@ async def resolve_model(ctx, model_id):
     return BrokerModel(ctx.deps) if model_id == 'moyai' else None
 
 
-def conservative_tokens(text: str) -> int:
-    # Match the broker's text byte bound; the library's default chars/4
-    # heuristic could trigger compaction only after broker admission fails.
-    return len(text.encode('utf-8'))
-
-
 # Unknown app writes must never be repeated automatically. Computer operations
 # have their own durable identities, but this generic bridge can also send mail,
 # create PRs, etc. A lost activity result therefore requires reconciliation.
@@ -124,8 +117,8 @@ agent = Agent(
     name='moyai_pydantic_v1', deps_type=TurnScope, toolsets=[workspace],
     capabilities=[
         ResolveModelId(resolve_model),
-        SummarizingCompaction(max_fraction=.65, keep_messages=4, keep_user_messages=True,
-                             tokenizer=conservative_tokens),
+        # The broker owns background input compaction. Keep typed history intact
+        # for replay and let fitting requests proceed while a summary is pending.
         TemporalDurability(activity_config={
             'start_to_close_timeout': timedelta(minutes=15),
             'heartbeat_timeout': timedelta(seconds=5),

@@ -334,8 +334,8 @@ reserved inside that limit. Missing/invalid limits pause inference with a
 configuration error. Configure verified limits for private model aliases; model
 names such as Astra and GLM do not imply Claude's context window.
 
-Moyai's gateway owns background model-input compaction for Codex, Claude Agent
-SDK, Hermes, OpenCode, Deep Agents, Tool Loop and Pi. At 75% of the verified input
+Moyai's gateway owns background model-input compaction for PydanticAI, Codex, Claude
+Agent SDK, Hermes, OpenCode, Deep Agents, Tool Loop and Pi. At 75% of the verified input
 budget it snapshots an older, closed prefix and starts tool-free summarization.
 Fitting model requests continue using the existing history while that summary
 runs. A later request uses the completed summary plus every item appended after

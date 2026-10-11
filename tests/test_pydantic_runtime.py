@@ -185,41 +185,155 @@ async def test_steering_uses_library_cancellation_before_unexecuted_tools(tmp_pa
         assert calls == returns == {'not-executed'}
 
 
-async def test_library_compaction_runs_as_temporal_activity_and_replays(tmp_path):
+async def test_background_compaction_keeps_working_preserves_tail_and_replays(durable_app, tmp_path, monkeypatch):
+    import httpx
+    import httpx2
+    import time
     from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from app.context_budget import counting_input, ModelContextLimits
+    from app.harness_gateway import HarnessGateway
+    from app.pydantic_runtime import SealedModelTransport
+    from app.security import digest
+
+    app = durable_app
+    manager, store = app.state.manager, app.state.store
+    app.state.settings.litellm_api_base = 'https://scripted-provider.invalid/v1'
+    app.state.settings.model_context_limits['test-model'] = ModelContextLimits(
+        context_window=25000, max_input_tokens=25000, max_output_tokens=8192, default_output_tokens=4096)
     runtime = ScriptedRuntime(tmp_path)
-    summary_calls = []
+    summary_started, release_summary, pressured = (asyncio.Event() for _ in range(3))
+    summaries, inferences = [], []
+    proof = SimpleNamespace(owner=None)
+    original_forward = HarnessGateway.forward
+    async def forward(self, *args):
+        proof.owner = self.live_context
+        return await original_forward(self, *args)
+    monkeypatch.setattr(HarnessGateway, 'forward', forward)
+    original_measure = app.state.context_budget.measure
+    async def measure(payload, **kwargs):
+        budget = await original_measure(payload, **kwargs)
+        if budget.input_tokens > budget.input_budget and payload.get('tools'):
+            pressured.set()
+        return budget
+    monkeypatch.setattr(app.state.context_budget, 'measure', measure)
+
+    # Keep the installed Responses SDK and sealing transport; bridge only the
+    # network socket to the real ASGI broker. Only the upstream provider is fake.
+    actual_client = httpx.AsyncClient
+    class LocalBroker(httpx2.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            async with actual_client(transport=httpx.ASGITransport(app=app)) as client:
+                response = await client.request(request.method, str(request.url),
+                    headers=dict(request.headers), content=await request.aread())
+            return httpx2.Response(response.status_code, headers=dict(response.headers), content=response.content)
+    class LocalSealedTransport(SealedModelTransport):
+        def __init__(self, token):
+            self.token, self.transport = token, LocalBroker()
+    monkeypatch.setattr('app.pydantic_runtime.SealedModelTransport', LocalSealedTransport)
+
+    async def upstream(request):
+        body = json.loads(request.content)
+        if request.url.path == '/utils/token_counter':
+            return httpx.Response(200, json={'total_tokens': len(body['messages'][0]['content'][0]['text'].encode())})
+        if request.url.path == '/v1/chat/completions':
+            assert not body.get('tools')
+            summaries.append(body)
+            summary_started.set()
+            print('BACKGROUND: summary started and held at the scripted provider.' if not release_summary.is_set()
+                  else 'BACKGROUND: next prefix summarized after adoption.', flush=True)
+            await release_summary.wait()
+            return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {
+                'content': 'private-async-summary: older receipts are complete; preserve the original task.'}}],
+                'usage': {'prompt_tokens': 100, 'completion_tokens': 20, 'total_tokens': 120}})
+        assert request.url.path == '/v1/responses'
+        inferences.append(body)
+        number = len(inferences)
+        if number <= 2:
+            assert not release_summary.is_set()
+            assert 'private-async-summary' not in json.dumps(body)
+            output = [{'type': 'function_call', 'id': f'fc_{number}', 'call_id': f'write-{number}',
+                'name': 'workspace_call', 'arguments': json.dumps({'name': 'write_note', 'arguments_json': '{}'})}]
+            print(f'FOREGROUND: model step {number} completed while the summary is pending.', flush=True)
+        else:
+            assert number == 3 and release_summary.is_set()
+            assert 'private-async-summary' in json.dumps(body)
+            returns = [item for item in body['input'] if item.get('type') == 'function_call_output']
+            assert [item['call_id'] for item in returns] == ['write-1', 'write-2']
+            assert json.loads(returns[0]['output']) == {'result': 'new-tail-1'}
+            assert json.loads(returns[1]['output']) == {'result': 'new-tail-2 ' + 'z' * 6000}
+            assert 'Original task: preserve receipts.' in json.dumps(body)
+            assert 'Latest correction: do not deploy.' in json.dumps(body)
+            output = [{'type': 'message', 'id': 'msg_3', 'role': 'assistant', 'status': 'completed',
+                'content': [{'type': 'output_text', 'text': 'Finished with both new receipts.', 'annotations': []}]}]
+            print('ADOPTED: summary plus both exact new tool receipts; original task and correction retained.', flush=True)
+        tokens = counting_input(body)[1]
+        return httpx.Response(200, json={'id': f'resp_{number}', 'object': 'response', 'status': 'completed',
+            'model': 'test-model', 'created_at': 1770000000, 'output': output,
+            'usage': {'input_tokens': tokens, 'output_tokens': 40, 'total_tokens': tokens + 40}})
+    class ProviderClient(actual_client):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(upstream), **kwargs)
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', ProviderClient)
+
+    run = store.create_run('Original task: preserve receipts.', '', 'modal', [], chat_enabled=True,
+        harness=manager.settings.default_harness(), model='test-model', user_id='owner')
+    assert run['harness'] == 'pydantic-ai'
+    manager.submit(run)
+    message = store.claim_message(run['id'])
+    manager.save(run['id'], {'message_id': message['id'], 'segment': 0, 'turn_started': time.time()})
+    store.update_run(run['id'], status='running', token_hash=digest(manager.token(run['id'], message['id'])))
+    scope = TurnScope(run['id'], message['id'], actor_id='owner')
     @activity.defn(name='pydantic_prepare_v1')
     async def prepare(scope: TurnScope) -> TurnInput:
-        history = [ModelRequest(parts=[UserPromptPart('Preserve the original task: build a report.')])]
-        for i in range(8):
-            history += [ModelResponse(parts=[TextPart(f'Prior work {i} ' + 'data ' * 300)]),
-                        ModelRequest(parts=[UserPromptPart(f'Continue step {i}.')])]
-        return TurnInput(replace(scope, model='scripted', input_budget=16000), 'Finish the report.',
-                         'Follow the user task.', history)
-    runtime.prepare = prepare
-    async def model(scope, messages, settings, parameters):
-        if not parameters.function_tools:
-            from pydantic_ai.messages import ModelMessagesTypeAdapter
-            assert len(ModelMessagesTypeAdapter.dump_json(messages)) < scope.input_budget
-            summary_calls.append(messages)
-            return ModelResponse(parts=[TextPart('Original task: build a report. Prior work is complete; finish reporting.')],
-                                 model_name='scripted')
-        return ModelResponse(parts=[TextPart('Report ready.')], model_name='scripted')
-    runtime.model_request = model
-    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
-        client = configured_client(env.client, converter(tmp_path))
-        async with worker(client, runtime):
-            handle = await client.start_workflow(PydanticTurnWorkflow.run, TurnScope('test', 1),
-                id='pydantic-compaction', task_queue='pydantic-test')
-            result = await asyncio.wait_for(handle.result(), 25)
-        assert result.result['message'] == 'Report ready.'
-        assert summary_calls
-        assert len(str(result.messages)) < 20000
-        history = await handle.fetch_history()
-        assert 'summarize' in history.to_json()
-        await Replayer(workflows=[PydanticTurnWorkflow], data_converter=client.data_converter,
-                       plugins=[PydanticAIPlugin()]).replay_workflow(history)
+        history = [ModelRequest(parts=[UserPromptPart('Original task: preserve receipts.')])]
+        history += [ModelResponse(parts=[TextPart(f'older-receipt-{i}: ' + 'x' * 1000)]) for i in range(14)]
+        return TurnInput(replace(scope, model='test-model', input_budget=16808),
+            'Latest correction: do not deploy.', 'Keep instructions and receipts in order.', history)
+    async def call_tool(scope, call_id, name, arguments):
+        await asyncio.wait_for(summary_started.wait(), 10)
+        runtime.tool_calls += 1
+        with (tmp_path / 'note.txt').open('a') as stream:
+            stream.write(f'new-tail-{runtime.tool_calls}\n')
+        print(f'TOOL: real file write {runtime.tool_calls} completed while the summary is pending.', flush=True)
+        return {'result': 'new-tail-1' if runtime.tool_calls == 1 else 'new-tail-2 ' + 'z' * 6000}
+    runtime.prepare, runtime.call_tool = prepare, call_tool
+    runtime.model_request = manager.pydantic_runtime.model_request
+    try:
+        async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+            client = configured_client(env.client, converter(tmp_path))
+            first = worker(client, runtime)
+            task = asyncio.create_task(first.run())
+            handle = await client.start_workflow(PydanticTurnWorkflow.run, scope,
+                id='pydantic-background-compaction', task_queue='pydantic-test')
+            try:
+                await asyncio.wait_for(pressured.wait(), 25)
+                assert len(inferences) == runtime.tool_calls == 2 and len(summaries) == 1
+                assert not release_summary.is_set()
+                print('PRESSURE: only the oversized third request waits; two file writes already finished.', flush=True)
+            finally:
+                await first.shutdown()
+                await task
+            assert runtime.tool_calls == 2
+            print('RECOVERY: worker stopped during the context wait; starting a replacement.', flush=True)
+            release_summary.set()
+            async with worker(client, runtime):
+                result = await asyncio.wait_for(handle.result(), 25)
+            assert result.result['message'] == 'Finished with both new receipts.'
+            assert runtime.tool_calls == 2 and (tmp_path / 'note.txt').read_text() == 'new-tail-1\nnew-tail-2\n'
+            # Projection never mutates the typed checkpoint or public journal.
+            assert 'private-async-summary' not in str(result.messages)
+            assert 'older-receipt-0' in str(result.messages)
+            assert 'private-async-summary' not in str(store.messages(run['id'])) + str(store.events(run['id']))
+            history = await handle.fetch_history()
+            assert 'Original task' not in history.to_json()
+            await Replayer(workflows=[PydanticTurnWorkflow], data_converter=client.data_converter,
+                           plugins=[PydanticAIPlugin()]).replay_workflow(history)
+            assert len(inferences) == 3 and runtime.tool_calls == 2
+            print('VERIFIED: deterministic Temporal replay; no repeated writes; private summary stays private.', flush=True)
+    finally:
+        release_summary.set()
+        if proof.owner:
+            await proof.owner.close()
 
 
 @pytest.fixture

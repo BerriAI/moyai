@@ -12,7 +12,7 @@ from test_workspace import workspace
 from test_tracing import Processor
 
 
-def test_pydantic_context_is_not_rewritten_but_still_obeys_broker_budget(workspace, monkeypatch):
+def test_pydantic_single_oversized_input_is_rejected_before_inference(workspace, monkeypatch):
     from app.context_budget import ModelContextLimits
     app, client = workspace
     model = app.state.settings.resolve_model()
@@ -30,16 +30,13 @@ def test_pydantic_context_is_not_rewritten_but_still_obeys_broker_budget(workspa
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
-    async def unexpected_rewrite(*args, **kwargs):
-        pytest.fail('The broker must not independently rewrite PydanticAI working history')
-    monkeypatch.setattr('app.live_context.LiveContext.prepare', unexpected_rewrite)
     run = app.state.store.create_run('Context test', '', 'modal', [], harness='pydantic-ai', model=model)
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     def post(content):
         return client.post(f"/broker/{run['id']}/v1/responses", headers={'Authorization': 'Bearer cap'},
             json={'input': [{'role': 'user', 'content': content}], 'stream': False})
-    assert post('Preserve the library summary.').status_code == 200
-    assert 'Preserve the library summary.' in json.dumps(forwarded[0]['input'])
+    assert post('Preserve the original task.').status_code == 200
+    assert 'Preserve the original task.' in json.dumps(forwarded[0]['input'])
     response = post('x' * 40000)
     assert response.status_code == 409, response.text
     assert response.json()['detail']['code'] == 'context_compaction_required'
