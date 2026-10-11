@@ -199,6 +199,9 @@ def create_app(settings: Settings | None = None):
             # Publish a changed policy only after every component has completed
             # schema setup; joining workers remain fenced until this succeeds.
             store.database.configure_runtime(settings)
+        if settings.bundled_skills_enabled:
+            from .skill_templates import install_pack
+            install_pack(app.state.skills)
         return app
     except BaseException:
         store.close()

@@ -78,6 +78,7 @@ def jobs(app):
 async def test_opt_in_durable_private_draft_accept_and_load(review_app):
     app = review_app
     service, store = app.state.skill_learning, app.state.store
+    existing_skills = app.state.skills.rows_for(OWNER)
     turn(app)
     assert jobs(app) == []
     enable(app)
@@ -88,7 +89,7 @@ async def test_opt_in_durable_private_draft_accept_and_load(review_app):
     await process(app, lambda data: seen.append(data) or completion([proposal(data)]))
     assert 'PRIVATE OUTPUT' not in json.dumps(seen)
     assert seen[0]['current_message_id'] == message
-    assert app.state.skills.rows_for(OWNER) == []
+    assert app.state.skills.rows_for(OWNER) == existing_skills
     draft = service.detail(OWNER, drafts(app)[0]['id'])
     assert not service.listing('google:bob')['suggestions']
     with pytest.raises(HTTPException) as error:
@@ -99,7 +100,10 @@ async def test_opt_in_durable_private_draft_accept_and_load(review_app):
     assert draft['instructions'] == json.loads(service.security.decrypt(persisted['encrypted']))['proposal']['instructions']
     result = service.accept(OWNER, False, draft['id'], form(draft))
     assert service.accept(OWNER, False, draft['id'], form(draft)) == result
-    assert len(app.state.skills.rows_for(OWNER)) == 1 and drafts(app) == []
+    saved_skills = app.state.skills.rows_for(OWNER)
+    assert {row['id'] for row in saved_skills} == {row['id'] for row in existing_skills} | {result['id']}
+    assert [row for row in saved_skills if row['id'] != result['id']] == existing_skills
+    assert drafts(app) == []
     next_run = store.create_run('/personal:check-benchmark-fixtures Check benchmark', REPO, 'modal', [], chat_enabled=True, user_id=OWNER)
     store.claim_message(next_run['id'])
     assert 'Keep checks offline.' in app.state.skills.context(store.run(next_run['id']))
@@ -138,6 +142,7 @@ async def test_opt_out_during_extraction_and_forward_only_reenable(review_app):
 @pytest.mark.parametrize('change',['deleted','participant','edited'])
 async def test_sources_revalidated_before_apply_and_accept(review_app, change):
     app = review_app
+    existing_skills = app.state.skills.rows_for(OWNER)
     enable(app)
     run, message = turn(app)
     await process(app)
@@ -151,7 +156,8 @@ async def test_sources_revalidated_before_apply_and_accept(review_app, change):
     assert drafts(app) == []
     with pytest.raises(HTTPException) as error:
         app.state.skill_learning.accept(OWNER, False, draft['id'], form(draft))
-    assert error.value.status_code == 409 and not app.state.skills.rows_for(OWNER)
+    assert error.value.status_code == 409
+    assert app.state.skills.rows_for(OWNER) == existing_skills
     # Invalidation is not a user rejection. New eligible work can propose the
     # same workflow, but a stale form cannot accept the replacement draft.
     turn(app)
@@ -349,7 +355,8 @@ async def test_http_review_owner_csrf_scope_and_idempotent_accept(review_app):
         first = await client.post(path+'/accept',json=form(draft).model_dump())
         assert first.status_code == 200
         assert (await client.post(path+'/accept',json=form(draft).model_dump())).json() == first.json()
-        assert (await client.get('/api/skills')).json()['skills'][0]['name'] == draft['name']
+        skills = (await client.get('/api/skills')).json()['skills']
+        assert next(row for row in skills if row['id'] == first.json()['id'])['name'] == draft['name']
 
 
 async def test_input_budget_secret_filter_and_restart_recovery(review_app):

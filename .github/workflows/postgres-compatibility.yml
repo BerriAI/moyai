@@ -28,7 +28,7 @@ jobs:
               tests/test_attachments.py tests/test_message_queue.py tests/test_trace_outbox.py
           - group: features
             tests: >-
-              tests/test_credentials.py tests/test_skills.py tests/test_memory.py
+              tests/test_credentials.py tests/test_skills.py tests/test_bundled_skills.py tests/test_memory.py
               tests/test_initial_context.py tests/test_automations.py tests/test_automation_events.py
               tests/test_environments.py tests/test_infrastructure_costs.py
               tests/test_session_folders.py tests/test_spend.py

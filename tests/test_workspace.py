@@ -17,7 +17,7 @@ from app.security import digest
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
-                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01, repository_context_enabled=False)
+                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01, repository_context_enabled=False, bundled_skills_enabled=False)
     app = create_app(settings)
     # Existing endpoint tests use synthetic providers. Keep the real budget
     # check, but supply fixture limits/counting instead of external metadata.

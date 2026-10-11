@@ -7,6 +7,25 @@
 
 ## Skills
 
+Moyai ships three organization skills: `moyai-dev-and-test`, `pr-feedback-loop`,
+and `pr-delivery`. They cover this repository's setup/checks, repairing existing PR
+feedback, and evidence-backed PR handoff. The Moyai runbook applies only to
+`BerriAI/moyai`; other repositories should have their own verified runbooks.
+
+The release installs these templates at application startup using the existing
+encrypted, versioned library. No model call, sandbox startup or network lookup is
+needed. Their initial directory fits the shared model budget; instructions and reference
+files load on demand as described below. Simply having a skill does not invoke it.
+
+Admins can edit or archive them in Settings. Template upgrades preserve edits,
+renames, archives and existing names. Only unmodified, active
+templates receive a higher bundled source version; restarting an older release
+does not downgrade them. Set `BUNDLED_SKILLS_ENABLED=false` to stop future
+installation/upgrades; archive installed entries to remove them from discovery.
+These defaults require no schema migration and are independent of skill learning.
+See the [initial coding-pack evaluation](coding-skills-evaluation.md) for observed
+selection, overhead, limitations, and reproduction commands.
+
 The **Skills** library stores reusable Markdown instructions. Add a name, a
 description of when to use the skill, and Markdown text, or import a `SKILL.md`.
 You can also ask Moyai in chat to “save this as a personal skill” or, as an admin,
@@ -96,6 +115,11 @@ on chat, automation, and delegated surfaces. They are independent of a user's
 private library. The shared `repository_guidance` tool resolves workspace
 `AGENTS.md` files from root to the directory being edited, with scopes, hashes,
 and complete range reads. Native duplicate guidance loading is disabled.
+
+The editable coding templates are stored in `agent/skill_templates/` and installed
+by `app/skill_templates.py`. Public build-pinned procedures in `agent/skills/`
+keep their separate `bundled_skill_read` path; template edits, archives and disabled
+installation never expose a duplicate template through that public catalog.
 
 ## Suggestions learned from completed work
 

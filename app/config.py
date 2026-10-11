@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     temporal_dispatch_batch_size: int = Field(default=200, ge=1, le=10000)
     sandbox_prepared_pool_size: int = Field(default=0, ge=0, le=20)
     sandbox_prepared_idle_seconds: int = Field(default=300, ge=30, le=3600)
+    bundled_skills_enabled: bool = True
 
     @model_validator(mode='after')
     def database_backend(self):
