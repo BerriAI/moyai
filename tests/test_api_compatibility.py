@@ -51,7 +51,7 @@ def test_contract_loss_fences_live_api_reads_writes_and_health(cluster, mutation
         assert execute(settings, 'SELECT count(*) FROM runs') == [(0,)]
 
 
-@pytest.mark.parametrize('contract', ['API_PROTOCOL_REVISION', 'SCHEMA_REVISION'])
+@pytest.mark.parametrize('contract', ['API_PROTOCOL_REVISION', 'SCHEMA_COMPATIBILITY_REVISION'])
 def test_incompatible_code_contract_rejected_before_components(cluster, monkeypatch, contract):
     _, settings = cluster
     before = policies(settings)

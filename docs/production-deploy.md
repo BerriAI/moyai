@@ -4,17 +4,26 @@ For the activated four-service handoff topology, use **GitHub → Actions →
 Deploy production → Run workflow → main → Run workflow**. Leave the default
 **release_type: rolling** selected and **preflight_only** unchecked. This single
 run selects main at button press, waits for its CI, verifies compatibility, and
-replaces roles sequentially while active work continues. Follow
+applies any reviewed additive schema plan before replacing roles sequentially
+while active work continues. Online schema plans require the migration bridge
+already installed on every role; same-schema updates can install that bridge. Follow
 [compatible rolling deployments](rolling-deploy.md) for prerequisites and recovery.
 
 Every deployment includes preflight. Check **preflight_only** only when you want
 validation without deployment; a separate preflight run is optional. Incompatible
 schema, shared settings or runtime contracts stop the release before deployment
-and require a separately planned transition.
+and require a separately planned transition. An undeclared schema bump is not an
+online migration; see [schema migrations](schema-migrations.md) for the reviewed
+operations, initial activation and breaking-change procedure.
 
 The explicit **api** option remains for the narrower
 [compatible API deployment topology](api-deploy.md). The explicit **coordinated**
 option remains for the original two/three-service topology, described below.
+
+Rolling mode uses the existing SSH credential for read-only runtime checks and,
+when required, one explicit migration request to the coordinator's installed
+engine. Database credentials stay on that private service. No public database
+access, schema credentials in GitHub, or extra workflow input is needed.
 
 ## Original coordinated topology
 

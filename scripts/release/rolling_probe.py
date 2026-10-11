@@ -75,10 +75,28 @@ def health_identity(response, options, state):
             'broker_draining': broker_draining}
 
 
+def schema_capability(connection, schema, revision):
+    from app.schema_migrations import SCHEMA_REVISION
+    try:
+        from app.online_migrations import schema_support, schema_is_compatible
+    except ModuleNotFoundError as error:
+        if error.name != 'app.online_migrations':
+            raise
+        # Piped probes also run on pre-capability images during the bridge.
+        require(revision == SCHEMA_REVISION)
+        return {}
+    support = schema_support()
+    require(isinstance(support, dict) and set(support) == {'protocol', 'required', 'compatibility'}
+            and all(type(value) is int for value in support.values())
+            and support['protocol'] == 1 and support['required'] == SCHEMA_REVISION
+            and 0 < support['compatibility'] <= support['required'])
+    require(schema_is_compatible(connection, schema, support['required'], support['compatibility']))
+    return {'schema_support': support}
+
+
 def probe(options):
     from app.config import Settings
     from app.runtime_compatibility import api_fingerprint, background_fingerprint
-    from app.schema_migrations import SCHEMA_REVISION
     from render_start import configure_environment
     import psycopg
     require(not options['staged'] and not options['drain'])
@@ -94,9 +112,10 @@ def probe(options):
             and settings.moyai_coordinator_handoff and settings.temporal_enabled)
     with psycopg.connect(settings.moyai_database_url, connect_timeout=10) as connection:
         state = snapshot(connection, settings.moyai_database_schema)
+        state.update(schema_capability(connection, settings.moyai_database_schema, state['schema']))
     contracts = {'api': api_fingerprint(settings), **{
         role: background_fingerprint(settings, role) for role in ('worker', 'broker', 'coordinator')}}
-    require(state['schema'] == SCHEMA_REVISION and state['contracts'] == contracts)
+    require(state['contracts'] == contracts)
     request = urllib.request.Request('http://127.0.0.1:10000/health',
                                     headers={'Host': urlsplit(settings.public_url).netloc})
     try:

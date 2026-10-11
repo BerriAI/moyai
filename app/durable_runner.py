@@ -112,8 +112,8 @@ class DurableRunner(RunManager):
             " WHERE id=? AND status!='stopping' AND deletion_requested_at='' AND deleted_at=''",
             (*fields.values(), run_id), write_scope=run_id))
 
-    def is_active(self, run_id):
-        row = self.store.run(run_id)
+    def is_active(self, run_id, *, run=None):
+        row = self.store.run(run_id) if run is None else run
         return bool(row and row['status'] not in TERMINAL)
 
     def token(self, run_id, message_id):

@@ -213,7 +213,7 @@ async def test_slow_pr_summary_reads_do_not_stall_other_requests(users_app, monk
     fallback = Timer(2, release.set)
     fallback.start()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app),
-                                base_url=str(client.base_url), cookies=client.cookies) as reader:
+                                base_url=str(client.base_url), cookies=client.cookies.jar) as reader:
         path = '/api/runs?view=sidebar' if view == 'sidebar' else '/api/runs/' + run['id']
         pending = asyncio.create_task(reader.get(path))
         try:

@@ -48,6 +48,7 @@ from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from .session_lifecycle import SessionLifecycle
+from .session_maintenance import SessionMaintenance
 from .session_metadata import is_session_id_request
 from .session_pull_requests import SessionPullRequests
 from agent.memory_history import scrub_memory_history
@@ -265,6 +266,8 @@ def _create_app(settings, store):
     manager.persist = checkpoints.flush
     if store.schema_updates:
         store.execute("INSERT INTO organization(id,name) VALUES(1,?) ON CONFLICT DO NOTHING", (settings.organization_name,))
+    from .session_events import SessionEvents
+    store.session_events = SessionEvents(store)
     slack = SlackSessions(store, connectors, manager, checkpoints, settings, lens_feedback=lens_feedback)
     user_preferences.notifications = slack.notifications
     from .session_titles import SessionTitles
@@ -443,11 +446,13 @@ def _create_app(settings, store):
             async with background_lifespan():
                 yield
         finally:
+            await session_maintenance.close()
             if overlap_broker:
                 await asyncio.to_thread(model_slots.close)
             await asyncio.to_thread(store.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
+    session_maintenance = SessionMaintenance(store)
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
                   dependencies=[Depends(session_lifecycle.require_live_api)])
     if settings.moyai_runtime_role == 'worker':
@@ -469,6 +474,7 @@ def _create_app(settings, store):
         app.add_middleware(BrokerOwnershipMiddleware, owner=broker_requests)
     app.state.broker_requests = broker_requests
     app.state.session_lifecycle = session_lifecycle
+    app.state.session_maintenance = session_maintenance
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
     app.include_router(session_lifecycle.routes())
@@ -611,22 +617,29 @@ def _create_app(settings, store):
                 raise HTTPException(503, 'Database is unavailable.', headers=headers) from None
         return JSONResponse({"status": "ok"}, headers=headers)
 
-    @app.get("/api/session")
-    def session(request: Request):
-        sid = security.session(request)
+    def load_session(request: Request):
+        info = security.session_info(request) or {}
+        sid = info.get('sid')
         response = JSONResponse({})
         if not sid and security.local_preview():
             sid = security.new_session(response, local=True)
-        role = security.role(request) or ("admin" if sid else None)
-        info = security.session_info(request) or {}
+        role = info.get('role') or ("admin" if sid else None)
+        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
         user_id = None
         if info:
-            user_id = store.identity(info)
+            user_id = actor if actor is not None else store.identity(info)
         response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role,
                                    "identity": info.get("identity"), "user_id": user_id, "preferences": user_preferences.get(user_id), "google_enabled": settings.google_enabled(),
                                    "google_domains": sorted(settings.google_domains()) if settings.google_enabled() else [],
                                    "password_enabled": settings.password_login_enabled and bool(settings.workspace_password or settings.workspace_member_password)}).encode()
         response.headers["content-length"] = str(len(response.body))
+        return response, info, actor
+
+    @app.get("/api/session")
+    async def session(request: Request):
+        response, info, actor = await database(load_session, request)
+        if actor is not None:
+            session_maintenance.schedule(info['identity'], actor)
         return response
 
     @app.post("/api/login")
@@ -885,6 +898,10 @@ def _create_app(settings, store):
     def load_run_details(run_id, request, activity):
         security.require(request)
         from .activity_history import projection
+        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
+        if actor is None:
+            actor = store.identity(security.session_info(request))
+        admin = security.role(request) == 'admin'
         # Keep message status and the activity cursor in one read snapshot. A
         # response completing during this request must be included or replayed
         # by SSE, never skipped between independent database reads.
@@ -896,29 +913,29 @@ def _create_app(settings, store):
             messages = public_messages(run, store.messages(run_id, connection=connection))
             activity_data = projection(connection, run, messages) if activity == 'summary' and run['chat_enabled'] else {
                 'events': store.events(run_id, limit=10000, connection=connection)}
-        owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
+            metadata = store.conversation_metadata_in(connection, run, actor)
+            approvals = store.approvals(run_id, connection=connection)
+            goal = store.goal(run_id, connection=connection)
+            agents = coordinator.view(run_id, include_costs=admin, connection=connection)
         project = environments.context(run)
-        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
-        if actor is None:
-            actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request, actor))
+        feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'])
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
-        sidebar_id = store.root_id(run_id)
+        sidebar_id = metadata['workflow_root_id']
         run['workflow_root_id'] = sidebar_id
-        admin = security.role(request) == 'admin'
-        return {**public_run(run), **session_lifecycle.metadata(run, actor, admin),
-                **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
+        archives = {sidebar_id} if metadata['archived'] else set()
+        return {**public_run(run), **session_lifecycle.metadata(run, actor, admin, archives, root_id=sidebar_id),
+                **metadata['sidebar'],
                 'feedback_enabled': lens_feedback.enabled,
-                **activity_data, "approvals": store.approvals(run_id), "messages": messages,
+                **activity_data, "approvals": approvals, "messages": messages,
                 'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
-                "owner": owners[0] if owners else None, "goal": store.goal(run_id),
-                "agents": coordinator.view(run_id, include_costs=admin),
+                "owner": metadata['owner'], "goal": goal,
+                "agents": agents,
                 "credential_requests": credentials.pending(run,actor,admin),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": bool(store.rows("SELECT 1 FROM published_artifacts WHERE run_id=? LIMIT 1", (run_id,))), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
@@ -976,6 +993,15 @@ def _create_app(settings, store):
         actor = store.identity(security.session_info(request))
         result = await connectors.github.decide_write_access(run_id, access_id, actor, body.decision)
         await checkpoints.flush()
+        if body.decision == 'approve' and body.resume:
+            # The normal message path preserves requester identity, queueing and
+            # retry deduplication without touching the browser's unsent draft.
+            access = store.rows('SELECT repository_id, number FROM github_write_access WHERE id=? AND run_id=?',
+                                (access_id, run_id))[0]
+            await send_message(run_id, ChatMessage(
+                content=f"I approved access to PR #{access['number']} in repository {access['repository_id']} for this session. Check the approval and continue the requested work.",
+                client_id=f'pr-access-{access_id}',
+            ), request)
         return result
 
     @app.get('/api/runs/{run_id}/pull-request')
@@ -1107,24 +1133,37 @@ def _create_app(settings, store):
 
     def read_event_batch(run_id, cursor):
         # Each open conversation polls the database. Keep the whole read off
-        # the event loop so a busy database cannot stall navigation in other tabs.
-        row = store.run(run_id)
-        if not row or row['deleted_at']:
-            return None, [], None
-        batch = store.events(run_id, cursor)
-        status = {'status': response_status(row), 'active': manager.is_active(run_id),
+        # the event loop and reuse its snapshot/connection. Full run decoration
+        # (including swarm metadata) and a second durable activity read are not
+        # needed for every half-second status update.
+        with store.connect() as connection:
+            connection.begin_read()
+            rows = store.rows('''SELECT id,status,chat_enabled,model,active_model,updated_at,
+                active_message_id,checkpoint_error,deletion_requested_at,deleted_at,
+                pending_result,parent_run_id FROM runs WHERE id=?''', (run_id,), connection=connection)
+            if not rows or rows[0]['deleted_at']:
+                return None, [], None
+            row = rows[0]
+            batch = store.events(run_id, cursor, connection=connection)
+            root_id = store.root_id_in(connection, run_id) if row['parent_run_id'] else run_id
+        # Slack policy checks may borrow their own connection. Release the
+        # snapshot first so concurrent streams never exhaust the pool nesting it.
+        status = {'status': response_status(row), 'active': manager.is_active(run_id, run=row),
                   'model': row['model'], 'active_model': row['active_model'],
                   'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'],
                   'checkpoint_error': row['checkpoint_error'],
-                  'deletion_error': session_lifecycle.deletion_error(run_id),
+                  'deletion_error': session_lifecycle.deletion_errors.get(root_id, ''),
                   'slack_mirroring': slack.chat.mirroring(run_id)}
         return row, batch, status
 
+    def require_event_run(run_id, request):
+        security.require(request)
+        if not store.rows('SELECT 1 FROM runs WHERE id=?', (run_id,)):
+            raise HTTPException(404, 'Task not found')
+
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, request: Request, after: int = 0):
-        security.require(request)
-        if not await run_in_threadpool(store.run, run_id):
-            raise HTTPException(404, "Task not found")
+        await run_in_threadpool(require_event_run, run_id, request)
         try:
             last_id = int(request.headers.get("last-event-id", "0"))
         except ValueError:

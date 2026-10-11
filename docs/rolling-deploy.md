@@ -16,7 +16,10 @@ This mode replaces the worker, broker, coordinator and API in that order. Users
 can continue sending messages and admitted work stays under its existing durable
 ownership. Each replacement must become healthy, and its predecessor must retire,
 before the next role changes. The controller never drains the global session queue,
-cancels turns, changes concurrency, migrates the database, or changes edge routes.
+cancels turns, changes concurrency, or changes edge routes. A reviewed additive
+schema plan can run before the first replacement, once every live role supports
+the online migration protocol described below. This supports future declared
+expansions; it does not make arbitrary schema changes safe to run online.
 
 ## Activation prerequisites
 
@@ -42,7 +45,9 @@ separately planned initial migration and routing activation before enabling it:
 - Actual running commits equal their saved `MOYAI_BUILD_SHA` settings. Every role
   implements the correlated rolling health headers. Set environment variable
   `MOYAI_API_SERVICE_ID` in GitHub's `moyai-production` environment to the activated
-  API service; retain the existing deployment and read-only SSH credentials.
+  API service; retain the existing deployment and SSH credentials. SSH runtime
+  probes are read-only; an approved online schema plan uses the same private
+  connection to the coordinator's installed migration engine.
 
 The controller rejects the old singleton-broker/whole-cluster build contract,
 local disks, unverified schemas, staged services, mismatched saved build labels,
@@ -60,11 +65,48 @@ remain unchanged. A missing run still fails closed.
 
 The checked-out candidate computes its API and three background role contracts
 in an isolated process using each service's actual saved environment. All must
-equal the live contracts and exact schema revision. Same protocol revisions are
+equal the live contracts. The physical schema must either match the candidate or
+have an explicit compatible online plan. Same protocol revisions are
 a reviewed compatibility declaration, not proof that arbitrary code is safe.
 Review both old→new and new→old durable data/workflow behavior and run the actual
 release pair through ongoing-work and rollback tests before keeping revisions
-unchanged. Incompatible schema or runtime-setting changes need a maintenance plan.
+unchanged. Breaking schema or runtime-setting changes need a maintenance plan.
+
+## Online additive schema changes
+
+The initial bridge requires verified schema **18** and keeps its existing role
+fingerprints unchanged. Deploy that bridge to **all four roles with no schema
+change** before attempting a later expansion. A piped probe recognizes an older
+image without the engine, but permits it only for a same-schema release. It does
+not infer support from candidate code or a healthy HTTP response. This feature
+does not automatically migrate a pre-18 installation or activate role routing.
+
+For a later schema revision, the exact selected candidate must contain a complete
+reviewed chain in `app/online_schema_migrations.json`, matching its versioned
+schema digests. Every running role must advertise protocol 1, the same schema
+compatibility revision as the candidate, and a required revision no newer than
+the live database. Shared role contracts, runtime policy and concurrency remain
+unchanged. Missing steps, unsupported operations, capability gaps and schema
+downgrades stop before any database or service write.
+
+Preflight validates and records the complete plan and digest without applying
+it. A normal deployment records migration intent, then sends the plan once to
+the coordinator's installed engine. The engine rechecks the database, owners
+and contracts in its migration transaction. Reviewed additive DDL, its receipt
+chain and the physical revision commit together. Existing application owners
+remain admitted; there is no global worker pause or session cancellation.
+Individual DDL operations can still briefly wait for locks or fail their bounded
+timeouts: 250 ms to acquire a lock and five seconds per statement, with a
+20-second total transaction budget (also enforced by PostgreSQL 17 or newer).
+This is not a guarantee of zero latency during schema changes.
+
+Before any service replacement, the controller rereads every role and requires
+the same process identities, healthy state, contracts and policy, plus the exact
+target database revision. The target then becomes the fixed schema baseline for
+the rest of the release. The [schema migration guide](schema-migrations.md)
+defines the deliberately narrow additive operations and the maintenance path
+for changes outside that set. The bridge ships an empty plan registry; a future
+schema change still needs its own reviewed declaration and compatibility tests.
 
 For each selected role, the controller:
 
@@ -111,7 +153,12 @@ build label names the candidate; that is intentionally rejected by the next run.
 Inspect the `production-release` receipt and Render's exact live deployment and
 saved environment before any recovery action. The receipt contains per-role
 previous SHA/deploy/owner, selected SHA, confirmed/unconfirmed writes, deployments,
-and observed ownership replacements, without environment secrets.
+observed ownership replacements, and any full schema plan/digest and confirmation,
+without environment secrets. If the migration response was lost, its commit is
+unknown to this run: no deployment starts, no migration is automatically retried,
+and the database is never automatically rolled back. Inspect the committed schema
+and ledger. A fresh release can observe an already committed compatible target
+and continue the service replacements without reapplying the migration.
 
 Already completed compatible replacements may remain live if a later role fails.
 Once every service has a verified healthy baseline and saved labels match reality,
@@ -132,7 +179,10 @@ use rolling mode for the activated coordinator/broker handoff topology.
 
 `tests/release/test_rolling_deploy.py` exercises real controller logic against
 simulated Render, SSH and GitHub responses, including ongoing work, partial
-completion, unknown writes, external edits and failed ownership transfer.
+completion, unknown writes, external edits and failed ownership transfer. It also
+checks migration-before-replacement ordering, zero-write preflight, capability
+admission, unsafe-plan rejection, lost migration responses and committed-target
+recovery. These simulated checks do not establish live deployment continuity.
 `tests/release/test_rolling_probe.py` uses real local PostgreSQL locks/contracts
 and validates HTTP process correlation. These tests do not deploy Render or
 establish production latency. The first activated production release still needs

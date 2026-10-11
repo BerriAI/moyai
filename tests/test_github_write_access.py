@@ -255,6 +255,24 @@ def test_session_api_and_discovery_schema(external):
     assert client.get(f'/api/runs/{rid}').json()['pr_write_access'] == []
 
 
+def test_empty_access_panel_skips_connection_reads_but_existing_rows_stay_versioned(external, monkeypatch):
+    app, client, rid, headers, github, api = external
+    run = app.state.store.run(rid)
+    actor = run['active_user_id']
+
+    def unexpected_version_read():
+        pytest.fail('An empty PR access panel must not read the GitHub connection')
+
+    with monkeypatch.context() as guard:
+        guard.setattr(github, 'connection_version', unexpected_version_read)
+        assert github.access_requests(run, actor) == []
+    row = call(external).json()
+    assert github.access_requests(run, actor)[0]['id'] == row['id']
+    assert github.access_requests(run, 'another-person') == []
+    monkeypatch.setattr(github, 'connection_version', lambda: 'rotated-connection')
+    assert github.access_requests(run, actor) == []
+
+
 def test_real_signed_other_user_and_admin_cannot_approve_member_request(external):
     from test_spend import sign_in
     app, client, rid, headers, github, api = external
@@ -446,3 +464,34 @@ def test_late_identity_link_respects_consent_and_revokes_all_aliases(external, o
         store.execute('UPDATE runs SET active_user_id=? WHERE id=?', (current, rid))
         args['request_key'] = 'after-revocation-' + current.replace(':', '-')
         assert 'error' in call(external, name, args).json()
+
+
+def test_approve_and_resume_queues_once_without_regranting(external, monkeypatch):
+    app, client, rid, _, _, _ = external
+    row = call(external).json()
+    app.state.store.execute("UPDATE runs SET mode='demo' WHERE id=?", (rid,))
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    async def no_title(*args):
+        pass
+    monkeypatch.setattr(app.state.session_titles, 'request', no_title)
+    endpoint = f"/api/runs/{rid}/pr-write-access/{row['id']}"
+    for _ in range(2):
+        response = client.post(endpoint, json={'decision': 'approve', 'resume': True})
+        assert response.status_code == 200, response.text
+    messages = app.state.store.rows('SELECT * FROM messages WHERE run_id=? AND client_id=?',
+                                    (rid, f"pr-access-{row['id']}"))
+    assert len(messages) == 1
+    assert 'PR #100' in messages[0]['content']
+    assert messages[0]['user_id'] == 'shared:local:admin'
+    app.state.store.execute("UPDATE runs SET mode='modal' WHERE id=?", (rid,))
+    assert call(external).json()['status'] == 'approved'
+
+
+def test_deny_with_resume_does_not_queue_work(external):
+    app, client, rid, _, _, _ = external
+    row = call(external).json()
+    response = client.post(f"/api/runs/{rid}/pr-write-access/{row['id']}",
+                           json={'decision': 'deny', 'resume': True})
+    assert response.status_code == 200
+    assert not app.state.store.rows('SELECT * FROM messages WHERE run_id=? AND client_id=?',
+                                    (rid, f"pr-access-{row['id']}"))

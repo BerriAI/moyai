@@ -12,13 +12,23 @@ from datetime import datetime, timezone
 
 from .connector_errors import ConnectorError
 from .db import database, now
+from .session_events import BATCH_SIZE, RECONCILE_SECONDS
 
 logger = logging.getLogger(__name__)
+
+NOTIFICATION_TEXT = {
+    'session.approval_required': ('Approval needed', 'This session needs an administrator to review an action in Moyai.'),
+    'session.access_required': ('Access needed', 'This session is waiting for access. Provide it securely in Moyai to continue.'),
+    'session.response_ready': ('Response ready', 'Moyai finished replying. Open the session to review the result or respond.'),
+    'session.failed': ('Session needs attention', 'This session could not finish normally. Open it to review what happened and continue.'),
+    'session.interrupted': ('Session needs attention', 'This session could not finish normally. Open it to review what happened and continue.'),
+}
 
 
 class SlackNotifications:
     def __init__(self, owner):
         self.owner, self.store = owner, owner.store
+        self.events = self.store.session_events
         self.worker = None
         self.closing = False
         self.wake = asyncio.Event()
@@ -46,66 +56,18 @@ class SlackNotifications:
             return None
         return user['id'] if user['kind'] in {'google', 'cloudflare', 'slack'} else None
 
-    def signal_in(self, conn, run):
-        if run['deleted_at'] or run['deletion_requested_at'] or run['status'] in {'stopping', 'cancelled'}:
-            return None
-        # Child requests require the root owner's attention, but child answers
-        # are summarized by the parent and must not generate a stream of DMs.
-        pending = conn.execute("""SELECT a.id,a.run_id,a.created_at FROM approvals a
-            JOIN runs r ON r.id=a.run_id JOIN run_roots roots ON roots.run_id=r.id
-            WHERE roots.root_id=? AND a.status='pending' AND r.deleted_at=''
-            AND r.deletion_requested_at='' AND r.status IN ('running','reconnecting','awaiting_approval')
-            ORDER BY a.created_at,a.id LIMIT 1""", (run['id'],)).fetchone()
-        if pending:
-            return ('approval:' + pending['id'], pending['run_id'], 'Approval needed',
-                    'This session needs an administrator to review an action in Moyai.', pending['created_at'])
-        pending = conn.execute("""SELECT q.id,q.run_id,q.generation,q.created_at,r.updated_at FROM credential_requests q
-            JOIN runs r ON r.id=q.run_id JOIN run_roots roots ON roots.run_id=r.id
-            WHERE roots.root_id=? AND q.status='pending' AND r.deleted_at=''
-            AND r.deletion_requested_at='' AND r.status NOT IN ('stopping','cancelled','failed','interrupted','idle','completed')
-            ORDER BY q.created_at,q.id LIMIT 1""", (run['id'],)).fetchone()
-        if pending:
-            return (f"credential:{pending['id']}:{pending['generation']}", pending['run_id'], 'Access needed',
-                    'This session is waiting for access. Provide it securely in Moyai to continue.',
-                    pending['updated_at'] if pending['generation'] else pending['created_at'])
-        if run['status'] not in {'idle', 'completed', 'failed', 'interrupted'}:
-            return None
-        if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running') LIMIT 1", (run['id'],)).fetchone():
-            return None
-        answer = conn.execute("SELECT id,status,created_at FROM messages WHERE run_id=? AND role='assistant' AND status!='steered' ORDER BY id DESC LIMIT 1", (run['id'],)).fetchone()
-        if answer and answer['status'] == 'saving':
-            return None
-        turn = conn.execute("SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=? AND role='user'", (run['id'],)).fetchone()[0]
-        outcome = run['status'] if run['status'] in {'failed', 'interrupted'} else 'ready'
-        key = f"turn:{turn}:{outcome}:{answer['id'] if answer else 0}"
-        if run['status'] in {'failed', 'interrupted'} or (answer and answer['status'] == 'save_failed'):
-            return (key, run['id'], 'Session needs attention',
-                    'This session could not finish normally. Open it to review what happened and continue.', run['updated_at'])
-        if answer or run['status'] == 'completed':
-            return (key, run['id'], 'Response ready',
-                    'Moyai finished replying. Open the session to review the result or respond.',
-                    answer['created_at'] if answer else run['updated_at'])
-        return None
-
     def queue_in(self, conn, run, signal, user_id, team_id, status):
         preference = conn.execute('SELECT slack_notifications_since FROM user_preferences WHERE user_id=?', (user_id,)).fetchone()
         rollout = conn.execute('SELECT enabled_since FROM slack_notification_state WHERE id=1').fetchone()
-        if signal[4] < rollout['enabled_since'] or (preference and signal[4] < preference['slack_notifications_since']):
+        if signal.occurred_at < rollout['enabled_since'] or (preference and signal.occurred_at < preference['slack_notifications_since']):
             status = 'skipped'  # Neither rollout nor re-enabling replays historical events.
         conn.execute('''INSERT INTO slack_notifications
             (run_id,event_key,target_run_id,user_id,owner_id,team_id,status,created_at)
             VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,event_key) DO NOTHING''',
-            (run['id'], signal[0], signal[1], user_id, run['owner_id'], team_id, status, now()))
+            (run['id'], signal.key, signal.target_run_id, user_id, run['owner_id'], team_id, status, now()))
 
-    def preferences_changed_in(self, conn, user_id, enabled):
+    def preferences_changed_in(self, conn, user_id):
         conn.execute("UPDATE slack_notifications SET status='skipped' WHERE user_id=? AND status IN ('pending','preparing')", (user_id,))
-        if enabled:
-            # Enabling never replays old completions or existing requests.
-            for run in conn.execute("SELECT * FROM runs WHERE parent_run_id='' AND deleted_at='' ").fetchall():
-                if self.preference_owner_in(conn, run) == user_id:
-                    signal = self.signal_in(conn, run)
-                    if signal:
-                        self.queue_in(conn, run, signal, user_id, '', 'skipped')
 
     def installation(self):
         bot = self.owner.connectors.slack_installation()
@@ -125,16 +87,12 @@ class SlackNotifications:
         bot, allowed = self.installation()
         with self.store.connect() as conn:
             conn.begin_write()
-            for run in conn.execute("""SELECT r.* FROM runs r JOIN users u ON u.id=r.owner_id
-                WHERE r.parent_run_id='' AND r.deleted_at='' AND r.deletion_requested_at=''
-                AND u.kind IN ('google','cloudflare','slack')""").fetchall():
+            def queue(run, signal):
                 user_id = self.preference_owner_in(conn, run)
-                if not user_id or not self.enabled_in(conn, run, user_id):
-                    continue
-                signal = self.signal_in(conn, run)
-                if signal:
+                if user_id and self.enabled_in(conn, run, user_id):
                     self.queue_in(conn, run, signal, user_id, bot.get('team_id') or '',
                                   'pending' if allowed else 'skipped')
+            return self.events.consume_in(conn, 'slack_notifications', queue)
 
     def current(self, row):
         bot, allowed = self.installation()
@@ -146,18 +104,19 @@ class SlackNotifications:
             if (not run or not allowed or bot.get('team_id') != row['team_id']
                     or run['owner_id'] != row['owner_id'] or not self.enabled_in(conn, run, row['user_id'])):
                 return None
-            signal = self.signal_in(conn, run)
-            return (dict(run), signal, bot) if signal and signal[0] == row['event_key'] else None
+            signal = self.events.attention_in(conn, run)
+            return (dict(run), signal, bot) if signal and signal.key == row['event_key'] else None
 
     def payload(self, run, signal, channel):
+        label, description = NOTIFICATION_TEXT[signal.kind]
         title = self.owner.chat.scrub(run['display_title'] or run['prompt'])[:160].strip() or 'Moyai session'
-        url = self.owner.settings.public_url.rstrip('/') + '/#run=' + signal[1]
-        return {'channel': channel, 'text': html.escape(f'{signal[2]}: {title}', quote=False),
+        url = self.owner.settings.public_url.rstrip('/') + '/#run=' + signal.target_run_id
+        return {'channel': channel, 'text': html.escape(f'{label}: {title}', quote=False),
                 'parse': 'none', 'unfurl_links': False, 'unfurl_media': False,
                 'blocks': [
-                    {'type': 'header', 'text': {'type': 'plain_text', 'text': signal[2]}},
+                    {'type': 'header', 'text': {'type': 'plain_text', 'text': label}},
                     {'type': 'section', 'text': {'type': 'plain_text', 'text': title}},
-                    {'type': 'section', 'text': {'type': 'plain_text', 'text': signal[3]}},
+                    {'type': 'section', 'text': {'type': 'plain_text', 'text': description}},
                     {'type': 'actions', 'elements': [{'type': 'button', 'action_id': 'open_session_notification',
                         'text': {'type': 'plain_text', 'text': 'Open session'}, 'style': 'primary', 'url': url}]},
                     {'type': 'context', 'elements': [{'type': 'plain_text', 'text': 'Manage Slack notifications in Moyai Settings.'}]},
@@ -167,24 +126,24 @@ class SlackNotifications:
         async with self.delivery_lock:
             rows = await database(self.store.rows, "SELECT * FROM slack_notifications WHERE status='pending' AND retry_at<=? ORDER BY id LIMIT 1", (time.time(),))
             if not rows:
-                return
+                return False
             row = rows[0]
             sending = False
             try:
                 claimed = await database(self.store.execute, "UPDATE slack_notifications SET status='preparing' WHERE id=? AND status='pending'", (row['id'],))
                 if not claimed:
-                    return
+                    return True
                 async with asyncio.timeout(20):
                     current = await database(self.current, row)
                     if not current or not self.owner.identities:
                         await self.set_status(row, 'skipped')
-                        return
+                        return True
                     run, signal, bot = current
                     recipient = await self.owner.identities.requester(run, session_owner=True)
                     audience = {item.strip() for item in self.owner.settings.slack_session_users.split(',')}
                     if recipient['team_id'] != row['team_id'] or ('*' not in audience and recipient['user_id'] not in audience):
                         await self.set_status(row, 'skipped')
-                        return
+                        return True
                     token = await self.owner.connectors.slack_bot_token()
                     headers = {'Authorization': f'Bearer {token}'}
                     opened = await self.owner.connectors.request('POST', 'https://slack.com/api/conversations.open',
@@ -197,14 +156,14 @@ class SlackNotifications:
                         raise ConnectorError('The notification recipient changed.')
                     if not await database(self.current, row):
                         await self.set_status(row, 'skipped')
-                        return
+                        return True
                     await self.set_status(row, 'sending')
                     await self.owner.checkpoints.flush()
                     # Recheck after checkpoint awaits, before the only message send.
                     await database(self.owner.identities.check_requester, run, bot)
                     if not await database(self.current, row):
                         await self.set_status(row, 'skipped')
-                        return
+                        return True
                     sending = True
                     result = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
                         headers=headers, json=self.payload(run, signal, channel))
@@ -227,26 +186,42 @@ class SlackNotifications:
                 await database(self.store.execute, "UPDATE slack_notifications SET status='sent',slack_ts=? WHERE id=?", (result['ts'], row['id']))
             finally:
                 await self.owner.checkpoints.flush()
+            return True
 
     async def set_status(self, row, status):
         await database(self.store.execute, "UPDATE slack_notifications SET status=? WHERE id=? AND status IN ('pending','preparing','sending')", (status, row['id']))
 
+    def next_delay(self):
+        rows = self.store.rows("SELECT MIN(retry_at) AS ready FROM slack_notifications WHERE status='pending'")
+        ready = rows[0]['ready']
+        return min(RECONCILE_SECONDS, max(0, ready - time.time())) if ready is not None else RECONCILE_SECONDS
+
     async def watch(self):
-        while not self.closing:
-            try:
+        async with self.events.wake_on_commit(self.wake):
+            while not self.closing:
                 self.wake.clear()
-                await database(self.collect)
-                await self.deliver_one()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning('Slack notification worker will retry after %s', type(exc).__name__)
-            if asyncio.current_task().cancelling():
-                raise asyncio.CancelledError
-            try:
-                await asyncio.wait_for(self.wake.wait(), timeout=2)
-            except TimeoutError:
-                pass
+                try:
+                    count = await database(self.collect)
+                    if self.closing:
+                        break
+                    if await self.deliver_one():
+                        # Pace message delivery; this is not a session poll.
+                        await asyncio.sleep(1)
+                        continue
+                    if count == BATCH_SIZE:
+                        continue
+                    delay = await database(self.next_delay)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning('Slack notification worker will retry after %s', type(exc).__name__)
+                    delay = RECONCILE_SECONDS
+                if asyncio.current_task().cancelling():
+                    raise asyncio.CancelledError
+                try:
+                    await asyncio.wait_for(self.wake.wait(), timeout=delay)
+                except TimeoutError:
+                    pass
 
     def recover(self):
         if self.worker and not self.worker.done():
@@ -287,3 +262,5 @@ def initialize_schema(store):
         # Persist once at rollout, including when no one has saved preferences.
         # Restarts must still deliver new events created while the worker was down.
         conn.execute('INSERT INTO slack_notification_state VALUES(1,?) ON CONFLICT(id) DO NOTHING', (now(),))
+        from .session_events import SessionEvents
+        SessionEvents.subscribe_in(conn, 'slack_notifications')

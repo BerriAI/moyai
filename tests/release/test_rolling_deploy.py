@@ -43,6 +43,8 @@ class RollingRender(APIRender):
             self.deployments[deployment['id']] = deepcopy(deployment)
             if deployment['status'] == 'live':
                 self.owners[sid].append(str(10 + len(self.deployments)) + '@replacement')
+                if hasattr(self, 'replacement_support'):
+                    self.schema_supports[sid] = deepcopy(self.replacement_support)
                 self.live[sid] = deepcopy(deployment)
                 self.active_service = sid
                 self.remaining = self.retirement_polls
@@ -62,7 +64,9 @@ class RollingRender(APIRender):
         ready = self.ready and not (self.unhealthy and service.id == self.active_service)
         if self.unreachable and service.id == self.active_service:
             return {'ok': False}
+        support = getattr(self, 'schema_supports', {}).get(service.id)
         return {'ok': self.probe_ok, 'ready': ready, 'identity': owner, 'policy': self.policy,
+            **({'schema_support': deepcopy(support)} if support is not None else {}),
             **deepcopy(self.contracts), 'owners': sorted(sum(self.owners.values(), [])),
             'coordinators': self.owners[COORDINATOR][:1], 'brokers': self.owners[BROKER][:],
             'broker_leaders': self.owners[BROKER][:1], 'broker_draining': False,
@@ -270,3 +274,308 @@ def test_interruption_preserves_unconfirmed_deploy_intent(setup):
     with pytest.raises(KeyboardInterrupt): release.run()
     assert json.loads(release.receipt.read_text())['deploys'][0]['id'] is None
     assert len([call for call in render.calls if call[0] == 'POST']) == 1
+
+
+@pytest.fixture
+def online(setup):
+    from app.online_migrations import digest
+    from app.schema_migrations import SCHEMA_REVISION
+    release, render, github = setup
+    current, target = SCHEMA_REVISION, SCHEMA_REVISION + 1
+    support = {'protocol': 1, 'required': current, 'compatibility': current}
+    render.contracts['schema'] = current
+    render.schema_supports = {sid: deepcopy(support) for sid in render.env}
+    render.replacement_support = {**support, 'required': target}
+    candidate = {**deepcopy(render.contracts), 'schema': target,
+                 'schema_support': deepcopy(render.replacement_support)}
+    release.contract = lambda env: deepcopy(candidate)
+    plan = {'from_revision': current, 'to_revision': target, 'compatibility': current,
+            'steps': [{'from_revision': current, 'to_revision': target, 'compatibility': current,
+                       'source_digest': 'a' * 64, 'target_digest': 'b' * 64,
+                       'operations': [{'kind': 'add_column', 'table': 'sessions',
+                                       'name': 'release_test_value', 'type': 'TEXT', 'nullable': True}]}]}
+    plan['digest'] = digest(plan)
+    release.migration_plan = lambda previous, selected: deepcopy(plan)
+    calls = []
+
+    def migrate(service, value, expected):
+        assert render.calls == []
+        persisted = json.loads(release.receipt.read_text())['schema_migration']
+        assert persisted['status'] == 'requested' and persisted['confirmed'] is False
+        assert persisted['plan'] == value
+        assert service.id == COORDINATOR and expected['schema'] == current
+        assert expected['identities'] == release.identities
+        calls.append(deepcopy(value))
+        render.contracts['schema'] = target
+        return {'status': 'applied', **{key: value[key] for key in ('from_revision', 'to_revision', 'digest')}}
+
+    release.migrate = migrate
+    return release, render, github, plan, calls
+
+
+def test_reviewed_schema_expansion_precedes_every_service_write(online):
+    release, render, _, plan, calls = online
+    release.run()
+    assert calls == [plan]
+    assert release.record['schema_migration'] == {
+        'plan': plan, 'status': 'applied', 'confirmed': True, 'verified': True}
+    assert release.record['schema_revision'] == plan['to_revision']
+    assert [call[1] for call in render.calls if call[0] == 'POST'] == [WORKER, BROKER, COORDINATOR, API_ID]
+    assert release.record['status'] == 'success'
+
+
+def test_schema_preflight_records_full_validated_plan_without_writes(online):
+    release, render, _, plan, calls = online
+    release.preflight_only = True
+    release.run()
+    receipt = json.loads(release.receipt.read_text())
+    assert receipt['status'] == 'preflight_passed'
+    assert receipt['schema_migration'] == {
+        'plan': plan, 'status': 'planned', 'confirmed': False, 'verified': False}
+    assert calls == render.calls == []
+    assert render.contracts['schema'] == plan['from_revision']
+
+
+@pytest.mark.parametrize('sid', [WORKER, BROKER, COORDINATOR, API_ID])
+@pytest.mark.parametrize('change', ['missing', 'protocol', 'compatibility', 'required'])
+def test_every_live_source_must_support_the_expansion_before_any_write(online, sid, change):
+    release, render, _, plan, calls = online
+    if change == 'missing':
+        del render.schema_supports[sid]
+    elif change == 'protocol':
+        render.schema_supports[sid]['protocol'] = 2
+    elif change == 'compatibility':
+        render.schema_supports[sid]['compatibility'] = plan['compatibility'] - 1
+    else:
+        render.schema_supports[sid]['required'] = plan['to_revision']
+    with pytest.raises(ReleaseError, match='incompatible.*running source'):
+        release.run()
+    assert calls == render.calls == []
+
+
+@pytest.mark.parametrize('change', ['gap', 'digest', 'raw_sql', 'destructive', 'required_column', 'default',
+                                  'target', 'compatibility', 'different_endpoints'])
+def test_invalid_or_unsafe_online_plan_never_writes(online, change):
+    from app.online_migrations import digest
+    release, render, _, plan, calls = online
+    invalid = deepcopy(plan)
+    if change == 'gap':
+        invalid['steps'] = []
+    elif change == 'digest':
+        invalid['digest'] = '0' * 64
+    elif change == 'raw_sql':
+        invalid['steps'][0]['operations'] = [{'kind': 'sql', 'sql': 'DROP TABLE sessions'}]
+    elif change == 'destructive':
+        invalid['steps'][0]['operations'][0]['kind'] = 'drop_column'
+    elif change == 'required_column':
+        invalid['steps'][0]['operations'][0]['nullable'] = False
+    elif change == 'default':
+        invalid['steps'][0]['operations'][0]['default'] = 'value'
+    elif change == 'compatibility':
+        invalid['compatibility'] -= 1
+        invalid['steps'][0]['compatibility'] -= 1
+    elif change == 'different_endpoints':
+        for value in (invalid, invalid['steps'][0]):
+            value['from_revision'] += 1
+            value['to_revision'] += 1
+    else:
+        invalid['to_revision'] += 1
+    if change != 'digest':
+        invalid['digest'] = digest({key: value for key, value in invalid.items() if key != 'digest'})
+    release.migration_plan = lambda previous, target: invalid
+    with pytest.raises(ReleaseError, match='incompatible, incomplete or unsupported'):
+        release.run()
+    assert calls == render.calls == []
+
+
+def test_missing_reviewed_manifest_step_never_writes(online):
+    release, render, _, _, calls = online
+    def missing(previous, target):
+        raise ValueError('No reviewed manifest step')
+    release.migration_plan = missing
+    with pytest.raises(ReleaseError, match='incompatible, incomplete or unsupported'):
+        release.run()
+    assert calls == render.calls == []
+
+
+def test_no_migration_transport_fails_before_service_writes(online):
+    release, render, _, _, calls = online
+    release.migrate = None
+    with pytest.raises(ReleaseError, match='transport is unavailable'):
+        release.run()
+    assert calls == render.calls == []
+
+
+@pytest.mark.parametrize('change', ['schema', 'identity', 'policy', 'contract', 'capability', 'environment'])
+def test_last_baseline_check_stops_drift_before_migration(online, change):
+    release, render, _, plan, calls = online
+    def plan_after_drift(previous, target):
+        if change == 'schema': render.contracts['schema'] += 1
+        elif change == 'identity': render.owners[WORKER] = ['99@foreign']
+        elif change == 'policy': render.policy = '0' * 64
+        elif change == 'contract': render.contracts['contracts']['worker'] = '0' * 64
+        elif change == 'capability': render.schema_supports[WORKER]['protocol'] = 2
+        else: render.env[WORKER]['ENCRYPTION_KEY'] = 'changed'
+        return deepcopy(plan)
+    release.migration_plan = plan_after_drift
+    with pytest.raises(ReleaseError): release.run()
+    assert calls == render.calls == []
+
+
+def test_same_schema_capability_bridge_accepts_legacy_sources_without_migration(online):
+    release, render, _, plan, calls = online
+    render.schema_supports.clear()
+    render.replacement_support['required'] = plan['from_revision']
+    candidate = {**deepcopy(render.contracts), 'schema_support': deepcopy(render.replacement_support)}
+    release.contract = lambda env: deepcopy(candidate)
+    release.migration_plan = lambda *args: pytest.fail('Same-schema bridge must not plan a migration')
+    release.run()
+    assert calls == [] and release.record['schema_migration'] is None
+    assert release.record['status'] == 'success'
+    assert len([call for call in render.calls if call[0] == 'POST']) == 4
+
+
+@pytest.mark.parametrize('change', ['schema', 'identity', 'policy', 'contract', 'capability', 'readiness', 'environment'])
+def test_migration_refresh_rejects_foreign_drift_before_deployment(online, change):
+    release, render, _, _, calls = online
+    original = release.migrate
+    def drift(*args):
+        receipt = original(*args)
+        if change == 'schema': render.contracts['schema'] += 1
+        elif change == 'identity': render.owners[WORKER] = ['99@foreign']
+        elif change == 'policy': render.policy = '0' * 64
+        elif change == 'contract': render.contracts['contracts']['worker'] = '0' * 64
+        elif change == 'capability': render.schema_supports[WORKER]['protocol'] = 2
+        elif change == 'readiness': render.ready = False
+        else: render.env[WORKER]['ENCRYPTION_KEY'] = 'changed'
+        return receipt
+    release.migrate = drift
+    with pytest.raises(ReleaseError): release.run()
+    assert len(calls) == 1 and render.calls == []
+    assert release.record['schema_migration']['confirmed'] is True
+    assert release.record['schema_migration']['verified'] is False
+
+
+def test_schema_drift_after_migration_stops_before_deployment(online):
+    release, render, _, _, calls = online
+    original = render.call
+    def drift(method, path, body=None):
+        result = original(method, path, body)
+        if method == 'PUT': render.contracts['schema'] += 1
+        return result
+    render.call = drift
+    with pytest.raises(ReleaseError, match='schema or compatibility contracts changed'):
+        release.run()
+    assert len(calls) == 1
+    assert not [call for call in render.calls if call[0] == 'POST']
+
+
+@pytest.mark.parametrize('failure', ['lost_response', 'interrupt', 'wrong_receipt'])
+def test_uncertain_migration_is_never_retried_or_rolled_back(online, failure):
+    release, render, _, plan, calls = online
+    original = release.migrate
+    def interrupted(*args):
+        receipt = original(*args)
+        if failure == 'interrupt': raise KeyboardInterrupt()
+        if failure == 'lost_response': raise ReleaseError('Synthetic lost migration response')
+        return {**receipt, 'digest': '0' * 64}
+    release.migrate = interrupted
+    with pytest.raises(KeyboardInterrupt if failure == 'interrupt' else ReleaseError):
+        release.run()
+    assert calls == [plan] and render.calls == []
+    assert render.contracts['schema'] == plan['to_revision']
+    assert release.record['schema_migration']['status'] == 'requested'
+    assert release.record['schema_migration']['confirmed'] is False
+
+
+@pytest.mark.parametrize('malformed', ['extra', 'missing', 'status_type'])
+def test_malformed_migration_receipt_stops_before_deployment(online, malformed):
+    release, render, _, plan, calls = online
+    original = release.migrate
+    def corrupt(*args):
+        receipt = original(*args)
+        if malformed == 'extra': receipt['details'] = 'unexpected-private-data'
+        elif malformed == 'missing': del receipt['from_revision']
+        else: receipt['status'] = []
+        return receipt
+    release.migrate = corrupt
+    with pytest.raises(ReleaseError, match='incomplete or mismatched'):
+        release.run()
+    assert calls == [plan] and render.calls == []
+    assert release.record['schema_migration']['confirmed'] is False
+    assert 'unexpected-private-data' not in release.receipt.read_text()
+
+
+def test_new_run_observes_committed_migration_without_replaying_it(online, tmp_path):
+    release, render, github, plan, calls = online
+    original = release.migrate
+    def lost(*args):
+        original(*args)
+        raise ReleaseError('Synthetic lost migration response')
+    release.migrate = lost
+    with pytest.raises(ReleaseError): release.run()
+    recovery = RollingRelease(render, github, render.probe, tmp_path / 'recovery.json',
+        api_service_id=API_ID, contract=release.contract,
+        migration_plan=lambda *args: pytest.fail('Committed target must not be planned again'),
+        migrate=lost, wait_seconds=1, clock=release.clock, sleep=release.sleep)
+    recovery.run()
+    assert calls == [plan] and recovery.record['schema_migration'] is None
+    assert recovery.record['status'] == 'success'
+
+
+def test_partial_compatible_release_at_target_schema_resumes_remaining_roles(online):
+    release, render, _, plan, calls = online
+    render.contracts['schema'] = plan['to_revision']
+    for sid in (WORKER, BROKER):
+        render.env[sid]['MOYAI_BUILD_SHA'] = NEW
+        render.live[sid]['commit']['id'] = NEW
+        render.schema_supports[sid] = deepcopy(render.replacement_support)
+    release.run()
+    assert calls == []
+    assert [call[1] for call in render.calls if call[0] == 'POST'] == [COORDINATOR, API_ID]
+
+
+def test_new_probe_allows_only_exact_schema_on_legacy_source(monkeypatch):
+    import builtins
+    from app.schema_migrations import SCHEMA_REVISION
+    from scripts.release.rolling_probe import schema_capability
+    original = builtins.__import__
+    def legacy(name, *args, **kwargs):
+        if name == 'app.online_migrations':
+            raise ModuleNotFoundError('Legacy image has no migration engine', name=name)
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', legacy)
+    assert schema_capability(object(), 'tenant', SCHEMA_REVISION) == {}
+    with pytest.raises(ValueError): schema_capability(object(), 'tenant', SCHEMA_REVISION + 1)
+
+
+def test_missing_engine_dependency_is_not_treated_as_legacy_support(monkeypatch):
+    import builtins
+    from scripts.release.rolling_probe import schema_capability
+    original = builtins.__import__
+    def broken(name, *args, **kwargs):
+        if name == 'app.online_migrations':
+            raise ModuleNotFoundError('An installed engine dependency is absent', name='engine_dependency')
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', broken)
+    with pytest.raises(ModuleNotFoundError): schema_capability(object(), 'tenant', 1)
+
+
+@pytest.mark.parametrize('compatible', [False, True])
+def test_running_probe_uses_installed_source_compatibility_admission(monkeypatch, compatible):
+    import sys
+    from types import SimpleNamespace
+    from app.schema_migrations import SCHEMA_REVISION
+    from scripts.release.rolling_probe import schema_capability
+    support = {'protocol': 1, 'required': SCHEMA_REVISION, 'compatibility': SCHEMA_REVISION}
+    connection, calls = object(), []
+    def verify(*args):
+        calls.append(args)
+        return compatible
+    monkeypatch.setitem(sys.modules, 'app.online_migrations', SimpleNamespace(
+        schema_support=lambda: support, schema_is_compatible=verify))
+    if compatible:
+        assert schema_capability(connection, 'tenant', SCHEMA_REVISION + 1) == {'schema_support': support}
+    else:
+        with pytest.raises(ValueError): schema_capability(connection, 'tenant', SCHEMA_REVISION + 1)
+    assert calls == [(connection, 'tenant', SCHEMA_REVISION, SCHEMA_REVISION)]
