@@ -86,7 +86,7 @@ test('restored Activity activates after the controller snapshot is installed and
   let live=true,snapshot=null;
   const context={good:()=>live,activity:{},onActivity:async()=>{calls.push(snapshot);if(calls.length===1)throw Error('Retry history');},toast:message=>errors.push(message)};
   vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf('    async function mount(t)'),source.indexOf('    function mountCaptures(t)')),context);
+  vm.runInContext(source.slice(source.indexOf('    async function mount('),source.indexOf('    function mountCaptures(t)')),context);
   const tab={kind:'activity',element:{append(){}}};await context.mount(tab);
   const first=tab.activate();snapshot={id:'installed'};assert.equal(calls.length,0);
   await first;assert.equal(calls[0],snapshot);assert.deepEqual(errors,['Retry history']);
