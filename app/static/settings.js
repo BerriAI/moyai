@@ -138,6 +138,13 @@ async function renderSettings(recent=false) {
       <div><h2 id="preferences-title">Preferences</h2><p class="subtext">Saved for your account.${session.identity?'':' Shared password and local sign-ins use a shared profile.'}</p></div>
       <div class="settings-preferences">
         <div class="settings-preference">
+          <label for="slack-notifications">
+            <span class="settings-copy"><strong id="slack-notifications-title">Slack session notifications</strong><span id="slack-notifications-description">On by default for chats outside Slack. Get a DM when your session has a response ready, needs approval or access, or fails. Chats already in Slack keep their updates there. Requires your work account and the connected Moyai Slack bot.</span></span>
+            <input id="slack-notifications" type="checkbox" ${state.preferences.slack_notifications?'checked':''} role="switch" aria-labelledby="slack-notifications-title" aria-describedby="slack-notifications-description slack-notifications-status">
+          </label>
+          <p id="slack-notifications-status" class="subtext" role="status">${state.preferences.slack_notifications?'On':'Off'}</p>
+        </div>
+        <div class="settings-preference">
           <label for="send-immediately">
             <span class="settings-copy"><strong id="send-immediately-title">Send messages immediately</strong><span id="send-immediately-description">Send follow-ups into the active response instead of queueing them while Moyai is working.</span></span>
             <input id="send-immediately" type="checkbox" ${state.preferences.send_immediately?'checked':''} role="switch" aria-labelledby="send-immediately-title" aria-describedby="send-immediately-description send-immediately-status">
@@ -155,7 +162,7 @@ async function renderSettings(recent=false) {
     </section>
   </section>`);
   const userId=state.userId;
-  for(const key of ['send_immediately','omit_private_tool_payloads']){
+  for(const key of ['send_immediately','omit_private_tool_payloads','slack_notifications']){
     const id=key.replaceAll('_','-'),input=$('#'+id),status=$('#'+id+'-status');
     input.onchange=async()=>{
       const previous=state.preferences[key],hadFocus=document.activeElement===input;

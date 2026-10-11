@@ -11,7 +11,7 @@ import json
 
 from .database import DatabaseError, identifier
 
-SCHEMA_REVISION = 15
+SCHEMA_REVISION = 16
 # Dependency order; optional features are prepared even when disabled at runtime.
 COMPONENTS = (
     'user_roles', 'sandbox_settings', 'github_repositories', 'github_write_access',
@@ -23,6 +23,7 @@ COMPONENTS = (
     'coordinator_handoff',
     'broker_ownership',
     'session_journal', 'goals', 'slack_sources', 'published_artifacts', 'computer_operations', 'broker_payloads',
+    'slack_notifications',
 )
 
 
