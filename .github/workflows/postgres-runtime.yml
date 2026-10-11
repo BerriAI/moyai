@@ -135,7 +135,7 @@ jobs:
       - name: Verify chat snapshots reuse PostgreSQL pool connections
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_message_snapshot_pool.py tests/test_slack_mentions.py tests/test_attachments.py
       - name: Verify agent handoffs, warm workspaces and admission on PostgreSQL
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py tests/test_admission_scaling.py tests/test_idle_window.py
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py tests/test_admission_scaling.py tests/test_idle_window.py tests/test_independent_runtime.py tests/test_independent_runtime_warm.py
       - name: Measure admission while another sandbox termination is slow
         run: uv run --frozen --python 3.13 python scripts/admission_cleanup_probe.py
       - name: Measure wake delivery and admission under database contention
