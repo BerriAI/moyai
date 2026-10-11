@@ -5,7 +5,7 @@ of agent commentary. The announcement and publication receipt commit
 together and are deduplicated on readback/retry. A later turn failure preserves the
 PR link; creation alone does not imply successful CI or completed review.
 
-The GitHub connection exposes four read-only tools:
+The GitHub connection exposes these four CI inspection tools:
 
 | Tool | Input and result |
 | --- | --- |
@@ -25,8 +25,15 @@ Checks use a repository-scoped token with Checks read and Commit statuses read. 
 use Actions read only. Tokens remain on the server. New GitHub App manifests ask
 for these read permissions. Existing installations must have an organization
 owner enable and approve Checks/Commit statuses/Actions read; missing scopes return actionable
-tool errors and do not disable existing code/PR access. CI tools cannot rerun,
-cancel, dispatch, edit or delete workflows.
+tool errors and do not disable existing code/PR access. These four inspection tools cannot mutate CI. The separate `github_workflow_action`
+tool can rerun/cancel an exact authorized PR workflow with Actions write; see
+[the coding-tool audit](github-tool-audit.md) for permissions and boundaries.
+
+Use `github_capabilities` before describing a CI failure as a missing tool. It
+reports registered tools, connection policy, and missing installation scopes
+without changing access. It also checks the separate Workflows write permission
+used to publish workflow files. A permitted, registered tool can still fail on
+repository rules, stale heads, expired access, or transport errors.
 
 GitHub's [commit-status endpoint](https://docs.github.com/en/rest/commits/statuses#list-commit-statuses-for-a-reference)
 requires the separate Commit statuses permission; Contents read does not grant it.

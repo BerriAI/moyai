@@ -9,6 +9,7 @@ import subprocess
 
 ROOT = Path('/workspace')
 from sandbox.access_transport import git_environment
+from agent.github_paths import publishable_path
 
 
 class GitHubToolError(ValueError):
@@ -138,12 +139,7 @@ def collect(directory, title, body, request_key):
         raise GitHubToolError('There are no changed files to publish.')
     files = []
     for name in paths:
-        parts = name.split('/')
-        lower = name.lower()
-        if (any(p in {'', '.', '..'} or p.lower() in {'.git', '.ssh', 'codeowners'} or p.lower().startswith('.env') for p in parts)
-                or '\\' in name or any(ord(c) < 32 or ord(c) == 127 for c in name)
-                or lower in {'.github', '.github/workflows', '.github/actions'}
-                or lower.endswith(('.pem', '.key'))):
+        if not publishable_path(name):
             raise GitHubToolError('Remove credential or access-control files from the change before publishing.')
         path = target / name
         for ancestor in [path, *path.parents]:
