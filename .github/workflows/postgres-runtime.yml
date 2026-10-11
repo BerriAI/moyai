@@ -59,6 +59,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Preserve SQLite admission behavior
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_admission_scaling.py
+      - name: Verify enrolled bootstrap reads and deferred identity maintenance
+        run: |
+          uv run --frozen --python 3.13 pytest -q --tb=short tests/test_session_bootstrap.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_session_bootstrap.py
       - name: Verify Postgres transactions, ownership, import and restart
         # The import contract needs sqlglot; full migration coverage has its own workflow.
         run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py
