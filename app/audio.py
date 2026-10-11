@@ -1,4 +1,4 @@
-"""Bounded audio transcription through the workspace's existing LiteLLM gateway."""
+"""Audio transcription through the workspace's existing LiteLLM gateway."""
 import asyncio
 import json
 from pathlib import PurePath
@@ -9,7 +9,6 @@ import httpx
 AUDIO_TYPES = {'mp3': 'audio/mpeg', 'mpga': 'audio/mpeg', 'mpeg': 'audio/mpeg', 'wav': 'audio/wav', 'm4a': 'audio/mp4',
                'mp4': 'audio/mp4', 'webm': 'audio/webm', 'ogg': 'audio/ogg',
                'oga': 'audio/ogg', 'flac': 'audio/flac'}
-MAX_TRANSCRIPT = 16000
 
 
 def audio_type(name, raw):
@@ -50,18 +49,13 @@ class AudioTranscriber:
                         data=data,
                         files={'file': (name, raw, media_type)}) as response:
                         response.raise_for_status()
-                        chunks, size = [], 0
+                        chunks = []
                         async for chunk in response.aiter_bytes():
-                            size += len(chunk)
-                            if size > 256 * 1024:
-                                raise ValueError('The audio transcript is too long. Send a shorter recording.')
                             chunks.append(chunk)
                         result = json.loads(b''.join(chunks))
                 text = result.get('text') if isinstance(result, dict) else None
                 if not isinstance(text, str) or not text.strip():
                     raise ValueError('No speech was detected. Try another recording or type your message.')
-                if len(text) > MAX_TRANSCRIPT:
-                    raise ValueError('The audio transcript is too long. Send a shorter recording.')
                 return text.strip()
             except (httpx.HTTPError, TimeoutError):
                 # Provider responses may contain credentials or private audio text.

@@ -55,25 +55,19 @@ def test_save_current_requester_explicit_personal_and_admin_org_only(workspace):
     assert call(client,member,**form()).status_code==401
 
 
-def test_unspecified_skill_scope_returns_question_and_saves_nothing(workspace):
+def test_unspecified_skill_scope_defaults_to_personal_without_publishing(workspace):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
     args=form()
     del args['scope']
-    question=call(client,run,**args)
-    assert question.status_code==200
-    assert question.json()['status']=='scope_required' and question.json()['saved'] is False
-    assert [c['scope'] for c in question.json()['choices']]==['personal','organization']
-    assert all(c['available'] for c in question.json()['choices'])
-    assert not app.state.store.rows('SELECT * FROM skills')
-    assert not app.state.store.rows('SELECT * FROM skill_saves')
-    # Asking the question consumes no save receipt; an explicit reply can save.
-    assert call(client,run,**args,scope='organization').json()['scope']=='organization'
+    saved=call(client,run,**args)
+    assert saved.status_code==200 and saved.json()['saved'] and saved.json()['scope']=='personal'
+    assert call(client,run,**args).json()==saved.json()
     sign_in(app,client,'ishaan','ishaan@berri.ai')
+    assert client.get('/api/skills/'+saved.json()['id']).status_code==404
     member=active(app,'google:ishaan')
-    choices=call(client,member,**args).json()['choices']
-    assert choices[0]['available'] and not choices[1]['available']
+    assert call(client,member,**args).json()['scope']=='personal'
     assert_rejected(call(client,member,**args,scope='organization'), 403)
 
 
@@ -137,7 +131,7 @@ def test_large_attachments_persist_exactly_and_references_are_private_pinned_and
     assert 'runbook-secret-marker' in app.state.skills.context(later)
     for offset in range(100,600,100):
         assert call(client,later,'skills_read_file',name='personal:team-review',path='references/runbook.md',offset=offset,limit=80).status_code==200
-    assert len(app.state.store.rows('SELECT * FROM skill_file_reads'))==4
+    assert len(app.state.store.rows('SELECT * FROM skill_file_reads'))==6
     # Search can bring a relevant excerpt back without replaying the whole file.
     assert call(client,later,'skills_read_file',name='personal:team-review',path='references/runbook.md',search='runbook-secret-marker',limit=40).status_code==200
     missing = call(client,later,'skills_read_file',name='personal:team-review',path='references/runbook.md',search='not-in-this-document')
@@ -206,22 +200,23 @@ def test_skill_paths_rejected(workspace,path):
     assert not app.state.store.rows('SELECT * FROM skills')
 
 
-def test_file_limits_invalid_text_removal_and_rollback(workspace,storage_mode):
+def test_large_file_bundles_preserve_bytes_and_invalid_imports_roll_back(workspace,storage_mode):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
-    for raw,status in [(b'x'*(1024*1024+1),413),(b'binary\x00content',422),(b'\xff\xff',422)]:
+    for raw in (b'binary\x00content', b'\xff\xff'):
         attachment_id=attach(app,client,run,'reference.md',raw)
-        assert_rejected(call(client,run,**form(files=[{'path':'ref.md','attachment_id':attachment_id}])), status)
+        assert_rejected(call(client,run,**form(files=[{'path':'ref.md','attachment_id':attachment_id}])), 422)
     assert not app.state.store.rows('SELECT * FROM skills')
+    raw=b'x'*(1024*1024+1)
+    large=attach(app,client,run,'large.md',raw)
     saved=call(client,run,**form(files=[{'path':'ref.md','content':'Keep this file.'}])).json()
-    large=attach(app,client,run,'large.md',b'x'*(1024*1024))
-    result=call(client,run,**form(expected_revision=1,request_id='oversized-update',
-        files=[{'path':f'ref{i}.md','attachment_id':large} for i in range(5)]))
-    assert_rejected(result, 413)
-    assert client.get('/api/skills/'+saved['id']).json()['revision']==1
-    removed=call(client,run,**form(expected_revision=1,request_id='remove-reference',remove_files=['ref.md']))
-    assert removed.json()['files']==[]
+    result=call(client,run,**form(expected_revision=1,request_id='large-update',
+        files=[{'path':f'ref{i}.md','attachment_id':large} for i in range(5)])).json()
+    assert result['revision']==2 and len(result['files'])==6
+    assert client.get('/api/skills/'+saved['id']+'/files/ref4.md').content==raw
+    removed=call(client,run,**form(expected_revision=2,request_id='remove-reference',remove_files=['ref.md'])).json()
+    assert len(removed['files'])==5
     assert client.get('/api/skills/'+saved['id']+'/files/ref.md').status_code==404
 
 

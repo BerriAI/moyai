@@ -1,5 +1,7 @@
 """Loopback OpenAI/MCP adapter; never forwards a model-chosen destination."""
 import hmac
+import base64
+import hashlib
 import http.client
 import json
 import random
@@ -14,12 +16,12 @@ from contextlib import nullcontext
 from collections import Counter
 
 try:
-    from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
+    from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal, send_payload
     from .access_transport import broker_headers, open_broker
     from .broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from .startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
-    from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
+    from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal, send_payload
     from access_transport import broker_headers, open_broker
     from broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
@@ -146,7 +148,7 @@ class BrokerRelay:
                     (r'info/refs\?service=git-upload-pack' if self.command == 'GET' else
                      r'git-upload-pack' if self.command == 'POST' else r'(?!)'), self.path))
                 tool_read = git_route
-                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize'}}
+                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize', '/artifacts/transfer', '/agent-runtime', '/payloads'}}
                 if not git_route and not credential_route and self.path not in allowed.get(self.command, set()):
                     return self.error(404, 'Unknown broker route.')
                 try:
@@ -200,7 +202,7 @@ class BrokerRelay:
                         try:
                             name = json.loads(raw).get('name')
                             tool_read = isinstance(name, str) and name in relay.retry_safe_tools
-                            control_call = name in {'swarm_start', 'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
+                            control_call = name in {'swarm_start', 'agents_fanout', 'agents_retry', 'agents_wait', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
                             # These broker operations only read repository/PR
                             # metadata. Git mutations happen after their reply.
                             repository_read = (relay.repository_startup and self.command == 'POST'
@@ -221,8 +223,8 @@ class BrokerRelay:
                             # preserve its former 90s allowance per lookup.
                             options = {'budget': REPOSITORY_METADATA_BUDGET, 'attempt_timeout': 90} if repository_read or tool_read else {}
                             def read_reply(response):
-                                body = response.read(MAX_BODY + 1)
-                                if len(body) <= MAX_BODY and response.length:
+                                body = response.read()
+                                if response.length:
                                     raise http.client.IncompleteRead(body, response.length)
                                 return response.status, response.headers.get('Content-Type', 'application/json'), body
                             status, content_type, body = read(request, read_reply,
@@ -237,8 +239,6 @@ class BrokerRelay:
                             return self.error(503, str(exc))
                         if self.path == '/tools' or repository_read:
                             relay.startup_failure = None
-                        if len(body) > MAX_BODY:
-                            return self.error(502, 'Workspace service reply exceeds size limit.')
                         if self.path == '/tools':
                             # Only the authenticated broker's explicit declarations
                             # authorize replay. readOnlyHint alone can include
@@ -305,10 +305,8 @@ class BrokerRelay:
                         response_started = True
                         self.end_headers()
                         if control_call:
-                            body = response.read(MAX_BODY + 1)
+                            body = response.read()
                             response_bytes += len(body)
-                            if len(body) > MAX_BODY:
-                                raise ValueError('Delegation reply exceeds size limit')
                             value = json.loads(body)
                             group = value.get('moyai_wait_group')
                             if isinstance(group, str) and len(group) == 32 and all(c in '0123456789abcdef' for c in group):
@@ -458,17 +456,52 @@ class BrokerRelay:
         self.live_compaction = value.get('live_compaction') is True
         return value
 
-    def native(self, body):
-        route = '/context/native'
+    def journal(self, body):
+        raw = json.dumps(body, ensure_ascii=False).encode()
+        if len(raw) > MAX_BODY:
+            # The broker envelope is a transport boundary, not a content limit.
+            # All pieces and the final append can be retried after a lost ACK.
+            digest = hashlib.sha256(raw).hexdigest()
+            size = MAX_BODY // 2
+            parts = 0
+            for offset in range(0, len(raw), size):
+                self.journal({'action': 'upload', 'id': digest, 'part': parts,
+                              'data': base64.b64encode(raw[offset:offset + size]).decode()})
+                parts += 1
+            return self.journal({'action': 'commit_upload', 'id': digest, 'parts': parts, 'sha256': digest})
+        route = '/context/journal'
+        request = urllib.request.Request(self.remote.rstrip('/') + route,
+            data=seal(self.token, route, raw),
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
+                     'X-Moyai-Request-ID': uuid4().hex}, method='POST')
+        # Stable item IDs make a reconnect safe even after a lost response.
+        # Unlike arbitrary tool POSTs, this endpoint enforces stable item and
+        # upload identities. Retrying cannot append a second item or execute a
+        # task action, including after the response is lost following commit.
+        return _read_with_reconnect(request, lambda response: json.load(response),
+                                    stage='conversation_journal', notify=self.notify, opener=open_broker)
+
+    def goal(self, body):
+        route = '/goal'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
             data=seal(self.token, route, json.dumps(body).encode()),
             headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
-        with open_broker(request, timeout=3) as response:
-            raw = response.read(2_001_025)
-            if len(raw) > 2_001_024:
-                raise ValueError('Native state response exceeded its limit.')
-            return json.loads(raw)
+        # Cumulative clock receipts and one-time imports are idempotent. A short
+        # timeout leaves the next heartbeat to retry, without blocking tools.
+        timeout = 330 if body.get('action') in {'review', 'report'} else 5
+        with open_broker(request, timeout=timeout) as response:
+            return json.load(response)
+
+    def native(self, body):
+        def send(route, value):
+            request = urllib.request.Request(self.remote.rstrip('/') + route,
+                data=seal(self.token, route, json.dumps(value, ensure_ascii=False).encode()),
+                headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
+                         'X-Moyai-Request-ID': uuid4().hex}, method='POST')
+            with open_broker(request, timeout=30) as response:
+                return json.load(response)
+        return send_payload('/context/native', body, send)
 
     def maintain(self, snapshot, ack=''):
         route = '/context/maintenance'
@@ -478,10 +511,7 @@ class BrokerRelay:
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         # This waits for durable job admission, never for summary inference.
         with open_broker(request, timeout=2) as response:
-            raw = response.read(64_001)
-            if len(raw) > 64_000:
-                raise ValueError('Context maintenance response exceeded its limit.')
-            return json.loads(raw)
+            return json.load(response)
 
     def compact(self, summary, entries, *, summary_bytes=None):
         """Tool-free maintenance outside the runtime's next-model checkpoint hook.
@@ -510,10 +540,7 @@ class BrokerRelay:
                 exc.close()
                 time.sleep(3)
         with response:
-            raw = response.read(64_001)
-            if len(raw) > 64_000:
-                raise ValueError('Context summary response exceeded the limit.')
-            value = json.loads(raw)
+            value = json.load(response)
             return value if 'through_seq' in value else value['summary']
 
     def close(self):

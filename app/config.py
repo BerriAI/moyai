@@ -53,7 +53,7 @@ class Settings(BaseSettings):
         if self.sandbox_prepared_pool_size:
             if not self.temporal_enabled or self.sandbox_provider != 'modal':
                 raise ValueError('Prepared workspaces require Temporal and the Modal provider.')
-            if self.sandbox_prepared_pool_size >= self.max_concurrent_runs:
+            if self.max_concurrent_runs and self.sandbox_prepared_pool_size >= self.max_concurrent_runs:
                 raise ValueError('Prepared workspaces must leave capacity for active sessions.')
         if self.moyai_database_url:
             if urlsplit(self.moyai_database_url).scheme not in {'postgresql', 'postgres'}:
@@ -161,6 +161,8 @@ class Settings(BaseSettings):
     session_title_concurrency: int = Field(default=2, ge=1, le=8)
     session_title_backfill_limit: int = Field(default=50, ge=0, le=128)
     memory_review_enabled: bool = True
+    repository_context_enabled: bool = True
+    repository_context_refresh_seconds: int = Field(default=900, ge=60, le=86400)
     # Empty uses the completed turn's configured model; no new provider is needed.
     memory_review_model: str = Field(default='', max_length=200)
     memory_review_idle_seconds: float = Field(default=60, ge=0, le=3600)
@@ -229,12 +231,13 @@ class Settings(BaseSettings):
 
     auto_prepare_repositories: bool = True
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
-    max_concurrent_runs: int = Field(default=100, ge=1)
+    # Zero means unlimited. A positive value caps active and warm sandboxes.
+    max_concurrent_runs: int = Field(default=0, ge=0)
     max_pending_runs: int = Field(default=1000, ge=100)
-    max_parallel_agents: int = Field(default=100, ge=1, le=100)
+    max_parallel_agents: int = Field(default=100, ge=1)
     swarm_models: str = ''
-    # Bound response buffers on the web worker independently of sandbox count.
-    max_concurrent_model_requests: int = Field(default=8, ge=1)
+    # Zero means unlimited. A positive value bounds broker response buffers.
+    max_concurrent_model_requests: int = Field(default=0, ge=0)
     # Zero means no overall response deadline or iteration cap.
     run_timeout_seconds: int = Field(default=0, ge=0, le=82800)
     snapshot_timeout_seconds: int = Field(default=180, ge=10, le=900)
@@ -242,6 +245,7 @@ class Settings(BaseSettings):
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     sandbox_idle_seconds: int = Field(default=300, ge=0, le=3600)
     codex_runtime_reuse: bool = True
+    independent_agent_runtime: bool = True
     temporal_enabled: bool = False
     maintenance_drain: bool = False
     temporal_address: str = "localhost:7233"

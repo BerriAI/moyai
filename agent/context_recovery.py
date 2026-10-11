@@ -21,6 +21,8 @@ def prepare_context(agent, history):
     if hasattr(relay, 'context_window'):
         try:
             agent.compaction_window = relay.context_window()['input_budget']
+            if agent.context_store is not None:
+                agent.context_store.input_budget = agent.compaction_window
         except StartupUnavailable as exc:
             if getattr(agent, 'journal', None) is not None:
                 # A later goal/steering invocation owns completed work. Save it
@@ -39,7 +41,20 @@ def run_with_context_recovery(agent, prompt, history, invoke):
     ctx, store = agent.context, agent.context_store
     directory = ctx.spec.get('history_reference_dir', ctx.cwd)
     native = getattr(agent, 'native', None)
-    current = prompt if native is not None and native.resumed else agent.journal.prompt(prompt, history, cwd=directory)
+    typed_replay = getattr(agent, 'typed_replay', False)
+    from agent.context_views import current_view, history_view
+    def seed(current_prompt, records, *, resumed=False):
+        window = getattr(agent, 'compaction_window', None)
+        # Conservative UTF-8 allocation leaves room for native instructions,
+        # tool schemas, private context and output. The broker still counts the
+        # complete provider request; this is a view, never a retention cap.
+        allocation = window // 2 if window else None
+        current = current_view(current_prompt, directory=directory,
+                               budget=allocation // 2 if allocation else None)
+        viewed = history_view(records, directory=directory, budget=allocation) if not resumed else []
+        agent.replay_history = viewed
+        return current if typed_replay or resumed else agent.journal.prompt(current, viewed, cwd=directory)
+    current = seed(prompt, history, resumed=native is not None and native.resumed)
     previous = None
     attempts = 0
     timeout = ctx.spec.get('timeout')
@@ -81,13 +96,15 @@ def run_with_context_recovery(agent, prompt, history, invoke):
         # commentary/tool receipts were already journaled by the public hooks.
         pending_text = getattr(agent, 'pending_text', [])
         pending_text.clear()
-        target = max(512, min(6000, pressure['input_budget'] // (8 * attempts)))
+        store.input_budget = pressure['input_budget']
+        target = max(1, pressure['input_budget'] // (8 * attempts))
         ctx.activity.commentary('Compacting saved context before continuing. Completed tool receipts are preserved.')
         store.compact(ctx.relay.compact, force=True, summary_bytes=target)
         history = store.history()
-        current = agent.journal.prompt(
+        handoff = (
             'Continue the unfinished task from the saved receipts. This is a context handoff, not a new request. '
-            'Do not repeat completed actions.\n\nOriginal current request:\n' + prompt,
-            history, cwd=directory)
+            'Do not repeat completed actions.\n\nOriginal current request:\n' + prompt)
+        agent.compaction_window = pressure['input_budget']
+        current = seed(handoff, history)
         if native is not None:
             native.begin(resume=False)

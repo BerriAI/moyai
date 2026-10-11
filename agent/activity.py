@@ -19,7 +19,7 @@ def public_text(value, limit=2000):
     text = re.sub(r'(?i)(authorization\s*[:=]\s*[\"\']?(?:bearer|basic)\s+)[^\s\"\']+', r'\1[redacted]', text)
     text = re.sub(r'(?i)(\b(?:[\w-]*(?:token|secret|password|api[_-]?key)[\w-]*)[\"\']?\s*[:=]\s*)(?:\"[^\"]*\"|\'[^\']*\'|[^\s,;&]+)', r'\1[redacted]', text)
     text = re.sub(r'(https?://)[^/\s@]+@', r'\1[redacted]@', text)
-    return text[:limit] + ('…' if len(text) > limit else '')
+    return text if limit is None else text[:limit] + ('…' if len(text) > limit else '')
 
 
 def focus_text(value):
@@ -93,7 +93,7 @@ def tool_details(name, value):
         return None
     if name == 'browser_fill' and isinstance(value, dict):
         value = {key: '[redacted]' if key == 'value' else item for key, item in value.items()}
-    return trace_content(value, limit=8000)
+    return trace_content(value, limit=None)
 
 
 def formatted_details(name, value):
@@ -173,7 +173,7 @@ class ActivityReporter:
         # separate reasoning_callback. Strip tagged reasoning defensively too.
         if isinstance(text, str):
             focus, prose = split_focus(text)
-            prose = public_text(prose, 3000).strip()
+            prose = public_text(prose, None).strip()
             if focus:
                 self.emit('status', focus, {'activity_version': 1, 'phase': 'focus'})
             if prose:

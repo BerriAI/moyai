@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import zipfile
 import zlib
@@ -210,7 +211,8 @@ class FakeSandbox:
         self.archive = buffer.getvalue()
         self.completed = completed
         self.runtime_verified = False
-        self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read))
+        self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read),
+                                          copy_to_local=aio(self.copy_to_local))
         self.terminate = aio(self.terminate_sandbox)
         self.wait = aio(self.wait_sandbox)
         self.exec = aio(self.execute)
@@ -224,6 +226,10 @@ class FakeSandbox:
 
     async def read(self, path):
         return self.archive
+
+    async def copy_to_local(self, source, destination):
+        assert source == '/artifacts/result.zip'
+        Path(destination).write_bytes(self.archive)
 
     async def terminate_sandbox(self):
         self.terminated = True

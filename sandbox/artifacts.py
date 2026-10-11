@@ -1,4 +1,5 @@
-"""Bounded recovery archives prioritize repository edits over installed packages."""
+"""Stream recovery files and patches; exclude dependencies and private dotfiles."""
+import io
 import json
 import os
 from pathlib import Path
@@ -6,8 +7,7 @@ import subprocess
 import zipfile
 
 EXCLUDED = {"moyai-captures", "node_modules", "__pycache__", "venv", "env", "site-packages", "dist", "build"}
-FILE_LIMIT = 2 * 1024 * 1024
-TOTAL_LIMIT = 15 * 1024 * 1024
+CHUNK_BYTES = 1024 * 1024
 
 
 def eligible(relative):
@@ -23,12 +23,7 @@ def collect_archive(workspace, artifacts, token):
     workspace, artifacts = Path(workspace).resolve(), Path(artifacts)
     repositories, loose_files, omitted = [], [], []
     tracked_files = []
-    directories = 0
     for current, dirs, files in os.walk(workspace, followlinks=False):
-        directories += 1
-        if directories > 10000:
-            omitted.append("Directory scan limit reached")
-            break
         root = Path(current)
         if (root / ".git").exists():
             repositories.append(root)
@@ -38,33 +33,48 @@ def collect_archive(workspace, artifacts, token):
                          and not (root / d / "pyvenv.cfg").exists())
         loose_files.extend(root / name for name in sorted(files) if eligible(Path(name)))
 
-    total = 0
     repo_details = []
     with zipfile.ZipFile(artifacts / "result.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        secrets = [secret for secret in (token, os.environ.get('WORKSPACE_ACCESS_CLIENT_ID', '').encode(),
+                                         os.environ.get('WORKSPACE_ACCESS_CLIENT_SECRET', '').encode()) if secret]
+        span = max(map(len, secrets), default=1)-1
+
+        def add_stream(name, source):
+            # Carry original bytes across pages, including any secret crossing a
+            # page edge. Do not cut or buffer a complete file to redact it.
+            with archive.open(name, 'w', force_zip64=True) as target:
+                carry = b''
+                while chunk := source.read(CHUNK_BYTES):
+                    data = carry + chunk
+                    cut = max(0, len(data)-span)
+                    for secret in secrets:
+                        start = data.find(secret, max(0, cut-len(secret)+1))
+                        if 0 <= start < cut < start+len(secret):
+                            cut = start
+                    output, carry = data[:cut], data[cut:]
+                    for secret in secrets:
+                        output = output.replace(secret, b'[redacted]')
+                    target.write(output)
+                for secret in secrets:
+                    carry = carry.replace(secret, b'[redacted]')
+                target.write(carry)
+
         def add(name, data):
-            nonlocal total
-            if len(data) > FILE_LIMIT or total + len(data) > TOTAL_LIMIT:
-                omitted.append(name + " (size limit)")
-                return
-            for secret in (token, os.environ.get('WORKSPACE_ACCESS_CLIENT_ID', '').encode(),
-                           os.environ.get('WORKSPACE_ACCESS_CLIENT_SECRET', '').encode()):
-                if secret:
-                    data = data.replace(secret, b"[redacted]")
-            archive.writestr(name, data)
-            total += len(data)
+            add_stream(name, io.BytesIO(data))
 
         def add_file(path, name, root):
             if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root):
                 return
-            if path.stat().st_size > FILE_LIMIT:
-                omitted.append(name + " (size limit)")
-                return
-            add(name, path.read_bytes())
+            try:
+                with path.open('rb') as source:
+                    add_stream(name, source)
+            except OSError:
+                omitted.append(name + ' (file collection failed)')
 
         add_file(artifacts / "result.md", "result.md", artifacts.resolve())
         # Discover all nested checkouts before collecting loose files. A large
         # virtualenv cannot consume the archive budget before the actual edits.
-        for repo in repositories[:50]:
+        for repo in repositories:
             relative = repo.relative_to(workspace)
             label = str(relative)
             try:
@@ -90,19 +100,13 @@ def collect_archive(workspace, artifacts, token):
                         tracked_files.append(repo / name)
             except (OSError, subprocess.SubprocessError):
                 omitted.append(label + " (repository collection failed)")
-        if len(repositories) > 50:
-            omitted.append("Repository count limit reached")
-        for path in loose_files[:1000]:
+        for path in loose_files:
             add_file(path, "new-files/" + path.relative_to(workspace).as_posix(), workspace)
-        if len(loose_files) > 1000:
-            omitted.append("Loose file count limit reached")
         add_file(artifacts / "browser.png", "browser.png", artifacts.resolve())
-        for path in dict.fromkeys(tracked_files[:1000]):
+        for path in dict.fromkeys(tracked_files):
             add_file(path, "new-files/" + path.relative_to(workspace).as_posix(), workspace)
-        if len(tracked_files) > 1000:
-            omitted.append("Tracked file count limit reached")
         archive.writestr("recovery-manifest.json", json.dumps({
             "repositories": repo_details,
             "omitted": omitted,
-            "note": "Bounded workspace files and uncommitted patches, not a complete workspace backup. Dependencies are excluded; see omitted for collection limits.",
+            "note": "Workspace files and uncommitted patches. Dependencies, hidden files and symlinks are excluded; see omitted for collection failures. Publish exact deliverables with artifact_publish.",
         }, indent=2))

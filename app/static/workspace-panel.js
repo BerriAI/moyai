@@ -161,7 +161,7 @@
             const previous=MoyaiPullRequest.presentation(t.prStatus).state;t.prStatus=data;
             if(MoyaiPullRequest.presentation(data).state!==previous)draw();
           },
-          load:({refresh=false}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`,{recent:!refresh})}));return;
+          load:({refresh=false,page,head_sha,base_sha}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}${page?`&page=${page}&head_sha=${encodeURIComponent(head_sha||'')}&base_sha=${encodeURIComponent(base_sha||'')}`:''}`,{recent:!refresh})}));return;
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}
@@ -254,7 +254,7 @@
     function renderAgents(host){
       const focused=host.contains(document.activeElement)?document.activeElement?.getAttribute('data-agent-id'):null;
       const ready=agents.filter(child=>['idle','completed'].includes(child.status)).length;
-      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`);
+      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}">${globalThis.MoyaiAgentIcon(child.id)}<span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`);
       if(focused)host.querySelector(`[data-agent-id="${focused}"]`)?.focus({preventScroll:true});
     }
     function syncAgents(data){
@@ -321,7 +321,7 @@
       element.querySelectorAll('.copy-code').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText(b.closest('.code-block').querySelector('code').textContent);b.textContent='Copied';}catch{b.textContent='Select to copy';}});
     }
     function mountChat(t){
-      MoyaiUI.render(t.element, `<div class="side-chat-note"><span>Separate conversation · Main task keeps running</span><a data-full hidden target="_blank" rel="noopener">Open session ↗</a></div><div class="side-chat-messages" role="log" aria-label="Side conversation"></div><form class="side-chat-form"><p data-status role="status"></p><label class="sr-only" for="side-input-${t.uid}">Message side chat</label><textarea id="side-input-${t.uid}" placeholder="Ask about this session…" rows="3" maxlength="16000" required></textarea><div><select aria-label="Side chat model">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===(t.model||run.model)?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" data-stop hidden>Stop</button><button type="submit" aria-label="Send side chat message">↑</button></div><small>Starts with a snapshot of this conversation. Files and computer are separate.</small></form>`);
+      MoyaiUI.render(t.element, `<div class="side-chat-note"><span>Separate conversation · Main task keeps running</span><a data-full hidden target="_blank" rel="noopener">Open session ↗</a></div><div class="side-chat-messages" role="log" aria-label="Side conversation"></div><form class="side-chat-form"><p data-status role="status"></p><label class="sr-only" for="side-input-${t.uid}">Message side chat</label><textarea id="side-input-${t.uid}" placeholder="Ask about this session…" rows="3" required></textarea><div><select aria-label="Side chat model">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===(t.model||run.model)?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" data-stop hidden>Stop</button><button type="submit" aria-label="Send side chat message">↑</button></div><small>Starts with a snapshot of this conversation. Files and computer are separate.</small></form>`);
       const form=t.element.querySelector('form'),input=form.querySelector('textarea'),log=t.element.querySelector('[role="log"]'),status=form.querySelector('[data-status]'),model=form.querySelector('select'),send=form.querySelector('[type="submit"]'),stop=form.querySelector('[data-stop]'),link=t.element.querySelector('[data-full]');
       let timer,inFlight=false,enabled=false,unavailable=false,deleting=false,deletionError='',sending=false,stopping=false,signature='';
       function syncControls(){

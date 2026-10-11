@@ -24,7 +24,12 @@ separately planned initial migration and routing activation before enabling it:
   `MOYAI_SEPARATE_BROKER=true` and `TEMPORAL_ENABLED=true` on all four roles;
   `MOYAI_DATABASE_INITIALIZE=false`, staging off and maintenance drain off.
 - One private Oregon Render service per role, each diskless, auto-deploy off,
-  without autoscaling or command overrides. Every service needs Render's
+  without autoscaling or start-command overrides. Worker and coordinator may
+  retain the exact pre-deploy command
+  `/app/.venv/bin/python /app/build_workspace_image.py`; API and broker must have
+  no pre-deploy command. This hook prepares Modal images without starting runtime
+  jobs or migrating the database. The controller preserves the hook and rejects
+  other commands or edits during a release. Every service needs Render's
   **300-second shutdown allowance**. Use the normal repository Docker startup.
 - Actual running commits equal their saved `MOYAI_BUILD_SHA` settings. Every role
   implements the correlated rolling health headers. Set environment variable
@@ -73,8 +78,16 @@ Active sessions, model requests and leases do not need to reach zero. The shared
 model limit remains unchanged while brokers overlap. A process failure may still
 produce bounded retry/lease-recovery delay; this is not a zero-latency promise.
 
-Render's shutdown window is finite. API and broker requests get the configured
-270-second application drain within the 300-second platform allowance. A stream
+Render's shutdown window is finite. The API and broker keep accepting for 30
+seconds after SIGTERM for routing convergence, then drain admitted requests for
+up to 240 seconds, capped at 270 seconds after the first signal. The coordinator
+keeps accepting for 30 seconds, then retains its existing 20-second HTTP drain,
+leaving approximately 250 seconds for background cleanup. These waits leave
+cleanup headroom within the 300-second platform allowance. The grace reduces a
+brief routing/listener race; it is
+not a guarantee that private routing always converges within 30 seconds. Validate
+the real ingress path during each rollout. Ownership and background handoff still
+use the existing lifespan protocols. Worker and standalone shutdown are unchanged. A stream
 that outlasts that window can be interrupted and follows the existing durable
 failure/uncertainty rules. The controller cannot guarantee uninterrupted streams
 of unlimited duration and does not retry ambiguous external work.

@@ -115,10 +115,11 @@ test('saved access and decline never transmit labeled input drafts',async()=>{
   }
 });
 
-test('new skill asks for scope and cannot submit until a choice is made',async()=>{
+test('new skill defaults to personal and organization remains an explicit choice',async()=>{
   const f=fixture();await f.ctx.openSkillEditor();
   const scope=f.element('skill-scope'),form=f.element('skill-form');
-  assert.equal(scope.value,'');assert.equal(scope.required,true);
+  assert.equal(scope.value,'personal');assert.equal(scope.required,true);
+  scope.value='';
   await form.onsubmit({preventDefault(){},currentTarget:form});
   assert.equal(f.posts.length,0);assert.match(f.element('skill-form-error').textContent,/Choose Personal or Organization/);
   scope.value='organization';f.element('skill-name').value='team';f.element('skill-description').value='Team workflow';f.element('skill-instructions').value='Run the workflow.';
@@ -130,7 +131,7 @@ test('editing preserves the existing choice; members see that organization requi
   const edit=fixture({skill:{id:'skill-one',name:'team',description:'Team workflow',instructions:'Workflow instructions',scope:'organization',revision:2,can_manage:true}});
   await edit.ctx.openSkillEditor('skill-one');assert.equal(edit.element('skill-scope').value,'organization');
   const member=fixture({admin:false});await member.ctx.openSkillEditor();
-  assert.equal(member.element('skill-scope').value,'');
+  assert.equal(member.element('skill-scope').value,'personal');
   assert.equal(member.element('skill-scope').options.find(o=>o.value==='organization').disabled,true);
 });
 

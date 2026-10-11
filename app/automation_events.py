@@ -136,10 +136,10 @@ class AutomationEvents:
     @staticmethod
     def human_session(conn, run_id):
         # Workers are never eligible. Follow side-chat ancestry too, failing
-        # closed on broken, cyclic or excessively deep lineage.
+        # closed on broken or cyclic lineage.
         seen = set()
         while run_id:
-            if run_id in seen or len(seen) >= 100:
+            if run_id in seen:
                 return False
             seen.add(run_id)
             run = conn.execute("SELECT parent_run_id,side_chat_of,chat_enabled FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
@@ -151,14 +151,15 @@ class AutomationEvents:
         return True
 
     def session_payload(self, conn, message):
-        prior = conn.execute('''SELECT role,substr(content,1,1000) AS content,length(content) AS size FROM messages
+        prior = conn.execute('''SELECT id,role,content,user_id,created_at,input_kind,source_json,response_to_id FROM messages
             WHERE run_id=? AND id<? AND status!='deleted' AND role IN ('user','assistant')
-            ORDER BY id DESC LIMIT 11''', (message['run_id'], message['id'])).fetchall()
+            ORDER BY id''', (message['run_id'], message['id'])).fetchall()
         return {'event':'message.posted', 'session_id':message['run_id'], 'message_id':message['id'],
                 'user_id':message['user_id'], 'body':message['content'],
                 'url':self.automations.settings.public_url.rstrip('/') + '/#run=' + message['run_id'],
-                'conversation':[{'role':m['role'],'content':m['content']} for m in reversed(prior[:10])],
-                'context_truncated':len(prior) > 10 or any(m['size'] > 1000 for m in prior[:10]) or len(message['content']) > 4000}
+                'conversation':[{**{key:m[key] for key in ('id','role','content','user_id','created_at','input_kind','response_to_id')},
+                                 'source':json.loads(m['source_json'])} for m in prior],
+                'context_truncated':False}
 
     async def capture_sessions(self):
         changed = False
@@ -176,7 +177,9 @@ class AutomationEvents:
                     continue
                 messages = conn.execute('SELECT * FROM messages WHERE id>? ORDER BY id LIMIT 100', (cursor['message_id'],)).fetchall()
                 for message in messages:
-                    if (message['role'] == 'user' and message['status'] != 'deleted' and message['user_id']
+                    if (message['role'] == 'user' and message['input_kind'] == 'user'
+                            and not (message['client_id'] or '').startswith('swarm:')
+                            and message['status'] != 'deleted' and message['user_id']
                             and message['content'].strip() and self.human_session(conn, message['run_id'])):
                         context = self.match(row, 'session', self.session_payload(conn, message))
                         if context:

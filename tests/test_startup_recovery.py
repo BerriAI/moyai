@@ -196,7 +196,7 @@ def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp
     monkeypatch.setattr(agent, 'BrokerRelay', relay_factory)
     monkeypatch.setattr(agent, 'Path', lambda value: tmp_path / str(value).lstrip('/'))
     monkeypatch.setattr(agent, 'emit', lambda kind, message, data=None, **extra: events.append((kind, data, extra)))
-    monkeypatch.setattr('agent.agent.create_agent', enter_agent)
+    monkeypatch.setattr(agent, 'run_conversation', enter_agent)
     monkeypatch.setattr(github_tools, 'git', checked_git)
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     if outcome == 'exhausted':
@@ -255,6 +255,14 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
     from agent.harnesses.harness_registry import resolve
     from importlib import import_module
     events, reads, invocations = [], [], []
+    from app.session_journal import SessionJournal
+    from app.goals import Goals
+    server_store = Store(tmp_path / 'broker')
+    server_run = server_store.create_run('Do the task', '', 'modal', [], chat_enabled=True, user_id='fixture')
+    server_store.claim_message(server_run['id'])
+    server_store.update_run(server_run['id'], status='running', token_hash='test-token')
+    server_run = server_store.run(server_run['id'])
+    journal, goals = SessionJournal(server_store), Goals(server_store)
     def started():
         return sum(data.get('phase') == 'execution_started' for _, data, _ in events)
     class Gateway(BaseHTTPRequestHandler):
@@ -270,10 +278,13 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
             self.wfile.write(json.dumps({'input_budget': 0 if outcome == 'invalid' else
                                         64000 if not invocations else 32000}).encode())
         def do_POST(self):
-            self.rfile.read(int(self.headers['Content-Length']))
+            raw = self.rfile.read(int(self.headers['Content-Length']))
+            body = json.loads(unseal('test-token', self.path, raw))
+            result = (journal.exchange(server_run, body) if self.path == '/context/journal' else
+                      goals.exchange(server_run, body, internal=True) if self.path == '/goal' else {})
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b'{}')  # Optional maintenance/native state unavailable.
+            self.wfile.write(json.dumps(result).encode())  # Optional maintenance/native state unavailable.
     async def invoke(runtime, prompt, system_message):
         assert started() == 1
         invocations.append(runtime.compaction_window)
@@ -329,6 +340,7 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
                     store.close()
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
+        server_store.close()
 
 
 def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
@@ -344,13 +356,12 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
         def run_conversation(self, *args, **kwargs):
             assert any(e[2].get('phase') == 'execution_started' for e in events)
             instructions = kwargs['system_message']
-            assert 'before the first tool call' in instructions
-            assert 'Do not send only a status tag as the opening' in instructions
-            assert 'Before delegating to agents' in instructions
-            assert 'delivery includes a normal ready-for-review PR by default' in instructions
+            assert 'concise visible opening update' in instructions
+            assert 'A status tag alone is not an opening update' in instructions
+            assert 'bundled_skill_read' in instructions and 'delegation' in instructions
+            assert 'default delivery includes a ready-for-review PR' in instructions
             assert 'local-only work, no PR, or review/investigation only' in instructions
-            assert 'verify the publication tool returned a PR URL' in instructions
-            assert 'report the specific verified blocker' in instructions
+            assert 'Final answers contain no status tags and distinguish verified results' in instructions
             assert 'Do not push, merge, deploy, or publish unless explicitly requested' not in instructions
             calls.append('inference')
             self.commentary('<status>Auditing UI and schema changes</status>I’m checking the UI and schema before making changes.')

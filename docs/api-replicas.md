@@ -107,7 +107,7 @@ proof that arbitrary source changes are safe. Before retaining the revision:
 
 This API contract does not add Temporal build routing or rolling schema migration.
 Initial activation of the full rolling topology requires the selected release's
-offline schema migration (currently revision 8) and a contract-publishing
+offline schema migration (currently revision 15) and a contract-publishing
 coordinator. Old processes without those contracts cannot participate in that
 one-time transition. Later compatible releases use coordinator ownership transfer
 and broker request drain; they do not move a live stream between processes.

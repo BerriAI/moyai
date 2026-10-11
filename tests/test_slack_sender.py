@@ -71,7 +71,11 @@ def test_every_requester_sends_as_bot(sender, channel, actor):
     result = invoke(sender, arguments={'channel': channel, 'text': 'Requested message'})
     assert result['message']['user'] == 'U99999999'
     assert len(requests) == 1 and requests[0].headers['Authorization'] == f'Bearer {BOT}'
-    assert json.loads(requests[0].content) == {'channel': channel, 'text': ('Tin' if actor == 'google:bob' else 'Moe') + ': Requested message',
+    from app.slack_origin import is_self
+    payload = json.loads(requests[0].content)
+    assert is_self(app.state.connectors, payload, channel)
+    payload.pop('metadata')
+    assert payload == {'channel': channel, 'text': ('Tin' if actor == 'google:bob' else 'Moe') + ': Requested message',
                                               'unfurl_links': False, 'unfurl_media': False}
     assert USER not in client.get(f'/api/runs/{run_id}').text
     assert BOT not in client.get(f'/api/runs/{run_id}').text
@@ -108,7 +112,8 @@ def test_agent_cannot_supply_a_sender_override(sender):
     _, client, run_id, headers, requests = sender
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': 'slack_send', 'arguments': {'channel': 'C12345678', 'text': 'Hello', 'sender': 'Tin'}})
-    assert response.status_code == 422 and not requests
+    assert response.status_code == 200 and response.json()['code'] == 'invalid_arguments' and not requests
+    assert response.json()['dispatched'] is False
 
 
 def test_sender_name_is_one_line_and_cannot_create_slack_mentions(sender):
@@ -473,7 +478,8 @@ def test_agent_cannot_override_self_recipient(linked_sender, name):
         arguments.update(channel='me', text='Private issue')
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': name, 'arguments': arguments})
-    assert response.status_code == 422 and not requests
+    assert response.status_code == 200 and response.json()['code'] == 'invalid_arguments' and not requests
+    assert response.json()['dispatched'] is False
 
 
 @pytest.mark.parametrize('problem', ['profile_scope', 'linking_disabled', 'read_only', 'disabled'])

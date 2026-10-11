@@ -10,6 +10,19 @@ RUNTIME_FILES = Path(__file__).parent.parent
 SANDBOX_FILES = RUNTIME_FILES / "sandbox"
 
 
+def agent_runtime_image():
+    """Small isolated Codex guest, with no repository or desktop preparation."""
+    from sandbox.harness_dependencies import CODEX_SDK_VERSION, CODEX_WEBSOCKETS_VERSION
+    return (modal.Image.debian_slim(python_version='3.14')
+            .pip_install('openai-codex=='+CODEX_SDK_VERSION, 'websockets=='+CODEX_WEBSOCKETS_VERSION,
+                         'cryptography==50.0.1')
+            .add_local_dir(SANDBOX_FILES, remote_path='/opt/workspace-runner/sandbox', copy=True,
+                           ignore=['**/__pycache__/**', '**/*.pyc'])
+            .add_local_dir(RUNTIME_FILES/'agent', remote_path='/opt/workspace-runner/agent', copy=True,
+                           ignore=['**/__pycache__/**', '**/*.pyc'])
+            .env({'PYTHONUNBUFFERED': '1', 'PYTHONPATH': '/opt/workspace-runner'}))
+
+
 def workspace_image(settings: Settings) -> modal.Image:
     revision = settings.hermes_revision
     if not re.fullmatch(r"[0-9a-f]{40}", revision):

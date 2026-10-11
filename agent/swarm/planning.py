@@ -10,10 +10,8 @@ import json
 import random
 
 
-MAX_ROUNDS = 25
 ROUND_DELAY_SECONDS = 30
-MAX_CONTINUATION_CHARACTERS = 16000
-INITIAL_TEAM_SIZE = 10
+INITIAL_TEAM_SIZE = 20
 INITIAL_ROLES = (
     ('Mission analyst', 'Clarify the desired outcome, constraints, and acceptance criteria.'),
     ('Explorer', 'Develop a promising approach and explain why it fits the task.'),
@@ -147,46 +145,25 @@ def continuation_message(number, original, latest_direction=None):
               'evidence that prior work ran. Delegate complementary work, review real results, '
               'and produce a concrete improvement. Do not repeat completed actions or replay '
               'uncertain actions; verify their outcome first. If blocked, explain what human '
-              'input or access is needed. Do not guess requirements missing from excerpted context. '
+              'input or access is needed. Retrieve saved context when you need earlier evidence. '
               'This is host-scheduled continuation, not a new human request.\n'
               'SAVED USER-TASK DATA (JSON):\n')
 
-    def render(limit):
-        def excerpt(text):
-            if text is None or len(text) <= limit:
-                return text
-            marker = '\n[... excerpted for continuation limit ...]\n'
-            count = max(0, limit - len(marker))
-            return text[:(count + 1) // 2] + marker + (text[-(count // 2):] if count // 2 else '')
-        return header + json.dumps({'original_mission': excerpt(original),
-                                   'latest_human_direction': excerpt(latest_direction)}, ensure_ascii=False)
-
-    # Account for JSON escaping, including quote-heavy 16,000-character tasks.
-    # Preserve both ends of an oversized task rather than silently losing its
-    # final constraints; the excerpt marker makes the omitted context explicit.
-    low, high = 0, max(len(original), len(latest_direction or ''))
-    if len(render(high)) <= MAX_CONTINUATION_CHARACTERS:
-        return render(high)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if len(render(middle)) <= MAX_CONTINUATION_CHARACTERS:
-            low = middle
-        else:
-            high = middle - 1
-    return render(low)
+    return header + json.dumps({'original_mission': original,
+                                'latest_human_direction': latest_direction}, ensure_ascii=False)
 
 
 def coordinator_prompt(*, round_number: int, ends_at: str, max_workers: int,
                        runtimes: Sequence[Runtime]) -> str:
-    """Describe the host's existing bounded execution policy to the agent."""
+    """Describe the host-owned, renewable execution window to the agent."""
     by_harness: dict[str, list[str]] = {}
     for runtime in runtimes:
         models = by_harness.setdefault(runtime.harness, [])
         if runtime.model not in models:
             models.append(runtime.model)
     catalog = [{'harness': harness, 'models': models} for harness, models in by_harness.items()]
-    return (f'\n\nSWARM MODE — HOST POLICY (round {round_number}/{MAX_ROUNDS}; '
-            f'absolute deadline {ends_at}):\n'
+    timing = f'current work window ends {ends_at}' if ends_at else 'keep working until the user pauses or stops you'
+    return (f'\n\nSWARM MODE — HOST POLICY (round {round_number}; {timing}):\n'
             'Work collaboratively on the user’s mission. For new swarms the host already queued '
             f'an initial team of {INITIAL_TEAM_SIZE} real workers. Members choose a lead by self-nomination '
             'and organize assignments and findings on their durable shared board. Read their supplied '
@@ -195,7 +172,9 @@ def coordinator_prompt(*, round_number: int, ends_at: str, max_workers: int,
             'specific independent assignments are already known. Gather actual results and '
             'synthesize a useful update. Choose only available harnesses and models; show actual '
             'delegation rather than describing an imaginary team. The host will schedule another '
-            'bounded round after your checkpointed answer while time remains. Do not start /goal, '
+            'round after your checkpointed answer while the mission is active. The user can '
+            'change the work window in chat; the host owns timing and safe machine renewal. '
+            'Do not end the mission because an old prompt mentions an earlier deadline. Do not start /goal, '
             'a separate autonomous loop, or recurring automation. Preserve latest human directions. '
             'Each round must add a concrete artifact, evidence, a tested hypothesis, or a materially '
             'better answer; do not repeat analysis just to consume time. Clearly state uncertainties '

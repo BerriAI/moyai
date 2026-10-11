@@ -35,5 +35,8 @@ class MemoryObjects:
         assert len(raw) == expected_size
         assert reference == 'test:' + hashlib.sha256(raw).hexdigest()
 
+    def copy_to(self, reference, expected_size, stream):
+        stream.write(self.read(reference, expected_size))
+
     def close(self):
         pass

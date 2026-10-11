@@ -108,8 +108,8 @@ def test_audio_playback_obeys_draft_ownership(workspace, monkeypatch, storage_mo
     assert client.get(file['audio_url']).status_code == 401
 
 
-@pytest.mark.parametrize('reply', [{'text': ''}, {'text': 'x' * 16001}, {'text': None}, []])
-def test_empty_or_oversized_transcripts_cannot_be_sent(workspace, monkeypatch, reply):
+@pytest.mark.parametrize('reply', [{'text': ''}, {'text': None}, []])
+def test_invalid_transcripts_cannot_be_sent_through_legacy_upload(workspace, monkeypatch, reply):
     app, client = workspace
     configured(app)
     gateway(monkeypatch, lambda r: httpx.Response(200, json=reply))
@@ -233,7 +233,8 @@ def test_slack_download_and_transcription_use_separate_credentials(slack_app, mo
     gateway(monkeypatch, response)
     slack_download(monkeypatch, response)
     name, raw, inspected = asyncio.run(app.state.slack.files.read('F12345678','T12345678'))
-    assert inspected[2] == 'Read this voice message.' and raw == wav()
+    with raw:
+        assert inspected[2] == 'Read this voice message.' and raw.read() == wav()
 
 
 def test_slack_file_candidates_include_images_and_ignore_untrusted_urls():

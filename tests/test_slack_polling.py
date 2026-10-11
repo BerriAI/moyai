@@ -77,7 +77,7 @@ def test_shutdown_drains_collection_before_returning(slack_app, monkeypatch, fai
                 await chat.shutdown()
         assert chat.watcher.cancelled()
         rows = await database(store.rows, "SELECT status FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,))
-        assert rows == ([] if failed else [{'status': 'pending'}])
+        assert rows == [{'status': 'pending'}]  # Answer + delivery intent committed before collection.
         monkeypatch.setattr(chat, 'collect_answers_in', collect_answers)
         await database(chat.collect)
         await chat.deliver_one()
@@ -93,6 +93,8 @@ def test_shutdown_drains_collection_before_returning(slack_app, monkeypatch, fai
 def test_cancellation_drains_delivery_receipts_without_changing_outcome(slack_app, monkeypatch, kind, outcome):
     app, client, run_id = pending_answer(slack_app)
     chat, store = app.state.slack.chat, app.state.store
+    # Isolate the synthetic delivery under test from the atomic answer intent.
+    store.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=?", (run_id,))
     metadata = {'credential_request_id': 'local-test'} if 'credential' in kind else {}
     with store.connect() as conn:
         chat.queue(conn, run_id, 'cancellation-receipt', 'answer' if metadata else kind,

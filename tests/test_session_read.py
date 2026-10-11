@@ -70,12 +70,13 @@ def test_private_payloads_reasoning_and_credentials_are_omitted(users_app):
     assert 'private library body' not in result.text
     assert 'hidden thinking' not in result.text
     assert 'sensitivevalue' not in result.text
-    assert result.json()['messages'][-1]['truncated']
+    assert not result.json()['messages'][-1]['truncated']
+    assert 'a' * 9000 in result.json()['messages'][-1]['content']
     assert all('input' not in event['data'] for event in result.json()['events'][:3])
 
 
 @pytest.mark.parametrize('args', [{}, {'session': 'x'}, {'session': 'http://['},
-    {'session': 'https://wrong.example/#run=' + 'a' * 32}, {'session': 'a'*32, 'limit': 21},
+    {'session': 'https://wrong.example/#run=' + 'a' * 32}, {'session': 'a'*32, 'limit': 0},
     {'session': 'a'*32, 'after_event': -1}, {'session': 'a'*32, 'owner_id': 'other'}])
 def test_invalid_input(users_app, args):
     app, client, actor, caller, target = setup(users_app)
@@ -107,8 +108,12 @@ def test_only_live_direct_chat_can_discover_and_call(users_app, change):
                         'deleted': ('deleted_at', now()), 'token': ('token_hash', '')}[change]
         store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (value, caller['id']))
     listing = client.get(url, headers=headers)
-    assert listing.status_code == 401 or 'sessions_read' not in {t['name'] for t in listing.json()}
-    assert read(client, caller, session=target['id']).status_code in {401, 403}
+    if change in {'child', 'automated'}:
+        assert [t['name'] for t in listing.json()].count('sessions_read') == 1
+        assert read(client, caller, session=target['id']).status_code == (200 if change == 'child' else 403)
+    else:
+        assert listing.status_code == 401 or 'sessions_read' not in {t['name'] for t in listing.json()}
+        assert read(client, caller, session=target['id']).status_code in {401, 403}
 
 
 @pytest.mark.parametrize('field,value', [('active_user_id', 'google:other'), ('active_message_id', 999999)])

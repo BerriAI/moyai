@@ -154,19 +154,24 @@ class SessionPullRequests:
                 return receipt, target
         raise HTTPException(404, 'This pull request is not available in this session.')
 
-    async def read(self, run_id, url):
+    async def read(self, run_id, url, *, page=1, head_sha='', base_sha=''):
         context = self.context()
         receipt, target = self.selected(run_id, url, context)
         try:
             result = await self.github.call({'id': run_id, 'github_connection_version': context[0]}, 'github_pull_request',
-                                            {'repository_id': target, 'number': receipt.number})
+                                            {'repository_id': target, 'number': receipt.number,
+                                             'page': page, 'head_sha': head_sha, 'base_sha': base_sha})
             Receipt(number=result['number'], repository=result['repository'], url=result['html_url'])
             return result
         except GitHubError as exc:
             status = 404 if exc.status_code == 404 else 403 if exc.status_code in {401, 403} else 502
             raise HTTPException(status, 'The pull request is unavailable on GitHub.' if status != 502
                                 else 'GitHub could not load the pull request. Try again.') from None
-        except (ConnectorError, InvalidToken, ValidationError, KeyError, TypeError, ValueError, AttributeError, TimeoutError):
+        except ConnectorError as exc:
+            if exc.code == 'source_changed':
+                raise HTTPException(409, 'This pull request changed. Refresh to read the current revision.') from None
+            raise HTTPException(502, 'GitHub could not load the pull request. Try again.') from None
+        except (InvalidToken, ValidationError, KeyError, TypeError, ValueError, AttributeError, TimeoutError):
             raise HTTPException(502, 'GitHub could not load the pull request. Try again.') from None
         finally:
             # A revoked read must clear the native view even when GitHub failed.

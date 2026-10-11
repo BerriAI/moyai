@@ -116,10 +116,23 @@ class HarnessGateway:
         self.tracing = tracing
         self.context_budget = context_budget
         self.native_sessions = None
+        self.repository_context = None
         from .context_maintenance import ContextMaintenance
         self.maintenance = ContextMaintenance(self)
         from .live_context import LiveContext
         self.live_context = LiveContext(self)
+
+    async def library_context(self, run, model, budget=None, *, payload=None):
+        from .library_views import fit_context
+        budget = budget or await self.context_budget.allocation({**(payload or {}), 'model': model})
+        # This is a view allocation, derived from the actual input window. A
+        # byte per token is conservative; final admission still counts the wire.
+        allocation = max(1, budget.input_budget // 8)
+        reads = [asyncio.to_thread(self.skills.context, run), asyncio.to_thread(self.memory.context, run)]
+        if self.repository_context:
+            reads.append(asyncio.to_thread(self.repository_context.context, run))
+        contexts = await asyncio.gather(*reads)
+        return [fit_context(context, allocation) for context in contexts]
 
     async def context_window(self, run_id, request):
         run = self.require_run(run_id, request)
@@ -127,8 +140,8 @@ class HarnessGateway:
             model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
-        budget = await self.context_budget.measure({'model': model, 'messages': []})
-        context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+        budget = await self.context_budget.allocation({'model': model})
+        context = '\n\n'.join(x for x in await self.library_context(run, model, budget) if x)
         # The SDK cannot see broker-injected context. Reserve its byte bound as
         # well as room for a new tool result before the next native compact.
         window = max(1, budget.input_budget - len(context.encode()) - 4096)
@@ -144,6 +157,12 @@ class HarnessGateway:
         # rechecked for every inference attempt below.
         body = await self.read_body(request, route)
         return await self.summarize(run_id, request, body)
+
+    async def assess(self, run, request, system, data):
+        """Fresh, tool-free verification using ordinary admission and billing."""
+        response = await self._forward_once(run['id'], request, '/internal/assessment',
+            compaction_body={'system': system, 'data': data}, expected_run=dict(run))
+        return json.loads(response.body)['text']
 
     async def summarize_private(self, run, request, history: list[str], model: str, summary_bytes: int) -> str:
         response = await self.summarize(run['id'], request,
@@ -181,7 +200,8 @@ class HarnessGateway:
 
     async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None, *,
                             expected_run=None, private=False, expected_model=None):
-        compact = route == '/context/compact'
+        assessment = route == '/internal/assessment'
+        compact = route == '/context/compact' or assessment
         if (route not in NATIVE_ROUTES and not compact) or (private and not compact):
             raise HTTPException(404, 'Unsupported model endpoint.')
         def current_run():
@@ -198,6 +218,11 @@ class HarnessGateway:
                     raise HTTPException(409, 'The originating model has changed.')
             return current
         run = current_run()
+        if not compact and self.store.goals:
+            with self.store.connect() as conn:
+                goal = self.store.goals.current(conn, run_id)
+            if goal and goal['status'] == 'wrapping':
+                raise HTTPException(409, 'Goal work has ended. Save and deliver the goal report; no new task inference is admitted.')
         if not compact:
             model_stage(request, 'admission')
         # Internal private work already has a bounded snapshot. Let it queue
@@ -264,7 +289,20 @@ class HarnessGateway:
             if not compact:
                 expected_run, expected_model = dict(run), model
             body = compaction_body if compact else await self.read_body(request, route)
-            if compact:
+            partial_cursor = False
+            if assessment:
+                payload = {'model': model, 'stream': False, 'messages': [
+                    {'role': 'system', 'content': body['system']},
+                    {'role': 'user', 'content': json.dumps(body['data'], ensure_ascii=False)}]}
+            elif compact:
+                limits = await self.context_budget.limits(model)
+                allocation = max(1, min(limits.max_input_tokens, limits.context_window -
+                    (limits.default_output_tokens or limits.max_output_tokens)) // 8)
+                requested = body.get('summary_bytes')
+                if requested is None:
+                    body = {**body, 'summary_bytes': allocation}
+                elif type(requested) is not int or not 0 < requested <= allocation:
+                    raise HTTPException(422, 'Summary allocation exceeds the selected model context budget.')
                 # Both summary paths omit injections and content tracing. Only
                 # the public journal protocol can return a durable partial cursor.
                 payload = (private_compaction_payload(body['history'], model, body['summary_bytes'], attempt)
@@ -273,7 +311,7 @@ class HarnessGateway:
             else:
                 if self.native_sessions is not None:
                     self.native_sessions.observe_scope(run)
-                context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+                context = '\n\n'.join(x for x in await self.library_context(run, model, payload=body) if x)
                 payload = authorized_payload(body, route, model, context)
                 field = 'messages' if route == '/v1/messages' else 'input'
                 items = payload[field]
@@ -295,7 +333,7 @@ class HarnessGateway:
                         self.store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
                         await self.checkpoints.flush()
                         raise
-                    if private:
+                    if private or assessment:
                         raise SummaryFailure('summary_input_too_large', retryable=False) from None
                     if not partial_cursor:
                         raise HTTPException(422, 'Reconnect the runtime to compact smaller journal batches safely. Saved records are preserved.') from None
@@ -374,7 +412,8 @@ class HarnessGateway:
                         raise HTTPException(502, 'Model response exceeded the size limit.')
                 capture.feed(bytes(raw))
                 capture.finish()
-                result = (JSONResponse({**compaction_result(raw, body.get('summary_bytes', 12_000)),
+                result = (JSONResponse({'text': compaction_result(raw)['summary']}) if assessment else
+                          JSONResponse({**compaction_result(raw, body['summary_bytes']),
                                        **({} if private else {'through_seq': body['entries'][-1]['seq']})})
                           if compact else Response(bytes(raw), media_type='application/json',
                                                    headers=upstream_headers(request_id, upstream)))

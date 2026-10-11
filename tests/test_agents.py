@@ -482,7 +482,7 @@ async def test_failed_workers_are_not_replayed_and_explicit_retry_is_idempotent(
     assert not coordinator.settled(root, result['group_id'])
 
 
-async def test_worker_artifacts_are_bounded_read_only_and_run_scoped(durable, tmp_path):
+async def test_worker_artifacts_have_complete_ranges_and_parent_scope(durable, tmp_path):
     manager, cloud, root = durable
     coordinator, result, _ = await launch(durable, count=1)
     child = coordinator.children(result['group_id'])[0]
@@ -493,9 +493,11 @@ async def test_worker_artifacts_are_bounded_read_only_and_run_scoped(durable, tm
         archive.writestr('large.txt', 'x' * (128 * 1024 + 1))
     assert coordinator.read_artifact(root, Artifact(child_id=child['id']))['files'][0]['path'] == 'new-files/results.json'
     assert 'passed' in coordinator.read_artifact(root, Artifact(child_id=child['id'], path='new-files/results.json'))['content']
-    for path in ['../secret', '/secret', 'large.txt']:
+    for path in ['../secret', '/secret']:
         with pytest.raises(ValueError):
             coordinator.read_artifact(root, Artifact(child_id=child['id'], path=path))
+    large = coordinator.read_artifact(root, Artifact(child_id=child['id'], path='large.txt', length=200000))
+    assert len(large['content']) == 128*1024+1 and large['next_offset'] is None
     with pytest.raises(ValueError, match='belong'):
         coordinator.read_artifact('unrelated-parent', Artifact(child_id=child['id']))
 
@@ -665,11 +667,11 @@ def test_broker_hides_delegation_without_temporal_and_keeps_run_scope(workspace)
 
 
 @pytest.mark.parametrize('name', ['max_concurrent_runs', 'max_concurrent_model_requests'])
-def test_capacity_configuration_supports_explicit_scale_but_requires_positive_budgets(name):
+def test_capacity_configuration_supports_explicit_scale_and_zero_as_unlimited(name):
     assert getattr(Settings(_env_file=None, **{name: 3000}), name) == 3000
-    for invalid in (0, -1):
-        with pytest.raises(ValidationError):
-            Settings(_env_file=None, **{name: invalid})
+    assert getattr(Settings(_env_file=None), name) == 0
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{name: -1})
 
 
 async def test_direct_child_chat_joins_pending_work_and_keeps_sender_and_model(durable):
@@ -702,8 +704,8 @@ async def test_handoff_rechecks_followup_arriving_during_capacity_wait(durable, 
     await drive(manager, child)
     admission = manager.admission
     @asynccontextmanager
-    async def admit(run_id):
-        async with admission(run_id) as available:
+    async def admit(run_id, **options):
+        async with admission(run_id, **options) as available:
             coordinator.enqueue_child(child, 'Check one more case', 'during-admission', None, 'google:bob')
             yield available
     monkeypatch.setattr(manager, 'admission', admit)
@@ -744,8 +746,8 @@ async def test_post_handoff_chat_preserves_answers_and_files_across_restart(dura
     with zipfile.ZipFile(content, 'w') as z:
         z.writestr('results.json', '{"passed":21}')
     async def stat(_): return SimpleNamespace(size=len(content.getvalue()))
-    async def read(_): return content.getvalue()
-    sandbox = SimpleNamespace(filesystem=SimpleNamespace(stat=aio(stat), read_bytes=aio(read)))
+    async def copy(_, target): Path(target).write_bytes(content.getvalue())
+    sandbox = SimpleNamespace(filesystem=SimpleNamespace(stat=aio(stat), copy_to_local=aio(copy)))
     await RunManager.save_artifact(manager, sandbox, child)
     if storage == 'mixed':
         frozen = json.loads(coordinator.group(root, result['group_id'])['result_snapshot'])[0]['artifact_name']

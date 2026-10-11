@@ -152,7 +152,7 @@ actual execution output. The model fixture incurs no provider spend; this is not
 a live Render/Cloudflare or paid-model rollout test.
 
 For the complete rolling topology, migrate offline to the selected schema
-(currently revision 8), activate the dedicated API and its edge route, and enable
+(currently revision 15), activate the dedicated API and its edge route, and enable
 coordinator handoff. All participating services need diskless verified shared
 files and the configured shutdown allowance. The rolling controller verifies
 replacement readiness and old-owner retirement. Broker HTTP draining is bounded

@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from agent.harnesses.harness_agent import TurnJournal
-from agent.history_reference import HISTORY_BYTES, history_prompt
+from agent.history_reference import history_prompt
 
 
 def reference(prompt):
@@ -37,15 +37,13 @@ def test_large_tool_output_is_retrievable_without_growing_the_prompt(tmp_path, o
     original = deepcopy(history)
     journal = TurnJournal(history, 'Continue the saved task.')
     prompt = journal.prompt('Continue the saved task.', history, cwd=tmp_path)
-    assert len(reference(prompt).encode()) <= HISTORY_BYTES
+    assert json.dumps(history, ensure_ascii=False) in reference(prompt)
     assert 'Build a searchable model picker.' in prompt
     assert 'Do not publish it yet.' in prompt
-    assert 'History line 3' in prompt
-    assert 'do not load the entire history' in prompt
-    assert saved_history(tmp_path) == original
+    assert not list(tmp_path.iterdir())
     assert history == original
     assert journal.messages == [*original, {'role': 'user', 'content': 'Continue the saved task.'}]
-    assert (tmp_path / '.moyai-history.jsonl').stat().st_mode & 0o777 == 0o600
+    assert not (tmp_path / '.moyai-history.jsonl').exists()
 
 
 def test_many_rounds_retain_original_request_latest_correction_and_recent_receipts(tmp_path):
@@ -58,12 +56,11 @@ def test_many_rounds_retain_original_request_latest_correction_and_recent_receip
             {'role': 'tool', 'tool_call_id': f'call{i}',
              'content': json.dumps({'number': i, 'url': f'https://example.test/pr/{i}'})}])
     prompt = history_prompt('Continue without repeating writes.', history, cwd=tmp_path)
-    assert len(reference(prompt).encode()) <= HISTORY_BYTES
+    assert json.dumps(history, ensure_ascii=False) in reference(prompt)
     assert 'Original task: add model search.' in prompt
     assert 'Latest correction: keep Escape support.' in prompt
     assert 'github_create_pull_request' in prompt and 'https://example.test/pr/499' in prompt
-    assert 'Missing text does not mean an action was not performed' in prompt
-    assert saved_history(tmp_path) == history
+    assert not list(tmp_path.iterdir())
 
 
 def test_repeated_checkpoints_keep_raw_receipts_without_nesting_prompt_references(tmp_path):
@@ -73,13 +70,13 @@ def test_repeated_checkpoints_keep_raw_receipts_without_nesting_prompt_reference
         journal = TurnJournal(history, f'Continue {index}')
         prompt = journal.prompt(f'Continue {index}', history, cwd=tmp_path)
         assert prompt.count('SAVED CONVERSATION REFERENCE:') == 1
-        assert len(reference(prompt).encode()) <= HISTORY_BYTES
-        assert saved_history(tmp_path) == history
+        assert json.dumps(history, ensure_ascii=False) in reference(prompt)
+        assert not list(tmp_path.iterdir())
         journal.tool_started(f'check{index}', 'Read', {'file_path': 'proof.txt'})
         journal.tool_finished(f'check{index}', 'Already created')
         history = journal.messages
     assert len(history) == 14
-    assert len(list(tmp_path.iterdir())) == 1
+    assert not list(tmp_path.iterdir())
 
 
 def test_reference_uses_scrubbed_history_and_does_not_follow_an_existing_symlink(tmp_path):
@@ -92,6 +89,5 @@ def test_reference_uses_scrubbed_history_and_does_not_follow_an_existing_symlink
         {'role': 'tool', 'tool_call_id': 'read', 'content': 'safe output' * 20_000}]
     prompt = history_prompt('Continue.', history, cwd=tmp_path)
     assert 'private marker' not in prompt
-    assert 'private marker' not in json.dumps(saved_history(tmp_path))
     assert outside.read_text() == 'do not overwrite'
-    assert not (tmp_path / '.moyai-history.jsonl').is_symlink()
+    assert (tmp_path / '.moyai-history.jsonl').is_symlink()

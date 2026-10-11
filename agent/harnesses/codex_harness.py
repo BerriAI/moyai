@@ -31,6 +31,7 @@ def toml_value(value):
 
 
 class CodexAgent(HarnessAgent):
+    typed_replay = True
     def __init__(self, *, spec, relay, config, activity, step, cwd, definition, context_store=None):
         self.context = HarnessContext(spec, relay, config, activity, step, cwd)
         self.context_store = context_store
@@ -128,6 +129,16 @@ class CodexAgent(HarnessAgent):
             'agents': {'enabled': False},
             'cli_auth_credentials_store': 'ephemeral', 'history': {'persistence': 'none'},
         }
+        if ctx.spec.get('independent_runtime'):
+            # This server is Moyai's authenticated capability boundary. Native
+            # read-only sandbox approval defaults otherwise reject even remote
+            # MCP actions. The broker still checks task scope and revocation.
+            settings['mcp_servers']['moyai']['default_tools_approval_mode'] = 'approve'
+            # Match QM's empty control jail. All real workspace operations use
+            # supplied tools and the separately leased computer, never this host.
+            settings['features'].update(shell_tool=False, goals=False, browser_use=False,
+                browser_use_external=False, computer_use=False, image_generation=False,
+                in_app_browser=False, request_permissions_tool=False, tool_suggest=False)
         if self.compaction_window:
             settings['model_context_window'] = self.compaction_window
             settings['model_auto_compact_token_limit'] = max(1024, self.compaction_window * 4 // 5)
@@ -487,13 +498,26 @@ class CodexAgent(HarnessAgent):
                             'cwd': self.context.cwd, 'ephemeral': True,
                             'developerInstructions': system_message + '\nUse Moyai MCP tools for authorized app actions. '
                                 'Do not start detached work. Moyai owns credentials, memory, skills and delegation.',
-                            'approvalPolicy': 'never', 'sandbox': 'danger-full-access',
+                            'approvalPolicy': 'never', 'sandbox': 'read-only' if self.context.spec.get('independent_runtime') else 'danger-full-access',
                             # The pinned SDK exposes this native app-server field
                             # through dict params. Consume output IDs and native
                             # search receipts, never private reasoning/response text.
                             'experimentalRawEvents': True,
                             **({'config': self.runtime_config} if self.runtime_config else {})})
                         self.runtime_thread = thread.thread.id
+                        if getattr(self, 'replay_history', None):
+                            from openai_codex.generated.v2_all import ThreadInjectItemsResponse
+                            from agent.harnesses.replay import codex_items
+                            items = codex_items(self.replay_history)
+                            await client.request('thread/inject_items', {
+                                'threadId': thread.thread.id, 'items': items},
+                                response_model=ThreadInjectItemsResponse)
+                            # These receipts were committed before this native
+                            # invocation. They need no new SDK notification and
+                            # must never be mistaken for unsettled live writes.
+                            with self.receipts:
+                                self.completed.update(item['call_id'] for item in items
+                                    if item['type'] == 'function_call_output')
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:
                             notification = asyncio.create_task(client.next_turn_notification(turn.turn.id))
@@ -538,7 +562,7 @@ class CodexAgent(HarnessAgent):
                                     if text:
                                         publish_pending()
                                     if text and item.get('phase') != 'final_answer':
-                                        self.journal.finish(text)
+                                        self.journal.finish(text, phase=item.get('phase'))
                                         if item.get('phase') == 'commentary':
                                             self.context.activity.commentary(text)
                                         else:

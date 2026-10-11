@@ -59,7 +59,7 @@ def test_transport_recovery_requires_settled_durable_receipts(tmp_path, unsafe):
         assert bool(marker) is (unsafe == '')
         if marker:
             validate_recovery(store, marker)
-            assert 'receipt-one' in store.history()[0]['content']
+            assert any(m.get('role') == 'tool' and 'receipt-one' in m.get('content', '') for m in store.history())
             store.append({'role': 'user', 'content': 'A newer checkpoint'})
             with pytest.raises(ContextUnavailable, match='checkpoint'):
                 validate_recovery(store, marker)
@@ -147,7 +147,7 @@ def test_failed_compaction_keeps_cursor_and_receipts_across_cold_restore(tmp_pat
         agent.context_store.close()
     restored = ContextStore(tmp_path / 'context.db', 'run')
     assert restored.state()['cursor'] == 0 and not restored.pending
-    assert 'durable receipt' in restored.history()[0]['content']
+    assert any(m.get('role') == 'tool' and 'durable receipt' in m.get('content', '') for m in restored.history())
     restored.close()
 
 

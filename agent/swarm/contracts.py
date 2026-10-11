@@ -14,17 +14,18 @@ class Arguments(BaseModel):
 
 class Assignment(Arguments):
     label: str = Field(min_length=1, max_length=100)
-    prompt: str = Field(min_length=3, max_length=12000)
+    prompt: str = Field(min_length=3)
     harness: str | None = Field(default=None, min_length=1, max_length=80)
     model: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class Fanout(Arguments):
     request_key: str = Field(min_length=3, max_length=80, pattern=r'^[A-Za-z0-9_-]+$')
-    instructions: str = Field(default='', max_length=8000)
-    items: list[str] = Field(default_factory=list, max_length=2000)
-    workers: int = Field(default=5, ge=1, le=100)
-    tasks: list[Assignment] = Field(default_factory=list, max_length=100)
+    instructions: str = ''
+    items: list[str] = Field(default_factory=list)
+    workers: int = Field(default=5, ge=1)
+    tasks: list[Assignment] = Field(default_factory=list)
+    wait: bool = Field(default=False, description='Checkpoint and release the parent while all children work. Otherwise return handles immediately so the parent can continue independent work.')
     harness: str | None = Field(default=None, min_length=1, max_length=80)
     model: str | None = Field(default=None, max_length=120)
 
@@ -32,12 +33,8 @@ class Fanout(Arguments):
     def valid_work(self):
         if bool(self.items) == bool(self.tasks):
             raise ValueError('Supply either items to partition or explicit tasks.')
-        if self.items and (len(self.instructions) < 3 or any(not x or len(x) > 8000 for x in self.items)):
-            raise ValueError('Items need common instructions and nonempty text up to 8000 characters.')
-        if len(json.dumps(self.model_dump())) > 240000:
-            raise ValueError('Delegation exceeds the input size limit.')
-        if any(len(t.prompt) + len(self.instructions) > 12000 for t in self.tasks):
-            raise ValueError('Each task including common instructions must fit in 12000 characters.')
+        if self.items and (len(self.instructions) < 3 or any(not x.strip() for x in self.items)):
+            raise ValueError('Items need common instructions and nonempty text.')
         return self
 
     def assignments(self):
@@ -52,8 +49,6 @@ class Fanout(Arguments):
             prompt = (self.instructions + '\n\nAssigned cases (only process these case indices):\n' +
                       json.dumps(cases, ensure_ascii=False) +
                       '\nReturn a result for every assigned index, including failures. Save detailed results under /workspace.')
-            if len(prompt) > 16000:
-                raise ValueError('A partition is too large. Use more workers or shorter case descriptions.')
             result.append((f'Cases {offset + 1}–{end}', prompt))
             offset = end
         return result
@@ -67,16 +62,36 @@ class Results(Group):
     latest: bool = False
 
 
+class Wait(Results):
+    after: str = Field(default='', description='Cursor from agents_results or an earlier wait. Returns when a worker changes, all settle, or the wait interval ends.')
+    seconds: float = Field(default=60, ge=0, allow_inf_nan=False)
+    release: bool = Field(default=False, description='Save and release this execution until the group settles instead of polling locally.')
+
+
+class Send(Group):
+    child_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    message: str = Field(min_length=1)
+    request_key: str = Field(min_length=3, max_length=80, pattern=r'^[A-Za-z0-9_-]+$')
+
+
+class Cancel(Group):
+    child_ids: list[str] = Field(default_factory=list, description='Omit to stop the entire group; otherwise only these direct children are stopped.')
+
+
 class Artifact(Arguments):
     child_id: str = Field(pattern=r'^[0-9a-f]{32}$')
-    path: str = Field(default='', max_length=500)
+    path: str = ''
+    revision: str = ''
+    offset: int = Field(default=0, ge=0)
+    length: int = Field(default=65536, ge=1)
     latest: bool = False
 
 
 class Retry(Group):
     request_key: str = Field(min_length=3, max_length=80, pattern=r'^[A-Za-z0-9_-]+$')
-    child_ids: list[str] = Field(min_length=1, max_length=100)
-    instructions: str = Field(min_length=3, max_length=8000)
+    child_ids: list[str] = Field(min_length=1)
+    instructions: str = Field(min_length=3)
+    wait: bool = False
 
 
 
