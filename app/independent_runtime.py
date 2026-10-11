@@ -32,6 +32,27 @@ class IndependentRuntime:
                 and run['harness'] == 'codex'
                 and (run.get('sandbox_provider') or self.runner.settings.sandbox_provider) == 'modal')
 
+    def idle_seconds(self):
+        settings = self.runner.settings
+        return min(300, settings.sandbox_idle_seconds) if (
+            settings.independent_agent_runtime and settings.codex_runtime_reuse) else 0
+
+    def scope(self, run):
+        r = self.runner
+        return [run['id'], run['active_user_id'],
+                r.settings.resolve_model(fallback=run['active_model'] or run['model']), r.prepared.build]
+
+    def reusable(self, run, state):
+        if not self.supports(run):
+            return False
+        try:
+            scope = self.scope(run)
+        except ValueError:
+            # A removed model ends reuse, not the successfully completed turn.
+            # Fresh provisioning still validates through scope() directly.
+            return False
+        return state.get('runtime_scope') == scope
+
     def provider(self):
         backend = ModalProvider(self.runner.settings, self.runner.modal_clients)
         backend.image = agent_runtime_image
@@ -40,7 +61,7 @@ class IndependentRuntime:
     async def provision(self, run_id, state):
         r = self.runner
         name = f"moyai-runtime-{run_id}-{state['message_id']}-{state['segment']}"
-        state['sandbox_name'] = name
+        state.update(sandbox_name=name, runtime_scope=self.scope(await database(r.store.run, run_id)))
         await database(r.save, run_id, state)
         backend = self.provider()
         try:
@@ -206,7 +227,7 @@ class IndependentRuntime:
             conn.execute('UPDATE runs SET pending_result=? WHERE id=?', (json.dumps(result), run_id))
         return True
 
-    async def cleanup(self, run_id, state):
+    async def cleanup_computer(self, run_id, state):
         r = self.runner
         computer = state.get('computer', {})
         if computer:
@@ -214,6 +235,13 @@ class IndependentRuntime:
             # computer cleanup, with no independent-runtime flag on the child.
             await r.cleanup(computer, run_id, save=lambda *_: r.save(run_id, state))
             state['computer'] = {}
+        state.pop('computer_requested', None)
+        await database(r.store.update_run, run_id, sandbox_id='')
+        await database(r.save, run_id, state)
+
+    async def cleanup(self, run_id, state):
+        r = self.runner
+        await self.cleanup_computer(run_id, state)
         identity, name = state.get('sandbox_id'), state.get('sandbox_name')
         if identity or name:
             try:
@@ -224,5 +252,4 @@ class IndependentRuntime:
                 pass
         await database(self.operations.abandon, run_id)
         state.pop('sandbox_name', None)
-        await database(r.store.update_run, run_id, sandbox_id='')
         await database(r.save, run_id, state)

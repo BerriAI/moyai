@@ -3,6 +3,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
+import tempfile
 import threading
 from types import SimpleNamespace
 
@@ -10,6 +11,37 @@ from agent.context_store import ContextStore
 from agent.harnesses.codex_harness import CodexAgent
 from agent.tools.computer_tools import call as computer_call
 from test_codex_sdk_transport import send_response
+
+
+def test_warm_independent_sdk_keeps_process_but_refreshes_thread_and_tools(tmp_path, monkeypatch):
+    from sandbox.codex_runtime import RuntimeLease
+    from test_codex_tool_readiness import readiness_case
+    proofs = []
+    with tempfile.TemporaryDirectory(prefix='moyai-independent-', dir='/tmp') as folder:
+        class IndependentAgent(CodexAgent):
+            def __init__(self, **kwargs):
+                kwargs['spec']['independent_runtime'] = True
+                kwargs['config']['mcp_servers']['workspace']['env']['MOYAI_REMOTE_COMPUTER'] = '1'
+                self.lease = RuntimeLease('same-private-scope', 5, root=Path(folder))
+                kwargs['relay'].codex_runtime = self.lease
+                super().__init__(**kwargs)
+
+            def close(self):
+                proof = {**(self.lease.info or {}), 'thread': self.runtime_thread}
+                super().close()
+                proof['clean'] = self.lease.clean
+                self.lease.close()
+                proofs.append(proof)
+
+        first, _, result = readiness_case(tmp_path, monkeypatch, delay=0, agent_class=IndependentAgent)
+        assert first['completed'], result
+        second, requests, result = readiness_case(tmp_path, monkeypatch, delay=0,
+            agent_class=IndependentAgent, capability='next-turn-capability', tool_name='fresh_lookup')
+        assert second['completed'] and second['tool_calls'] == ['fresh_lookup'], result
+        assert proofs[0]['clean'] and proofs[1]['clean']
+        assert proofs[0]['pid'] == proofs[1]['pid'] and proofs[1]['reused']
+        assert proofs[0]['thread'] != proofs[1]['thread']
+        assert 'ready-before-inference' not in json.dumps(requests[0]['body']['input'])
 
 
 def test_selected_sdk_uses_broker_before_later_computer_acquisition(tmp_path, monkeypatch):

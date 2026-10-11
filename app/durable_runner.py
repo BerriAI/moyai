@@ -167,7 +167,7 @@ class DurableRunner(RunManager):
         elif self.settings.missing_sandbox(row.get('sandbox_provider')):
             action, notice = 'unconfigured', 'Configure the session sandbox provider before waking its computer.'
         else:
-            action = 'reuse' if phase == 'warm' else 'start'
+            action = 'reuse' if phase == 'warm' and not state.get('independent_runtime') else 'start'
         return {'can_wake': action in {'start', 'reuse', 'acquire'}, 'waking': action == 'pending',
                 'starting': starting, 'shutting_down': shutting_down, 'wake_notice': notice, 'wake_action': action,
                 'wake_error': state.get('computer_error', '')}
@@ -195,6 +195,10 @@ class DurableRunner(RunManager):
                 self.submit(self.store.run(run_id))
                 await self.persist()
                 return
+            if state.get('independent_runtime') and state.get('phase') == 'warm':
+                # The idle control guest is not the user's computer. Release it
+                # before the normal, transactionally rechecked computer wake.
+                await self.release_warm(run_id, state, 'workspace computer requested')
             if policy['wake_action'] == 'reuse':
                 try:
                     await self.sandbox(self.state(run_id))
@@ -389,8 +393,12 @@ class DurableRunner(RunManager):
             return False
         state = {'version': 1, 'phase': 'prepare', 'message_id': message['id'], 'segment': 0,
                  'snapshot_id': row['snapshot_id'], 'sandbox_id': '', 'cursor': 0, 'turn_started': time.time()}
-        if self.agent_runtime.supports(row) and not warm:
+        if self.agent_runtime.supports(row) and (not warm or warm.get('independent_runtime')):
             state['independent_runtime'] = True
+            if warm:
+                state.update({key: warm[key] for key in
+                    ('sandbox_id', 'sandbox_name', 'machine_started', 'runtime_scope') if key in warm})
+                state['reused_machine'] = True
         initial_group = self.swarms.initial_group(run_id, message['id']) if self.coordinator else None
         if initial_group and initial_group['status'] == 'running':
             # The initial team was committed with the mission. Wait without
@@ -426,7 +434,15 @@ class DurableRunner(RunManager):
                    state['machine_started'] + self.rotation_seconds(state))
 
     def computer_idle_seconds(self, state):
+        if state.get('independent_runtime'):
+            return self.agent_runtime.idle_seconds()
         return self.settings.sandbox_idle_seconds or (300 if state.get('computer_only') else 0)
+
+    def can_keep_warm(self, run, state):
+        return (bool(self.computer_idle_seconds(state)) and not run['parent_run_id']
+                and bool(state.get('sandbox_id'))
+                and time.time() < state['machine_started'] + self.rotation_seconds(state)
+                and (not state.get('independent_runtime') or self.agent_runtime.reusable(run, state)))
 
     async def release_warm(self, run_id, state, reason):
         # Persist before the provider call: a lost termination ACK is retryable
@@ -442,7 +458,8 @@ class DurableRunner(RunManager):
 
     async def warm(self, run_id, state):
         row = await database(self.store.run, run_id)
-        if getattr(self, 'computer', None) and state.get('phase') == 'warm':
+        if (getattr(self, 'computer', None) and state.get('phase') == 'warm'
+                and not state.get('independent_runtime')):
             touched = self.computer.touched(run_id)
             if touched and state.get('idle_until') is not None:
                 state['idle_until'] = max(state['idle_until'], touched + self.computer_idle_seconds(state))
@@ -451,6 +468,9 @@ class DurableRunner(RunManager):
         queued = await database(self.store.has_queued_messages, run_id)
         expired = (time.time() >= state['machine_started'] + self.rotation_seconds(state)
                    or (not queued and time.time() >= self.idle_deadline(state)))
+        if state.get('independent_runtime') and not self.agent_runtime.reusable(row, state):
+            state['idle_reason'] = 'agent runtime configuration changed'
+            expired = True
         if (state['phase'] == 'warm_cleanup' or stopping or not self.computer_idle_seconds(state)
                 or expired):
             await self.release_warm(run_id, state, state.get('idle_reason', 'idle timeout' if not stopping else 'stop requested'))
@@ -785,6 +805,13 @@ class DurableRunner(RunManager):
         phase = state['phase']
         run = await database(self.store.run, run_id)
         if phase in {'waiting_children', 'waiting_credential'}:
+            if state.get('independent_runtime') and state.get('sandbox_id'):
+                # A queued turn can enter a child wait before using its retained
+                # runtime. Do not hold that guest for the lifetime of the wait.
+                await self.cleanup(state, run_id)
+                state.update(sandbox_id='', reused_machine=False)
+                await database(self.save, run_id, state)
+                return True
             control = self.message_queue.live_control(run_id, state['message_id'], [], checkpointed=True)
             if control.get('handoff'):
                 # A different requester/model still needs a capability boundary.
@@ -835,6 +862,14 @@ class DurableRunner(RunManager):
             if result == 'capacity':
                 return 'capacity'
         elif phase == 'install':
+            if (state.get('independent_runtime') and state.get('reused_machine')
+                    and not self.agent_runtime.reusable(run, state)):
+                # claim_message has now selected the next requester/model. A
+                # different scope must never inherit the old control filesystem.
+                await self.cleanup(state, run_id)
+                state.update(phase='provision', sandbox_id='', reused_machine=False)
+                await database(self.save, run_id, state)
+                return True
             if state.get('context_pending'):
                 # Acquisition may have committed before context finished on a
                 # previous worker. These reads are idempotent; agent work has
@@ -1046,8 +1081,7 @@ class DurableRunner(RunManager):
             steered = (state['exit_code'] == 0 and
                        self.message_queue.accepted(run_id, result.get('steer_message_id')))
             if steered:
-                keep = (not state.get('independent_runtime') and self.settings.sandbox_idle_seconds and not run['parent_run_id']
-                        and time.time() < state['machine_started'] + self.rotation_seconds(state))
+                keep = self.can_keep_warm(run, state)
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='steered', response='')
                 await database(self.save, run_id, state)
             elif continuing and result.get('wait_credential') and self.credentials:
@@ -1090,8 +1124,7 @@ class DurableRunner(RunManager):
                 await database(self.save, run_id, state)
             else:
                 completed = result.get('completed') and state['exit_code'] == 0
-                keep = (not state.get('independent_runtime') and completed and self.settings.sandbox_idle_seconds and run['chat_enabled'] and not run['parent_run_id']
-                        and time.time() < state['machine_started'] + self.rotation_seconds(state))
+                keep = completed and run['chat_enabled'] and self.can_keep_warm(run, state)
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='completed' if completed else 'failed',
                              response=result.get('message') or state.get('last_error') or 'Hermes stopped without a final answer.')
                 await database(self.save, run_id, state)
@@ -1128,6 +1161,12 @@ class DurableRunner(RunManager):
             await database(self.store.update_run, run_id, sandbox_id='')
             await database(self.save, run_id, state)
         elif phase == 'finish':
+            if state.get('independent_runtime') and state.get('keep_warm'):
+                # Checkpointed workspace bytes and receipts are already durable.
+                # Retain only the lightweight guest; release full-computer capacity.
+                await self.agent_runtime.cleanup_computer(run_id, state)
+                await database(self.agent_runtime.operations.abandon, run_id)
+                run = await database(self.store.run, run_id)
             if state['outcome'] == 'steered':
                 state['response'] = ''  # Also suppress notices checkpointed by an older worker.
             if stop_requested(run):
@@ -1164,7 +1203,7 @@ class DurableRunner(RunManager):
                 # Queued work has not gone idle, even if the worker restarts
                 # before it can claim the next message.
                 state['idle_until'] = (None if (await database(self.store.has_queued_messages, run_id))
-                                       else time.time() + self.settings.sandbox_idle_seconds)
+                                       else time.time() + self.computer_idle_seconds(state))
             await database(self.save, run_id, state)
             if state['phase'] == 'warm' and not (await database(self.store.has_queued_messages, run_id)):
                 return {'idle_seconds': max(0.01, self.idle_deadline(state) - time.time())}

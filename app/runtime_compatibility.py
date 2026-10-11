@@ -24,13 +24,15 @@ from .schema_migrations import SCHEMA_COMPATIBILITY_REVISION
 # Publishing workflow files uses explicit per-operation Workflows permission.
 # Snapshotless workers wait for shared preparation; restored services are verified.
 # GitHub coding capabilities and shared environment-template publication policy.
-API_PROTOCOL_REVISION = 16
+# Independent control guests can now be warm. Older workers would resume these
+# as full workspace computers, so adoption/rollback requires matching roles.
+API_PROTOCOL_REVISION = 17
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 16
-BROKER_PROTOCOL_REVISION = 16
-COORDINATOR_PROTOCOL_REVISION = 16
+WORKER_PROTOCOL_REVISION = 17
+BROKER_PROTOCOL_REVISION = 17
+COORDINATOR_PROTOCOL_REVISION = 17
 
 
 def api_fingerprint(settings):
