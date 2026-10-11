@@ -64,6 +64,8 @@ jobs:
         run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py
       - name: Verify conversation authentication remains readable during writes
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_cloudflare_login.py -k 'conversation or keeps_personal_tools'
+      - name: Verify PR summary reads leave other requests responsive
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_session_list_performance.py tests/test_pr_delivery.py -k 'slow_pr_summary or pr_summary_restores or empty_pr_summaries'
       - name: Verify editable skill template installation and upgrades
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_bundled_skills.py
       - name: Demonstrate real HTTP requests across two server processes
@@ -128,8 +130,8 @@ jobs:
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_finish_tracing.py tests/test_tracing.py
       - name: Verify Slack polling responsiveness and delivery ownership
         run: |
-          uv run --frozen --python 3.13 pytest -q tests/test_slack_polling.py tests/test_slack_notifications.py
-          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py tests/test_slack_notifications.py
+          uv run --frozen --python 3.13 pytest -q tests/test_slack_polling.py tests/test_slack_notifications.py tests/test_session_events.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py tests/test_slack_notifications.py tests/test_session_events.py
       - name: Verify chat snapshots reuse PostgreSQL pool connections
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_message_snapshot_pool.py tests/test_slack_mentions.py tests/test_attachments.py
       - name: Verify agent handoffs, warm workspaces and admission on PostgreSQL

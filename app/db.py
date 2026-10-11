@@ -85,6 +85,7 @@ class Store:
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
         self.generation = 0
+        self.commit_listeners = set()
         self.default_model = default_model
         self.tracing = None
         self.memory_review = None
@@ -350,6 +351,8 @@ class Store:
                     yield conn
                 if conn.changed:
                     self.generation += 1
+                    for listener in tuple(self.commit_listeners):
+                        listener()
                 for callback in conn.commit_callbacks:
                     callback()
                 return
@@ -361,6 +364,8 @@ class Store:
                     yield conn
                 if conn.total_changes:
                     self.generation += 1
+                    for listener in tuple(self.commit_listeners):
+                        listener()
                 for callback in conn.commit_callbacks:
                     callback()
             finally:

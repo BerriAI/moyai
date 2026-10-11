@@ -74,12 +74,12 @@ unchanged. Breaking schema or runtime-setting changes need a maintenance plan.
 
 ## Online additive schema changes
 
-The initial bridge requires verified schema **17** and keeps its existing role
+The initial bridge requires verified schema **18** and keeps its existing role
 fingerprints unchanged. Deploy that bridge to **all four roles with no schema
 change** before attempting a later expansion. A piped probe recognizes an older
 image without the engine, but permits it only for a same-schema release. It does
 not infer support from candidate code or a healthy HTTP response. This feature
-does not automatically migrate a pre-17 installation or activate role routing.
+does not automatically migrate a pre-18 installation or activate role routing.
 
 For a later schema revision, the exact selected candidate must contain a complete
 reviewed chain in `app/online_schema_migrations.json`, matching its versioned

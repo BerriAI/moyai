@@ -92,8 +92,6 @@ def demo(directory, port):
             elif action != 'poll':
                 raise ValueError('Start a session first.')
         await database(apply)
-        await database(app.state.slack.notifications.collect)
-        await app.state.slack.notifications.deliver_one()
         return await state()
 
     return app
@@ -109,11 +107,11 @@ button.secondary{background:#293952;color:#f0f4ff}.card{background:#1c2b43;borde
 .badge{display:inline-block;font-size:13px;background:#233b33;color:#bcf2d7;border-radius:6px;padding:5px 10px}.muted{font-size:14px;color:#a6b3c9}.status{font-size:20px;margin:22px 0}
 @media(max-width:650px){body{padding:18px}.grid{grid-template-columns:1fr}h1{font-size:26px}}
 </style><main><header><div class="badge">Local verification · synthetic session</div><h1>Moyai session notifications</h1>
-<p>Real preferences, session state and delivery worker. Slack transport is captured locally; no messages are sent to Slack.</p></header>
+<p>Session changes automatically wake the delivery worker. Slack transport is captured locally; no messages are sent to Slack.</p></header>
 <div class="grid"><section class="panel"><h2>Session controls</h2><p id="preference"></p><a href="/#settings">Open Moyai Settings</a>
 <div id="state" class="status">Loading…</div><button id="start">Start web session</button><button id="start-slack" class="secondary">Start Slack session</button><button id="approval" class="secondary">Request approval</button>
 <button id="finish" class="secondary">Finish reply</button><button id="poll" class="secondary">Check again</button>
-<p class="muted">Web sessions notify their owner by default. Slack sessions keep updates in Slack, with no extra DM. “Check again” verifies that saved events are not delivered twice.</p><a id="session" hidden>Open session</a></section>
+<p class="muted">Web sessions notify their owner by default. Slack sessions keep updates in Slack, with no extra DM. The controls only save session state; the lifecycle worker delivers alerts automatically. “Check again” only refreshes this view.</p><a id="session" hidden>Open session</a></section>
 <section class="panel"><h2>Captured DM payloads <span id="count">0</span></h2><p class="muted">Recipient: Alex · D12345678</p><div id="inbox"><p>No alerts delivered yet.</p></div></section></div></main>
 <script src="/demo/notifications.js"></script></html>'''
 

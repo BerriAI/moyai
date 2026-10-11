@@ -264,6 +264,8 @@ def _create_app(settings, store):
     manager.persist = checkpoints.flush
     if store.schema_updates:
         store.execute("INSERT INTO organization(id,name) VALUES(1,?) ON CONFLICT DO NOTHING", (settings.organization_name,))
+    from .session_events import SessionEvents
+    store.session_events = SessionEvents(store)
     slack = SlackSessions(store, connectors, manager, checkpoints, settings, lens_feedback=lens_feedback)
     user_preferences.notifications = slack.notifications
     from .session_titles import SessionTitles
@@ -680,7 +682,9 @@ def _create_app(settings, store):
         return {'model': selected}
 
     def user_model(request):
-        actor = store.identity(security.session_info(request))
+        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
+        if actor is None:
+            actor = store.identity(security.session_info(request))
         with store.connect() as conn:
             return preferred_model(conn, settings, actor)
 
@@ -796,9 +800,7 @@ def _create_app(settings, store):
         # SQLite reads/identity writes can wait on disk or a writer. Keep the
         # bounded worker pool responsible for those waits, not the event loop.
         rows, receipts = await run_in_threadpool(load_run_list, request, focus, scope, archived, search, view)
-        # The PR cache and refresh tasks belong to the event loop. Recheck live
-        # GitHub access here; do not pass connection credentials across threads.
-        summaries = session_pull_requests.summaries(rows, receipts=receipts)
+        summaries = await session_pull_requests.summaries(rows, receipts=receipts)
         for run_id, row in rows.items():
             row['pr_summary'] = summaries[run_id]
         return list(rows.values())
@@ -906,15 +908,16 @@ def _create_app(settings, store):
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = store.root_id(run_id)
         run['workflow_root_id'] = sidebar_id
-        return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
+        admin = security.role(request) == 'admin'
+        return {**public_run(run), **session_lifecycle.metadata(run, actor, admin),
                 **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
                 'feedback_enabled': lens_feedback.enabled,
                 **activity_data, "approvals": store.approvals(run_id), "messages": messages,
                 'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
-                "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
-                "credential_requests": credentials.pending(run,actor,security.role(request)=='admin'),
+                "agents": coordinator.view(run_id, include_costs=admin),
+                "credential_requests": credentials.pending(run,actor,admin),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": bool(store.rows("SELECT 1 FROM published_artifacts WHERE run_id=? LIMIT 1", (run_id,))), "slack_source": store.slack_source(run_id)}
 
@@ -924,7 +927,7 @@ def _create_app(settings, store):
         identities.wake.set()
         # PR refresh tasks are event-loop owned; database and object-store reads
         # above keep their complete transactions in the thread pool.
-        summary = session_pull_requests.summaries([run_id])[run_id]
+        summary = (await session_pull_requests.summaries([run_id]))[run_id]
         return {**result, 'pr_summary': summary, 'pull_requests': summary['pull_requests']}
 
     def feedback_author(request, actor=None):
@@ -974,6 +977,15 @@ def _create_app(settings, store):
         actor = store.identity(security.session_info(request))
         result = await connectors.github.decide_write_access(run_id, access_id, actor, body.decision)
         await checkpoints.flush()
+        if body.decision == 'approve' and body.resume:
+            # The normal message path preserves requester identity, queueing and
+            # retry deduplication without touching the browser's unsent draft.
+            access = store.rows('SELECT repository_id, number FROM github_write_access WHERE id=? AND run_id=?',
+                                (access_id, run_id))[0]
+            await send_message(run_id, ChatMessage(
+                content=f"I approved access to PR #{access['number']} in repository {access['repository_id']} for this session. Check the approval and continue the requested work.",
+                client_id=f'pr-access-{access_id}',
+            ), request)
         return result
 
     @app.get('/api/runs/{run_id}/pull-request')

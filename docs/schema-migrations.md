@@ -2,7 +2,7 @@
 
 Explicit schema verification is the database prerequisite for
 [compatible rolling releases](rolling-deploy.md). This bridge release requires
-revision **17**. Verified roles can overlap under their reviewed protocols and
+revision **18**. Verified roles can overlap under their reviewed protocols and
 shared settings. After every role runs the bridge, future explicitly reviewed
 additive revisions can use the rolling action; initial activation and breaking
 changes still require maintenance. Production is not opted in by merging code.
@@ -33,7 +33,7 @@ is insufficient.
    python -m app.schema_migrations --apply
    ```
 
-   It prints `{"schema_revision": 17, "status": "ready"}` on success. An empty
+   It prints `{"schema_revision": 18, "status": "ready"}` on success. An empty
    schema must already exist, and requires `MOYAI_DATABASE_INITIALIZE=true`.
    Existing schemas do not need that flag. No credentials are printed.
 4. Set `MOYAI_SCHEMA_MODE=verify` on every role, including the dedicated API.
@@ -48,7 +48,7 @@ transition before enabling them. A normal pre-deploy hook that runs while the ol
 app is live will be rejected. Once this activation is complete, deploy the bridge
 at the same schema revision to all four roles before using online expansions.
 An installation still on an earlier revision, such as revision 14, first needs
-the one-time maintenance adoption of revision 17; the empty online registry
+the one-time maintenance adoption of revision 18; the empty online registry
 does not provide a migration path for it.
 
 ## Reviewed online expansions
@@ -63,7 +63,7 @@ entire plan and records it while making no database or service writes.
 names its source and target revision, their digests from `schema_versions.json`,
 the unchanged compatibility revision, and a list of declarative operations.
 Steps must be contiguous. The bridge initially has an empty registry and retains
-compatibility revision 17, preserving the existing role fingerprints.
+compatibility revision 18, preserving the existing role fingerprints.
 
 Protocol 1 accepts only:
 

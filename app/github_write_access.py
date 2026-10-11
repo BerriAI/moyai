@@ -14,6 +14,7 @@ from .db import now
 class WriteDecision(BaseModel):
     model_config = ConfigDict(extra='forbid')
     decision: Literal['approve', 'deny', 'revoke']
+    resume: bool = False
 
 
 class GitHubWriteAccess:

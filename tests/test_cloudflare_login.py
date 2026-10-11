@@ -87,7 +87,8 @@ async def test_slow_access_account_check_does_not_block_another_request(login, a
     assert 'workspace_session=' in response.headers['set-cookie']
 
 
-def test_conversation_reads_reuse_fresh_access_actor_without_identity_writes(login, monkeypatch):
+@pytest.mark.parametrize('view', ['detail', 'config', 'sidebar', 'folders'])
+def test_conversation_reads_reuse_fresh_access_actor_without_identity_writes(login, monkeypatch, view):
     app, client = login
     store = app.state.store
     owner = 'google:original-google-tin'
@@ -104,11 +105,16 @@ def test_conversation_reads_reuse_fresh_access_actor_without_identity_writes(log
 
     monkeypatch.setattr(store, 'access_identity', enroll)
     monkeypatch.setattr(store, 'identity', unexpected_identity_write)
-    path = f"/api/runs/{run['id']}?activity=summary"
+    path = {'detail': f"/api/runs/{run['id']}?activity=summary", 'config': '/api/config',
+            'sidebar': '/api/runs?scope=mine&view=sidebar', 'folders': '/api/session-folders'}[view]
     first = client.get(path)
     assert first.status_code == 200
-    assert first.json()['owner']['id'] == owner
-    assert first.json()['can_delete'] is True
+    if view == 'detail':
+        assert first.json()['owner']['id'] == owner
+        assert first.json()['can_delete'] is True
+    elif view == 'sidebar':
+        assert first.json()[0]['id'] == run['id']
+        assert first.json()[0]['can_delete'] is True
     assert enrollments == ['access-tin']
     seen = store.rows('SELECT updated_at FROM users WHERE id=?', (owner,))[0]['updated_at']
     cookie = app.state.security.signer.loads(client.cookies['workspace_session'])
@@ -121,12 +127,14 @@ def test_conversation_reads_reuse_fresh_access_actor_without_identity_writes(log
     assert store.rows('SELECT updated_at FROM users WHERE id=?', (owner,))[0]['updated_at'] == seen
 
 
-def test_enrolled_conversation_read_does_not_wait_for_database_writer(login):
+@pytest.mark.parametrize('view', ['detail', 'config', 'sidebar', 'folders'])
+def test_enrolled_conversation_read_does_not_wait_for_database_writer(login, view):
     app, client = login
     store = app.state.store
     run = store.create_run('Open while another session writes', '', 'demo', [], chat_enabled=True,
                            user_id='google:original-google-tin')
-    path = f"/api/runs/{run['id']}?activity=summary"
+    path = {'detail': f"/api/runs/{run['id']}?activity=summary", 'config': '/api/config',
+            'sidebar': '/api/runs?scope=mine&view=sidebar', 'folders': '/api/session-folders'}[view]
     assert client.get(path).status_code == 200
     # In PostgreSQL this holds the schema's exclusive advisory write lock.
     # SQLite holds its writer lock while WAL readers remain available.
@@ -134,7 +142,8 @@ def test_enrolled_conversation_read_does_not_wait_for_database_writer(login):
         writer.begin_write()
         response = requests.submit(client.get, path).result(timeout=2)
         assert response.status_code == 200
-        assert response.json()['messages'][0]['content'] == 'Open while another session writes'
+        if view == 'detail':
+            assert response.json()['messages'][0]['content'] == 'Open while another session writes'
 
 
 @pytest.mark.parametrize('change', [
@@ -142,12 +151,14 @@ def test_enrolled_conversation_read_does_not_wait_for_database_writer(login):
     "UPDATE users SET email='reassigned@berri.ai' WHERE id='google:original-google-tin'",
     "UPDATE users SET kind='shared' WHERE id='google:original-google-tin'",
 ])
-def test_conversation_access_mapping_is_revalidated_without_enrollment_fallback(login, monkeypatch, change):
+@pytest.mark.parametrize('view', ['detail', 'config', 'sidebar', 'folders'])
+def test_conversation_access_mapping_is_revalidated_without_enrollment_fallback(login, monkeypatch, change, view):
     app, client = login
     store = app.state.store
     run = store.create_run('Check current access', '', 'demo', [], chat_enabled=True,
                            user_id='google:original-google-tin')
-    path = f"/api/runs/{run['id']}?activity=summary"
+    path = {'detail': f"/api/runs/{run['id']}?activity=summary", 'config': '/api/config',
+            'sidebar': '/api/runs?scope=mine&view=sidebar', 'folders': '/api/session-folders'}[view]
     assert client.get(path).status_code == 200
     store.execute(change)
 
