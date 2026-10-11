@@ -884,6 +884,10 @@ def _create_app(settings, store):
     def load_run_details(run_id, request, activity):
         security.require(request)
         from .activity_history import projection
+        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
+        if actor is None:
+            actor = store.identity(security.session_info(request))
+        admin = security.role(request) == 'admin'
         # Keep message status and the activity cursor in one read snapshot. A
         # response completing during this request must be included or replayed
         # by SSE, never skipped between independent database reads.
@@ -895,29 +899,29 @@ def _create_app(settings, store):
             messages = public_messages(run, store.messages(run_id, connection=connection))
             activity_data = projection(connection, run, messages) if activity == 'summary' and run['chat_enabled'] else {
                 'events': store.events(run_id, limit=10000, connection=connection)}
-        owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
+            metadata = store.conversation_metadata_in(connection, run, actor)
+            approvals = store.approvals(run_id, connection=connection)
+            goal = store.goal(run_id, connection=connection)
+            agents = coordinator.view(run_id, include_costs=admin, connection=connection)
         project = environments.context(run)
-        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
-        if actor is None:
-            actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request, actor))
+        feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'])
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
-        sidebar_id = store.root_id(run_id)
+        sidebar_id = metadata['workflow_root_id']
         run['workflow_root_id'] = sidebar_id
-        admin = security.role(request) == 'admin'
-        return {**public_run(run), **session_lifecycle.metadata(run, actor, admin),
-                **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
+        archives = {sidebar_id} if metadata['archived'] else set()
+        return {**public_run(run), **session_lifecycle.metadata(run, actor, admin, archives, root_id=sidebar_id),
+                **metadata['sidebar'],
                 'feedback_enabled': lens_feedback.enabled,
-                **activity_data, "approvals": store.approvals(run_id), "messages": messages,
+                **activity_data, "approvals": approvals, "messages": messages,
                 'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
-                "owner": owners[0] if owners else None, "goal": store.goal(run_id),
-                "agents": coordinator.view(run_id, include_costs=admin),
+                "owner": metadata['owner'], "goal": goal,
+                "agents": agents,
                 "credential_requests": credentials.pending(run,actor,admin),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": bool(store.rows("SELECT 1 FROM published_artifacts WHERE run_id=? LIMIT 1", (run_id,))), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):

@@ -255,6 +255,24 @@ def test_session_api_and_discovery_schema(external):
     assert client.get(f'/api/runs/{rid}').json()['pr_write_access'] == []
 
 
+def test_empty_access_panel_skips_connection_reads_but_existing_rows_stay_versioned(external, monkeypatch):
+    app, client, rid, headers, github, api = external
+    run = app.state.store.run(rid)
+    actor = run['active_user_id']
+
+    def unexpected_version_read():
+        pytest.fail('An empty PR access panel must not read the GitHub connection')
+
+    with monkeypatch.context() as guard:
+        guard.setattr(github, 'connection_version', unexpected_version_read)
+        assert github.access_requests(run, actor) == []
+    row = call(external).json()
+    assert github.access_requests(run, actor)[0]['id'] == row['id']
+    assert github.access_requests(run, 'another-person') == []
+    monkeypatch.setattr(github, 'connection_version', lambda: 'rotated-connection')
+    assert github.access_requests(run, actor) == []
+
+
 def test_real_signed_other_user_and_admin_cannot_approve_member_request(external):
     from test_spend import sign_in
     app, client, rid, headers, github, api = external

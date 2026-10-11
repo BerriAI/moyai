@@ -522,11 +522,11 @@ class AgentCoordinator:
                     'offset': args.offset, 'bytes': len(raw), 'size': info.file_size,
                     'next_offset': end if end < info.file_size else None, 'untrusted_reference': True}
 
-    def view(self, run_id, *, include_costs=True):
+    def view(self, run_id, *, include_costs=True, connection=None):
         # Opening a chat needs worker status, not saved answers or group handoff
         # snapshots. Read the whole tree once instead of repeating result and
         # artifact queries for every group and child.
-        group_rows = self.store.rows('SELECT id,status FROM agent_groups WHERE parent_id=? ORDER BY created_at', (run_id,))
+        group_rows = self.store.rows('SELECT id,status FROM agent_groups WHERE parent_id=? ORDER BY created_at', (run_id,), connection=connection)
         family = self.store.rows('''WITH RECURSIVE tree(run_id) AS (
             SELECT id FROM runs WHERE id=? UNION
             SELECT r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
@@ -535,13 +535,13 @@ class AgentCoordinator:
             r.active_message_id,r.deletion_requested_at,r.deleted_at,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id
                 AND m.status IN ('queued','running','injected')) AS pending_messages
-            FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id''', (run_id,))
+            FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id''', (run_id,), connection=connection)
         direct = {group['id']: [] for group in group_rows}
         for row in family:
             if row['agent_group_id'] in direct:
                 direct[row['agent_group_id']].append(row)
         artifacts = self.store.artifacts.available_names([child['id'] + '.zip'
-            for children in direct.values() for child in children])
+            for children in direct.values() for child in children], conn=connection)
         groups = [{'group_id': group['id'], 'status': group['status'],
                    'completed': sum(child['status'] in {'idle', 'completed'} for child in direct[group['id']]),
                    'total': len(direct[group['id']]),
@@ -552,7 +552,7 @@ class AgentCoordinator:
                   for group in group_rows]
         ids = [row['id'] for row in family]
         requests = self.store.rows('SELECT run_id,cost,status,key_hash,gateway_scope,cost_recovery_error FROM model_requests WHERE run_id IN (' + ','.join('?' for _ in ids) + ')',
-                                   tuple(ids)) if include_costs else []
+                                   tuple(ids), connection=connection) if include_costs else []
         costs = {}
         key_hash = digest(self.settings.litellm_api_key) if self.settings.litellm_api_key else ''
         scope = gateway_scope(self.settings.litellm_api_base)

@@ -194,7 +194,9 @@ class SessionLifecycle:
         if not getattr(route, 'path', '').startswith('/api/runs/{run_id}'):
             return
         self.security.require(request, mutation=request.method in {'POST', 'PUT', 'PATCH', 'DELETE'})
-        run = self.store.run(request.path_params['run_id'])
+        rows = self.store.rows('SELECT deleted_at,deletion_requested_at FROM runs WHERE id=?',
+                               (request.path_params['run_id'],))
+        run = rows[0] if rows else None
         deleting = request.method == 'DELETE' and route.path == '/api/runs/{run_id}'
         # A fresh/reconnecting stream must receive its terminal marker. The
         # events handler checks deletion before reading any retained history.
@@ -211,9 +213,9 @@ class SessionLifecycle:
     def can_delete(run, actor, admin):
         return not run['parent_run_id'] and (admin or bool(actor and run['owner_id'] == actor))
 
-    def metadata(self, run, actor, admin, archives=None):
+    def metadata(self, run, actor, admin, archives=None, *, root_id=None):
         archives = self.archives(actor) if archives is None else archives
-        root_id = self.store.root_id(run['id']) if run['parent_run_id'] else run['id']
+        root_id = root_id or (self.store.root_id(run['id']) if run['parent_run_id'] else run['id'])
         return {'archived': root_id in archives,
                 'can_delete': self.can_delete(run, actor, admin),
                 'deletion_error': self.deletion_errors.get(root_id, '')}
