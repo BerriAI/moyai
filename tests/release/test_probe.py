@@ -93,7 +93,10 @@ def test_release_fingerprint_matches_actual_runtime_policy(production_shape):
     assert policy_fingerprint(settings.model_copy(update={'encryption_key': 'different'})) != state['policy']
     assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_pool_size': 1})) != state['policy']
     assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_idle_seconds': 600})) != state['policy']
-    assert policy_fingerprint(settings.model_copy(update={'independent_agent_runtime': True})) != state['policy']
+    assert policy_fingerprint(settings.model_copy(update={'independent_agent_runtime': not settings.independent_agent_runtime})) != state['policy']
+    for name in ('max_concurrent_runs', 'max_concurrent_model_requests'):
+        changed = 1 if getattr(settings, name) == 0 else 0
+        assert policy_fingerprint(settings.model_copy(update={name: changed})) != state['policy']
 
 
 @pytest.mark.parametrize('independent', [False, True])
