@@ -785,8 +785,15 @@ def test_relay_retries_only_explicit_unbilled_model_admission(monkeypatch):
         relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
 
 
-def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkeypatch):
-    app, client = workspace
+@pytest.fixture
+def finite_model_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv('MAX_CONCURRENT_MODEL_REQUESTS', '8')
+    with contextmanager(workspace.__wrapped__)(tmp_path, monkeypatch) as value:
+        yield value
+
+
+def test_full_model_capacity_returns_unbilled_admission_marker(finite_model_workspace, monkeypatch):
+    app, client = finite_model_workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     run = active(app)
     received = []
@@ -805,7 +812,7 @@ def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkey
         calls = [pool.submit(client.post, endpoint, json={'messages':[]}, headers=headers) for _ in range(8)]
         try:
             wait_for(lambda: len(received) == 8)
-            queued = client.post(endpoint, json={'messages':[]}, headers=headers)
+            queued = pool.submit(client.post, endpoint, json={'messages':[]}, headers=headers).result(timeout=5)
             assert queued.status_code == 429 and queued.headers['X-Moyai-Model-Queue'] == '1'
             assert len(app.state.store.rows('SELECT * FROM model_requests')) == 8
         finally:
