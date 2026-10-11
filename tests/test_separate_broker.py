@@ -112,11 +112,13 @@ def test_broker_is_singleton_and_requires_matching_build_and_topology(split_sett
         api.state.store.close()
 
 
-def test_only_broker_runs_inference_recovery_and_memory_review(split_settings, monkeypatch):
+def test_only_broker_runs_inference_recovery_and_background_reviews(split_settings, monkeypatch):
     from app.memory_review import MemoryReview
+    from app.skill_learning import SkillLearning
     from app.spend_recovery import SpendRecovery
     from app.context_maintenance import ContextMaintenance
     starts = []
+    monkeypatch.setattr(SkillLearning, 'start', lambda self: starts.append(('skills', self.settings.moyai_runtime_role)))
     monkeypatch.setattr(MemoryReview, 'start', lambda self: starts.append(('memory', self.settings.moyai_runtime_role)))
     monkeypatch.setattr(SpendRecovery, 'start', lambda self: starts.append(('spend', self.spend.settings.moyai_runtime_role)))
     monkeypatch.setattr(ContextMaintenance, 'recover', lambda self: starts.append(('context', self.gateway.settings.moyai_runtime_role)))
@@ -124,7 +126,7 @@ def test_only_broker_runs_inference_recovery_and_memory_review(split_settings, m
         assert starts == []
         with TestClient(create_app(split_settings.model_copy(update={'moyai_runtime_role': 'broker'})),
                         base_url=split_settings.public_url, client=('127.0.0.1', 50000)):
-            assert sorted(starts) == [('context', 'broker'), ('memory', 'broker'), ('spend', 'broker')]
+            assert sorted(starts) == [('context', 'broker'), ('memory', 'broker'), ('skills', 'broker'), ('spend', 'broker')]
 
 
 async def test_broker_serves_no_temporal_work_or_wake_dispatch(split_settings, monkeypatch):

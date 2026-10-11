@@ -32,7 +32,7 @@ broker with `active_scope=broker`; a positive limit reports the shared active
 count with `active_scope=cluster`. Unlimited counters must not be interpreted as
 a cluster-wide total during replacement overlap.
 
-Memory review and spend recovery use one separate leader lock (`726946`) on the
+Memory review, skill learning, repository context and spend recovery use one separate leader lock (`726946`) on the
 runtime ownership session. A new broker can become ready and accept foreground
 requests while the previous generation retains this maintenance leadership. The
 old generation closes maintenance before releasing leadership. Context jobs and

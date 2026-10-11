@@ -68,9 +68,10 @@ class BrokerMaintenance:
     A replacement can serve requests while waiting for this independent lock.
     Release comes after shutdown of the tasks, never before cancellation drains.
     """
-    def __init__(self, store, memory_review, spend_recovery, repository_context=None):
+    def __init__(self, store, memory_review, spend_recovery, repository_context=None, *, skill_learning=None):
         self.store, self.memory_review, self.spend_recovery = store, memory_review, spend_recovery
         self.repository_context = repository_context
+        self.skill_learning = skill_learning
         self.task = None
         self.owned = False
 
@@ -92,12 +93,16 @@ class BrokerMaintenance:
                 await asyncio.sleep(.2)
             self.spend_recovery.start()
             self.memory_review.start()
+            if self.skill_learning:
+                self.skill_learning.start()
             if self.repository_context:
                 self.repository_context.start()
             await asyncio.Event().wait()
         finally:
             errors = []
             closes = [self.memory_review.close, self.spend_recovery.close]
+            if self.skill_learning:
+                closes.insert(1, self.skill_learning.close)
             if self.repository_context:
                 closes.insert(0, self.repository_context.close)
             for close in closes:

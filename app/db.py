@@ -88,6 +88,7 @@ class Store:
         self.default_model = default_model
         self.tracing = None
         self.memory_review = None
+        self.skill_learning = None
         self.goals = None
         self.public_delivery = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -832,6 +833,8 @@ class Store:
             self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
         if status == 'completed' and self.memory_review:
             self.memory_review.enqueue_in(conn, message_id)
+        if status == 'completed' and self.skill_learning:
+            self.skill_learning.enqueue_in(conn, message_id)
         return content
 
     def finish_message(self, run_id, message_id, content, status="completed"):
