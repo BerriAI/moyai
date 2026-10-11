@@ -47,6 +47,7 @@ part of the ordinary change review. Existing tree/symlink checks still apply.
 | Close an unwanted PR | Missing | `github_close_pull_request`; exact PR authority/current head; no merge or branch deletion |
 | Diagnose registered tools versus installation permissions | Generic workspace catalog only | `github_capabilities`; per-tool requirements/policy plus workflow-file permission |
 | Inspect an uncertain publication without invoking the publisher | Missing | `github_publication_status`; session-bound request key, saved receipt or exact branch/commit readback |
+| Images/recordings in PR descriptions and comments | Revocable hosted links available | Existing `media_list` / `media_share` / `media_revoke`, plus new PR-description edits; native GitHub uploads remain a separate gap |
 
 This adds **31 tools**: 18 readers and 13 writers. Some cover several provider
 operations using finite enums. It is workflow coverage, not a one-to-one copy of
@@ -86,6 +87,55 @@ publication. Empty results remain `unconfirmed`. Saved receipts are historical;
 read the PR for its current open/closed state. Existing publication recovery and
 retry semantics are unchanged. Closing is supported for open PRs; reopening
 closed PRs is outside this addition's evidence-backed scope.
+
+## Broader historical pass and remaining gap
+
+A third pass reviewed GitHub-related content in **15 additional Slack threads**
+from October 3–8 and **four additional live session histories**. Three live histories
+were expanded to inspect recorded GitHub calls; older records sometimes retained
+tool names/completion status without inputs or results. Searches also included
+October 9–10 and excluded threads already covered by the previous pass. This is
+still a targeted sample, not an exhaustive tracing-backend export; no Langfuse
+project credentials were available to this audit.
+
+| Historical symptom | Current disposition |
+| --- | --- |
+| Generated API files rejected above 1 MiB | Already fixed by the existing publisher. Rechecked large text, binary and more-than-100-file regressions. |
+| Repository visible on GitHub but publishing denied | Repository selection/connection configuration, not a missing operation. |
+| Vercel deployment failed while GitHub code/log reads worked | Separate deployment-provider access. GitHub tools do not expose Vercel's private logs. |
+| Actions admin settings denied | Separate administration permission; ordinary CI reads and the new PR-bound rerun/cancel tools do not require granting settings administration. |
+| Local fix completed without opening a PR | Agent delivery behavior; subsequent publication succeeded with the existing tool. |
+| Review findings required follow-up edits/re-review | Existing file publication and PR comments worked; this PR adds dedicated replies, thread state and reviewer requests. |
+| Broken screenshot paths in PR body | PR-description editing is now covered. Existing hosted media tools can produce usable links when sharing is authorized and storage/public-origin prerequisites are configured. |
+| Native GitHub image/video attachments requested | **Still missing from Moyai's App connector.** Requires a separate user-authenticated upload integration, not another App installation scope. |
+
+GitHub's current [CLI attachment documentation](https://github.com/cli/cli/blob/trunk/skills/gh/SKILL.md#attaching-images-and-videos)
+describes uploads using OAuth/PAT user credentials with repository write access;
+the installation-token connection used here is not that upload path. Do not
+claim `media_share` produces native GitHub attachments or silently substitute
+public hosted links when the user specifically requested native uploads. Native
+upload support would need trusted-server credential storage, fixed upload-only
+operations, exact PR/session authorization, selected immutable media revisions,
+and durable partial-upload receipts. An unrestricted user token in the agent
+would undermine the no-merge/no-approval boundary. This PR does not add that
+authentication flow or count native uploads among its 31 tools.
+
+## Tool discovery
+
+The added tools join the ordinary broker catalog when GitHub is selected for the
+session and the connection policy permits the operation. The MCP bridge advertises
+that catalog, including these additions; no per-tool installation or activation
+step is required after the coordinated release. Read-only connections hide writers.
+Installation scopes and exact-PR authorization are checked separately at execution.
+
+Definitions are **loaded on demand**, not eagerly inserted into every model prompt:
+Codex uses native `tool_search` where supported (or its actual catalog/`ALL_TOOLS`),
+Claude uses `ToolSearch`, and Hermes uses `tool_search`, `tool_describe`, then
+`tool_call`. The Codex runtime waits for the MCP server before its first request.
+The native-search integration regression verifies deferred schema discovery,
+execution through the real bridge/relay/broker, and hiding an unselected GitHub
+connection. Registration in this branch does not imply deployment to existing
+sessions or old computer images.
 
 ## Authorization and recovery
 
