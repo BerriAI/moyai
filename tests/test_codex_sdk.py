@@ -696,6 +696,176 @@ def model_failure(relay, request_id='failed-model'):
     return failure
 
 
+@pytest.mark.parametrize('rpc_error', [False, True])
+def test_compaction_reconnect_drains_late_receipts_without_replaying_tools(codex_agent, monkeypatch, rpc_error):
+    from openai_codex.errors import TransportClosedError
+    agent, _, store = codex_agent
+    relay, resumed = install_transport_relay(agent)
+    pressure = relay.context_required = {'input_tokens': 30000, 'input_budget': 20000}
+    started, finished = native_item('commandExecution')
+    agent.record_item(started, completed=False)
+    attempts, probes, queued = [], [], []
+    sleep = asyncio.sleep
+
+    async def fast_backoff(seconds):
+        await sleep(0 if seconds >= 2 else 0.001)
+
+    async def compact(client, thread_id, turn_ids):
+        assert thread_id == 'original-thread' and turn_ids == {'original-turn'}
+        assert relay.context_required is pressure and agent.before_model()
+        attempts.append(thread_id)
+        if len(attempts) == 1:
+            model_failure(relay)
+            if rpc_error:
+                raise RuntimeError('Compaction RPC failed')
+            return False
+        assert not agent.journal.pending and not store.pending
+        return True
+
+    def ready(*, timeout):
+        assert 0 < timeout <= 1 and len(attempts) == 1
+        probes.append(timeout)
+        queued.extend([sdk_event('item/completed', {'item': finished})] * 2)
+        return True
+
+    class Client:
+        async def next_turn_notification(self, turn_id):
+            assert turn_id == 'original-turn'
+            if queued:
+                return queued.pop(0)
+            raise TransportClosedError('Turn is no longer streaming')
+
+    monkeypatch.setattr(codex_harness.asyncio, 'sleep', fast_backoff)
+    monkeypatch.setattr(agent, '_compact_context', compact)
+    relay.model_ready = ready
+    assert asyncio.run(agent.compact_context(Client(), 'original-thread', {'original-turn'}))
+    assert attempts == ['original-thread', 'original-thread'] and len(probes) == 1
+    assert resumed == ['failed-model'] and agent.transport_attempt == 1
+    assert agent.model_calls == 2 and agent.journal.completed_tools == 1
+    assert not agent.journal.pending and not store.pending
+    assert relay.context_required is pressure, 'Only the caller may clear a confirmed compaction'
+    assert len([message for message in store.history() if message['role'] == 'tool']) == 1
+    assert len([message for message in store.history() if message['role'] == 'user']) == 1
+
+
+@pytest.mark.parametrize('reason', ['permanent', 'stale', 'uncertain_tool', 'pressure_changed',
+    'stop', 'boundary', 'model_limit', 'unauthorized', 'invalid', 'recovery_deadline', 'exhausted'])
+def test_compaction_reconnect_does_not_bypass_recovery_boundaries(codex_agent, monkeypatch, reason):
+    from openai_codex.errors import TransportClosedError
+    agent, _, store = codex_agent
+    relay, resumed = install_transport_relay(agent)
+    relay.context_required = {'input_tokens': 30000, 'input_budget': 20000}
+    agent.record_item(native_item('commandExecution')[0], completed=False)
+    attempts, probes = [], []
+    sleep = asyncio.sleep
+    agent.context.spec['transport_recovery_seconds'] = 0.02
+    if reason == 'stale':
+        model_failure(relay)
+
+    async def fast_backoff(seconds):
+        await sleep(0 if seconds >= 2 else 0.001)
+
+    async def compact(client, thread_id, turn_ids):
+        attempts.append(thread_id)
+        if reason != 'stale':
+            model_failure(relay, 'compact-' + str(len(attempts)))
+        if reason == 'permanent': relay.last_failure['transient'] = False
+        if reason == 'uncertain_tool': relay.uncertain_tool = True
+        if reason == 'pressure_changed': relay.context_required = dict(relay.context_required)
+        if reason == 'stop': agent.interrupt()
+        if reason == 'boundary': agent.boundary_failed = True
+        if reason == 'model_limit': agent.model_calls = agent.context.spec['max_iterations']
+        return False
+
+    def ready(*, timeout):
+        probes.append(timeout)
+        if reason == 'unauthorized':
+            raise urllib.error.HTTPError('http://broker/v1/models', 401, 'Unauthorized', {}, None)
+        if reason == 'invalid':
+            raise ValueError('Invalid model list')
+        return reason != 'recovery_deadline'
+
+    class Client:
+        async def next_turn_notification(self, turn_id):
+            raise TransportClosedError('Turn is no longer streaming')
+
+    monkeypatch.setattr(codex_harness.asyncio, 'sleep', fast_backoff)
+    monkeypatch.setattr(agent, '_compact_context', compact)
+    relay.model_ready = ready
+    assert not asyncio.run(agent.compact_context(Client(), 'original-thread', {'original-turn'}))
+    assert len(attempts) == (MAX_TRANSPORT_ATTEMPTS + 1 if reason == 'exhausted' else 1)
+    assert len(resumed) == (MAX_TRANSPORT_ATTEMPTS if reason == 'exhausted' else 0)
+    assert agent.transport_attempt <= MAX_TRANSPORT_ATTEMPTS
+    assert agent.journal.pending and store.pending and agent.journal.completed_tools == 0
+    assert recovery_marker(agent, {'failed': True}) is None
+    if reason in {'unauthorized', 'invalid', 'recovery_deadline'}:
+        assert probes and agent.boundary_failed
+
+
+@pytest.mark.parametrize('deadline', [False, True])
+def test_compaction_reconnect_cancellation_retains_pending_receipts(codex_agent, monkeypatch, deadline):
+    from openai_codex.errors import TransportClosedError
+    agent, _, store = codex_agent
+    relay, resumed = install_transport_relay(agent)
+    relay.context_required = {'input_tokens': 30000, 'input_budget': 20000}
+    agent.record_item(native_item('commandExecution')[0], completed=False)
+    started, released = threading.Event(), threading.Event()
+    attempts = []
+    sleep = asyncio.sleep
+
+    async def fast_backoff(seconds):
+        await sleep(0 if seconds >= 2 else 0.001)
+
+    async def compact(*args):
+        attempts.append(1)
+        model_failure(relay)
+        return False
+
+    def ready(*, timeout):
+        started.set()
+        assert released.wait(2)
+        return True
+
+    class Client:
+        async def next_turn_notification(self, turn_id):
+            raise TransportClosedError('Turn is no longer streaming')
+
+    monkeypatch.setattr(codex_harness.asyncio, 'sleep', fast_backoff)
+    monkeypatch.setattr(agent, '_compact_context', compact)
+    relay.model_ready = ready
+
+    async def run():
+        async def recovering():
+            async with asyncio.timeout(None) as scope:
+                if deadline:
+                    while not started.is_set():
+                        await sleep(0)
+                    scope.reschedule(asyncio.get_running_loop().time())
+                return await task
+
+        task = asyncio.create_task(agent.compact_context(Client(), 'original-thread', {'original-turn'}))
+        while not started.is_set():
+            await sleep(0.001)
+        try:
+            if deadline:
+                with pytest.raises(TimeoutError):
+                    await recovering()
+            else:
+                task.cancel()
+                await sleep(0)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        finally:
+            released.set()
+        await sleep(0.01)
+
+    asyncio.run(run())
+    assert attempts == [1] and not resumed and relay.model_failed
+    assert agent.journal.pending and store.pending and agent.journal.completed_tools == 0
+    assert recovery_marker(agent, {'failed': True}) is None
+
+
 def test_live_transport_keeps_tools_all_prior_turns_and_queued_input(codex_agent, monkeypatch):
     from openai_codex.errors import TransportClosedError
     agent, events, store = codex_agent
