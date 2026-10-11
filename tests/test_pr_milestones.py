@@ -10,23 +10,23 @@ from test_github import PAYLOAD, GitHubAPI, connected
 from test_workspace import workspace
 
 
-def test_publication_bypasses_spent_update_budget_and_survives_failure(workspace, monkeypatch):
+def test_publication_preserves_commentary_and_survives_failure(workspace, monkeypatch):
     app, _ = workspace
     connected(app)
     store, github = app.state.store, app.state.connectors.github
     run = store.create_run('Create the fix PR', '', 'modal', ['github'], chat_enabled=True)
     turn = store.claim_message(run['id'])
     store.update_run(run['id'], status='running', token_hash=digest('test-capability'))
-    store.event(run['id'], 'message', 'Opening update')
-    store.event(run['id'], 'message', 'Delegating to scouts')
-    store.event(run['id'], 'message', 'Suppressed third update')
+    commentary = ['Opening update', 'Delegating to scouts', 'Implementing the fix']
+    for message in commentary:
+        store.event(run['id'], 'message', message)
     provider = GitHubAPI(github, monkeypatch)
     receipt = asyncio.run(github.publish(store.run(run['id']), Publish.model_validate(PAYLOAD)))
     for _ in range(2):
         assert asyncio.run(github.publish(store.run(run['id']), Publish.model_validate(PAYLOAD))) == receipt
     updates = [event for event in store.events(run['id']) if event['kind'] == 'message']
-    assert len(updates) == 3
-    milestone = updates[-1]
+    milestone, = [event for event in updates if event['data'].get('phase') == 'pr_created']
+    assert [event['message'] for event in updates] == [*commentary, milestone['message']]
     assert milestone['data']['phase'] == 'pr_created' and milestone['data']['public_update']
     assert milestone['data']['turn_id'] == turn['id'] and receipt['url'] in milestone['message']
     assert 'not complete' in milestone['message']
@@ -34,7 +34,7 @@ def test_publication_bypasses_spent_update_budget_and_survives_failure(workspace
     store.update_run(run['id'], status='failed')
     with store.connect() as conn:
         result = projection(conn, store.run(run['id']), store.messages(run['id']))
-    assert any(event['id'] == milestone['id'] for event in result['events'])
+    assert {event['id'] for event in updates} <= {event['id'] for event in result['events']}
     assert len([call for call in provider.calls if call[0] == 'POST' and call[1].endswith('/pulls')]) == 1
 
 
