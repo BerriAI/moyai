@@ -699,7 +699,7 @@ function updateChatStatus(run){
   syncRunSummary(run);
 }
 function renderChatWorking(run){
-  const current=MoyaiActivity.current(run),node=$('#chat-working');
+  const turns=MoyaiActivity.groups(run),current=MoyaiActivity.current(run,turns),node=$('#chat-working');
   node.classList.toggle('busy',current.pulse);
   node.textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',reconnecting:'Reconnecting to workspace services. Your request will resume automatically…',running:current.headline,saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for access. Your work is saved and the sandbox is paused.',stopping:'Stopping…',deleting:run.deletion_error?'Deleting session… '+run.deletion_error:'Deleting session…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
   if(run.swarm?.status==='active'&&run.status==='waiting_children')node.textContent='Your team is working. Send a direction anytime.';
@@ -710,13 +710,13 @@ function renderChatWorking(run){
   if(!savedFailure&&MoyaiActivity.terminalError(run))node.textContent=MoyaiActivity.terminalError(run);
   node.hidden=!node.textContent;
   node.title=node.textContent;
-  renderActivitySummary(run);
+  renderActivitySummary(run,turns);
   MoyaiGoal.render($('#goal-status'),run,esc);
 }
-function renderActivitySummary(run){
+function renderActivitySummary(run,groups=MoyaiActivity.groups(run)){
   const target=$('#activity-history');if(!target)return;
-  const turns=[...MoyaiActivity.groups(run).values()].filter(turn=>turn.rows.length||turn.live).reverse();
-  $('#activity-summary').textContent=MoyaiActivity.current(run).headline||'No active work';
+  const turns=[...groups.values()].filter(turn=>turn.rows.length||turn.live).reverse();
+  $('#activity-summary').textContent=MoyaiActivity.current(run,groups).headline||'No active work';
   $('#activity-count').textContent=`· ${turns.reduce((n,turn)=>n+turn.count,0)} actions`;
   const shown=turns.slice(0,state.activityHistoryLimit||5),signature=JSON.stringify(shown);
   if(target.dataset.signature===signature)return;
@@ -781,14 +781,21 @@ function updateChat(run,initial=false){
   const box=$('#conversation');const atBottom=initial||box.scrollHeight-box.scrollTop-box.clientHeight<100;
   state.messageQueue?.render(run);
   if(!state.swarmChat){
-  const {transcript}=MoyaiQueue.presentation(run);
+  const {transcript:history}=MoyaiQueue.presentation(run);
+  // Retain a message boundary rather than a count: new replies must not evict
+  // history the reader has opened, or move their position during refreshes.
+  let start=box.firstMessageId==null?-1:history.findIndex(message=>String(message.id)===box.firstMessageId);
+  if(start<0)start=Math.max(0,history.length-40);
+  box.firstMessageId=history[start]?String(history[start].id):null;
+  const transcript=history.slice(start);
   const diagnostics=transcript.map(m=>MoyaiActivity.failureDetails(run,m));
-  const signature=JSON.stringify([transcript,run.feedback_enabled,diagnostics]);
+  const signature=JSON.stringify([transcript,run.feedback_enabled,diagnostics,start>0,history[start-1]?.status]);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
     const previousTemplates=box.messageTemplates||new Map(),templates=new Map();
     const messages=transcript.map((m,index)=>{
-      const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;
+      const preceding=history[start+index-1];
+      const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(preceding?.status)?preceding.status:null;
       const signature=JSON.stringify([m,m.feedback,failure,run.mode,run.feedback_enabled,diagnostics[index]]),previous=previousTemplates.get(m.id);
       const feedback=m.role==='assistant'&&run.feedback_enabled&&!['running','streaming','queued','injected'].includes(m.status)?`<div class="message-actions"><button class="feedback-message primary" type="button" data-feedback-message="${esc(m.id)}" aria-label="${m.feedback?`Update feedback, score ${m.feedback.score} out of 10`:'Give feedback'}" title="${m.feedback?`Feedback ${esc(m.feedback.status||'pending')}`:'Give feedback on this reply'}">${globalThis.MoyaiIcon?.('chat',14)||''}<span>${m.feedback?`Feedback ${esc(m.feedback.score)}/10`:'Feedback'}</span></button></div>`:'';
       const swarmMessage=m.source==='swarm'||String(m.client_id||'').startsWith('swarm:');
@@ -797,7 +804,20 @@ function updateChat(run,initial=false){
       return html+`${m.role==='user'?`<div data-region-key="activity:${esc(m.id)}" data-region-preserve data-activity-slot="${m.id}"></div>`:''}`;
     }).join('');
     box.messageTemplates=templates;
-    MoyaiRegions.sync(box, `<div class="conversation-inner" data-region-key="transcript">${messages}<div id="credential-requests" data-region-key="credentials" data-region-preserve></div></div>`);
+    MoyaiRegions.sync(box, `<div class="conversation-inner" data-region-key="transcript">${start>0?'<div data-region-key="earlier-messages" data-region-leaf><button type="button" class="quiet" data-earlier-messages>Load earlier messages</button></div>':''}${messages}<div id="credential-requests" data-region-key="credentials" data-region-preserve></div></div>`);
+    const earlier=start>0?box.querySelector('[data-earlier-messages]:not([data-earlier-bound])'):null;
+    if(earlier){earlier.dataset.earlierBound='';earlier.addEventListener('click',()=>{
+      const current=state.chatRun;if(current?.id!==run.id||!box.isConnected)return;
+      const {transcript}=MoyaiQueue.presentation(current),index=transcript.findIndex(message=>String(message.id)===box.firstMessageId);
+      if(index<=0)return;
+      const scrollTop=box.scrollTop,height=box.scrollHeight,focused=box.querySelector('[data-earlier-messages]')===document.activeElement;
+      box.firstMessageId=String(transcript[Math.max(0,index-40)].id);
+      updateChat(current);
+      box.scrollTop=scrollTop+box.scrollHeight-height;
+      if(focused&&!box.querySelector('[data-earlier-messages]')){
+        const first=box.querySelector('.chat-message');if(first){first.tabIndex=-1;first.focus({preventScroll:true});}
+      }
+    });}
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.feedback-message:not([data-feedback-bound])').forEach(button=>{
