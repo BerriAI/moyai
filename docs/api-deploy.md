@@ -112,8 +112,10 @@ signal (plus Uvicorn's short shutdown scheduling overhead), reserving approximat
 application ownership until ordinary lifespan cleanup.
 Repeated SIGTERM does not extend the deadline; SIGINT skips the listener grace
 and retains Uvicorn's force-exit behavior during shutdown. Signals received before
-startup completes do not add a delay. Broker drain remains 270 seconds;
-coordinator and worker drain remain 20 seconds. These are finite deadlines:
+startup completes do not add a delay. Brokers use the same 30-second listener grace
+and 240-second request drain; coordinators add a 30-second grace before their
+existing 20-second HTTP drain. Workers retain their existing 20-second timeout.
+These are finite deadlines:
 event streams/computer sockets must reconnect, and an upload/transcription or
 other API request exceeding the deadline can be interrupted. Broker model streams
 are on the unchanged broker.

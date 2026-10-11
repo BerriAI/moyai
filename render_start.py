@@ -22,15 +22,15 @@ from fastapi.responses import PlainTextResponse
 
 
 maintenance = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-API_LISTENER_GRACE_SECONDS = 30
+LISTENER_GRACE_SECONDS = 30
 API_GRACEFUL_SHUTDOWN_SECONDS = 240
-BROKER_GRACEFUL_SHUTDOWN_SECONDS = 270
+BROKER_GRACEFUL_SHUTDOWN_SECONDS = 240
 
 
-class RenderAPIServer(uvicorn.Server):
+class RenderOverlapServer(uvicorn.Server):
     """Keep accepting briefly while Render's private routing converges."""
 
-    def __init__(self, config, *, listener_grace_seconds=API_LISTENER_GRACE_SECONDS):
+    def __init__(self, config, *, listener_grace_seconds=LISTENER_GRACE_SECONDS):
         super().__init__(config)
         self.listener_grace_seconds = listener_grace_seconds
         self.listener_grace_deadline = None
@@ -48,7 +48,7 @@ class RenderAPIServer(uvicorn.Server):
     async def shutdown(self, sockets=None):
         if self.listener_grace_deadline is not None and not self.force_exit:
             logging.getLogger("uvicorn.error").info(
-                "Keeping API listener open for up to %s seconds during routing handoff",
+                "Keeping listener open for up to %s seconds during routing handoff",
                 self.listener_grace_seconds,
             )
             while not self.force_exit:
@@ -173,7 +173,7 @@ def main():
         # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
         proxy_headers=False,
     )
-    server = RenderAPIServer(config) if role == "api" else uvicorn.Server(config)
+    server = RenderOverlapServer(config) if role in {"api", "broker", "coordinator"} else uvicorn.Server(config)
     try:
         server.run()
     except KeyboardInterrupt:

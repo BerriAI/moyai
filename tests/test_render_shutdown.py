@@ -13,7 +13,7 @@ from urllib.request import urlopen
 import pytest
 import uvicorn
 
-from render_start import RenderAPIServer
+from render_start import RenderOverlapServer
 
 
 PROBE = r'''
@@ -26,7 +26,7 @@ import time
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 import uvicorn
-from render_start import RenderAPIServer
+from render_start import RenderOverlapServer
 
 events = Path(sys.argv[1])
 def record(event, **values):
@@ -57,7 +57,7 @@ async def stream(seconds: float = 1):
         yield b'finished\n'
     return StreamingResponse(body())
 
-class ProbeServer(RenderAPIServer):
+class ProbeServer(RenderOverlapServer):
     async def startup(self, sockets=None):
         await super().startup(sockets=sockets)
         record('ready', port=self.servers[0].sockets[0].getsockname()[1])
@@ -189,7 +189,7 @@ def test_stream_exceeding_finite_drain_is_cancelled_and_cleanup_runs(api_server)
 
 
 def test_signal_before_started_does_not_defer_shutdown():
-    server = RenderAPIServer(uvicorn.Config('unused:app'))
+    server = RenderOverlapServer(uvicorn.Config('unused:app'))
     server.handle_exit(signal.SIGTERM, None)
     assert server.should_exit
     assert server.listener_grace_deadline is None
@@ -208,7 +208,7 @@ def test_startup_failure_does_not_wait_for_listener_grace(tmp_path):
 
 async def test_late_event_loop_does_not_extend_http_drain_budget(monkeypatch):
     import render_start
-    server = RenderAPIServer(uvicorn.Config('unused:app', timeout_graceful_shutdown=240))
+    server = RenderOverlapServer(uvicorn.Config('unused:app', timeout_graceful_shutdown=240))
     server.started = True
     monkeypatch.setattr(render_start.time, 'monotonic', lambda: 100)
     server.handle_exit(signal.SIGTERM, None)
