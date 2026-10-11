@@ -29,6 +29,9 @@ jobs:
       # Controlled-model code/SDK comparison. Production-only model setting
       # changes need their own configuration comparison and are not covered here.
       AGENT_MODEL: ${{ vars.MOYAI_EVAL_MODEL }}
+      # Native SDK compatibility comparison. The durable engine is exercised
+      # separately by test_deepagents_runtime on SQLite and PostgreSQL.
+      MOYAI_EVAL_HARNESS: codex
       LITELLM_TRACE_ENDPOINT: ${{ vars.LENS_TRACE_ENDPOINT }}
       CARGO_BUILD_JOBS: '2'
       BASE_SHA: ${{ github.event.pull_request.base.sha }}

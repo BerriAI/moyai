@@ -396,6 +396,79 @@ async def test_default_engine_uses_real_broker_skills_and_settles_answer_without
         assert store.rows('SELECT 1 FROM session_items WHERE run_id=?', (run['id'],))
 
 
+async def test_discovered_tools_acquire_one_computer_and_preserve_file_receipts(durable_app, tmp_path, monkeypatch):
+    from agent.tools.computer_tools import call as computer_call
+    from test_durable import Cloud
+
+    manager, store = durable_app.state.manager, durable_app.state.store
+    manager.settings.sandbox_idle_seconds = 0
+    run = store.create_run('Discover tools, write the requested file, and verify it.', '', 'modal', [],
+        chat_enabled=True, harness='deepagents-temporal', model='test-model', user_id='owner')
+    cloud = Cloud(monkeypatch, store, run['id'])
+    cloud.attach(manager)
+    workspace = tmp_path / 'computer'
+    workspace.mkdir()
+    executions, calls = [], []
+
+    async def command(machine, action, directory, value, **kwargs):
+        assert '/computer-operations/' in directory
+        if action == 'start' and directory not in machine.operations:
+            spec = machine.spec
+            if spec.get('prepare_computer'):
+                result = {'workspace': str(workspace)}
+            elif spec.get('finish_computer'):
+                result = {'saved': True}
+            else:
+                executions.append(spec['name'])
+                result = {'content': [{'type': 'text', 'text': json.dumps(
+                    computer_call(spec['name'], spec['arguments'], workspace))}], 'isError': False}
+            machine.operations[directory] = result
+        return json.dumps({'state': 'done', 'events': [], 'cursor': 0, 'exit_code': 0,
+                           'final': {'tool_result': machine.operations[directory]}})
+
+    monkeypatch.setattr(manager, 'command', command)
+
+    async def model(scope, messages, settings, parameters):
+        calls.append(scope)
+        step = len(calls)
+        results = [m for m in messages if isinstance(m, ToolMessage)]
+        if step == 1:
+            assert not cloud.machines
+            return AIMessage(content='', tool_calls=[{'name': 'workspace_tools', 'args': {}, 'id': 'discover'}])
+        if step == 2:
+            assert not cloud.machines
+            catalog = {t['name'] for t in json.loads(results[-1].content)}
+            assert {'skills_search', 'skills_load', 'agents_fanout', 'credentials_request',
+                    'computer_write_file', 'computer_read_file', 'computer_terminal'} <= catalog
+            name, arguments = 'computer_write_file', {'path': 'receipt.txt', 'text': 'verified-file'}
+        elif step == 3:
+            assert len(cloud.machines) == 1
+            assert (workspace / 'receipt.txt').read_text() == 'verified-file'
+            name, arguments = 'computer_read_file', {'path': 'receipt.txt'}
+        else:
+            assert step == 4 and len(cloud.machines) == 1
+            receipt = json.loads(results[-1].content)['result']
+            assert json.loads(receipt['content'][0]['text'])['text'] == 'verified-file'
+            return AIMessage(content='Created and verified the requested file.')
+        return AIMessage(content='', tool_calls=[{'name': 'workspace_call', 'args': {
+            'name': name, 'arguments_json': json.dumps(arguments)}, 'id': f'file-{step}'}])
+
+    manager.deepagents_runtime.model_request = model
+    manager.submit(run)
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        manager.temporal = configured_client(env.client, DataConverter(payload_codec=PrivatePayloadCodec(manager.payloads)))
+        async with manager.make_worker(manager.temporal), manager.make_agent_worker(manager.temporal):
+            await drive_session(manager, run['id'])
+    assert executions == ['computer_write_file', 'computer_read_file']
+    assert len({s.message_id for s in calls}) == 1
+    assert cloud.snapshots == 1 and all(not machine.alive for machine in cloud.machines)
+    current = store.run(run['id'])
+    assert current['summary'] == 'Created and verified the requested file.'
+    assert current['snapshot_id'] == 'im-1' and not current['sandbox_id']
+    receipts = store.rows('SELECT name,status FROM computer_operations WHERE run_id=? ORDER BY seq', (run['id'],))
+    assert receipts == [{'name': name, 'status': 'completed'} for name in executions]
+
+
 @pytest.mark.parametrize('actor,model_name', [('owner', 'test-model'), ('collaborator', 'anthropic/claude-opus-5-5')])
 async def test_queued_followup_keeps_history_and_rotates_capability(durable_app, actor, model_name):
     manager, store = durable_app.state.manager, durable_app.state.store
@@ -635,6 +708,27 @@ async def execute_scripted(runtime, tmp_path, identity):
         async with worker(client, runtime):
             return await asyncio.wait_for(client.execute_workflow(DeepAgentsTurnWorkflow.run, TurnScope('test', 1),
                 id=identity, task_queue='deepagents-test'), 30)
+
+
+async def test_tool_screenshot_survives_graph_and_saved_conversation(tmp_path):
+    pixels = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF9sAAAAASUVORK5CYII='
+
+    class ScreenshotRuntime(ScriptedRuntime):
+        async def call_tool(self, scope, call_id, name, arguments):
+            return {'result': {'content': [{'type': 'text', 'text': 'Screenshot captured.'},
+                {'type': 'image', 'mimeType': 'image/png', 'data': pixels}], 'isError': False}}
+
+        async def model_request(self, scope, messages, settings, parameters):
+            if isinstance(messages[-1], ToolMessage):
+                assert messages[-1].content[1]['image_url']['url'] == 'data:image/png;base64,' + pixels
+                return AIMessage(content='Screenshot received.')
+            return AIMessage(content='', tool_calls=[{'name': 'workspace_call',
+                'args': {'name': 'write_note', 'arguments_json': '{}'}, 'id': 'capture'}])
+
+    result = await execute_scripted(ScreenshotRuntime(tmp_path), tmp_path, 'screenshot-content')
+    saved = next(m for m in messages_from_dict(result.messages) if isinstance(m, ToolMessage))
+    assert saved.content[1]['image_url']['url'] == 'data:image/png;base64,' + pixels
+    assert result.result['message'] == 'Screenshot received.'
 
 
 async def test_only_scoped_bridge_tools_are_exposed_and_model_cannot_forge_scope(tmp_path):

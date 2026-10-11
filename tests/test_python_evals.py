@@ -17,11 +17,12 @@ ENV = {
     'AGENT_MODEL': 'openai/gpt-6.1-sol', 'LITELLM_TRACE_ENDPOINT': 'https://lens.example/v1/traces',
     'LITELLM_TRACE_API_KEY': 'trace-secret', 'LENS_VERSION': BUILD,
 }
+NATIVE_ENV = {**ENV, 'MOYAI_EVAL_HARNESS': 'codex'}
 
 
 def test_should_require_the_exact_checkout_revision(monkeypatch, tmp_path):
     monkeypatch.setattr('evals.agent.source_revision', lambda root: BUILD)
-    agent = MoyaiAgent.from_env(workspace=tmp_path / 'case', environ=ENV)
+    agent = MoyaiAgent.from_env(workspace=tmp_path / 'case', environ=NATIVE_ENV)
     assert agent.version == BUILD
     assert 'model-secret' not in repr(agent)
     assert 'trace-secret' not in repr(agent)
@@ -39,7 +40,7 @@ def test_should_reject_missing_runtime_configuration(monkeypatch, tmp_path, miss
 
 def test_should_reject_nonempty_workspaces(monkeypatch, tmp_path):
     monkeypatch.setattr('evals.agent.source_revision', lambda root: BUILD)
-    agent = MoyaiAgent.from_env(workspace=tmp_path, environ=ENV)
+    agent = MoyaiAgent.from_env(workspace=tmp_path, environ=NATIVE_ENV)
     with pytest.raises(FileExistsError):
         agent.run(input='Use the terminal to test a function.')
 
@@ -66,7 +67,7 @@ def test_should_send_secrets_over_stdin_not_environment_or_argv(monkeypatch, tmp
             }}))
 
     monkeypatch.setattr('evals.agent.subprocess.Popen', Process)
-    result = MoyaiAgent.from_env(workspace=tmp_path / 'case', environ=ENV).run(input='Implement it.')
+    result = MoyaiAgent.from_env(workspace=tmp_path / 'case', environ=NATIVE_ENV).run(input='Implement it.')
     assert result.output == 'verified'
     args, options = calls[0]
     assert not {'GITHUB_TOKEN', 'LENS_API_KEY', 'LITELLM_API_KEY'} & options['env'].keys()
@@ -88,6 +89,10 @@ def worker(monkeypatch, tmp_path):
         return httpx.Response(200)
 
     def create_app(settings):
+        # The scripted model has no real gateway metadata endpoint. Supply
+        # its verified fixture window while exercising the real broker read.
+        settings.model_context_limits = {settings.agent_model: {
+            'context_window': 100000, 'max_input_tokens': 90000, 'max_output_tokens': 10000}}
         app = app_factory(settings)
         for outbox in app.state.tracing.outboxes:
             outbox.client = httpx.AsyncClient(transport=httpx.MockTransport(receiver))

@@ -148,10 +148,23 @@ uv run --frozen --python 3.13 python -m scripts.deepagents_temporal_probe --outp
 The tests use a real local Temporal server and Deep Agents graph. They cover worker
 restart without repeating a completed write, uncertain writes, replay, background compaction,
 steering, Stop, scope fencing, private payload storage, the real skill broker and
-answer settlement. The provider-transport test exercises the installed official SDK
+answer settlement. Session compatibility checks also cover queued followups and
+requester/model changes, credential waits, parent/child completion, tool discovery,
+lazy computer acquisition with actual local file writes and saved operation receipts,
+and screenshot content preserved through the graph and conversation checkpoint.
+The provider-transport test exercises the installed official SDK
 against a local sealed Responses endpoint. Provider responses and cloud computers
 are controlled test fixtures; live model quality and cloud-provider behavior require
 deployment qualification.
+
+The Lens subprocess benchmark remains a **native SDK compatibility lane**. CI
+explicitly selects `MOYAI_EVAL_HARNESS=codex` for both base and candidate; its local
+broker uses that same harness. It cannot execute `deepagents-temporal` and must not
+be presented as a live model-quality evaluation of this migration. Without an
+explicit supported native selection, the driver rejects the durable default rather
+than silently substituting another engine. The Temporal tests above run separately
+on SQLite and PostgreSQL. A live provider and cloud-computer evaluation of the
+durable engine remains a release requirement.
 
 The focused compaction proof uses the installed Responses SDK, sealed transport,
 real broker, Deep Agents graph and a local Temporal server. It holds a scripted

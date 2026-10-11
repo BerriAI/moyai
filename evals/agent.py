@@ -3,9 +3,9 @@
 This is the CI entry point, not a deployed Moyai HTTP client. Run it in a
 throwaway container: coding agents can execute shell commands.
 
-AGENT_MODEL is supplied by this test's caller. Native harness selection follows
-production settings, but this controlled-model lane does not discover or test
-model changes made only in the deployed application's environment.
+AGENT_MODEL is supplied by this test's caller. This local subprocess lane only
+supports native SDKs; select MOYAI_EVAL_HARNESS explicitly when production uses
+Deep Agents + Temporal. Its results do not qualify the durable engine.
 """
 from dataclasses import dataclass, field
 import json
@@ -54,7 +54,8 @@ def runtime_selection(environ: Mapping[str, str]) -> tuple[str, str]:
     model = settings.resolve_model()
     harness = settings.default_harness(model)
     if harness not in {'codex', 'claude-agent-sdk'}:
-        raise ValueError('The resolved eval harness must be codex or claude-agent-sdk.')
+        raise ValueError('This local eval supports native SDKs only. Set MOYAI_EVAL_HARNESS to codex or '
+                         'claude-agent-sdk; this lane does not evaluate Deep Agents + Temporal.')
     return model, harness
 
 
