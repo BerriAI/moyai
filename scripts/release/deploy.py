@@ -25,6 +25,7 @@ import urllib.request
 
 from scripts.release.errors import ReleaseError
 from scripts.release.ssh_diagnostics import failure as ssh_failure
+from scripts.release.ssh_connections import ConnectionFailure, SSHConnections
 
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = 'BerriAI/moyai'
@@ -202,13 +203,17 @@ class Service:
 
 
 class SSHProbe:
-    def __init__(self, key: Path, *, source: Path = ROOT / 'probe.py'):
-        self.key, self.source = key, source
+    def __init__(self, key: Path, *, source: Path = ROOT / 'probe.py', connections=None):
+        self.key, self.source, self.connections = key, source, connections
+
+    def invalidate(self, service):
+        if self.connections is not None:
+            self.connections.invalidate(service)
 
     def __call__(self, service: Service):
-        return self.run(service, service.probe_options(), marker='MOYAI_RELEASE_PROBE=')
+        return self.run(service, service.probe_options(), marker='MOYAI_RELEASE_PROBE=', read_only=True)
 
-    def run(self, service: Service, options, *, marker, timeout=50, source=None):
+    def run(self, service: Service, options, *, marker, timeout=50, source=None, read_only=False):
         options = json.dumps(options, separators=(',', ':'))
         if len(options.encode()) > 65536:
             return {'ok': False, 'reason': 'probe_request_invalid'}
@@ -219,7 +224,7 @@ class SSHProbe:
                    '; else exec /app/.venv/bin/python - ' + shlex.quote(options) + '; fi')
         # Capture verbose milestones privately. Only fixed categories and booleans
         # leave this transport; raw SSH diagnostics can contain command arguments.
-        args = ['ssh', '-v', '-T', '-i', str(self.key), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+        args = ['ssh', '-F', '/dev/null', '-v', '-T', '-i', str(self.key), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
                 '-o', 'StrictHostKeyChecking=yes', '-o', 'GlobalKnownHostsFile=/dev/null',
                 '-o', 'UserKnownHostsFile=' + str(ROOT / 'render-known-hosts'), '-o', 'ConnectTimeout=10',
                 '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
@@ -229,17 +234,29 @@ class SSHProbe:
             return ssh_failure(stdout=stdout, stderr=stderr, returncode=returncode, marker=marker,
                                elapsed_ms=round((time.monotonic() - started) * 1000), kind=kind)
         try:
-            result = subprocess.run(args, input=self.source.read_text() if source is None else source, text=True,
-                                    capture_output=True, timeout=timeout)
+            body = self.source.read_text() if source is None else source
+            if read_only and self.connections is not None:
+                result = self.connections.run(service, args, input=body, timeout=timeout)
+            else:
+                # Migration commands deliberately never share or reconnect an
+                # observational connection. Ambiguous writes stay single-shot.
+                direct = [*args[:-2], '-o', 'ControlMaster=no', '-o', 'ControlPath=none', *args[-2:]]
+                result = subprocess.run(direct, input=body, text=True, capture_output=True, timeout=timeout)
             if result.returncode:
                 return failed(result.stdout, getattr(result, 'stderr', ''), result.returncode)
             lines = [line.removeprefix(marker) for line in result.stdout.splitlines()
                      if line.startswith(marker)]
             value = json.loads(lines[0]) if len(lines) == 1 else None
-            return value if isinstance(value, dict) else {'ok': False, 'reason': 'probe_output_invalid'}
+            if isinstance(value, dict):
+                return value
+            self.invalidate(service)
+            return {'ok': False, 'reason': 'probe_output_invalid'}
         except subprocess.TimeoutExpired as exc:
             return failed(exc.stdout, exc.stderr, kind='command_timeout')
+        except ConnectionFailure as exc:
+            return exc.result
         except ValueError:
+            self.invalidate(service)
             return {'ok': False, 'reason': 'probe_output_invalid'}
         except OSError:
             return failed(None, None, kind='local_os_error')
@@ -501,7 +518,7 @@ def main():
         raise ReleaseError('Release cancelled. Inspect the receipt; paused or staged execution was not automatically resumed.')
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
-    with tempfile.TemporaryDirectory(prefix='moyai-deploy-') as directory:
+    with tempfile.TemporaryDirectory(prefix='moyai-deploy-') as directory, SSHConnections() as connections:
         key_path = Path(directory) / 'key'
         key_path.write_text(key.rstrip() + '\n')
         key_path.chmod(0o600)
@@ -511,7 +528,7 @@ def main():
         if args.release_type == 'rolling':
             from scripts.release.rolling_deploy import RollingRelease
             from scripts.release.online_migration import SSHMigration
-            release = RollingRelease(render, github, SSHProbe(key_path, source=ROOT / 'rolling_probe.py'),
+            release = RollingRelease(render, github, SSHProbe(key_path, source=ROOT / 'rolling_probe.py', connections=connections),
                                      args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
                                      migrate=SSHMigration(key_path),
                                      preflight_only=args.preflight)

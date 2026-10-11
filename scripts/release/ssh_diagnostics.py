@@ -28,8 +28,13 @@ def failure(*, stdout, stderr, returncode, marker, elapsed_ms, kind=None):
     if isinstance(stderr, bytes):
         stderr = stderr.decode('utf-8', errors='replace')
     stderr = stderr or ''
+    # Security failures also take precedence over a local timeout while a mux
+    # master is exiting; a generic client error must not make them retryable.
+    if any(message in stderr for message in ('Permission denied', 'Too many authentication failures')):
+        kind = 'auth_denied'
+    elif any(message in stderr for message in ('Host key verification failed', 'REMOTE HOST IDENTIFICATION HAS CHANGED')):
+        kind = 'host_key_rejected'
     if kind is None:
-        # Security failures take precedence over an accompanying connection close.
         for category, messages in (
             ('auth_denied', ('Permission denied', 'Too many authentication failures')),
             ('host_key_rejected', ('Host key verification failed', 'REMOTE HOST IDENTIFICATION HAS CHANGED')),
@@ -37,7 +42,9 @@ def failure(*, stdout, stderr, returncode, marker, elapsed_ms, kind=None):
             ('connect_timeout', ('Connection timed out',)),
             ('connection_reset', ('Connection reset by peer',)),
             ('connection_refused', ('Connection refused',)),
-            ('connection_closed', ('Connection closed by',)),
+            ('connection_closed', ('Connection closed by',
+                                   'mux_client_read_packet: read header failed:',
+                                   'mux_client_request_session: read from master failed:')),
         ):
             if any(message in stderr for message in messages):
                 kind = category
@@ -57,7 +64,8 @@ def failure(*, stdout, stderr, returncode, marker, elapsed_ms, kind=None):
     return {'ok': False, 'reason': reason, 'transport': {
         'kind': kind, 'returncode': returncode, 'elapsed_ms': elapsed_ms, 'output': output,
         'authenticated': 'Authenticated to ' in stderr,
-        'command_requested': 'Sending command: ' in stderr,
+        'command_requested': ('Sending command: ' in stderr
+                              or 'mux_client_request_session: master session id: ' in stderr),
     }}
 
 
