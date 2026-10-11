@@ -195,9 +195,9 @@ class Attachments:
     def message_ids(self, conn, message_id):
         return {row['id'] for row in conn.execute('SELECT id FROM attachments WHERE message_id=?', (message_id,))}
 
-    def messages(self, run_id, messages):
+    def messages(self, run_id, messages, *, connection=None):
         grouped = {}
-        for row in self.store.rows(f'SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=?) ORDER BY created_at,id', (run_id,)):
+        for row in self.store.rows(f'SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=?) ORDER BY created_at,id', (run_id,), connection=connection):
             grouped.setdefault(row['message_id'], []).append(public_file(row))
         return [{**message, 'attachments': grouped.get(message['id'], [])} for message in messages]
 
