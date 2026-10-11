@@ -75,3 +75,15 @@ test('the real API invalidates before and after a write, including reads overlap
   write.resolve({ok:true,json:async()=>({saved:true})});await saving;
   assert.equal(cache.get('/api/admin/users'),undefined);
 });
+
+test('a timeout while reading the response body rejects instead of caching an empty catalog',async()=>{
+  const cache=create(),path='/api/runs/'+'a'.repeat(32)+'/files';
+  const error=Object.assign(Error('body timed out'),{name:'AbortError'});
+  const c={AbortSignal,state:{csrf:'test',navigationCache:cache},fetch:async(_path,options)=>{
+    assert(options.signal);return {ok:true,json:async()=>{throw error;}};
+  }};
+  vm.createContext(c);const script=readFileSync('app/static/app.js','utf8');
+  vm.runInContext(script.slice(script.indexOf('async function api('),script.indexOf('function toast(')),c);
+  await assert.rejects(c.api(path,{recent:true,timeoutMs:30000}),e=>e===error);
+  assert.equal(cache.get(path),undefined);
+});

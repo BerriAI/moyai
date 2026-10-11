@@ -23,6 +23,32 @@ All routes require the session's organization sign-in. HTML/scripts stay inert.
 A replaced recovery archive requests a refresh rather than silently serving
 different bytes; explicit artifact revisions remain independently readable.
 
+Published outputs and browser captures appear before the recovery ZIP finishes
+loading. Chat links and Files share recent catalog requests. The server keeps a
+bounded, per-process index of each verified ZIP revision (32 entries / 8 MiB of
+serialized metadata), so repeat listings do not download the archive again.
+Each request still checks authentication and the current artifact manifest;
+file previews and downloads still verify the archive bytes. A cold index still
+downloads the ZIP once per process and revision. Archive errors offer Retry
+while independent captures remain available.
+
+To reproduce with the real app and synthetic storage, run:
+
+```sh
+uv run python scripts/files_loading_demo.py --port 8892 --archive-delay 12
+```
+
+Open the printed localhost login URL and **Verify fast Files and chat links**.
+Open Files, search for `result`, and open the capture while the remaining files
+load. Clear the search to see the full index. `/demo/files-metrics` reports
+actual object reads. `--root /path/to/baseline --port 8893` uses the same fixture
+against another checkout. No model or external storage call is made.
+
+Against baseline `52beefb`, one local 8 MiB / 12-second-delay comparison measured
+the media catalog at 12,027 → 14 ms and a repeat full listing at 12,021 → 15 ms.
+Opening chat plus Files downloaded the ZIP twice before and once after. These
+are controlled local samples, not production percentiles or a cold-scan promise.
+
 ### Files uploaded by users
 
 Attach files with the paperclip, drag/drop, or paste. Both new sessions and
