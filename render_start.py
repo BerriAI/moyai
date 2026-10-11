@@ -5,11 +5,14 @@ set RENDER_MIGRATION_STAGE=false to import its final Modal Volume checkpoint.
 An existing Render database is never overwritten by bootstrap.
 """
 import asyncio
+import logging
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import sqlite3
+import time
 from urllib.parse import urlparse
 
 import modal
@@ -19,7 +22,48 @@ from fastapi.responses import PlainTextResponse
 
 
 maintenance = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-API_GRACEFUL_SHUTDOWN_SECONDS = 270
+API_LISTENER_GRACE_SECONDS = 30
+API_GRACEFUL_SHUTDOWN_SECONDS = 240
+BROKER_GRACEFUL_SHUTDOWN_SECONDS = 270
+
+
+class RenderAPIServer(uvicorn.Server):
+    """Keep accepting briefly while Render's private routing converges."""
+
+    def __init__(self, config, *, listener_grace_seconds=API_LISTENER_GRACE_SECONDS):
+        super().__init__(config)
+        self.listener_grace_seconds = listener_grace_seconds
+        self.listener_grace_deadline = None
+        self.http_drain_deadline = None
+
+    def handle_exit(self, sig, frame):
+        # Measure from the first signal, not from when the event loop gets to
+        # shutdown. Repeated SIGTERM must never extend the platform's deadline.
+        if sig == signal.SIGTERM and self.started and not self.should_exit:
+            self.listener_grace_deadline = time.monotonic() + self.listener_grace_seconds
+            if self.config.timeout_graceful_shutdown is not None:
+                self.http_drain_deadline = self.listener_grace_deadline + self.config.timeout_graceful_shutdown
+        super().handle_exit(sig, frame)
+
+    async def shutdown(self, sockets=None):
+        if self.listener_grace_deadline is not None and not self.force_exit:
+            logging.getLogger("uvicorn.error").info(
+                "Keeping API listener open for up to %s seconds during routing handoff",
+                self.listener_grace_seconds,
+            )
+            while not self.force_exit:
+                remaining = self.listener_grace_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # Keep serving requests and observing Uvicorn's second-SIGINT
+                # force-exit flag; neither sleep nor signal handling blocks I/O.
+                await asyncio.sleep(min(0.1, remaining))
+        if self.http_drain_deadline is not None:
+            self.config.timeout_graceful_shutdown = max(0, min(
+                self.config.timeout_graceful_shutdown,
+                self.http_drain_deadline - time.monotonic(),
+            ))
+        await super().shutdown(sockets=sockets)
 
 
 @maintenance.get("/health")
@@ -120,11 +164,20 @@ def main():
         raise RuntimeError("RENDER_MIGRATION_STAGE must be true or false.")
     if stage == "false":
         asyncio.run(bootstrap())
-    uvicorn.run(maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
-                port=int(os.environ.get("PORT", "10000")), workers=1,
-                timeout_graceful_shutdown=API_GRACEFUL_SHUTDOWN_SECONDS if os.environ.get('MOYAI_RUNTIME_ROLE') in {'api', 'broker'} else 20,
-                # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
-                proxy_headers=False)
+    role = os.environ.get("MOYAI_RUNTIME_ROLE")
+    config = uvicorn.Config(
+        maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
+        port=int(os.environ.get("PORT", "10000")), workers=1,
+        timeout_graceful_shutdown=(API_GRACEFUL_SHUTDOWN_SECONDS if role == "api" else
+                                   BROKER_GRACEFUL_SHUTDOWN_SECONDS if role == "broker" else 20),
+        # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
+        proxy_headers=False,
+    )
+    server = RenderAPIServer(config) if role == "api" else uvicorn.Server(config)
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
