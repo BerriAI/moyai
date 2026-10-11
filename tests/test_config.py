@@ -3,6 +3,13 @@ import pytest
 from pydantic import ValidationError
 
 
+def test_independent_runtime_defaults_on_and_preserves_explicit_opt_out(monkeypatch):
+    monkeypatch.delenv('INDEPENDENT_AGENT_RUNTIME', raising=False)
+    assert Settings(_env_file=None).independent_agent_runtime is True
+    monkeypatch.setenv('INDEPENDENT_AGENT_RUNTIME', 'false')
+    assert Settings(_env_file=None).independent_agent_runtime is False
+
+
 @pytest.mark.parametrize('value', ['', 'a1' * 20, 'B2' * 32])
 def test_build_sha_accepts_only_full_optional_commit_identity(monkeypatch, value):
     monkeypatch.setenv('MOYAI_BUILD_SHA', value)

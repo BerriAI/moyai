@@ -982,7 +982,11 @@ def _create_app(settings, store):
         if not metadata_request:
             await session_titles.request(run_id)
             if await run_in_threadpool(store.has_queued_messages, run_id):
-                manager.submit(await run_in_threadpool(store.run, run_id))
+                run = await run_in_threadpool(store.run, run_id)
+                if settings.temporal_enabled:
+                    await database(manager.submit, run)
+                else:
+                    manager.submit(run)
         return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
 
     def enqueue_follow_up(run_id: str, body: ChatMessage, request: Request):
