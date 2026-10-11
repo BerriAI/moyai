@@ -210,6 +210,8 @@ def test_archive_filters_before_limit_and_keeps_agents_together(users_app):
 
 @pytest.mark.sqlite_only
 def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, tmp_path):
+    from app.database_schema import SESSION_EVENT_TRIGGERS
+    from app.session_events import SessionEvents, initialize_schema as initialize_events
     from app.session_lifecycle import SessionLifecycle
 
     app, client = users_app
@@ -219,13 +221,19 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     # Exercise the actual idempotent upgrade with a pre-field database.
     # These newer schema objects reference deleted_at and did not exist in
     # the legacy schema. Remove them before reconstructing the old database.
+    with store.connect() as conn:
+        for name in SESSION_EVENT_TRIGGERS:
+            conn.execute('DROP TRIGGER ' + name)
+        conn.execute('DROP TABLE session_event_inbox')
+        conn.execute('DROP TABLE session_event_consumers')
     store.execute('DROP TRIGGER revoke_github_write_access')
     store.execute('DROP INDEX idx_runs_pending_deletion')
     store.execute('ALTER TABLE runs DROP COLUMN deleted_at')
     store.execute('DROP TABLE session_archives')
     reopened = Store(app.state.settings.data_dir)
     assert reopened.run(item['id'])['deleted_at'] == ''
-    # App startup initializes GitHub access after the Store schema upgrade.
+    # App startup initializes dependent schemas after the Store upgrade.
+    initialize_events(reopened)
     app.state.connectors.github.init_write_access()
     checkpoints = app.state.session_folders.checkpoints
     checkpoints.settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path/'checkpoint'})
@@ -244,6 +252,14 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     assert restored.run(removed['id'])['deleted_at']
     assert restored.sidebar_run_ids(actor, archive_owner=actor) == []
     assert restored.sidebar_run_ids(actor, archive_owner=actor, archived=True) == [item['id']]
+    # Checkpoint restoration must preserve the upgraded change-capture triggers.
+    with restored.connect() as conn:
+        SessionEvents.subscribe_in(conn, 'legacy-upgrade-check')
+        conn.execute('DELETE FROM session_event_inbox WHERE consumer=?', ('legacy-upgrade-check',))
+    restored.update_run(item['id'], status='completed')
+    assert restored.rows('SELECT run_id,kind FROM session_event_inbox WHERE consumer=?',
+                         ('legacy-upgrade-check',)) == [
+                             {'run_id': item['id'], 'kind': 'session.state_changed'}]
 
 
 def test_viewer_can_find_and_restore_archived_shared_link(users_app):
