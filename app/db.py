@@ -427,6 +427,31 @@ class Store:
             result.update({row['id']: {key: bool(row[key]) for key in ('pinned', 'participated', 'slack_connected')} for row in rows})
         return result
 
+    def conversation_metadata_in(self, connection, run, actor):
+        """Read viewer/root labels together, using the message snapshot's slot."""
+        root_id = self.root_id_in(connection, run['id']) if run['parent_run_id'] else run['id']
+        prefix, params = self.sidebar_scope(actor)
+        row = self.rows(prefix + '''SELECT r.deleted_at,
+            owner.id AS owner_id,owner.email AS owner_email,owner.name AS owner_name,
+            COALESCE(NULLIF(linked.email,''),NULLIF(viewer.email,''),linked.name,viewer.name,'') AS feedback_author,
+            EXISTS(SELECT 1 FROM session_archives a WHERE a.run_id=r.id AND a.owner_id=?) AS archived,
+            EXISTS(SELECT 1 FROM session_pins p WHERE p.run_id=r.id AND p.owner_id=?) AS pinned,
+            (r.id IN (SELECT id FROM mine) AND r.owner_id NOT IN (SELECT id FROM identities)) AS participated,
+            (EXISTS(SELECT 1 FROM slack_events e WHERE e.run_id=r.id)
+                OR EXISTS(SELECT 1 FROM slack_threads t WHERE t.run_id=r.id)) AS slack_connected,
+            EXISTS(SELECT 1 FROM published_artifacts WHERE run_id=?) AS has_published_artifacts
+            FROM runs r LEFT JOIN users owner ON owner.id=?
+            LEFT JOIN users viewer ON viewer.id=? LEFT JOIN users linked ON linked.id=viewer.linked_user_id
+            WHERE r.id=?''', [*params, actor, actor, run['id'], run['owner_id'], actor, root_id],
+            connection=connection)[0]
+        return {'workflow_root_id': root_id,
+                'owner': {key: row['owner_' + key] for key in ('id', 'email', 'name')} if row['owner_id'] else None,
+                'feedback_author': row['feedback_author'] or actor,
+                'archived': bool(row['archived']),
+                'has_published_artifacts': bool(row['has_published_artifacts']),
+                'sidebar': {key: bool(row[key]) for key in ('pinned', 'participated', 'slack_connected')}
+                           if not row['deleted_at'] else {}}
+
     @staticmethod
     def session_view_owner_in(conn, user_id: str) -> str:
         """Resolve shared-workspace view links, never authentication or authorship."""
@@ -675,6 +700,7 @@ class Store:
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
             m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,m.input_kind,m.source_json,m.reply_policy,
+            m.client_id LIKE 'swarm:%' AS swarm_generated,
             CASE WHEN m.input_kind='observation' THEN 'Slack observation' WHEN m.input_kind='delegation' THEN 'Agent guidance' WHEN m.input_kind='automation' THEN 'Scheduled workflow' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
@@ -691,9 +717,8 @@ class Store:
             WHERE m.run_id=? AND m.status!='deleted'
             ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,
                 COALESCE(NULLIF(m.started_at,''),m.created_at),m.id""", (run_id,), connection=connection)
-        generated = {row['id'] for row in self.rows("SELECT id FROM messages WHERE run_id=? AND client_id LIKE 'swarm:%'", (run_id,), connection=connection)}
         for message in messages:
-            if message['id'] in generated:
+            if message.pop('swarm_generated'):
                 message['source'] = 'swarm'
             slack_user = message.pop('slack_reply_user')
             name, email = message.pop('sender_name'), message.pop('sender_email')
@@ -1065,19 +1090,21 @@ class Store:
             row["data"] = json.loads(row["data"])
         return rows
 
-    def goal(self, run_id: str):
+    def goal(self, run_id: str, *, connection=None):
         if self.goals:
-            with self.connect() as conn:
-                state = self.goals.current(conn, run_id)
-                if state:
-                    return state
+            if connection is None:
+                with self.connect() as conn:
+                    return self.goal(run_id, connection=conn)
+            state = self.goals.current(connection, run_id)
+            if state:
+                return state
         rows = self.rows("SELECT data FROM events WHERE run_id=? AND kind='status' "
                          "AND json_number(data,'goal_version')=1 AND json_text(data,'phase')='goal' "
-                         "ORDER BY id DESC LIMIT 1", (run_id,))
+                         "ORDER BY id DESC LIMIT 1", (run_id,), connection=connection)
         return json.loads(rows[0]['data']).get('goal') if rows else None
 
-    def approvals(self, run_id: str):
-        rows = self.rows("SELECT * FROM approvals WHERE run_id=? ORDER BY created_at", (run_id,))
+    def approvals(self, run_id: str, *, connection=None):
+        rows = self.rows("SELECT * FROM approvals WHERE run_id=? ORDER BY created_at", (run_id,), connection=connection)
         for row in rows:
             row["arguments"] = json.loads(row["arguments"])
         return rows

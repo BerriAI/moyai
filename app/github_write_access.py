@@ -114,9 +114,12 @@ class GitHubWriteAccess:
     def access_requests(self, run, actor):
         if not run or run['deleted_at'] or not self.same_write_requester(run['active_user_id'], actor):
             return []
-        rows = self.store.rows('SELECT * FROM github_write_access WHERE run_id=? AND connection_version=? ORDER BY created_at',
-                               (run['id'], self.connection_version()))
-        return [self.public_access(r) for r in rows if self.same_write_requester(r['actor_id'], actor)]
+        rows = self.store.rows('SELECT * FROM github_write_access WHERE run_id=? ORDER BY created_at', (run['id'],))
+        if not rows:
+            return []
+        version = self.connection_version()
+        return [self.public_access(r) for r in rows
+                if r['connection_version'] == version and self.same_write_requester(r['actor_id'], actor)]
 
     async def decide_write_access(self, run_id, identity, actor, decision):
         with self.store.connect() as conn:
