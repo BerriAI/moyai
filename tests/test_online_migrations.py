@@ -352,3 +352,85 @@ def test_malformed_incoming_receipt_is_incompatible(database,monkeypatch):
     url,schema=database
     with psycopg.connect(url,autocommit=True) as conn:
         assert not online.schema_is_compatible(conn,schema,BASE+1,COMPATIBILITY)
+
+
+def adopt_expanded_baseline(monkeypatch, *, required=BASE+1):
+    versions = dict(online._versions(), **{str(BASE+1): 'a'*64, str(BASE+2): 'b'*64})
+    monkeypatch.setattr(online, '_versions', lambda: versions)
+    monkeypatch.setattr(schema_migrations, 'SCHEMA_REVISION', required)
+    monkeypatch.setattr(schema_migrations, 'SCHEMA_COMPATIBILITY_REVISION', BASE+1)
+
+
+def expansion_after_baseline():
+    value = expansion()
+    value.update(from_revision=BASE+1, to_revision=BASE+2, compatibility=BASE+1)
+    value['steps'][0].update(from_revision=BASE+1, to_revision=BASE+2, compatibility=BASE+1,
+        source_digest='a'*64, target_digest='b'*64,
+        operations=[{'kind':'add_column','table':'runs','name':'after_baseline','type':'TEXT','nullable':True}])
+    return seal(value)
+
+
+def test_exact_schema_at_new_compatibility_floor_preserves_historical_receipt(database, monkeypatch):
+    apply(database)
+    before = rows(database, 'SELECT * FROM online_schema_migrations')
+    adopt_expanded_baseline(monkeypatch)
+    url, schema = database
+    db = PostgresDatabase(url, schema, schema_mode='verify')
+    db.close()
+    assert apply(database, online.plan(BASE+1))['status'] == 'already_applied'
+    assert rows(database, 'SELECT * FROM online_schema_migrations') == before
+
+
+def test_expansion_after_compatibility_floor_enforces_new_forward_contract(database, monkeypatch):
+    apply(database)
+    adopt_expanded_baseline(monkeypatch)
+    assert apply(database, expansion_after_baseline())['status'] == 'applied'
+    url, schema = database
+    db = PostgresDatabase(url, schema, schema_mode='verify')
+    db.close()
+    with psycopg.connect(url, autocommit=True) as conn:
+        assert not online.schema_is_compatible(conn, schema, BASE, COMPATIBILITY)
+    assert apply(database, expansion_after_baseline())['status'] == 'already_applied'
+
+
+@pytest.mark.parametrize('expanded', [False, True])
+@pytest.mark.parametrize('mutation', ['source', 'target', 'step_digest', 'compatibility', 'malformed'])
+def test_historical_receipt_corruption_rejected_at_and_above_new_floor(database, monkeypatch, expanded, mutation):
+    from psycopg.types.json import Jsonb
+    first = expansion()
+    apply(database, first)
+    adopt_expanded_baseline(monkeypatch)
+    if expanded:
+        apply(database, expansion_after_baseline())
+    if mutation in {'source', 'target'}:
+        # Self-consistent receipt metadata still must match the binary's known schema.
+        step = deepcopy(first['steps'][0])
+        step[mutation + '_digest'] = 'f'*64
+        rows(database, f'UPDATE online_schema_migrations SET {mutation}_digest=%s,step=%s,step_digest=%s '
+             'WHERE from_revision=%s RETURNING from_revision',
+             ('f'*64, Jsonb(step), online.digest(step), BASE))
+    else:
+        change = {'step_digest': "step_digest='changed'", 'compatibility': 'compatibility=compatibility+1',
+                  'malformed': "step='[]'::jsonb"}[mutation]
+        rows(database, 'UPDATE online_schema_migrations SET ' + change +
+             ' WHERE from_revision=%s RETURNING from_revision', (BASE,))
+    url, schema = database
+    with pytest.raises(DatabaseError, match='incomplete, or incompatible'):
+        PostgresDatabase(url, schema, schema_mode='verify')
+    value = expansion_after_baseline() if expanded else online.plan(BASE+1)
+    with pytest.raises(DatabaseError, match='no verified schema digest'):
+        apply(database, value)
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_newer_migrator_validates_receipt_for_known_earlier_source(database, monkeypatch, corrupt):
+    apply(database)
+    adopt_expanded_baseline(monkeypatch, required=BASE+2)
+    if corrupt:
+        rows(database, "UPDATE online_schema_migrations SET step_digest='changed' RETURNING from_revision")
+        with pytest.raises(DatabaseError, match='no verified schema digest'):
+            apply(database, expansion_after_baseline())
+        assert rows(database, 'SELECT revision,dirty FROM schema_state') == [(BASE+1, 0)]
+        assert rows(database, 'SELECT count(*) FROM online_schema_migrations') == [(1,)]
+    else:
+        assert apply(database, expansion_after_baseline())['status'] == 'applied'

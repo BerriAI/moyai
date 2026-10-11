@@ -13,8 +13,11 @@ For an explicitly migrated PostgreSQL schema, use `MOYAI_SCHEMA_MODE=verify` on
 all component schema setup, legacy backfills and default insertion. Normal
 application data writes and runtime-policy publication still work. Startup also
 rejects accidental DDL through the application database adapter.
-An exact clean revision is admitted directly. An older bridge can also admit a
-newer physical revision only when a complete committed receipt chain proves
+An exact clean revision is admitted when any incoming online receipt agrees with
+the binary's known source and target digests. That receipt retains its historical
+compatibility value even after a coordinated baseline increase; startup does not
+need to admit the earlier schema below the new baseline. An older bridge can also
+admit a newer physical revision only when a complete committed receipt chain proves
 compatible additive steps from its own known schema digest. A newer number alone
 is insufficient.
 
@@ -133,7 +136,10 @@ initializer is registered. Revisions must be contiguous. For an online expansion
 also append the reviewed declarative step and keep `SCHEMA_COMPATIBILITY_REVISION`
 unchanged only after verifying mixed-version reads/writes. Missing declarations
 fail closed. A breaking change advances the compatibility revision and uses the
-maintenance procedure; compatibility across revisions is never inferred.
+maintenance procedure; compatibility across revisions is never inferred. When
+raising the compatibility baseline, remove the old compatibility's steps from
+the candidate's online registry. Preserve their committed database receipts and
+versioned source digests; neither history should be deleted to permit startup.
 
 For example, a reviewed future step can add one optional field without rewriting
 existing rows. Its `operations` entry would be:

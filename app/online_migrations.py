@@ -185,20 +185,52 @@ def _state(conn, schema, *, for_update=False):
                         (' FOR UPDATE' if for_update else '')).fetchone()
 
 
-def _has_incoming_receipt(conn, schema, revision):
+def _receipt_step(row):
+    """Validate a recorded step against its metadata and digest."""
+    start, end, compat, source, target, step_digest, step = row
+    try:
+        _step(step)
+    except (DatabaseError, TypeError, ValueError):
+        return None
+    if (step != {'from_revision': start, 'to_revision': end, 'compatibility': compat,
+                 'source_digest': source, 'target_digest': target, 'operations': step['operations']}
+            or step_digest != digest(step)):
+        return None
+    return step
+
+
+def _known_schema_digest(conn, schema, revision):
+    """Bind a known schema to its incoming receipt, including at a new floor.
+
+    A compatibility bump changes future admission, not the contract under which
+    a historical migration ran. Its source/target digests and full receipt still
+    have to agree with this binary; no admission below today's floor is needed.
+    """
+    versions = _versions()
+    anchor = versions.get(str(revision))
+    if not anchor:
+        return None
     table = identifier(schema) + '.' + identifier(LEDGER)
-    return bool(conn.execute('SELECT to_regclass(%s)', (table,)).fetchone()[0]
-                and conn.execute(f'SELECT 1 FROM {table} WHERE to_revision=%s', (revision,)).fetchone())
+    if conn.execute('SELECT to_regclass(%s)', (table,)).fetchone()[0]:
+        row = conn.execute(f'''SELECT from_revision,to_revision,compatibility,
+            source_digest,target_digest,step_digest,step FROM {table}
+            WHERE to_revision=%s''', (revision,)).fetchone()
+        if row:
+            step = _receipt_step(row)
+            if (step is None or step['to_revision'] != revision or step['target_digest'] != anchor
+                    or step['source_digest'] != versions.get(str(revision - 1))):
+                return None
+    return anchor
 
 
 def _chain(conn, schema, required, actual, compatibility):
     """Receipt chain anchored in this binary's known required-schema digest."""
-    anchor = _versions().get(str(required))
-    if not anchor or required < compatibility or actual < required:
+    if required < compatibility or actual < required:
+        return None
+    anchor = _known_schema_digest(conn, schema, required)
+    if not anchor:
         return None
     if actual == required:
-        if _has_incoming_receipt(conn, schema, required):
-            return anchor if _chain(conn, schema, required - 1, actual, compatibility) == anchor else None
         return anchor
     table = identifier(schema) + '.' + identifier(LEDGER)
     if not conn.execute('SELECT to_regclass(%s)', (table,)).fetchone()[0]:
@@ -207,16 +239,12 @@ def _chain(conn, schema, required, actual, compatibility):
         source_digest,target_digest,step_digest,step FROM {table}
         WHERE from_revision>=%s AND to_revision<=%s ORDER BY from_revision''', (required, actual)).fetchall()
     revision = required
-    for start, end, compat, source, target, step_digest, step in rows:
-        try:
-            _step(step)
-        except (DatabaseError, TypeError, ValueError):
+    for row in rows:
+        step = _receipt_step(row)
+        if (step is None or step['from_revision'] != revision
+                or step['compatibility'] != compatibility or step['source_digest'] != anchor):
             return None
-        if (start != revision or end != start + 1 or compat != compatibility or source != anchor
-                or step != {'from_revision':start,'to_revision':end,'compatibility':compat,
-                            'source_digest':source,'target_digest':target,'operations':step['operations']}
-                or step_digest != digest(step)):
-            return None
+        end, target = step['to_revision'], step['target_digest']
         known = _versions().get(str(end))
         if known is not None and known != target:
             return None
@@ -232,8 +260,7 @@ def schema_is_compatible(conn, schema, required, compatibility):
         return False
     # Preserve exact-version offline admission without a receipt. When an online
     # receipt exists, even the new binary must agree with its recorded digest.
-    return ((state[0] == required and not _has_incoming_receipt(conn, schema, required))
-            or _chain(conn, schema, required, state[0], compatibility) is not None)
+    return _chain(conn, schema, required, state[0], compatibility) is not None
 
 
 def _ddl(conn, schema, op):
@@ -293,7 +320,7 @@ def apply_plan(conn, schema, value, *, before_apply=None):
             # A newer candidate can migrate from a known earlier schema; installed
             # bridge execution instead follows its receipts when the DB is newer.
             if state[0] < support['required']:
-                anchor = _versions().get(str(state[0]))
+                anchor = _known_schema_digest(conn, schema, state[0])
             require(anchor is not None, 'Online migration source has no verified schema digest.')
             if state[0] == value['to_revision'] and value['steps']:
                 require(conn.execute('SELECT to_regclass(%s)', (table,)).fetchone()[0],
