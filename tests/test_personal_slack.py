@@ -350,7 +350,6 @@ def test_automation_history_never_copies_private_run(personal, monkeypatch):
 
 @pytest.mark.parametrize('configured', [False, True])
 def test_slack_webhook_source_context_obeys_personal_boundary(slack_app, monkeypatch, configured):
-    import asyncio
     from app.db import now
     from test_slack import event, signed
     app, client, runs, _ = slack_app
@@ -370,7 +369,7 @@ def test_slack_webhook_source_context_obeys_personal_boundary(slack_app, monkeyp
             return {'ok': True, 'messages': [{'ts': '1790718000.123456', 'text': 'shared-source-sentinel'}]}
         return {'ok': True}
     monkeypatch.setattr(app.state.connectors, 'request', upstream)
-    asyncio.run(app.state.slack.prepare_source(r['id']))
+    client.portal.call(app.state.slack.prepare_source, r['id'])
     source = app.state.store.slack_source(r['id'])
     if configured:
         assert source['context_status'] == 'unavailable'
