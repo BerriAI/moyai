@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 import sys
@@ -145,6 +146,38 @@ def test_packaged_entrypoints_bootstrap_without_controller_or_working_directory(
         cwd=tmp_path, capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('independent_runtime', [False, True])
+def test_packaged_mcp_initializes_with_the_agent_interpreter(tmp_path, monkeypatch, independent_runtime):
+    from sandbox.agent import hermes_config
+
+    source = Path(__file__).resolve().parents[1]
+    runtime = tmp_path / 'workspace-runner'
+    for package in ('agent', 'sandbox'):
+        shutil.copytree(source / package, runtime / package,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    bridge = runtime / 'agent/tools/mcp_bridge.py'
+    # The base workspace Python has no bridge dependencies; the agent's
+    # interpreter does. Reproduce the missing dependency without an install.
+    missing = subprocess.run([sys.executable, '-S', str(bridge)], cwd=tmp_path,
+                             capture_output=True, text=True, timeout=15)
+    assert missing.returncode != 0 and "No module named 'cryptography'" in missing.stderr
+
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'packaging-test-capability')
+    server = hermes_config({'model': 'test-model', 'independent_runtime': independent_runtime},
+                           'http://127.0.0.1:1', tmp_path)['mcp_servers']['workspace']
+    assert server['command'] == sys.executable
+    # Relocate only the image's absolute package path, keeping its selected
+    # interpreter and environment. initialize requires no broker/model call.
+    result = subprocess.run([server['command'], str(bridge)], cwd=tmp_path,
+        env=server['env'], input=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+                                           'params': {'protocolVersion': '2025-03-26'}}) + '\n',
+        capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response['id'] == 1 and response['result']['protocolVersion'] == '2025-03-26'
+    assert response['result']['serverInfo']['name'] == 'hermes-workspace'
 
 
 @pytest.mark.parametrize('name', ['agent.py', '../computer.py', '/tmp/computer.py'])
