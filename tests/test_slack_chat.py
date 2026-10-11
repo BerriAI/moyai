@@ -1288,7 +1288,8 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
     assert set(scope.split(',')) == {'app_mentions:read','chat:write','im:write','channels:history','groups:history','im:history','reactions:write','assistant:write','files:write','files:read','users:read','users:read.email'}
 
 
-def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):
+@pytest.mark.parametrize('background_claim', [False, True])
+def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, monkeypatch, background_claim):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     client.post('/hooks/slack/events', **signed(event('EvDuplicateType', type='message')))
@@ -1297,10 +1298,41 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):
     assert len(slack_app[3]) == 1
     assert slack_app[3][0]['status'] == 'is getting ready…'
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind IN ('ack','progress','control')")
+    chat = app.state.slack.chat
+    claimed, release = asyncio.Event(), asyncio.Event()
+    if background_claim:
+        original_claim = chat.claim_delivery
+
+        async def hold_background_claim(*, media=None):
+            row = await original_claim(media=media)
+            if media is False and row is not None:
+                claimed.set()
+                await release.wait()
+            return row
+
+        monkeypatch.setattr(chat, 'claim_delivery', hold_background_claim)
     finish(app, run_id, 'Here is the answer.')
-    app.state.slack.chat.last_post.clear()
-    client.portal.call(app.state.slack.chat.deliver_one)
-    assert slack_app[3][-1]['text'].startswith('Here is the answer.')
+    chat.last_post.clear()
+
+    async def deliver():
+        try:
+            if background_claim:
+                await asyncio.wait_for(claimed.wait(), 3)
+            await chat.deliver_one()
+            if background_claim:
+                assert not any('text' in message for message in slack_app[3])
+        finally:
+            release.set()
+
+    client.portal.call(deliver)
+    # A background watcher can already own the answer when deliver_one returns.
+    wait_for(lambda: app.state.store.rows(
+        "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' AND status='sent'", (run_id,),
+    ))
+    client.portal.call(chat.activity.sync)
+    # Native working-status/clear calls share this capture and have no text.
+    answers = [message for message in slack_app[3] if 'text' in message]
+    assert len(answers) == 1 and answers[0]['text'].startswith('Here is the answer.')
 
 
 def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
