@@ -1301,6 +1301,9 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, mon
     chat = app.state.slack.chat
     claimed, release = asyncio.Event(), asyncio.Event()
     if background_claim:
+        # Join any claim already awaiting database work before installing the
+        # hook, so no existing watcher can bypass the claimed event.
+        client.portal.call(chat.shutdown)
         original_claim = chat.claim_delivery
 
         async def hold_background_claim(*, media=None):
@@ -1313,6 +1316,8 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, mon
         monkeypatch.setattr(chat, 'claim_delivery', hold_background_claim)
     finish(app, run_id, 'Here is the answer.')
     chat.last_post.clear()
+    if background_claim:
+        client.portal.call(chat.recover)
 
     async def deliver():
         try:
