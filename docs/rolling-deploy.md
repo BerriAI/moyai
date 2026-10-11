@@ -24,7 +24,12 @@ separately planned initial migration and routing activation before enabling it:
   `MOYAI_SEPARATE_BROKER=true` and `TEMPORAL_ENABLED=true` on all four roles;
   `MOYAI_DATABASE_INITIALIZE=false`, staging off and maintenance drain off.
 - One private Oregon Render service per role, each diskless, auto-deploy off,
-  without autoscaling or command overrides. Every service needs Render's
+  without autoscaling or start-command overrides. Worker and coordinator may
+  retain the exact pre-deploy command
+  `/app/.venv/bin/python /app/build_workspace_image.py`; API and broker must have
+  no pre-deploy command. This hook prepares Modal images without starting runtime
+  jobs or migrating the database. The controller preserves the hook and rejects
+  other commands or edits during a release. Every service needs Render's
   **300-second shutdown allowance**. Use the normal repository Docker startup.
 - Actual running commits equal their saved `MOYAI_BUILD_SHA` settings. Every role
   implements the correlated rolling health headers. Set environment variable

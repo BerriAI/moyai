@@ -7,7 +7,7 @@ import pytest
 from scripts.release.deploy import BROKER, COORDINATOR, WORKER, ReleaseError
 from scripts.release.rehearse import Candidate, NEW, OLD
 from scripts.release.rehearse_api import API_ID, APIRender
-from scripts.release.rolling_deploy import RollingRelease
+from scripts.release.rolling_deploy import RollingRelease, WORKSPACE_IMAGE_PREDEPLOY
 
 CONTRACT = {'schema': 5, 'contracts': {role: digit * 64 for role, digit in
              zip(('api', 'worker', 'broker', 'coordinator'), 'abcd')}}
@@ -18,6 +18,8 @@ class RollingRender(APIRender):
         super().__init__()
         for env in self.env.values():
             env['MOYAI_COORDINATOR_HANDOFF'] = 'true'
+        for sid in (WORKER, COORDINATOR):
+            self.metadata[sid]['serviceDetails']['envSpecificDetails']['preDeployCommand'] = WORKSPACE_IMAGE_PREDEPLOY
         self.owners = {sid: [str(index + 1) + '@original'] for index, sid in enumerate(self.env)}
         self.active_service = None
         self.retirement_polls = 8
@@ -108,6 +110,42 @@ def test_preflight_and_noop_make_no_writes(setup, preflight):
     assert release.record['status'] == ('preflight_passed' if preflight else 'success')
 
 
+@pytest.mark.parametrize('sid', [WORKER, COORDINATOR])
+@pytest.mark.parametrize('command', [None, '', WORKSPACE_IMAGE_PREDEPLOY])
+def test_optional_image_build_hook_is_preserved_through_release(setup, sid, command):
+    release, render, _ = setup
+    render.metadata[sid]['serviceDetails']['envSpecificDetails']['preDeployCommand'] = command
+    original = deepcopy(render.metadata)
+    release.run()
+    assert release.record['status'] == 'success'
+    assert render.metadata == original
+    assert [call[1] for call in render.calls if call[0] == 'POST'] == [WORKER, BROKER, COORDINATOR, API_ID]
+
+
+@pytest.mark.parametrize('sid', [API_ID, BROKER])
+def test_image_build_hook_is_not_allowed_on_api_or_broker(setup, sid):
+    release, render, _ = setup
+    render.metadata[sid]['serviceDetails']['envSpecificDetails']['preDeployCommand'] = WORKSPACE_IMAGE_PREDEPLOY
+    with pytest.raises(ReleaseError, match='approved worker/coordinator image-build hook'):
+        release.run()
+    assert render.calls == []
+
+
+@pytest.mark.parametrize('sid', [WORKER, COORDINATOR])
+@pytest.mark.parametrize('command', [
+    '/app/.venv/bin/python -m app.schema_migrations --apply',
+    'python /app/build_workspace_image.py',
+    WORKSPACE_IMAGE_PREDEPLOY + ' --extra',
+    WORKSPACE_IMAGE_PREDEPLOY + '; migrate',
+])
+def test_other_image_build_commands_fail_before_any_write(setup, sid, command):
+    release, render, _ = setup
+    render.metadata[sid]['serviceDetails']['envSpecificDetails']['preDeployCommand'] = command
+    with pytest.raises(ReleaseError, match='approved worker/coordinator image-build hook'):
+        release.run()
+    assert render.calls == []
+
+
 @pytest.mark.parametrize('role', ['api', 'worker', 'broker', 'coordinator'])
 @pytest.mark.parametrize('change', ['disk', 'shutdown', 'command', 'schema', 'handoff', 'drain', 'stage', 'saved_sha'])
 def test_invalid_topology_never_writes(setup, role, change):
@@ -166,7 +204,7 @@ def test_lost_write_response_is_never_retried(setup, mutation):
     assert pending['confirmed'] is False if mutation == 'PUT' else pending['id'] is None
 
 
-@pytest.mark.parametrize('change', ['environment', 'topology', 'owner', 'policy', 'contract', 'unexpected_deploy'])
+@pytest.mark.parametrize('change', ['environment', 'topology', 'predeploy', 'owner', 'policy', 'contract', 'unexpected_deploy'])
 def test_external_changes_stop_before_next_mutation(setup, change):
     release, render, _ = setup
     call = render.call
@@ -175,6 +213,7 @@ def test_external_changes_stop_before_next_mutation(setup, change):
         if method == 'PUT':
             if change == 'environment': render.env[BROKER]['ENCRYPTION_KEY'] = 'changed'
             elif change == 'topology': render.metadata[BROKER]['serviceDetails']['numInstances'] = 2
+            elif change == 'predeploy': render.metadata[WORKER]['serviceDetails']['envSpecificDetails']['preDeployCommand'] = None
             elif change == 'owner': render.owners[BROKER] = ['77@external']
             elif change == 'policy': render.policy = '0' * 64
             elif change == 'contract': render.contracts['contracts']['worker'] = '0' * 64
