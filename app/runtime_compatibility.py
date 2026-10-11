@@ -9,7 +9,7 @@ import hashlib
 import json
 
 from .database import RUNTIME_SETTINGS
-from .schema_migrations import SCHEMA_REVISION
+from .schema_migrations import SCHEMA_COMPATIBILITY_REVISION
 
 # Unlimited swarms persist budget_seconds=0 and ends_at=''. Older roles parse
 # every deadline as a timestamp and cannot safely read or execute these rows.
@@ -36,7 +36,7 @@ COORDINATOR_PROTOCOL_REVISION = 16
 def api_fingerprint(settings):
     return hashlib.sha256(json.dumps({
         'protocol': API_PROTOCOL_REVISION,
-        'schema': SCHEMA_REVISION,
+        'schema': SCHEMA_COMPATIBILITY_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
     }, sort_keys=True).encode()).hexdigest()
 
@@ -57,7 +57,7 @@ def background_fingerprint(settings, role):
         'broker_protocol': BROKER_PROTOCOL_REVISION,
         'coordinator_protocol': COORDINATOR_PROTOCOL_REVISION,
         'api_protocol': API_PROTOCOL_REVISION,
-        'schema': SCHEMA_REVISION,
+        'schema': SCHEMA_COMPATIBILITY_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
     }, sort_keys=True).encode()).hexdigest()
 

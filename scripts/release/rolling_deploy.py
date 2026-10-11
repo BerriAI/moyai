@@ -1,9 +1,10 @@
 """Replace compatible runtime roles sequentially while admitted work continues.
 
-Only build labels and exact-commit deployments change. Schema, capacities,
-routes and shared policy are immutable. Ambiguous writes never trigger retries
-or rollback. This controller requires the separately activated rolling topology.
+Only reviewed additive schema plans, build labels and exact-commit deployments
+change. Capacities, routes and shared policy remain fixed. Ambiguous writes never
+trigger retries or rollback. This requires the activated rolling topology.
 """
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -19,28 +20,54 @@ ROLES = ('api', 'worker', 'broker', 'coordinator')
 WORKSPACE_IMAGE_PREDEPLOY = '/app/.venv/bin/python /app/build_workspace_image.py'
 
 
+def valid_schema_support(value):
+    return (isinstance(value, dict) and set(value) == {'protocol', 'required', 'compatibility'}
+            and all(type(value[key]) is int for key in value)
+            and value['protocol'] == 1 and 0 < value['compatibility'] <= value['required'])
+
+
+def valid_contract(value):
+    return (isinstance(value, dict)
+            and set(value) in ({'schema', 'contracts'}, {'schema', 'contracts', 'schema_support'})
+            and type(value['schema']) is int and value['schema'] > 0
+            and isinstance(value['contracts'], dict) and set(value['contracts']) == set(ROLES)
+            and all(isinstance(digest, str) and re.fullmatch('[0-9a-f]{64}', digest)
+                    for digest in value['contracts'].values())
+            and ('schema_support' not in value or (valid_schema_support(value['schema_support'])
+                 and value['schema_support']['required'] == value['schema'])))
+
+
 def candidate_contract(environment):
     result = subprocess.run([sys.executable, '-m', 'scripts.release.rolling_contract'],
         cwd=Path(__file__).resolve().parents[2], env={**environment, 'PATH': os.defpath},
         capture_output=True, text=True, timeout=30)
     try:
         value = json.loads(result.stdout)
-        if (result.returncode or type(value['schema']) is not int
-                or set(value['contracts']) != set(ROLES)
-                or any(not re.fullmatch('[0-9a-f]{64}', digest) for digest in value['contracts'].values())):
+        if result.returncode or not valid_contract(value):
             raise ValueError()
         return value
     except (ValueError, KeyError, TypeError):
         raise ReleaseError('Candidate rolling contracts could not be verified; no changes made.') from None
 
 
+def candidate_migration_plan(current_revision, target_revision):
+    # The workflow checks out the immutable selected commit. This pure planner
+    # reads that commit's reviewed registry; it never connects to the database.
+    from app.online_migrations import plan
+    return plan(current_revision, target_revision)
+
+
 class RollingRelease(Release):
     def __init__(self, *args, api_service_id, contract=candidate_contract,
+                 migration_plan=candidate_migration_plan, migrate=None,
                  readiness_timeout=300, retirement_timeout=430, **kwargs):
         super().__init__(*args, **kwargs)
         self.api_service_id, self.contract = api_service_id, contract
+        self.migration_plan, self.migrate = migration_plan, migrate
         self.readiness_timeout, self.retirement_timeout = readiness_timeout, retirement_timeout
         self.topologies, self.identities = {}, {}
+        self.schema_supports = {}
+        self.candidate = None
         self.baseline = None
         self.selected = None
         self.active_deploy = None
@@ -67,9 +94,10 @@ class RollingRelease(Release):
         self.topologies[service_id] = topology(metadata)
         return item, owner
 
-    def check_state(self, state, *, settled=False):
+    def check_state(self, state, *, settled=False, schema=None):
         if (not state.get('ok') or any(state.get(key) != self.baseline[key]
-                for key in ('policy', 'contracts', 'schema'))):
+                for key in ('policy', 'contracts'))
+                or state.get('schema') != (self.baseline['schema'] if schema is None else schema)):
             raise ReleaseError('Cluster policy, schema or compatibility contracts changed; release stopped.')
         keys = ('owners', 'coordinators', 'brokers', 'broker_leaders')
         if any(not isinstance(state.get(key), list) or len(state[key]) != len(set(state[key])) for key in keys):
@@ -116,6 +144,66 @@ class RollingRelease(Release):
             self.check_state(state)
             if state.get('ready') is not True or state.get('identity') != self.identities[sid]:
                 raise ReleaseError('An unaffected service lost readiness or changed its process identity.')
+            self.check_schema_support(state, sid)
+
+    def check_schema_support(self, state, sid, *, candidate=False):
+        expected = self.candidate.get('schema_support') if candidate else self.schema_supports[sid]
+        if state.get('schema_support') != expected:
+            raise ReleaseError('Running-source schema capability changed; release stopped.')
+
+    def plan_schema(self, states):
+        current, target = self.baseline['schema'], self.candidate['schema']
+        if target == current:
+            return None  # Also permits the no-schema-change capability bridge.
+        support = self.candidate.get('schema_support')
+        if target < current or not valid_schema_support(support):
+            raise ReleaseError('Candidate schema is incompatible; use a planned maintenance transition.')
+        for state in states.values():
+            live = state.get('schema_support')
+            if (not valid_schema_support(live) or live['compatibility'] != support['compatibility']
+                    or live['required'] > current):
+                raise ReleaseError('Candidate schema is incompatible with a running source; deploy the same-schema capability bridge to every role first.')
+        try:
+            from app.online_migrations import validate_plan
+            plan = validate_plan(self.migration_plan(current, target))
+            if (plan['from_revision'] != current or plan['to_revision'] != target
+                    or plan['compatibility'] != support['compatibility'] or not plan['steps']):
+                raise ValueError()
+        except Exception:
+            # Planner exceptions can contain details from malformed manifests.
+            raise ReleaseError('Candidate schema migration plan is incompatible, incomplete or unsupported; no changes made.') from None
+        if self.migrate is None:
+            raise ReleaseError('Online schema migration transport is unavailable; no changes made.')
+        return deepcopy(plan)
+
+    def migrate_schema(self, plan):
+        self.unchanged()
+        expected = {key: deepcopy(self.baseline[key]) for key in
+                    ('schema', 'policy', 'contracts', 'owners', 'coordinators', 'brokers', 'broker_leaders')}
+        expected['identities'] = dict(self.identities)
+        entry = self.record['schema_migration']
+        entry.update(status='requested', confirmed=False)
+        self.phase('Apply the reviewed additive schema plan before replacing services')
+        # Intent is persisted before the one potentially ambiguous request.
+        receipt = self.migrate(self.expected[COORDINATOR], deepcopy(plan), expected)
+        if (not isinstance(receipt, dict) or set(receipt) != {'status', 'from_revision', 'to_revision', 'digest'}
+                or not isinstance(receipt['status'], str) or receipt['status'] not in {'applied', 'already_applied'}
+                or any(receipt.get(key) != plan[key] for key in ('from_revision', 'to_revision', 'digest'))):
+            raise ReleaseError('Schema migration response was incomplete or mismatched; inspect the receipt before recovery.')
+        entry.update(status=receipt['status'], confirmed=True)
+        self.save()
+        self.check_control_plane()
+        states = {sid: self.probe(service) for sid, service in self.expected.items()}
+        for sid, state in states.items():
+            self.check_state(state, schema=plan['to_revision'])
+            if state.get('ready') is not True or state.get('identity') != self.identities[sid]:
+                raise ReleaseError('A service changed identity or lost readiness after schema migration; no deployment started.')
+            self.check_schema_support(state, sid)
+        self.baseline = deepcopy(states[COORDINATOR])
+        self.record['schema_revision'] = plan['to_revision']
+        entry['verified'] = True
+        self.save()
+        self.unchanged()
 
     def unchanged(self):
         self.check_control_plane()
@@ -169,6 +257,7 @@ class RollingRelease(Release):
                 raise ReleaseError('Candidate process identity changed unexpectedly.')
             self.replacement = owner
             self.check_state(state)
+            self.check_schema_support(state, service.id, candidate=True)
             return state.get('ready') is True
         self.wait(ready, 'Candidate readiness could not be verified; no speculative rollback was attempted.', self.readiness_timeout)
         self.phase('Wait for old ' + service.role + ' ownership to retire after bounded Render draining')
@@ -183,6 +272,7 @@ class RollingRelease(Release):
                     or self.identities[service.id] in state['owners']):
                 return False
             self.check_state(state, settled=True)
+            self.check_schema_support(state, service.id, candidate=True)
             if service.role == 'coordinator':
                 return state.get('coordinator_state') == 'leader' and state['coordinators'] == [self.replacement]
             if service.role == 'broker':
@@ -193,6 +283,7 @@ class RollingRelease(Release):
         self.record['replacements'].append({'service': service.id, 'role': service.role,
             'old_owner': self.identities[service.id], 'new_owner': self.replacement})
         self.identities[service.id] = self.replacement
+        self.schema_supports[service.id] = deepcopy(self.candidate.get('schema_support'))
         self.selected = self.replacement = self.active_deploy = None
         self.save()
         self.unchanged()
@@ -216,8 +307,9 @@ class RollingRelease(Release):
             if any(not state.get('ok') or state.get('ready') is not True or not state.get('identity')
                    for state in states.values()):
                 raise ReleaseError('Preflight readiness or rolling release support is missing; no changes made.')
-            self.baseline = states[COORDINATOR]
+            self.baseline = deepcopy(states[COORDINATOR])
             self.identities = {sid: state['identity'] for sid, state in states.items()}
+            self.schema_supports = {sid: deepcopy(state.get('schema_support')) for sid, state in states.items()}
             if (len(set(self.identities.values())) != 4
                     or self.baseline.get('coordinator_state') != 'leader'
                     or states[BROKER].get('broker_draining') is not False):
@@ -227,17 +319,24 @@ class RollingRelease(Release):
                 service = self.expected[sid]
                 self.github.forward_from(service.sha, sha)
                 candidate = self.contract({**service.env, 'MOYAI_BUILD_SHA': sha})
-                if candidate != {key: self.baseline[key] for key in ('schema', 'contracts')}:
+                if (not valid_contract(candidate) or candidate['contracts'] != self.baseline['contracts']
+                        or (self.candidate is not None and candidate != self.candidate)):
                     raise ReleaseError('Candidate schema or role contracts are incompatible; use a planned maintenance transition.')
+                self.candidate = deepcopy(candidate)
+            plan = self.plan_schema(states)
             self.record.update(previous={sid: {'role': service.role, 'sha': service.sha,
                 'deploy_id': service.deploy_id, 'owner': self.identities[sid]} for sid, service in self.expected.items()},
-                cluster_policy=self.baseline['policy'], contracts=self.baseline['contracts'], schema_revision=self.baseline['schema'])
+                cluster_policy=self.baseline['policy'], contracts=deepcopy(self.baseline['contracts']),
+                schema_revision=self.baseline['schema'], schema_migration=(
+                    {'plan': plan, 'status': 'planned', 'confirmed': False, 'verified': False} if plan else None))
             self.unchanged()
             if self.preflight_only:
                 self.record['status'] = 'preflight_passed'
                 self.phase('Rolling preflight passed; no changes made')
                 return
             self.record['status'] = 'running'
+            if plan:
+                self.migrate_schema(plan)
             for sid in (WORKER, BROKER, COORDINATOR, self.api_service_id):
                 service = self.expected[sid]
                 if service.sha != sha:

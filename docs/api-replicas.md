@@ -74,7 +74,7 @@ their existing durable queues.
 
 `app/runtime_compatibility.py` owns `API_PROTOCOL_REVISION`. It is source-controlled;
 there is no environment override or arbitrary SHA allowlist. The API fingerprint
-includes this revision, the exact schema revision and every existing shared-policy
+includes this revision, the schema compatibility revision and every existing shared-policy
 setting except `MOYAI_BUILD_SHA`. The coordinator publishes it atomically with its
 exact-build runtime policy, only in verified-schema, separate-broker mode, after
 component construction succeeds. A missing/stale contract rejects even a same-build
@@ -87,8 +87,10 @@ revocation waits for writes already admitted. Read-only projections retain their
 consistent transaction snapshot. Runtime owners still hold the shared database
 ownership lock. A compatible coordinator successor preserves the original policy
 and may take over singleton work after the old leader drains. Changing shared
-configuration/protocols or migrating the schema still requires stopping **all**
-owners, including APIs.
+configuration/protocols or breaking the schema contract still requires stopping
+**all** owners, including APIs. Reviewed additive expansions use the
+[full rolling workflow](rolling-deploy.md#online-additive-schema-changes) after
+every role has the migration bridge; the API-only workflow does not migrate.
 
 Equal protocol numbers are a **reviewed compatibility declaration**, not an automatic
 proof that arbitrary source changes are safe. Before retaining the revision:
@@ -98,7 +100,8 @@ proof that arbitrary source changes are safe. Before retaining the revision:
   state produced by the new API during overlap and rollback.
 - Review durable run/message/wake state, title/deletion inboxes, serialized job/tool
   payloads, attachment references, broker capabilities, encryption and signed-session
-  formats. Schema changes also require a schema revision and offline migration.
+  formats. Schema changes require a physical schema revision and either an
+  explicitly reviewed online expansion or an offline maintenance migration.
 - Keep auth/provider/feature configuration aligned. A new feature that depends on
   new worker/broker behavior needs a coordinated release even if its tables exist.
 - Run regression tests and rehearse the actual candidate against the intended old
@@ -126,7 +129,7 @@ and broker request drain; they do not move a live stream between processes.
 4. Verify the coordinator, worker executions and broker streams stayed alive;
    confirm queued title/deletion work was handled by the coordinator.
 
-For an incompatible protocol, changed shared config or schema revision, use a
+For an incompatible protocol, changed shared config or breaking schema change, use a
 coordinated maintenance transition that includes every API owner. Do not bypass
 the fingerprint. Use the full rolling workflow for background-service updates,
 and validate it in a production continuity rehearsal with real sessions before

@@ -202,7 +202,12 @@ class SSHProbe:
         self.key, self.source = key, source
 
     def __call__(self, service: Service):
-        options = json.dumps(service.probe_options(), separators=(',', ':'))
+        return self.run(service, service.probe_options(), marker='MOYAI_RELEASE_PROBE=')
+
+    def run(self, service: Service, options, *, marker, timeout=50, source=None):
+        options = json.dumps(options, separators=(',', ':'))
+        if len(options.encode()) > 65536:
+            return {'ok': False}
         # Both possible container UIDs retain the existing environment. Never
         # create a root-owned SQLite file or import app.main in this probe.
         command = ('cd /app && if [ "$(id -u)" = 0 ]; then exec runuser -u workspace -- '
@@ -214,12 +219,12 @@ class SSHProbe:
                 '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
                 service.id + '@ssh.oregon.render.com', command]
         try:
-            result = subprocess.run(args, input=self.source.read_text(), text=True,
-                                    capture_output=True, timeout=50)
+            result = subprocess.run(args, input=self.source.read_text() if source is None else source, text=True,
+                                    capture_output=True, timeout=timeout)
             if result.returncode:
                 return {'ok': False}
-            lines = [line.removeprefix('MOYAI_RELEASE_PROBE=') for line in result.stdout.splitlines()
-                     if line.startswith('MOYAI_RELEASE_PROBE=')]
+            lines = [line.removeprefix(marker) for line in result.stdout.splitlines()
+                     if line.startswith(marker)]
             return json.loads(lines[-1]) if len(lines) == 1 else {'ok': False}
         except (subprocess.TimeoutExpired, ValueError, OSError):
             return {'ok': False}
@@ -490,8 +495,10 @@ def main():
                         os.environ['GITHUB_RUN_ID'], os.environ.get('GITHUB_SHA', ''))
         if args.release_type == 'rolling':
             from scripts.release.rolling_deploy import RollingRelease
+            from scripts.release.online_migration import SSHMigration
             release = RollingRelease(render, github, SSHProbe(key_path, source=ROOT / 'rolling_probe.py'),
                                      args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
+                                     migrate=SSHMigration(key_path),
                                      preflight_only=args.preflight)
         elif args.release_type == 'api':
             from scripts.release.api_deploy import APIRelease
