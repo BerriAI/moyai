@@ -30,7 +30,11 @@ class SessionPrivacy:
         info = self.security.session_info(request)
         if not info:
             raise HTTPException(401, 'Sign in to the workspace.')
-        run = self.store.run(run_or_id) if isinstance(run_or_id, str) else run_or_id
+        if isinstance(run_or_id, str):
+            rows = self.store.rows('SELECT id,private_owner_id FROM runs WHERE id=?', (run_or_id,))
+            run = rows[0] if rows else None
+        else:
+            run = run_or_id
         actor = self.individual_owner(request) if self.is_private(run) and info.get('method') in {'google', 'cloudflare'} else ''
         return self.require_owner(run, actor)
 

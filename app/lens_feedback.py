@@ -96,11 +96,11 @@ class LensFeedback:
             return 'delivered'
         return 'failed' if row['failed'] else 'pending'
 
-    def for_messages(self, run_id, author):
+    def for_messages(self, run_id, author, *, connection=None):
         rows = self.store.rows('''
             SELECT message_id,score,comment,delivered_at,failed
             FROM lens_feedback WHERE run_id=? AND author=?
-        ''', (run_id, author))
+        ''', (run_id, author), connection=connection)
         return {
             row['message_id']: {
                 'score': row['score'],

@@ -912,7 +912,8 @@ def _create_app(settings, store):
         return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
     def load_run_details(run_id, request, activity):
-        security.require(request)
+        # The route dependency authenticates and checks live-session access.
+        # Recheck ownership below against the same snapshot as the content.
         from .activity_history import projection
         actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
         if actor is None:
@@ -926,6 +927,7 @@ def _create_app(settings, store):
             run = store.run(run_id, connection=connection)
             if not run or run['deleted_at']:
                 raise HTTPException(404, "Task not found")
+            privacy.require_owner(run, actor)
             messages = public_messages(run, store.messages(run_id, connection=connection))
             activity_data = projection(connection, run, messages) if activity == 'summary' and run['chat_enabled'] else {
                 'events': store.events(run_id, limit=10000, connection=connection)}
@@ -933,9 +935,15 @@ def _create_app(settings, store):
             approvals = store.approvals(run_id, connection=connection)
             goal = store.goal(run_id, connection=connection)
             agents = coordinator.view(run_id, include_costs=admin, connection=connection)
+            feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'], connection=connection)
+            has_artifact = store.artifacts.info(run_id + '.zip', connection) is not None
+            # This returns only availability, not a capture listing. Use the
+            # authorized conversation snapshot and its existing pool slot.
+            capture_prefix = captures.directory(settings, run_id).name + '/'
+            has_captures = any(captures.valid_name(row['name'].removeprefix(capture_prefix))
+                               for row in store.artifacts.listing(capture_prefix, connection))
         project = environments.context(run)
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'])
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = metadata['workflow_root_id']
@@ -951,7 +959,7 @@ def _create_app(settings, store):
                 "agents": agents,
                 "credential_requests": credentials.pending(run,actor,admin),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store, actor=actor)), "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": has_artifact, "has_captures": has_captures, "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):

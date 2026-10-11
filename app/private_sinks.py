@@ -9,10 +9,9 @@ from .session_privacy import SessionPrivacy
 
 
 def stored_run(store, run_id, connection=None):
-    if connection is not None:
-        row = connection.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
-        return dict(row) if row else None
-    return store.run(run_id)
+    rows = store.rows('SELECT id,private_owner_id,deleted_at FROM runs WHERE id=?',
+                      (run_id,), connection=connection)
+    return rows[0] if rows else None
 
 
 def private_run(store, run_id, connection=None):

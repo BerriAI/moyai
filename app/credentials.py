@@ -713,8 +713,8 @@ class Credentials:
 
     def pending(self, run, user_id, admin):
         from .private_sinks import require_owner
-        require_owner(self.store, run['id'], user_id)
         with self.store.connect() as conn:
+            require_owner(self.store, run['id'], user_id, conn)
             rows = self.pending_rows(conn, run['id'])
         return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure', 'preferred_scope', 'scope_revision')},
                  'input_fields': json.loads(row['input_fields']),
