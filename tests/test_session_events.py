@@ -161,6 +161,43 @@ async def test_worker_wakes_without_periodic_poll_and_replays_stopped_events(not
         await worker.shutdown(graceful=True)
 
 
+async def test_worker_idles_before_and_after_a_real_notification(notifications, monkeypatch):
+    app, requests = notifications
+    store, worker = app.state.store, app.state.slack.notifications
+    monkeypatch.setattr('app.slack_notifications.RECONCILE_SECONDS', 3600)
+    collect = worker.collect
+    passes, empty_passes = [], []
+    def counted_collect():
+        count = collect()
+        passes.append(count)
+        if not count:
+            empty_passes.append(count)
+        return count
+    monkeypatch.setattr(worker, 'collect', counted_collect)
+    async def assert_idle():
+        # Let an initial LISTEN-ready wake or a final commit callback settle.
+        await asyncio.sleep(0.1)
+        before = len(passes)
+        await asyncio.sleep(0.2)
+        assert len(passes) == before, 'An empty inbox must not wake its own collector'
+    worker.recover()
+    try:
+        await asyncio.wait_for(store.session_events.listening.wait(), 3)
+        await until(lambda: empty_passes)
+        await assert_idle()
+        before = len(empty_passes)
+        run_id, turn = create(app)
+        finish(app, run_id, turn)
+        await until(lambda: len(posts(requests)) == 1)
+        await until(lambda: len(empty_passes) > before)
+        await assert_idle()
+        assert len(posts(requests)) == 1
+        assert not inbox(store)
+        assert store.rows('SELECT status FROM slack_notifications')[0]['status'] == 'sent'
+    finally:
+        await worker.shutdown(graceful=True)
+
+
 async def test_postgres_external_commit_wakes_and_rollback_stays_quiet(notifications):
     app, _ = notifications
     store = app.state.store

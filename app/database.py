@@ -225,9 +225,15 @@ class PostgresConnection:
         unquoted = ' '.join(SQL_PARTS.split(statement)[::2])
         if not self.schema_updates and re.search(r'\b(CREATE|ALTER|DROP|TRUNCATE|REINDEX)\b', unquoted, re.I):
             raise DatabaseError('Schema changes require the offline migration command.')
-        if re.search(r'\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b', unquoted, re.I):
+        # Row-locking SELECTs need write ownership, but do not change data.
+        # Exclude only locking clauses so data-modifying CTEs still publish a
+        # committed change even when their outer statement is a SELECT.
+        without_locks, row_locks = re.subn(
+            r'\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b', '', unquoted, flags=re.I)
+        mutating = re.search(r'\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b', without_locks, re.I)
+        if mutating or row_locks:
             self.begin_write()
-            self.changed = True
+            self.changed = self.changed or bool(mutating)
         elif not self.owner_checked:
             self.check_owner()
         if re.match(r'\s*(CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)|ALTER\s+TABLE)\b', unquoted, re.I):

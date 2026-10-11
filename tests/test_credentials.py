@@ -675,18 +675,23 @@ def test_metadata_edits_keep_values_and_enforce_personal_org_and_session_bounds(
 
 
 def test_legacy_session_scope_migrates_once_and_remains_root_bound(workspace):
+    from app.session_events import initialize_schema
     app,client=workspace
     sign_in(app,client)
     identity=save(client).json()['id']
     run=active(app)
     app.state.store.execute("UPDATE provider_secrets SET scope='session',root_id=? WHERE id=?",(run['id'],identity))
     with app.state.store.connect() as conn:
+        # The legacy schema predates the lifecycle trigger on generation.
+        suffix = ' ON credential_requests' if app.state.store.database else ''
+        conn.execute('DROP TRIGGER session_event_credential_requests_update' + suffix)
         for field in ('name','format','env_var','lifetime','expires_at','invalid_reason','revision'):
             conn.execute('ALTER TABLE provider_secrets DROP COLUMN '+field)
         for field in ('name','format','env_var','generation','failure','revision','secret_revision'):
             conn.execute('ALTER TABLE credential_requests DROP COLUMN '+field)
     for attempt in range(2):
         vault=Credentials(app.state.store,app.state.security,app.state.settings,app.state.manager,SimpleNamespace(flush=None))
+        initialize_schema(app.state.store)
         secret=app.state.store.rows('SELECT * FROM provider_secrets WHERE id=?',(identity,))[0]
         assert secret['scope']=='personal' and secret['lifetime']=='session'
         assert vault.permitted(secret,run,'google:alice')
