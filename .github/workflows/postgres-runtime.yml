@@ -1,12 +1,15 @@
 name: PostgreSQL runtime
 on:
   pull_request:
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/schema_migration_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'agent/skill_templates/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/schema_migration_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'scripts/worker_release_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
   push:
     branches: [main]
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/schema_migration_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  # Superseded PR revisions need no result; retain checks for every main commit.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   storage:
     runs-on: ubuntu-latest
@@ -33,8 +36,10 @@ jobs:
       - name: Migrate through the CLI and restore in a replacement process with no local files
         run: uv run --frozen --python 3.13 python scripts/shared_storage_smoke.py
   runtime:
+    # Database contracts stay on every PR. General feature compatibility runs
+    # nightly/on demand in postgres-compatibility.yml instead of once per PR.
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:17-alpine
@@ -52,25 +57,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - name: Preserve the default SQLite behavior
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_admission_scaling.py tests/test_sessions.py tests/test_conversation_responsiveness.py tests/test_slack_web_mirror.py tests/test_spend.py
-      - name: Verify import, transactions, ownership and restart
-        run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py tests/test_postgres_migration.py
-      - name: Verify existing chat, queue, attachment and trace behavior on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_workspace.py tests/test_sessions.py tests/test_conversation_responsiveness.py tests/test_session_list_performance.py tests/test_session_titles.py tests/test_session_metadata.py tests/test_pr_delivery.py tests/test_pr_milestones.py tests/test_github_ci.py tests/test_attachments.py tests/test_message_queue.py tests/test_trace_outbox.py
-      - name: Verify credentials, permissions, automations and settings on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_credentials.py tests/test_skills.py tests/test_memory.py tests/test_initial_context.py tests/test_automations.py tests/test_automation_events.py tests/test_environments.py tests/test_infrastructure_costs.py tests/test_session_folders.py tests/test_spend.py tests/test_github_write_access.py tests/test_lens_feedback.py
-      - name: Verify durable admission, gateway, identities and Slack recovery on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_admission_scaling.py tests/test_durable.py tests/test_startup_latency.py tests/test_startup_overlap.py tests/test_automation_concurrency.py tests/test_harness_gateway.py tests/test_broker_transport.py tests/test_adoption.py tests/test_identities.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_activity.py
+      - name: Preserve SQLite admission behavior
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_admission_scaling.py
+      - name: Verify Postgres transactions, ownership, import and restart
+        # The import contract needs sqlglot; full migration coverage has its own workflow.
+        run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py
+      - name: Verify conversation authentication remains readable during writes
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_cloudflare_login.py -k 'conversation or keeps_personal_tools'
+      - name: Verify editable skill template installation and upgrades
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_bundled_skills.py
       - name: Demonstrate real HTTP requests across two server processes
         run: uv run --frozen --python 3.13 python scripts/postgres_runtime_smoke.py
-      - name: Verify saved model choices and opt-in tiers on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_astra_ultrafast.py tests/test_model_preferences.py tests/test_model_tools.py
-      - name: Verify swarm deadlines, controls and mixed-harness groups on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py
   scheduling:
-    # The broad runtime suite already approaches its job timeout. Keep the
-    # real Temporal/lock-wait regressions independent so neither delays the other.
+    # Keep real Temporal and database-contention guarantees on every PR.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -97,8 +96,8 @@ jobs:
 
   distributed:
     runs-on: ubuntu-latest
-    # The PostgreSQL lifecycle suites plus three real process probes now take
-    # more than ten minutes on hosted runners. Keep every assertion and probe.
+    # Keep lifecycle and contention regressions here; the 3000-session load
+    # measurement runs in the scheduled/manual compatibility workflow.
     timeout-minutes: 20
     services:
       postgres:
@@ -121,8 +120,8 @@ jobs:
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_runtime_scaling.py tests/test_runtime_startup_fences.py tests/test_runtime_performance.py tests/test_admission_cleanup.py tests/test_startup_postgres.py
       - name: Verify authenticated capacity observations on both backends
         run: |
-          uv run --frozen --python 3.13 pytest -q tests/test_capacity.py tests/test_memory_review.py
-          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_capacity.py tests/test_memory_review.py
+          uv run --frozen --python 3.13 pytest -q tests/test_capacity.py tests/test_memory_review.py tests/test_skill_learning.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_capacity.py tests/test_memory_review.py tests/test_skill_learning.py
       - name: Verify Slack finish transactions and tracing on both backends
         run: |
           uv run --frozen --python 3.13 pytest -q tests/test_finish_tracing.py
@@ -131,8 +130,8 @@ jobs:
         run: |
           uv run --frozen --python 3.13 pytest -q tests/test_slack_polling.py tests/test_slack_notifications.py
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py tests/test_slack_notifications.py
-      - name: Verify 3000 synthetic reservations across four worker processes
-        run: uv run --frozen --python 3.13 python scripts/runtime_capacity_probe.py --sessions 3000 --workers 4
+      - name: Verify chat snapshots reuse PostgreSQL pool connections
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_message_snapshot_pool.py tests/test_slack_mentions.py tests/test_attachments.py
       - name: Verify agent handoffs, warm workspaces and admission on PostgreSQL
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py tests/test_admission_scaling.py tests/test_idle_window.py
       - name: Measure admission while another sandbox termination is slow
@@ -164,7 +163,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - name: Verify broker ownership, recovery, isolation and readiness
+      - name: Verify broker ownership, recovery, isolation and release compatibility
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_separate_broker.py tests/test_api_lifecycle.py tests/test_api_compatibility.py
       - name: Verify explicit migrations and runtime startup without DDL
         run: |
@@ -182,3 +181,34 @@ jobs:
         run: |
           uv run --frozen --python 3.13 pytest -q --tb=short tests/test_context_gateway.py tests/test_context_recovery.py
           uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_context_gateway.py tests/test_context_recovery.py
+
+  rolling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-rolling-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-rolling-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify compatible owners, revocation, stream draining and failed handoffs
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_background_contracts.py tests/test_worker_compatibility.py tests/test_worker_release_fences.py tests/test_worker_handoff.py tests/test_coordinator_handoff.py tests/test_broker_overlap.py
+      - name: Replace all four roles while messages and inference continue
+        run: uv run --frozen --python 3.13 python -m scripts.worker_release_probe --all-roles --output /tmp/moyai-rolling-release
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rolling-release-proof
+          path: /tmp/moyai-rolling-release
+          if-no-files-found: ignore

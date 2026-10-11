@@ -1,0 +1,57 @@
+const assert = require('node:assert/strict');
+const {test, before, after} = require('node:test');
+const {spawn} = require('node:child_process');
+const {mkdirSync} = require('node:fs');
+const {chromium} = require('playwright');
+let server, browser, base;
+before(async () => {
+  server = spawn(process.execPath, ['scripts/settings_ui_preview.cjs', '--port', '0'], {stdio: ['ignore', 'pipe', 'inherit']});
+  base = await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.stdout.on('data', data => {const url = data.toString().match(/http:\/\/127\.0\.0\.1:\d+/); if (url) resolve(url[0]);});
+  });
+  browser = await chromium.launch({headless: true});
+  if (process.env.LIBRARY_SCREENSHOT_DIR) mkdirSync(process.env.LIBRARY_SCREENSHOT_DIR, {recursive: true});
+});
+after(async () => {await browser?.close(); server?.kill();});
+for (const width of [1440, 768, 320]) test(`complete library editing and personal default at ${width}px`, {timeout: 60000}, async t => {
+  const page = await browser.newPage({viewport: {width, height: 900}, reducedMotion: 'reduce'});
+  t.after(() => page.close());
+  page.setDefaultTimeout(10000);
+  await page.goto(base+'/#memory');
+  await page.locator('#memory-add').click();
+  await page.locator('#memory-title').fill('Complete note '+width);
+  const note = 'A full note with rationale. '.repeat(150)+'The last requirement.';
+  await page.locator('#memory-content').fill(note);
+  const save = page.waitForRequest(r => r.method() === 'POST' && new URL(r.url()).pathname === '/api/memory');
+  await page.locator('#memory-form button[type=submit]').click();
+  assert.equal((await save).postDataJSON().content, note);
+  await page.locator('#memory-search').fill('Complete note '+width);
+  await page.locator('[data-memory-edit]').click();
+  assert.equal(await page.locator('#memory-title').inputValue(), 'Complete note '+width);
+  assert.equal(await page.locator('#memory-content').inputValue(), note);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), width);
+  if (process.env.LIBRARY_SCREENSHOT_DIR) await page.screenshot({path: `${process.env.LIBRARY_SCREENSHOT_DIR}/memory-${width}.png`});
+  await page.keyboard.press('Escape');
+  await page.goto(base+'/#skills');
+  await page.locator('#add-skill').click();
+  assert.equal(await page.locator('#skill-scope').inputValue(), 'personal');
+  await page.locator('#skill-name').fill('large-procedure');
+  await page.locator('#skill-description').fill('A complete imported procedure.');
+  const instructions = '# Procedure\n'+'Preserve supporting explanations.\n'.repeat(1500)+'Final instruction.';
+  await page.locator('#skill-import').setInputFiles({name: 'SKILL.md', mimeType: 'text/markdown', buffer: Buffer.from(instructions)});
+  await page.waitForFunction(text => document.querySelector('#skill-instructions').value === text, instructions);
+  assert.equal(await page.locator('#skill-instructions').inputValue(), instructions);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), width);
+  if (process.env.LIBRARY_SCREENSHOT_DIR) await page.screenshot({path: `${process.env.LIBRARY_SCREENSHOT_DIR}/skills-${width}.png`});
+  let saved;
+  await page.route('**/api/skills', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    saved = route.request().postDataJSON();
+    await route.fulfill({json: {id: 'saved-skill'}});
+  });
+  await page.locator('#skill-form button[type=submit]').click();
+  await page.waitForFunction(() => !document.querySelector('#skill-form'));
+  assert.equal(saved.instructions, instructions);
+  assert.equal(saved.scope, 'personal');
+});

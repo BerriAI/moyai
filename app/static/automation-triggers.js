@@ -61,7 +61,7 @@ function bindAutomationTrigger(form,d) {
   function refresh() {
     const cards=[...host.children];
     cards.forEach((card,i)=>{card.querySelector('[data-trigger-title]').textContent=`${i?'OR · ':''}Trigger ${i+1}`;card.querySelector('[data-remove-trigger]').disabled=cards.length===1;});
-    form.querySelector('[data-add-trigger]').disabled=cards.length>=20;
+    form.querySelector('[data-add-trigger]').disabled=false;
     if(!capEdited)cap.value=cards.some(c=>c.querySelector('[name=source]').value==='slack'&&c.querySelector('[name=event]')?.value==='message.posted')?150:50;
   }
   function add(t={id:crypto.randomUUID(),schedule:automationDefaultSchedule()}) {

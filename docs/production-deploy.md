@@ -1,5 +1,10 @@
 # Deploy production
 
+After the complete four-service handoff topology is activated, use
+`release_type: rolling` and follow [compatible rolling deployments](rolling-deploy.md).
+It replaces roles sequentially while active work continues and keeps schema,
+shared contracts and concurrency fixed.
+
 After dedicated API activation, use `release_type: api` and follow
 [compatible API deployments](api-deploy.md). The rest of this page describes
 `release_type: coordinated` for the original two/three-service topology.
@@ -60,9 +65,13 @@ host key stops the workflow and must be verified against Render before updating.
    not cancel sessions.
 3. Deploy the new worker in maintenance staging. It serves a health response but
    does not run jobs. Confirm no execution worker still owns the database and
-   model requests and execution leases have cleared. A Stop request accepted
-   after draining stays saved for the replacement worker; the ownership check
-   does not wait for a paused worker to process it.
+   model requests and execution leases have cleared. Persisted session phases
+   must still be at saved boundaries: worker shutdown can leave a sandbox
+   running between broker requests. Executing, unknown, and active legacy
+   sessions block broker/coordinator replacement even after worker ownership
+   clears. A Stop request accepted at a saved boundary after draining stays
+   saved for the replacement worker; the check does not wait for a paused
+   worker to process it.
 4. Deploy the app/coordinator at the selected commit and verify its runtime.
 5. Activate the worker at the same commit, clear its drain flag, and verify both
    services and database ownership before declaring success.

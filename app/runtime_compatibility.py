@@ -11,7 +11,25 @@ import json
 from .database import RUNTIME_SETTINGS
 from .schema_migrations import SCHEMA_REVISION
 
-API_PROTOCOL_REVISION = 1
+# Unlimited swarms persist budget_seconds=0 and ends_at=''. Older roles parse
+# every deadline as a timestamp and cannot safely read or execute these rows.
+# Automation startup now references the broker's complete automation_history tool.
+# Scoped automation definitions, grants and attributed inputs require all roles
+# to understand self-management and immutable owner-authored workflow sources.
+# Public progress is complete and requested goal checkpoints have durable
+# reporting schedules/receipts; old roles can discard or omit their delivery.
+# Side-chat snapshots retain complete attributed inputs; workers compose large
+# instruction sources as immutable references using the selected model window.
+# Immutable attachment manifests/parts must be understood by intake and workers.
+# Publishing workflow files uses explicit per-operation Workflows permission.
+# Snapshotless workers wait for shared preparation; restored services are verified.
+API_PROTOCOL_REVISION = 15
+# Bump for incompatible durable session state, Temporal workflow histories or
+# activity payloads, sandbox journals/capabilities, and worker/broker writes.
+# Matching revisions require a reviewed cross-release handoff and rollback.
+WORKER_PROTOCOL_REVISION = 15
+BROKER_PROTOCOL_REVISION = 15
+COORDINATOR_PROTOCOL_REVISION = 15
 
 
 def api_fingerprint(settings):
@@ -20,3 +38,28 @@ def api_fingerprint(settings):
         'schema': SCHEMA_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
     }, sort_keys=True).encode()).hexdigest()
+
+
+def worker_fingerprint(settings):
+    return background_fingerprint(settings, 'worker')
+
+
+def broker_fingerprint(settings):
+    return background_fingerprint(settings, 'broker')
+
+
+def background_fingerprint(settings, role):
+    """Conservative shared declaration for mutually dependent background roles."""
+    return hashlib.sha256(json.dumps({
+        'role': role,
+        'worker_protocol': WORKER_PROTOCOL_REVISION,
+        'broker_protocol': BROKER_PROTOCOL_REVISION,
+        'coordinator_protocol': COORDINATOR_PROTOCOL_REVISION,
+        'api_protocol': API_PROTOCOL_REVISION,
+        'schema': SCHEMA_REVISION,
+        'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
+    }, sort_keys=True).encode()).hexdigest()
+
+
+def coordinator_fingerprint(settings):
+    return background_fingerprint(settings, 'coordinator')

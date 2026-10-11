@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import pytest
 
 from app.attachment_transport import CONTENT_TYPE
-from app.attachments import MAX_FILE
+from app.attachments import LEGACY_UPLOAD_BYTES as MAX_FILE
 from test_spend import sign_in
 from test_workspace import workspace
 
@@ -109,6 +109,6 @@ def test_wire_overhead_does_not_change_original_size_and_storage_limits(workspac
     assert client.get(response.json()['url']).content == raw
     assert upload(client, uuid4().hex, name, data + b'x').status_code == 413
     client.delete(response.json()['url'])
-    monkeypatch.setattr('app.attachments.MAX_DRAFT', 2)
+    app.state.settings.attachment_storage_limit_mb = 2 / (1024 * 1024)
     assert upload(client, attachment_id, name, data).status_code == 422
     assert not app.state.store.rows('SELECT id FROM attachments')

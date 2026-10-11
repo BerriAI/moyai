@@ -79,7 +79,7 @@ class MessageQueue:
                 row = conn.execute("""SELECT m.* FROM messages m WHERE m.run_id=? AND m.status='queued'
                     AND (m.send_immediately=1 OR EXISTS (
                         SELECT 1 FROM slack_receipts s WHERE s.run_id=m.run_id AND s.message_id=m.id))
-                    ORDER BY m.id LIMIT 1""", (run_id,)).fetchone()
+                    ORDER BY CASE WHEN m.input_kind='user' THEN 0 ELSE 1 END,m.id LIMIT 1""", (run_id,)).fetchone()
                 if row and row['id'] != active_message_id:
                     conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (row['id'], run_id))
             if not row or row['id'] == active_message_id:
@@ -94,7 +94,7 @@ class MessageQueue:
 
     def acknowledge(self, run_id, turn_id, ids):
         """Idempotent receipts from the live sandbox, also carried by model/final events."""
-        if not isinstance(ids, list) or len(ids) > 100 or any(type(i) is not int for i in ids):
+        if not isinstance(ids, list) or any(type(i) is not int for i in ids):
             raise HTTPException(422, 'Invalid steering receipts.')
         if not ids:
             return
@@ -128,4 +128,5 @@ class MessageQueue:
             conn.execute('UPDATE messages SET steering_parent_id=? WHERE id=?', (turn_id, target))
         from .attachments import attachment_context
         uploads = [item for item in self.store.attachments.for_run(run_id, target) if item['message_id'] == target]
-        return {'steer_message_id': None, 'input': {'id': target, 'content': message['content'] + attachment_context(uploads), 'attachments': uploads}}
+        return {'steer_message_id': None, 'input': {'id': target, 'content': message['content'] + attachment_context(uploads), 'attachments': uploads,
+                'kind': message['input_kind'], 'source': json.loads(message['source_json'])}}

@@ -81,8 +81,16 @@ def test_two_apis_share_auth_requests_and_shutdown_leaves_owner_work_intact(clus
             first.app.state.manager.temporal.start_workflow.assert_not_awaited()
             with pytest.raises(DatabaseError, match='Another coordinator'):
                 create_app(settings.model_copy(update={'moyai_runtime_role': 'coordinator'}))
-            with pytest.raises(DatabaseError, match='Another inference broker'):
-                create_app(settings.model_copy(update={'moyai_runtime_role': 'broker'}))
+            # Verified brokers can overlap across compatible builds. Merely
+            # joining must preserve the live owner's pending work, just as an
+            # API replacement does; legacy singleton behavior is tested apart.
+            replacement_broker = create_app(settings.model_copy(update={
+                'moyai_runtime_role': 'broker', 'moyai_build_sha': build}))
+            try:
+                assert replacement_broker.state.store.database.owner.info.backend_pid != broker.state.store.database.owner.info.backend_pid
+                assert {name: store.rows('SELECT * FROM ' + name) for name in preserved} == preserved
+            finally:
+                replacement_broker.state.store.close()
         assert {name: store.rows('SELECT * FROM ' + name) for name in preserved} == preserved
         assert store.rows('SELECT status FROM model_requests WHERE id=?', (request,))[0]['status'] == 'pending'
     finally:
@@ -114,7 +122,7 @@ def test_api_starts_no_singleton_jobs_and_does_not_own_hooks(cluster, monkeypatc
                (app.state.session_lifecycle, 'start'), (app.state.environments, 'start'),
                (app.state.identities, 'start'), (app.state.automations, 'start'),
                (app.state.tracing, 'start'), (app.state.lens_feedback, 'start'),
-               (app.state.memory_review, 'start'), (app.state.spend.recovery, 'start')]
+               (app.state.memory_review, 'start'), (app.state.skill_learning, 'start'), (app.state.spend.recovery, 'start')]
     for service, method in guarded:
         monkeypatch.setattr(service, method, Mock(side_effect=AssertionError('API started singleton work')))
     manager = app.state.manager

@@ -277,6 +277,7 @@
 .settings-view [data-slot="dialog-content"] :is(.credential-actions,.role-actions,.environment-dialog-actions) { gap: 12px; margin-block-start: 24px; padding-block-start: 20px; border-top: 1px solid var(--settings-line); }
 .settings-view [data-slot="dialog-content"] [type=submit] { background: var(--settings-accent); color: var(--settings-accent-foreground); border-color: var(--settings-accent); }
 .settings-view [data-slot="dialog-content"] .field :is(input,select,textarea) { width: 100%; }
+.settings-view [data-slot="dialog-content"] :is(.memory-editor,.skill-editor) textarea { max-height: 40dvh; overflow-y: auto; }
 .settings-view .settings-load-error { max-width: 65ch !important; }
 .settings-view .settings-load-error>div { margin-block: 24px; }
 @media (hover:hover) {
@@ -604,4 +605,18 @@
   .automation-connection-search { flex-wrap: wrap; }
   .automation-connection-search input { flex-basis: 100%; }
   .settings-view [data-slot="dialog-content"] :is(input,textarea,select) { font-size: 16px; }
+}
+
+/* Learned drafts share the Skills rows and Settings controls. */
+.settings-view #skill-learning { display: grid; gap: 16px; margin-block: 24px; min-width: 0; }
+.settings-view #skill-learning .memory-controls { margin: 0; border-radius: var(--settings-radius); }
+.settings-view #skill-learning .memory-controls > label { display: flex; align-items: center; gap: 8px; flex-shrink: 0; min-height: 44px; }
+.settings-view #skill-learning .section-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.settings-view #skill-learning .section-header h2 { margin: 0; }
+.settings-view #skill-learning .skill-card { padding: 16px; }
+.settings-view #skill-learning-error:empty { display: none; }
+.settings-view #skill-learning-error { color: var(--ui-danger); }
+[data-dialog-id="skill-dialog"] .settings-hint { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .settings-view #skill-learning .memory-controls { flex-direction: column; }
 }

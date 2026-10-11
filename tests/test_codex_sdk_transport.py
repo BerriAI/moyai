@@ -539,7 +539,8 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
             assert result['final_response'] == 'codex-transport-ok'
             assert ('commentary', 'codex-transport-ok') not in events
         expected_samples = 6 if outcome == 'context-recovery-limit' else 5
-        assert result['completed'] and len(samples) == expected_samples and len(calls) == 1
+        assert result['completed'], result
+        assert len(samples) == expected_samples and len(calls) == 1
         assert len(requests) == expected_samples + len(summaries)
         assert 'requester-private-first-marker' not in json.dumps(requests[-1])
         assert 'requester-private-second-marker' in json.dumps(requests[-1])
@@ -1241,11 +1242,11 @@ def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, h
         arguments = None
         if not discover and len(attempts) < 2:
             if attempts:
-                validation_seen.append('definition.metadata.bootstrap_source' in text and '16384 characters' in text)
+                validation_seen.append('definition.metadata.bootstrap_source' in text and 'Input should be a valid string' in text)
                 assert not app.state.store.rows('SELECT * FROM automations')
             arguments = {'turn_id': app.state.store.run(state.run['id'])['active_message_id'],
                 'request_key': 'native-corrected-automation', 'definition': definition(**(
-                    {} if attempts else {'metadata': {'bootstrap_source': 'private-script-marker' + 'x' * (16385 - len('private-script-marker'))}}))}
+                    {} if attempts else {'metadata': {'bootstrap_source': ['private-script-marker']}}))}
             attempts.append('corrected' if attempts else 'invalid')
         sequence = len(state.requests)
         pipe = SimpleNamespace(server=state, wfile=BytesIO(), send_response=lambda *args: None,

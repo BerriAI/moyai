@@ -58,14 +58,14 @@ async def test_slow_activity_poll_does_not_block_opening_another_conversation(wo
         await stream.aclose()
 
 
-@pytest.mark.parametrize('route', ['config', 'activity'])
+@pytest.mark.parametrize('route', ['session', 'config', 'activity'])
 async def test_conversation_support_reads_run_outside_the_event_loop(workspace, monkeypatch, route):
     app, client = workspace
     store = app.state.store
     run = store.create_run('Read activity', '', 'demo', [], chat_enabled=True)
     message = store.messages(run['id'])[0]
     loop_thread = threading.get_ident()
-    original = store.identity if route == 'config' else store.run
+    original = store.run if route == 'activity' else store.identity
     observed = []
 
     def checked(*args, **kwargs):
@@ -73,11 +73,41 @@ async def test_conversation_support_reads_run_outside_the_event_loop(workspace, 
         assert threading.get_ident() != loop_thread
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, 'identity' if route == 'config' else 'run', checked)
-    path = '/api/config' if route == 'config' else f"/api/runs/{run['id']}/activity?message_id={message['id']}"
+    monkeypatch.setattr(store, 'run' if route == 'activity' else 'identity', checked)
+    path = f"/api/runs/{run['id']}/activity?message_id={message['id']}" if route == 'activity' else f'/api/{route}'
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                 base_url=app.state.settings.public_url,
                                 cookies=dict(client.cookies)) as reader:
         response = await reader.get(path)
     assert response.status_code == 200, response.text
     assert observed
+
+
+async def test_sending_a_follow_up_reads_and_writes_off_the_event_loop(workspace, monkeypatch):
+    app, client = workspace
+    store = app.state.store
+    run = store.create_run('Busy conversation', '', 'demo', [], chat_enabled=True)
+    loop_thread = threading.get_ident()
+    original_run, original_identity = store.run, store.identity
+    calls = []
+
+    def read_run(*args, **kwargs):
+        calls.append('run')
+        assert threading.get_ident() != loop_thread
+        return original_run(*args, **kwargs)
+
+    def identity(*args, **kwargs):
+        calls.append('identity')
+        assert threading.get_ident() != loop_thread
+        return original_identity(*args, **kwargs)
+
+    monkeypatch.setattr(store, 'run', read_run)
+    monkeypatch.setattr(store, 'identity', identity)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url=app.state.settings.public_url,
+                                 cookies=dict(client.cookies), headers=dict(client.headers)) as browser:
+        sent = await browser.post(f"/api/runs/{run['id']}/messages",
+                                  json={'content': 'is this done ?', 'client_id': 'instant-1'})
+    assert sent.status_code == 202, sent.text
+    assert {'run', 'identity'} <= set(calls)
+    assert any(m['content'] == 'is this done ?' for m in store.messages(run['id']))

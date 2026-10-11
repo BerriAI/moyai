@@ -1,4 +1,4 @@
-"""Bounded, durable user uploads. Drafts are private; sent files share chat access."""
+"""Durable user uploads. Drafts are private; sent files share chat access."""
 import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
@@ -11,22 +11,23 @@ import warnings
 from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .audio import AudioTranscriber, audio_type
 from .attachment_transport import CONTENT_TYPE, OVERHEAD, unseal_file
+from .attachment_uploads import AttachmentUploads, UploadSpec, PART_BYTES
 
-MAX_FILE = 10 * 1024 * 1024
-MAX_FILES = 8
-MAX_MESSAGE = 20 * 1024 * 1024
-MAX_DRAFT = 50 * 1024 * 1024
+# Compatibility framing for older clients. Current clients transfer as many
+# authenticated parts as needed; this does not bound an attachment's size.
+LEGACY_UPLOAD_BYTES = 10 * 1024 * 1024
+IMAGE_PREVIEW_BYTES = 10 * 1024 * 1024
 ID = re.compile(r'^[0-9a-f]{32}$')
-META = 'id,owner_id,message_id,name,size,sha256,media_type,preview_text,created_at'
+META = 'id,owner_id,message_id,name,size,sha256,media_type,preview_text,created_at,processing_error,upload_state,part_size'
 
 
 def upload_limit(content_type):
-    return MAX_FILE + OVERHEAD if content_type.split(';', 1)[0].lower() == CONTENT_TYPE else MAX_FILE
+    return LEGACY_UPLOAD_BYTES + OVERHEAD if content_type.split(';', 1)[0].lower() == CONTENT_TYPE else LEGACY_UPLOAD_BYTES
 
 
 def filename(value):
@@ -41,10 +42,12 @@ def inspect_file(raw):
     """Only decoded raster images get inline previews; originals always download."""
     preview = b''
     media_type = 'application/octet-stream'
+    stream = raw if hasattr(raw, 'read') else BytesIO(raw)
+    stream.seek(0)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('error', Image.DecompressionBombWarning)
-            with Image.open(BytesIO(raw)) as opened:
+            with Image.open(stream) as opened:
                 if opened.format not in {'PNG', 'JPEG', 'WEBP', 'GIF'}:
                     raise ValueError('Use PNG, JPEG, WebP or GIF for image attachments.')
                 if opened.width * opened.height > 25_000_000:
@@ -63,9 +66,11 @@ def inspect_file(raw):
     except (OSError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise ValueError('This image could not be opened safely. Try exporting it as PNG or JPEG.') from None
     text = ''
-    if not preview and b'\x00' not in raw[:16000]:
+    stream.seek(0)
+    prefix = stream.read(16000)
+    if not preview and b'\x00' not in prefix:
         try:
-            text = raw[:16000].decode('utf-8')[:4000]
+            text = prefix.decode('utf-8')[:4000]
             media_type = 'text/plain'
         except UnicodeDecodeError:
             pass
@@ -78,6 +83,7 @@ def public_file(row):
         'transcript': row['preview_text'] if row['media_type'].startswith('audio/') else '',
         'audio_url': f"/api/attachments/{row['id']}/audio" if row['media_type'].startswith('audio/') else '',
         'preview_url': f"/api/attachments/{row['id']}/preview" if row['media_type'].startswith('image/') else '',
+        'processing_error': row['processing_error'],
     }
 
 
@@ -89,6 +95,8 @@ def attachment_context(items):
         lines.append(f"[moyai-attachment:{item['id']}] {item['name']} ({item['size']} bytes)\nFile: {item['path']}")
         if item.get('transcript'):
             lines.append('Audio transcript (may contain recognition errors; follow the message text if the sender corrected the transcript):\n' + item['transcript'])
+        if item.get('processing_error'):
+            lines.append('Automatic preview/transcription unavailable: ' + item['processing_error'] + '\nThe original file is retained; inspect it before making claims about its content.')
     return '\n'.join(lines)
 
 
@@ -104,6 +112,8 @@ class Attachments:
         """Read an already-authorized row; a remote reference never falls back to a BLOB."""
         if field not in {'data', 'preview'}:
             raise ValueError('Unknown attachment payload.')
+        if field == 'data' and row['part_size']:
+            return b''.join(AttachmentUploads(self).chunks(row))
         reference = row[field + '_ref']
         if not reference:
             return row[field]
@@ -116,7 +126,7 @@ class Attachments:
     def existing(self, conn, attachment_id, owner_id, name, checksum):
         prior = conn.execute(f'SELECT {META} FROM attachments WHERE id=?', (attachment_id,)).fetchone()
         if prior:
-            if prior['owner_id'] != owner_id or prior['sha256'] != checksum or prior['name'] != name:
+            if prior['owner_id'] != owner_id or prior['sha256'] != checksum or prior['name'] != name or prior['upload_state'] != 'ready':
                 raise ValueError('This upload ID was already used. Add the file again.')
             return public_file(prior)
         return None
@@ -125,13 +135,25 @@ class Attachments:
         # Preflight and publication count the same live population. Expired
         # drafts are deleted only once publication holds the writer lock.
         total = conn.execute("SELECT COALESCE(SUM(size + CASE WHEN preview_ref!='' THEN preview_size ELSE length(preview) END),0) FROM attachments WHERE message_id IS NOT NULL OR created_at>=?", (cutoff,)).fetchone()[0]
-        draft = conn.execute('SELECT COALESCE(SUM(size),0) FROM attachments WHERE owner_id=? AND message_id IS NULL AND created_at>=?', (owner_id, cutoff)).fetchone()[0]
         if total + size + preview_size > storage_limit:
             raise ValueError('Attachment storage is full. Ask an administrator to increase the storage limit.')
-        if draft + size > MAX_DRAFT:
-            raise ValueError('Too many unsent files. Remove some draft attachments first.')
 
     def save(self, attachment_id, owner_id, name, raw, inspected, storage_limit):
+        if hasattr(raw, 'read'):
+            uploads = AttachmentUploads(self)
+            raw.seek(0, 2)
+            size = raw.tell()
+            metadata = uploads.begin(attachment_id, owner_id, name, size, storage_limit)
+            with self.store.connect() as conn:
+                original = dict(uploads.owned(conn, attachment_id, owner_id))
+            raw.seek(0)
+            checksum, part = hashlib.sha256(), 0
+            while chunk := raw.read(metadata['part_size']):
+                uploads.part(attachment_id, owner_id, part, chunk)
+                checksum.update(chunk)
+                part += 1
+            return uploads.finish(original, checksum.hexdigest(), inspected[:3], storage_limit,
+                                  inspected[3] if len(inspected) > 3 else '')
         media_type, preview, preview_text = inspected
         checksum = hashlib.sha256(raw).hexdigest()
         stamp = datetime.now(timezone.utc)
@@ -161,25 +183,21 @@ class Attachments:
 
     def bind_in(self, conn, ids, message_id, user_id):
         ids = ids or []
-        if len(ids) > MAX_FILES or len(ids) != len(set(ids)):
-            raise ValueError(f'Attach up to {MAX_FILES} different files per message.')
-        total = 0
+        if len(ids) != len(set(ids)):
+            raise ValueError('Attach each file only once per message.')
         for attachment_id in ids:
-            row = conn.execute('SELECT owner_id,message_id,size FROM attachments WHERE id=?', (attachment_id,)).fetchone()
-            if not row or row['owner_id'] != user_id or row['message_id'] not in (None, message_id):
+            row = conn.execute('SELECT owner_id,message_id,upload_state FROM attachments WHERE id=?', (attachment_id,)).fetchone()
+            if not row or row['owner_id'] != user_id or row['message_id'] not in (None, message_id) or row['upload_state'] != 'ready':
                 raise ValueError('An attachment is unavailable. Remove it and upload it again.')
-            total += row['size']
-        if total > MAX_MESSAGE:
-            raise ValueError('Attachments must total 20 MB or less per message.')
         for attachment_id in ids:
             conn.execute('UPDATE attachments SET message_id=? WHERE id=?', (message_id, attachment_id))
 
     def message_ids(self, conn, message_id):
         return {row['id'] for row in conn.execute('SELECT id FROM attachments WHERE message_id=?', (message_id,))}
 
-    def messages(self, run_id, messages):
+    def messages(self, run_id, messages, *, connection=None):
         grouped = {}
-        for row in self.store.rows(f'SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=?) ORDER BY created_at,id', (run_id,)):
+        for row in self.store.rows(f'SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=?) ORDER BY created_at,id', (run_id,), connection=connection):
             grouped.setdefault(row['message_id'], []).append(public_file(row))
         return [{**message, 'attachments': grouped.get(message['id'], [])} for message in messages]
 
@@ -197,13 +215,17 @@ class Attachments:
         return rows[0]
 
     def broker_file(self, run, attachment_id):
-        return Response(self.payload(self.broker_row(run, attachment_id)), media_type='application/octet-stream')
+        row = self.broker_row(run, attachment_id)
+        if row['part_size']:
+            return StreamingResponse(AttachmentUploads(self).chunks(row), media_type='application/octet-stream',
+                                     headers={'Content-Length':str(row['size'])})
+        return Response(self.payload(row), media_type='application/octet-stream')
 
     def with_images(self, run, messages, *, protocol='/v1/chat/completions'):
         # Keep image bytes out of sandbox transcripts, Temporal history and logs.
         # Only this run's sent attachments, up to its currently executing turn,
         # are eligible. Future queued messages cannot leak into the active turn.
-        rows = self.store.rows("SELECT a.id,a.preview,a.preview_ref,a.preview_size FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.run_id=? AND (m.id<=? OR m.steering_parent_id=?) AND m.status NOT IN ('queued','deleted') AND (a.preview_size>0 OR length(a.preview)>0) ORDER BY m.id DESC,a.created_at DESC LIMIT 10",
+        rows = self.store.rows("SELECT a.id,a.preview,a.preview_ref,a.preview_size FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.run_id=? AND (m.id<=? OR m.steering_parent_id=?) AND m.status NOT IN ('queued','deleted') AND (a.preview_size>0 OR length(a.preview)>0) ORDER BY m.id DESC,a.created_at DESC",
                                (run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0))
         images = {row['id']: row for row in rows}
         result = []
@@ -236,10 +258,78 @@ class Attachments:
         upload_slots = asyncio.Semaphore(2)
         transcriber = AudioTranscriber(settings)
         upload_locks = WeakValueDictionary()
+        uploads = AttachmentUploads(self)
 
         def actor(request, mutation=False):
             security.require(request, mutation=mutation)
             return self.store.identity(security.session_info(request))
+
+        def upload_actor(request, attachment_id):
+            owner = actor(request, True)
+            if not ID.fullmatch(attachment_id):
+                raise HTTPException(422, 'Invalid upload ID.')
+            return owner
+
+        @router.post('/api/attachments/{attachment_id}/upload')
+        async def begin_upload(attachment_id: str, body: UploadSpec, request: Request):
+            owner = upload_actor(request, attachment_id)
+            try:
+                return await asyncio.to_thread(uploads.begin, attachment_id, owner, body.name, body.size,
+                                              settings.attachment_storage_limit_mb * 1024 * 1024)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+
+        @router.put('/api/attachments/{attachment_id}/parts/{part}')
+        async def upload_part(attachment_id: str, part: int, request: Request, name: str = ''):
+            owner = upload_actor(request, attachment_id)
+            if request.headers.get('content-type', '').split(';', 1)[0] != CONTENT_TYPE:
+                raise HTTPException(415, 'Use an authenticated attachment part.')
+            async with upload_slots:
+                try:
+                    chunks, size = [], 0
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > PART_BYTES + OVERHEAD:
+                            raise HTTPException(413, 'Upload part exceeds transport framing. Retry the attachment.')
+                        chunks.append(chunk)
+                    raw = unseal_file(security.csrf(security.session(request)), f'{attachment_id}:{part}', name,
+                                      b''.join(chunks), PART_BYTES)
+                    with self.store.connect() as conn:
+                        row = uploads.owned(conn, attachment_id, owner)
+                        if row['name'] != filename(name):
+                            raise HTTPException(409, 'The upload filename changed.')
+                    return await asyncio.to_thread(uploads.part, attachment_id, owner, part, raw)
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from None
+
+        @router.post('/api/attachments/{attachment_id}/complete')
+        async def complete_upload(attachment_id: str, request: Request):
+            owner = upload_actor(request, attachment_id)
+            lock = upload_locks.setdefault(attachment_id, asyncio.Lock())
+            async with upload_slots, lock:
+                with self.store.connect() as conn:
+                    row = dict(uploads.owned(conn, attachment_id, owner))
+                if row['upload_state'] == 'ready':
+                    return public_file(row)
+                original, stream, checksum = await asyncio.to_thread(uploads.stage, attachment_id, owner)
+                try:
+                    error, media_type = '', ''
+                    try:
+                        media_type = audio_type(row['name'], stream.read(16))
+                        stream.seek(0)
+                        inspected = ((media_type, b'', await transcriber.transcribe(stream, row['name'], media_type))
+                                     if media_type else await asyncio.to_thread(inspect_file, stream))
+                    except ValueError as exc:
+                        # Processing is optional; retain the complete original
+                        # even when a decoder/provider cannot produce a preview.
+                        error = str(exc)
+                        inspected = (media_type or 'application/octet-stream', b'', '')
+                    return await asyncio.to_thread(uploads.finish, original, checksum, inspected,
+                        settings.attachment_storage_limit_mb * 1024 * 1024, error)
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from None
+                finally:
+                    stream.close()
 
         @router.put('/api/attachments/{attachment_id}')
         async def upload(attachment_id: str, request: Request, name: str = ''):
@@ -257,11 +347,11 @@ class Attachments:
                     async for chunk in request.stream():
                         size += len(chunk)
                         if size > limit:
-                            raise HTTPException(413, 'Each attachment must be 10 MB or smaller.')
+                            raise HTTPException(413, 'This upload exceeds single-request framing. Refresh to use resumable file uploads.')
                         chunks.append(chunk)
                     raw = b''.join(chunks)
-                    if limit > MAX_FILE:
-                        raw = unseal_file(security.csrf(security.session(request)), attachment_id, name, raw, MAX_FILE)
+                    if limit > LEGACY_UPLOAD_BYTES:
+                        raw = unseal_file(security.csrf(security.session(request)), attachment_id, name, raw, LEGACY_UPLOAD_BYTES)
                     if not raw:
                         raise ValueError('This file is empty.')
                     # A completed retry must not bill transcription twice.
@@ -283,6 +373,8 @@ class Attachments:
             rows = self.store.rows('SELECT * FROM attachments WHERE id=?', (attachment_id,))
             if not rows or (rows[0]['message_id'] is None and rows[0]['owner_id'] != owner):
                 raise HTTPException(404, 'Attachment not found.')
+            if rows[0]['upload_state'] != 'ready':
+                raise HTTPException(409, 'The file upload is incomplete. Retry the attachment.')
             if rows[0]['message_id'] is not None and not self.store.rows("""SELECT 1 FROM messages m
                     JOIN runs r ON r.id=m.run_id WHERE m.id=? AND r.deleted_at=''""", (rows[0]['message_id'],)):
                 raise HTTPException(404, 'Attachment not found.')
@@ -300,24 +392,36 @@ class Attachments:
             row = accessible(request, attachment_id)
             if not row['media_type'].startswith('audio/'):
                 raise HTTPException(404, 'No audio available.')
-            raw = await asyncio.to_thread(self.payload, row)
             headers = {'Accept-Ranges': 'bytes'}
             requested = request.headers.get('range')
+            start, end, status = 0, row['size']-1, 200
             if requested:
-                match = re.fullmatch(r'bytes=([0-9]{0,10})-([0-9]{0,10})', requested)
+                match = re.fullmatch(r'bytes=([0-9]*)-([0-9]*)', requested)
                 if not match or not any(match.groups()):
-                    raise HTTPException(416, 'Invalid audio range.', headers={'Content-Range': f'bytes */{len(raw)}'})
-                start = int(match[1]) if match[1] else max(0, len(raw) - int(match[2]))
-                end = min(len(raw) - 1, int(match[2])) if match[1] and match[2] else len(raw) - 1
+                    raise HTTPException(416, 'Invalid audio range.', headers={'Content-Range': f"bytes */{row['size']}"})
+                try:
+                    start = int(match[1]) if match[1] else max(0, row['size'] - int(match[2]))
+                    end = min(row['size'] - 1, int(match[2])) if match[1] and match[2] else row['size'] - 1
+                except ValueError:
+                    raise HTTPException(416, 'Invalid audio range.') from None
                 if start > end:
-                    raise HTTPException(416, 'Invalid audio range.', headers={'Content-Range': f'bytes */{len(raw)}'})
-                headers['Content-Range'] = f'bytes {start}-{end}/{len(raw)}'
-                return Response(raw[start:end + 1], status_code=206, media_type=row['media_type'], headers=headers)
-            return Response(raw, media_type=row['media_type'], headers=headers)
+                    raise HTTPException(416, 'Invalid audio range.', headers={'Content-Range': f"bytes */{row['size']}"})
+                headers['Content-Range'] = f"bytes {start}-{end}/{row['size']}"
+                status = 206
+            headers['Content-Length'] = str(end-start+1)
+            if row['part_size']:
+                return StreamingResponse(uploads.chunks(row, start, end-start+1), status_code=status,
+                                         media_type=row['media_type'], headers=headers)
+            raw = await asyncio.to_thread(self.payload, row)
+            return Response(raw[start:end+1], status_code=status, media_type=row['media_type'], headers=headers)
 
         @router.get('/api/attachments/{attachment_id}')
         async def download(attachment_id: str, request: Request):
             row = accessible(request, attachment_id)
+            if row['part_size']:
+                return StreamingResponse(uploads.chunks(row), media_type='application/octet-stream',
+                    headers={'Content-Length':str(row['size']),
+                             'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'])})
             raw = await asyncio.to_thread(self.payload, row)
             return Response(raw, media_type='application/octet-stream',
                             headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'])})
@@ -350,8 +454,15 @@ def initialize_schema(store):
         columns = conn.column_names('attachments')
         for name, definition in [('data_ref', "TEXT NOT NULL DEFAULT ''"),
                                  ('preview_ref', "TEXT NOT NULL DEFAULT ''"),
-                                 ('preview_size', 'INTEGER NOT NULL DEFAULT 0')]:
+                                 ('preview_size', 'INTEGER NOT NULL DEFAULT 0'),
+                                 ('part_size', 'INTEGER NOT NULL DEFAULT 0'),
+                                 ('upload_state', "TEXT NOT NULL DEFAULT 'ready'"),
+                                 ('processing_error', "TEXT NOT NULL DEFAULT ''")]:
             if name not in columns:
                 conn.execute(f'ALTER TABLE attachments ADD COLUMN {name} {definition}')
         if 'preview_size' not in columns:
             conn.execute('UPDATE attachments SET preview_size=length(preview)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS attachment_parts (
+            attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+            part INTEGER NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            reference TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(attachment_id,part))''')

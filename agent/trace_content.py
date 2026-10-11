@@ -15,16 +15,16 @@ def private_tool(name):
 
 def trace_content(value, *, secrets=(), limit=16000):
     def clean(item, depth=0):
-        if depth > 12:
+        if limit is not None and depth > 12:
             return '[depth limit]'
         if isinstance(item, dict):
             kind = item.get('type')
             if isinstance(kind, str) and kind in {'image_url', 'image', 'input_image', 'thinking', 'reasoning'}:
                 return '[image or private reasoning omitted]'
-            return {str(k)[:100]: '[redacted]' if PRIVATE_FIELDS.search(str(k)) else clean(v, depth + 1)
-                    for k, v in list(item.items())[:100]}
+            return {str(k) if limit is None else str(k)[:100]: '[redacted]' if PRIVATE_FIELDS.search(str(k)) else clean(v, depth + 1)
+                    for k, v in (item.items() if limit is None else list(item.items())[:100])}
         if isinstance(item, (list, tuple)):
-            return [clean(v, depth + 1) for v in item[:100]]
+            return [clean(v, depth + 1) for v in (item if limit is None else item[:100])]
         if isinstance(item, str):
             try:
                 parsed = json.loads(item)
@@ -41,4 +41,4 @@ def trace_content(value, *, secrets=(), limit=16000):
         return item if item is None or isinstance(item, (bool, int, float)) else str(item)[:limit]
     cleaned = clean(value)
     text = cleaned if isinstance(cleaned, str) else json.dumps(cleaned, ensure_ascii=False)
-    return text[:limit] + (' [truncated]' if len(text) > limit else '')
+    return text if limit is None else text[:limit] + (' [truncated]' if len(text) > limit else '')

@@ -136,7 +136,12 @@ class Security:
 
     def access_session(self, request: HTTPConnection, identity: dict) -> bytes | None:
         """Establish a browser session from a verified employee assertion only."""
-        self.user_roles.store.access_identity(identity)
+        actor = self.user_roles.store.access_actor(identity)
+        if actor is None:
+            actor = self.user_roles.store.access_identity(identity)
+        # Rechecked for every assertion and kept only on this request. Cookies
+        # never provide an account id or bypass the live mapping validation.
+        request.state.access_actor = actor
         try:
             info = self.signer.loads(request.cookies.get('workspace_session', ''), max_age=43200)
         except (BadSignature, SignatureExpired):

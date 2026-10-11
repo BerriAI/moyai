@@ -15,7 +15,7 @@ function bindAudioRecorder(form, onFile, locked){
     button.className='quiet record-button'+(busy()?'':' is-idle');
     MoyaiUI.render(button, busy()?label:microphoneIcon);
     button.title=label;button.setAttribute('aria-label',label);cancel.hidden=!busy();
-    status.textContent=recorder?`Recording ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')} · 2 min max`:'';
+    status.textContent=recorder?`Recording ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`:'';
   };
   const stop=(discard=false)=>{
     cancelled=discard;waiting=false;if(discard)generation++;
@@ -36,7 +36,6 @@ function bindAudioRecorder(form, onFile, locked){
       const chunks=[];let size=0;
       recorder.ondataavailable=event=>{
         if(event.data.size){chunks.push(event.data);size+=event.data.size;}
-        if(size>10*1024*1024){toast('Recording reached the 10 MB limit. Try a shorter recording.');stop(true);}
       };
       recorder.onerror=()=>{toast('Recording failed. Try again or upload an audio file.');stop(true);};
       recorder.onstop=()=>{
@@ -46,7 +45,7 @@ function bindAudioRecorder(form, onFile, locked){
         onFile(new File(chunks,'Voice message.'+extension,{type}));
       };
       seconds=0;recorder.start(1000);waiting=false;render();
-      timer=setInterval(()=>{seconds++;render();if(seconds>=120)stop();},1000);
+      timer=setInterval(()=>{seconds++;render();},1000);
     }catch(error){
       if(attempt!==generation)return;
       release();recorder=null;

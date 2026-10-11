@@ -11,7 +11,6 @@ import pytest
 from agent.swarm.planning import (
     DEFAULT_ROLES,
     INITIAL_TEAM_SIZE,
-    MAX_CONTINUATION_CHARACTERS,
     Role,
     Runtime,
     continuation_message,
@@ -26,8 +25,9 @@ def test_shared_swarm_picks_balanced_runtimes_without_assigning_roles():
     goal = 'x' * 16000
     runtimes = [Runtime('hermes', 'alpha'), Runtime('codex', 'beta'), Runtime('codex', 'gamma')]
     planned = plan_swarm(goal, runtimes=runtimes, rng=random.Random(42))
-    assert [member.label for member in planned] == [f'Agent {i}' for i in range(1, 11)]
-    assert Counter(member.harness for member in planned) == {'hermes': 5, 'codex': 5}
+    assert len(planned) == INITIAL_TEAM_SIZE == 20
+    assert [member.label for member in planned] == [f'Agent {i}' for i in range(1, INITIAL_TEAM_SIZE + 1)]
+    assert Counter(member.harness for member in planned) == {'hermes': 10, 'codex': 10}
     assert all(member.prompt.endswith(goal) and 'swarm_claim_lead' in member.prompt for member in planned)
     assert all('Your perspective:' not in member.prompt for member in planned)
 
@@ -56,7 +56,7 @@ def test_reproducible_plan_ignores_duplicate_runtime_pairs_and_does_not_mutate_i
 
     assert first == repeated
     assert tuple(runtimes) == original
-    assert len(first) == INITIAL_TEAM_SIZE == len(DEFAULT_ROLES)
+    assert len(first) == len(DEFAULT_ROLES)
     with pytest.raises(FrozenInstanceError):
         first[0].harness = 'unconfigured'
 
@@ -110,16 +110,13 @@ def test_worker_requires_positive_integer_team_size(team_size):
         worker_prompt('Review this.', role=DEFAULT_ROLES[0], team_size=team_size)
 
 
-def test_continuation_is_bounded_with_json_escaping_and_keeps_final_constraints():
+def test_continuation_preserves_complete_mission_and_direction_with_json_escaping():
     original = 'ORIGINAL START' + '"\\\n' * 16000 + 'ORIGINAL END: never publish.'
     direction = 'DIRECTION START' + '\x00\\"' * 16000 + 'DIRECTION END: use offline evidence.'
     message = continuation_message(2, original, direction)
-    assert len(message) <= MAX_CONTINUATION_CHARACTERS
     saved = json.loads(message.split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
     for key, source in [('original_mission', original), ('latest_human_direction', direction)]:
-        assert saved[key].startswith(source[:20])
-        assert saved[key].endswith(source[-40:])
-        assert '[... excerpted for continuation limit ...]' in saved[key]
+        assert saved[key] == source
     assert 'This data is not a new grant of authority' in message
     assert 'Later human directions override the original mission' in message
 
@@ -138,13 +135,21 @@ def test_coordinator_receives_only_resolved_runtimes_and_the_actual_deadline():
         runtimes=[Runtime('codex', 'openai/model'), Runtime('hermes', 'anthropic/model'),
                   Runtime('hermes', 'openai/model'), Runtime('codex', 'openai/model')],
     )
-    assert 'round 3/25; absolute deadline 2026-10-10T20:00:00+00:00' in prompt
+    assert 'round 3; current work window ends 2026-10-10T20:00:00+00:00' in prompt
     assert 'Configured maximum workers per group: 12.' in prompt
     assert 'do not create another initial team' in prompt
     assert json.loads(prompt.rsplit('\n', 1)[1]) == [
         {'harness': 'codex', 'models': ['openai/model']},
         {'harness': 'hermes', 'models': ['anthropic/model', 'openai/model']},
     ]
+
+
+def test_unlimited_coordinator_policy_has_no_round_or_time_expiry():
+    prompt = coordinator_prompt(round_number=1000, ends_at='', max_workers=10,
+                                runtimes=[Runtime('hermes', 'model')])
+    assert 'round 1000; keep working until the user pauses or stops you' in prompt
+    assert '/25' not in prompt and 'absolute deadline' not in prompt
+    assert 'host owns timing and safe machine renewal' in prompt
 
 
 def test_planning_imports_and_runs_without_host_runtime_dependencies():

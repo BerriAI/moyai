@@ -1,57 +1,135 @@
-# `/goal`: persistent, guarded continuation
+# Sustained goals and reports
 
-Start a cloud chat request with `/goal <objective>` (web or Slack thread chat):
+This describes the unreleased intelligence branch. Use `/goal <objective>` or
+ask naturally: “Work on this for three hours, then report what you found.” Moyai
+registers the original user request as a durable goal and continues across normal
+final responses. The goal survives computer replacement independently of its files.
 
-```text
-/goal fix the failing tests, verify the suite, and open a PR
-```
+| Request | Meaning |
+| --- | --- |
+| “For three hours” | Work timebox, then report the result and remaining work. |
+| “At least three hours” | Minimum active work before verified completion. |
+| “Up to three hours” | Work cap; verified completion can end it earlier. |
+| “By 5 pm” | Explicit clock deadline, interpreted with the user's timezone. |
+| “Until the tests pass and the PR is ready” | Outcome goal; no invented time or continuation limit. |
+| “At three hours, report and continue” | A reporting checkpoint; work remains active. |
+| “Report every hour while you work” | Repeating progress reports, independently of the stop budget. |
 
-This is a host-owned execution loop, not just a stronger prompt. When Hermes returns a normal final response without valid completion evidence, Moyai passes the returned conversation history into another `run_conversation` call in the **same user turn**. It does not enqueue synthetic user messages or repeat the original request. Ordinary non-goal conversations are unchanged.
+The model interprets natural language through the shared `goal` tool. The harness
+stores and enforces the resulting budget. Timeboxes and caps enter **Reporting**
+at their boundary. Budget exhaustion does not mean the objective was completed.
 
-The web command picker exposes `/goal` alongside scoped skills. An existing skill named `goal` remains accessible as `/personal:goal` or `/org:goal`.
+## Control ongoing work
 
-## Controls
+Use `/goal status` to inspect the registered objective and recorded active time.
+Use `/goal pause` or the session's Stop control to stop work. `/goal resume`
+continues an unfinished goal with its accrued time intact. Extending an exhausted
+budget requires a new user directive describing the new allowance. `stop` and
+`cancel` after `/goal` pause the goal. `/goal clear` cancels it so a new goal can
+be created; the saved audit record is retained.
 
-- `/goal status`: display the saved objective, state, continuation count and reason.
-- `/goal pause` (also `stop`, `cancel`): disable automatic continuation without discarding the goal.
-- `/goal resume`: resume an unfinished goal with a fresh safety-budget window.
-- `/goal clear`: discard the goal.
-- `/goal <new objective>`: replace the goal and invalidate old completion claims.
-- `/goal` or `/goal help`: usage.
+A queued command is not a registered goal. The status display reflects durable
+state: Running, Reporting, Budget ended, Needs your input, Paused, Interrupted,
+or independently verified Completed. Credential and child waits retain their
+existing waiting display.
 
-Commands are recognized only at the start of authenticated user input, not from quoted Slack context, tool output, old conversation history, code fences, or paths. Send-now corrections update the controller only after Hermes accepts delivery. The existing Stop button still revokes access and stops execution; this feature cannot restart it. A recovered active goal outside an explicit checkpoint continuation loads paused and needs `/goal resume`.
+Commands read authenticated user input. Quoted Slack messages, tool output and
+old history cannot create a control directive. Controls still use the current
+session execution path; removing computer startup for these requests is separate
+work. This is a conversation command, not a workspace-level Slack slash command.
 
-Goal controls currently use the existing sandbox turn lifecycle, so an idle status/control request still requires a cloud machine. This is not a new Slack workspace-level slash-command registration; type the command in the Moyai conversation.
+## Report without stopping
 
-## Completion and safety
+Ask for a checkpoint or recurring report in the same request as the objective.
+For example: “Keep working until the full fix is verified. Report at three hours
+and continue.” The goal panel shows the report schedule separately from any
+stop budget. No reporting cadence is imposed when you have not requested one.
 
-Every goal gets a unique completion marker. A final response must cite successful tool call IDs with a short explanation of how the results verify the goal. A bare “done,” a stale marker, invented call IDs, and failed tool results cannot complete it. A concrete blocker stops continuation and retains the goal as blocked.
+The shared tool represents cumulative active-work milestones in
+`reporting.at_seconds` and repeating active-work intervals in
+`reporting.interval_seconds`. An authenticated create, revise or resume directive
+can set the schedule; `{}` disables it without stopping the work. Omitting the
+field preserves it. An interval starts when its reporting schedule is saved;
+one-off milestones must be later than the goal's current recorded work time.
 
-This is **evidence-gated self-reporting, not an independent semantic verifier**: the host validates references to actual successful tool calls, while the model must judge whether they satisfy all acceptance criteria. A successful read alone is not a guarantee the objective is achieved. Independent verification and per-criterion structured evidence are future extensions.
+At a requested boundary, the server saves a factual checkpoint and Slack send
+intent in the same transaction. It reports the most recent `goal progress` note,
+when that note was saved, remaining work and journal references. The model should
+keep those notes current. A checkpoint does not need another model call and
+cannot declare completion. If no progress note exists, the report says so.
 
-Safety stops:
+Checkpoints use the same clock receipts as the work budget. A retry or computer
+replacement cannot publish the same checkpoint twice. After delayed receipts,
+missed intervals produce one current report rather than a burst of stale ones.
+User-paused time and unobserved machine downtime do not count. A simultaneous
+stop boundary takes precedence and produces the final goal report. Provider
+outages can delay Slack delivery; the saved checkpoint remains in the web chat.
 
-- Explicit Stop, interruption, partial output, provider errors, or missing history.
-- Existing administrator iteration/time limits; re-entry does not create a fresh time allowance.
-- 25 auto-continuations or one hour per goal budget window.
-- Three consecutive responses without tool activity, or three identical responses.
-- Tool rounds also check the goal deadline between steps; in-flight tools are never interrupted by the goal deadline.
+## Completion and delivery
 
-Worker waits, credential waits, and cooperative machine renewal retain active state and use the existing checkpoint/resumption path. Goal state is written atomically to `/session/goal.json` beside conversation history and travels in the same filesystem checkpoint. It is bound to the run ID so copied child/side-chat files cannot activate a parent's goal. Workspace-recovery warnings disable restoration of possibly stale goal state. No raw tool payloads or credentials are persisted by the goal controller.
+The worker saves progress, remaining requirements and original journal references
+through `goal progress`. Completion requests and final-response checkpoints get a
+fresh, tool-free review through the normal authenticated model gateway. That
+reviewer can read original journal records, including evidence that contradicts
+the worker's claim. Successful tool IDs alone do not establish completion.
 
-## Open-source research
+If the evidence does not fit the selected model, or review is unavailable, the
+goal remains incomplete. A new user input or new work during review invalidates
+its completion decision. A persistent external blocker requires independent
+review after a request to try another approach before it can await user input.
 
-Inspected before implementation:
+When the budget ends, the harness stops at a safe tool boundary and asks for a
+report. It does not kill an in-flight tool or pretend an uncertain action failed.
+New task inference is rejected while the goal is reporting. If final inference
+fails, the coordinator builds a factual report from the objective, recorded time,
+last saved progress, evidence references and remaining work. Agent progress is
+labeled as reported; it is not promoted to independently verified success.
 
-- [OpenCode ecosystem](https://github.com/anomalyco/opencode/blob/52a6c35825a31a48b58b39253293ed63053f0154/packages/web/src/content/docs/ecosystem.mdx) lists goal functionality as an external plugin, not a core `/goal` command.
-- [OpenCode goal plugin](https://github.com/willytop8/OpenCode-goal-plugin/tree/7f0b15fc8dd7792eafa84dcc001174d32284e520): session-scoped state, idle continuation, explicit blockers, evidence-gated completion, bounded loops and paused restart recovery informed this design. Its optional independent auditor and multi-goal sequences are not included here.
-- [Hermes programmatic integration](https://hermes-agent.nousresearch.com/docs/developer-guide/programmatic-integration) and Moyai's pinned Hermes source: continuation uses the returned `messages`, `completed`, `partial`, `interrupted`, and `pending_steer` contract. Normal model completion is distinct from goal completion.
+The existing saved-answer transaction also commits Slack delivery intent. Slack's
+existing outbox reconciles uncertain sends. A transport outage can delay delivery;
+the report remains accessible in the web session. The agent does not infer
+successful Slack delivery from its own final text.
 
-## Verification
+## Persistence and recovery
+
+`session_goals` owns state; `goal_clock_receipts` records idempotent cumulative
+clock updates. A computer sends active execution time, stopping its clock during
+saved waits or downtime. Parallel children do not multiply the parent's time.
+A crash can lose time since its last successful clock receipt; the normal receipt
+interval is two seconds, and a broker outage can extend that gap. No unobserved
+downtime is counted as work. This is active session time, including inference and
+tool execution, not a measure of useful progress.
+
+A legacy `goal.json` is imported once. Completed goals stay completed but are
+labeled as legacy completion. Unfinished legacy goals load paused so their
+original budget can be confirmed without granting a fresh allowance. The file
+ceases to be authoritative. Normal new-format restart does not pause a goal.
+
+Administrator time, iteration and spending policies still apply. They never
+silently reset when the agent continues. Unrecoverable execution failure saves an
+interruption report; it does not masquerade as a user pause or completed objective.
+
+Follow [schema migration](schema-migrations.md) for the current schema revision. This change
+requires coordinated runtime migration; it is not an API-only mixed-build update.
+
+## Verification and remaining qualification
 
 ```sh
-uv run pytest tests/test_goals.py tests/test_continuation.py tests/test_active_steering.py tests/test_activity.py tests/test_skills.py -q
-node --test tests/test_skill_composer.cjs
+uv run --frozen pytest -q tests/test_goals.py tests/test_goal_status.py
+uv run --frozen pytest -q tests/test_context_gateway.py tests/test_slack_chat.py
+node --test tests/test_goal_status.cjs tests/browser/goals.cjs
 ```
 
-`test_goals.py` executes the production continuation wrapper with a deterministic agent boundary. It verifies a premature final triggers another call with prior history, then successful tool evidence ends the loop. It also covers controls, stop/error/partial handling, stale/invalid evidence, blockers, loop limits, checkpoint recovery/isolation, and native steering receipt behavior. This test does not claim a live model or Modal deployment was exercised.
+The fake-clock contract suite covers the three-hour boundary, computer replacement
+near that boundary, failed report inference, source-bound directives, preserved
+elapsed time, independent evidence reads, stale review rejection and atomic report
+settlement. Gateway integration checks verify accounting and tool-free review;
+Slack integration checks verify report/send-intent commit and duplicate suppression.
+These checks do not substitute for a real sustained three-hour deployment rehearsal.
+The wider recovery, live model and release qualification remain tracked in the
+[implementation ledger](intelligence-implementation.md).
+
+The design follows [QM's goal controller at daeb2deb](https://github.com/yc-software/qm/blob/daeb2deb90383597a21b0a36bd15a45488d321af/src/harness/goal.ts):
+model-owned interpretation, independent review, explicit floors/caps, user-owned
+resume and a reporting phase when a budget ends. Moyai retains its own durable
+runner, accounting, storage and delivery infrastructure.

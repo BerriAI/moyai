@@ -195,7 +195,7 @@ def test_thread_followups_and_both_slack_event_types_share_one_session(slack_app
     assert messages[-1]['status'] == 'queued'
     finish(app, run_id, 'It was blue lantern.')
     app.state.slack.chat.collect()
-    answers = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer'")
+    answers = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' ORDER BY id")
     assert len(answers) == 2
     assert '*blue lantern*' in answers[0]['text']
     assert '<https://example.com|Docs>' in answers[0]['text']
@@ -700,7 +700,7 @@ def test_slack_access_duplicate_ack_retries_a_failed_checkpoint(access_delivery,
     assert app.state.credentials.row(request_id)['scope_revision'] == 1
 
 
-def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(slack_app):
+def test_observes_peers_without_accepting_them_as_users_and_excludes_foreign_sources(slack_app):
     app, client, run_id = start(slack_app)
     for index, changes in enumerate([
         {'thread_ts': '1790718990.000000'}, {'bot_id': 'B12345678'}, {'user': 'U99999999'},
@@ -714,8 +714,11 @@ def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(sla
     client.post('/hooks/slack/events', **signed(payload))
     payload['team_id'] = 'T12345678'; payload['is_ext_shared_channel'] = True
     client.post('/hooks/slack/events', **signed(payload))
-    assert len(app.state.store.messages(run_id)) == 1
+    messages = app.state.store.messages(run_id)
+    assert len(messages) == 2
+    assert [m['input_kind'] for m in messages] == ['user', 'observation']
     assert len(app.state.store.rows('SELECT * FROM runs')) == 1
+    assert not app.state.store.rows("SELECT 1 FROM slack_source_events WHERE team_id='T99999999'")
 
 
 @pytest.mark.parametrize('state', ['fresh', 'paused'])
@@ -752,8 +755,13 @@ def test_shared_thread_clarification_answer_does_not_need_another_mention(slack_
     send(client, 1, 'yes')
     messages = app.state.store.messages(run_id)
     assert len(messages) == 3
-    assert messages[-1]['content'] == 'Slack reply from U12345678:\nyes'
-    assert messages[-1]['status'] == 'queued'
+    assert messages[-1]['input_kind'] == 'observation' and messages[-1]['status'] == 'queued'
+    app.state.store.claim_message(run_id)
+    app.state.store.update_run(run_id, status='running', token_hash='capability')
+    caller = app.state.store.run(run_id)
+    records = app.state.slack.sources.read(caller, {'limit': 100})['entries']
+    app.state.slack.sources.participation(caller, {'respond': True, 'reason': 'Answers my question.', 'accept_source_seq': records[-1]['seq']})
+    assert app.state.store.messages(run_id)[-1]['content'] == 'Slack reply from U12345678:\nyes'
     assert len(app.state.store.rows('SELECT id FROM runs')) == 1
 
 
@@ -903,15 +911,14 @@ def test_no_historical_answer_backfill_and_legacy_requires_a_new_mention(slack_a
     assert 'Continue the previous conversation' in app.state.store.messages(old['id'])[-1]['content']
 
 
-def test_queue_limit_has_one_visible_reply_and_no_dropped_duplicate_execution(slack_app):
+def test_slack_burst_retains_every_message_and_deduplicates_retry(slack_app):
     app, client, run_id = start(slack_app)
-    for index in range(1, 6):
+    for index in range(1, 26):
         send(client, index, f'<@U99999999> Followup {index}')
-    assert len(app.state.store.messages(run_id)) == 5
-    rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")
-    assert len(rows) == 1 and '5 queued messages' in rows[0]['text']
-    send(client, 5, '<@U99999999> Followup 5')
-    assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")) == 1
+    assert len(app.state.store.messages(run_id)) == 26
+    assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key LIKE 'rejected:%'")
+    send(client, 25, '<@U99999999> Followup 25')
+    assert len(app.state.store.messages(run_id)) == 26
 
 
 def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app):
@@ -1325,11 +1332,13 @@ def test_existing_thread_mentions_anywhere_invite_moyai(slack_app, greeting):
     app, client, run_id = start(slack_app)
     for index, text in enumerate(['<@U88888888> what is <@U99999999>?', '<@U88888888> please continue'], 1):
         send(client, index, greeting + text)
-    assert len(app.state.store.messages(run_id)) == 2
+    assert len(app.state.store.messages(run_id)) == 3
     send(client, 3, greeting + '<@U99999999> tell me about <@U88888888>')
     send(client, 4, greeting + '<@U88888888> <@U99999999> please both explain')
-    assert len(app.state.store.messages(run_id)) == 4
+    assert len(app.state.store.messages(run_id)) == 5
     assert '<@U88888888>' in app.state.store.messages(run_id)[-2]['content']
+
+    assert sum(m['input_kind'] == 'observation' for m in app.state.store.messages(run_id)) == 1
 
 
 @pytest.mark.parametrize('bound', [False, True])
@@ -1350,9 +1359,14 @@ def test_reference_text_requires_an_existing_thread_or_direct_invitation(slack_a
     runs = len(submitted)
     send(client, 1, text)
     messages = app.state.store.rows('SELECT id,content FROM messages ORDER BY id')
-    assert len(messages) == len(before) + int(bound)
-    assert len(submitted) == runs + int(bound)
-    assert bool(app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")) == bound
+    from app.slack import routing_text
+    visible, _ = routing_text(text, '<@U99999999>')
+    direct = '<@U99999999>' in visible
+    assert len(messages) == len(before) + int(bound or direct)
+    assert len(submitted) == runs + int(bound or direct)
+    assert bool(app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")) == direct
+    if bound and not direct:
+        assert app.state.store.rows("SELECT 1 FROM messages WHERE input_kind='observation'")
 
 
 @pytest.mark.parametrize('quote', [
@@ -1776,8 +1790,10 @@ def test_forward_without_authored_mention_requires_an_existing_thread(slack_app,
     assert len(messages) == len(before) + int(bound)
     assert len(submitted) == runs + int(bound)
     if bound:
-        assert 'Please respond to the quoted Slack attachment.' in messages[-1]['content']
-        assert '\\u003c@U99999999> help' in messages[-1]['content']
+        run_id = submitted[-1]['id']
+        source = app.state.slack.sources.read(app.state.store.run(run_id), {'limit': 100})
+        assert '<@U99999999> help' in json.dumps(source['entries'])
+        assert app.state.store.messages(run_id)[-1]['input_kind'] == 'observation'
 
 
 def test_authored_control_still_works_with_forward(slack_app):
@@ -1794,3 +1810,51 @@ def test_legacy_channel_sessions_preserve_forwarded_body(slack_app):
     payload = event(text='<@U99999999> explain', attachments=[forwarded_attachment('legacy body')])
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
     assert 'legacy body' in submitted[0]['prompt']
+
+
+def test_goal_fallback_report_and_slack_intent_commit_together(slack_app):
+    app, client, run_id = start(slack_app)
+    store = app.state.store
+    message = store.claim_message(run_id)
+    store.update_run(run_id, status='running', token_hash='owner')
+    caller = store.run(run_id)
+    store.goals.exchange(caller, {'action': 'create', 'source_input_id': message['id'],
+                                 'objective': 'Work for 3 hours and report', 'budget': {'kind': 'timebox', 'seconds': 10800}})
+    store.goals.exchange(caller, {'action': 'tick', 'segment': 'worker', 'elapsed': 10800}, internal=True)
+    saved = store.finish_message(run_id, message['id'], 'Final inference failed.', 'failed')
+    # No collector invocation: answer and send intent are already committed.
+    outbox = store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,))
+    assert 'Goal report' in saved and any('Goal report' in row['text'] for row in outbox)
+    assert store.goal(run_id)['status'] == 'budget_exhausted'
+    store.finish_message(run_id, message['id'], 'Retry after lost acknowledgment.', 'failed')
+    assert len(store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,))) == len(outbox)
+
+
+def test_waiting_collector_revalidates_disabled_slack_after_lock(slack_app, monkeypatch):
+    from contextlib import contextmanager
+    from threading import Event
+    from test_credentials import access_request
+
+    app, client, run_id = start(slack_app)
+    client.portal.call(app.state.slack.chat.shutdown)
+    store = app.state.store
+    store.claim_message(run_id)
+    access_request(app.state.credentials, store.run(run_id))
+    entered = Event()
+    connect = store.connect
+
+    @contextmanager
+    def waiting_connect(*args, **kwargs):
+        entered.set()
+        with connect(*args, **kwargs) as conn:
+            yield conn
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with connect() as conn:
+            conn.begin_write()
+            monkeypatch.setattr(store, 'connect', waiting_connect)
+            future = executor.submit(app.state.slack.chat.collect)
+            assert entered.wait(5)
+            app.state.settings.slack_thread_chat_enabled = False
+        future.result(timeout=10)
+    assert not store.rows("SELECT 1 FROM slack_outbox WHERE dedupe_key LIKE 'credential:%'")

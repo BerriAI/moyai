@@ -10,6 +10,39 @@ function automationTiming(t) {
   return (t.frequency==='hourly'?`Every hour at :${t.time.slice(3)}`:t.frequency==='weekdays'?`Weekdays at ${t.time}`:t.frequency==='weekly'?`${days[t.weekday]} at ${t.time}`:`Every day at ${t.time}`)+` · ${t.timezone}`;
 }
 
+const automationHistoryPages = new Map();
+function automationHistoryRows(rows) {
+  return rows.map(r=>`<div class="automation-history-row"><span>${new Date(r.created_at).toLocaleString()}</span><span>${esc(automationRunStatus(r))}</span>${r.run_id?`<a href="#run=${esc(r.run_id)}">Open session ↗</a>`:`<span>${esc(r.detail)}</span>`}</div>`).join('');
+}
+function automationHistoryMerge(first, second) {
+  return [...new Map([...first,...second].map(row=>[row.occurrence,row])).values()]
+    .sort((a,b)=>b.created_at.localeCompare(a.created_at)||String(b.occurrence).localeCompare(String(a.occurrence)));
+}
+function automationHistory(a, openHistory) {
+  const previous=automationHistoryPages.get(a.id);
+  const saved={rows:automationHistoryMerge(previous?.rows||[],a.history),
+    cursor:previous?.loaded_more?previous.cursor:a.history_cursor,loaded_more:previous?.loaded_more||false};
+  automationHistoryPages.set(a.id,saved);
+  return `<details class="automation-history" data-history="${a.id}" ${openHistory.has(a.id)?'open':''}><summary>Run history <span data-history-count>${saved.rows.length} shown</span></summary><div data-history-rows>${saved.rows.length?automationHistoryRows(saved.rows):'<p>No runs yet. Use Run now to test the workflow.</p>'}</div><button class="quiet" data-load-history="${a.id}" ${saved.cursor?'':'hidden'}>Load earlier runs</button></details>`;
+}
+function bindAutomationHistory(content, version) {
+  content.querySelectorAll('[data-load-history]').forEach(button=>button.onclick=async()=>{
+    const id=button.dataset.loadHistory,saved=automationHistoryPages.get(id);
+    if(!saved?.cursor)return;
+    button.disabled=true;
+    try {
+      const page=await api(`/api/automations/${id}/history?cursor=${encodeURIComponent(saved.cursor)}`);
+      if(state.pageVersion!==version||!button.isConnected)return;
+      saved.rows=automationHistoryMerge(saved.rows,page.history);saved.cursor=page.next_cursor;saved.loaded_more=true;
+      const history=button.closest('.automation-history');
+      MoyaiUI.render(history.querySelector('[data-history-rows]'),automationHistoryRows(saved.rows));
+      history.querySelector('[data-history-count]').textContent=`${saved.rows.length} shown`;
+      button.hidden=!saved.cursor;
+    } catch(error) {if(state.pageVersion===version)toast(error.message);}
+    finally {button.disabled=false;}
+  });
+}
+
 async function renderAutomations(background = false,recent=false) {
   clearTimeout(automationRefresh);
   if (background && state.view !== 'automations') return;
@@ -37,9 +70,10 @@ async function renderAutomations(background = false,recent=false) {
       ${a.sync_error?`<p role="status" class="automation-notice">${esc(a.sync_error)}</p>`:''}
       ${a.environment_blocker?`<p role="status" class="automation-notice">${esc(a.environment_blocker)} ${hasEvents&&!a.paused?'New events stay queued for up to 24 hours.':''} <a href="#environments">View environments</a></p>`:''}
       <footer><span>${last?`Last run: ${esc(automationRunStatus(last))}`:'No runs yet'}</span><div>${a.can_edit?`<button class="quiet" data-edit-automation="${a.id}">Edit</button><button class="quiet" data-run-automation="${a.id}">Run now</button>${hasEvents?`<button class="quiet" data-test-event="${a.id}">Test filters</button>${automationWebhookProviders(a).length?`<button class="quiet" data-setup-event="${a.id}">${a.trigger.ready?'Webhook settings':'Set up webhook'}</button>`:''}`:''}`:''}${a.can_edit||(state.role==='admin'&&!a.paused)?`<button class="quiet" data-toggle-automation="${a.id}" ${a.paused&&!data.enabled?'disabled':''}>${a.paused?'Enable':'Pause'}</button>`:''}</div></footer>
-      <details class="automation-history" data-history="${a.id}" ${openHistory.has(a.id)?'open':''}><summary>Run history <span>${a.history.length}</span></summary>${a.history.length?a.history.map(r=>`<div class="automation-history-row"><span>${new Date(r.created_at).toLocaleString()}</span><span>${esc(automationRunStatus(r))}</span>${r.run_id?`<a href="#run=${r.run_id}">Open session ↗</a>`:`<span>${esc(r.detail)}</span>`}</div>`).join(''):'<p>No runs yet. Use Run now to test the workflow.</p>'}</details>${automationDeliveries(a,openHistory)}</article>`;
+      ${automationHistory(a,openHistory)}${automationDeliveries(a,openHistory)}</article>`;
     }).join(''):'<div class="automation-empty"><span aria-hidden="true">◷</span><h2>Choose what starts the work</h2><p>Start with your Linear tickets, or write a workflow of your own.</p><p>Schedules and event triggers start paused so you can review them first.</p></div>'}</div><div class="settings-empty" data-automation-empty hidden><h2>No matching automations</h2><p>Try another search or show all automations.</p><button data-clear-automations>Clear filters</button></div></section>`);
   bindAutomationLibrary(content,data);
+  bindAutomationHistory(content,version);
   content.querySelectorAll('[data-edit-automation]').forEach(b=>b.onclick=()=>editAutomation(data.automations.find(a=>a.id===b.dataset.editAutomation)));
   content.querySelectorAll('[data-toggle-automation]').forEach(b=>b.onclick=async()=>{
     const a=data.automations.find(a=>a.id===b.dataset.toggleAutomation);b.disabled=true;

@@ -330,3 +330,14 @@ button:hover { background: var(--soft); }
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }
 }
+
+/* Subagent identity is independent of the adjacent live status indicator. */
+.agent-identity{display:inline-flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;height:22px;border-radius:6px;background:color-mix(in srgb,currentColor 12%,transparent)}
+.agent-identity-blue{color:var(--ui-primary)}
+.agent-identity-mint{color:var(--ui-success)}
+.agent-identity-gold{color:var(--ui-warning)}
+.agent-identity-rose{color:var(--ui-danger)}
+.session-title-row>.agent-identity{flex-basis:18px;width:18px;height:18px;border-radius:4px}
+.session-title-row>.agent-identity .ui-icon{width:14px;height:14px}
+
+.child-session .session-link-meta,.child-session .session-search-snippet{margin-left:26px}

@@ -377,6 +377,36 @@ async def test_cancellation_during_confirmed_receipt_keeps_sent(notifications, m
     assert app.state.store.rows('SELECT status FROM slack_notifications')[0]['status'] == 'sent'
 
 
+async def test_graceful_shutdown_preserves_admitted_send_receipt(notifications, monkeypatch):
+    app, requests = notifications
+    run_id, turn = create(app)
+    finish(app, run_id, turn)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = app.state.connectors.request
+
+    async def request(method, url, **kwargs):
+        if url.endswith('chat.postMessage'):
+            entered.set()
+            await release.wait()
+        return await original(method, url, **kwargs)
+
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    worker = app.state.slack.notifications
+    worker.recover()
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        stopping = asyncio.create_task(worker.shutdown(graceful=True))
+        await asyncio.sleep(0)
+        assert not stopping.done()
+    finally:
+        release.set()
+        await worker.shutdown(graceful=True)
+    await stopping
+    await poll(app)
+    assert len(posts(requests)) == 1
+    assert app.state.store.rows('SELECT status FROM slack_notifications')[0]['status'] == 'sent'
+
+
 async def test_collection_database_wait_does_not_block_loop(notifications):
     app, _ = notifications
     run_id, turn = create(app)

@@ -20,6 +20,8 @@ class SlackNotifications:
     def __init__(self, owner):
         self.owner, self.store = owner, owner.store
         self.worker = None
+        self.closing = False
+        self.wake = asyncio.Event()
         self.delivery_lock = asyncio.Lock()
         if self.store.schema_updates:
             initialize_schema(self.store)
@@ -230,8 +232,9 @@ class SlackNotifications:
         await database(self.store.execute, "UPDATE slack_notifications SET status=? WHERE id=? AND status IN ('pending','preparing','sending')", (status, row['id']))
 
     async def watch(self):
-        while True:
+        while not self.closing:
             try:
+                self.wake.clear()
                 await database(self.collect)
                 await self.deliver_one()
             except asyncio.CancelledError:
@@ -240,7 +243,10 @@ class SlackNotifications:
                 logger.warning('Slack notification worker will retry after %s', type(exc).__name__)
             if asyncio.current_task().cancelling():
                 raise asyncio.CancelledError
-            await asyncio.sleep(2)
+            try:
+                await asyncio.wait_for(self.wake.wait(), timeout=2)
+            except TimeoutError:
+                pass
 
     def recover(self):
         if self.worker and not self.worker.done():
@@ -248,11 +254,19 @@ class SlackNotifications:
         self.store.execute("UPDATE slack_notifications SET status='uncertain' WHERE status='sending'")
         self.store.execute("UPDATE slack_notifications SET status='pending' WHERE status='preparing'")
         if not self.worker or self.worker.done():
+            self.closing = False
             self.worker = asyncio.create_task(self.watch())
 
-    async def shutdown(self):
+    def begin_drain(self):
+        self.closing = True
+        self.wake.set()
+
+    async def shutdown(self, *, graceful=False):
         if self.worker:
-            self.worker.cancel()
+            if graceful:
+                self.begin_drain()
+            else:
+                self.worker.cancel()
             await asyncio.gather(self.worker, return_exceptions=True)
 
 

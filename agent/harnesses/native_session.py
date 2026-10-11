@@ -9,10 +9,6 @@ import tempfile
 from uuid import uuid4
 
 
-MAX_BYTES = 2_000_000
-MAX_FILES = 256
-
-
 def remove(path):
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -99,7 +95,7 @@ class NativeSession:
                 return None
             self.reason = reply.get('reason', 'fresh')
             saved = reply.get('state') if resume else None
-            if saved is not None and (not isinstance(saved, dict) or len(json.dumps(saved).encode()) > MAX_BYTES):
+            if saved is not None and not isinstance(saved, dict):
                 return self.begin(resume=False)
             self.state = saved
             self.enabled = True
@@ -125,8 +121,8 @@ class NativeSession:
         if not self.enabled or self.store.pending:
             return
         try:
-            encoded = json.dumps(payload)
-            if not isinstance(payload, dict) or len(encoded.encode()) > MAX_BYTES:
+            encoded = json.dumps(payload, allow_nan=False)
+            if not isinstance(payload, dict):
                 return
             self.staged = (json.loads(encoded), self.checkpoint())
         except (TypeError, ValueError):
@@ -158,30 +154,22 @@ class NativeSession:
 
     def files(self, path):
         path = self.owned_path(path)
-        result, size = {}, 0
+        result = {}
         for source in sorted(path.rglob('*')):
             if source.is_symlink():
                 raise ValueError('Native snapshots cannot contain symbolic links')
             if source.is_dir():
                 continue
-            if not source.is_file() or source.stat().st_size > MAX_BYTES:
+            if not source.is_file():
                 raise ValueError('Invalid native file')
-            with source.open('rb') as stream:
-                raw = stream.read(MAX_BYTES + 1)
-            if len(raw) > MAX_BYTES:
-                raise ValueError('Native snapshot exceeds its limit')
-            value = base64.b64encode(raw).decode()
-            size += len(value)
-            if len(result) >= MAX_FILES or size > MAX_BYTES:
-                raise ValueError('Native snapshot exceeds its limit')
-            result[source.relative_to(path).as_posix()] = value
+            result[source.relative_to(path).as_posix()] = base64.b64encode(source.read_bytes()).decode()
         return result
 
     def restore_files(self, path, files):
         path = self.owned_path(path)
-        if not isinstance(files, dict) or len(files) > MAX_FILES:
+        if not isinstance(files, dict):
             raise ValueError('Invalid native snapshot')
-        decoded, size = [], 0
+        decoded = []
         for name, value in files.items():
             if not isinstance(name, str):
                 raise ValueError('Invalid native file name')
@@ -190,9 +178,6 @@ class NativeSession:
                     or not relative.parts or '\\' in name or '\x00' in name):
                 raise ValueError('Invalid native file name')
             data = base64.b64decode(value, validate=True)
-            size += len(data)
-            if size > MAX_BYTES:
-                raise ValueError('Native snapshot exceeds its limit')
             decoded.append((self.owned_path(path / relative), data))
         for target, data in decoded:
             if not target.resolve().is_relative_to(self.root.resolve()):

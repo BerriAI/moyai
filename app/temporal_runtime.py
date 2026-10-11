@@ -179,6 +179,16 @@ class TemporalRunManager(DurableRunner):
                 if self.settings.moyai_runtime_role in {'standalone', 'worker'}:
                     self.worker = self.make_worker(self.temporal)
                     self.worker_task = asyncio.create_task(self.worker.run())
+                    # The SDK validates the namespace asynchronously in run().
+                    # A scheduled task alone does not prove the poller started.
+                    # Its public is_running flag is set after that validation.
+                    while True:
+                        await asyncio.sleep(.01)
+                        if self.worker_task.done():
+                            await self.worker_task
+                            raise RuntimeError('Temporal worker stopped during startup')
+                        if self.worker.is_running:
+                            break
                 self.ready.set()
                 while not self.closing:
                     # Clear before reading the outbox, never after: an input
@@ -215,10 +225,7 @@ class TemporalRunManager(DurableRunner):
                 # credentials or request data. The inbox remains durable.
                 log.warning('Temporal connection paused (%s); retrying', type(exc).__name__)
                 self.ready.clear()
-                if self.worker and self.worker_task:
-                    if not self.worker_task.done():
-                        await self.worker.shutdown()
-                    await asyncio.gather(self.worker_task, return_exceptions=True)
+                await self.stop_worker()
                 await asyncio.sleep(5)
 
     async def dispatch(self):
@@ -319,6 +326,17 @@ class TemporalRunManager(DurableRunner):
             from temporalio.exceptions import ApplicationError
             raise ApplicationError('Automation status temporarily unavailable', type=type(exc).__name__) from None
 
+    async def stop_worker(self):
+        if self.worker and self.worker_task:
+            if not self.worker_task.done():
+                if self.worker.is_running:
+                    await self.worker.shutdown()
+                else:
+                    # shutdown() waits for run() to finish. Before namespace
+                    # validation completes it cannot stop a stalled startup.
+                    self.worker_task.cancel()
+            await asyncio.gather(self.worker_task, return_exceptions=True)
+
     async def shutdown(self):
         self.closing = True
         self.ready.clear()
@@ -334,7 +352,4 @@ class TemporalRunManager(DurableRunner):
         if self.dispatch_task:
             self.dispatch_task.cancel()
             await asyncio.gather(self.dispatch_task, return_exceptions=True)
-        if self.worker and self.worker_task:
-            if not self.worker_task.done():
-                await self.worker.shutdown()
-            await asyncio.gather(self.worker_task, return_exceptions=True)
+        await self.stop_worker()

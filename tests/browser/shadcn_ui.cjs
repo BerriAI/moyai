@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { test, before, after } = require('node:test');
 const { spawn } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
 
 let server, browser, base;
@@ -1890,11 +1891,12 @@ for (const width of [1440, 768, 320]) {
     await page.getByRole('button', { name: /Add metadata/ }).click();
     await page.getByLabel('Key', { exact: true }).fill('team');
     const metadata = page.getByLabel('Value', { exact: true });
-    const boundary = String.fromCodePoint(0x1f680).repeat(16384);
-    await metadata.fill(boundary);
+    const longValue = String.fromCodePoint(0x1f680).repeat(20000);
+    await metadata.fill(longValue);
     assert.equal(await metadata.evaluate(el => el.checkValidity()), true);
-    await metadata.fill(boundary + 'x');
-    assert.equal(await metadata.evaluate(el => el.validity.customError), true);
+    assert.equal(await metadata.inputValue(), longValue);
+    assert.equal(await dialog.locator('form').evaluate(form => new FormData(form).get('metadata_value')), longValue,
+      'Complete Unicode metadata remains valid and is serialized beyond the former text cap');
     await metadata.fill('platform\nRelease checks & owners');
     assert.equal(await metadata.evaluate(el => el.checkValidity()), true);
     const values = await dialog.locator('form').evaluate(form => Object.fromEntries(new FormData(form)));
@@ -1971,14 +1973,34 @@ async function assertCardContentsFit(cards) {
 
 for (const width of [1440, 768, 320]) test(`attachment cards preserve content geometry across chat owners at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'populated', width);
+  const content = Buffer.alloc(123, 'a'), checksum = createHash('sha256').update(content).digest('hex');
   const files = ['png', 'txt', 'wav'].map((extension, index) => ({
     id: String(index + 1).padStart(32, '0'), name: `layout-${'long-filename-'.repeat(3)}.${extension}`, size: 123,
     media_type: ['image/png', 'text/plain', 'audio/wav'][index],
     ...(index === 0 ? { preview_url: '/static/favicon.svg' } : { preview_text: 'Synthetic attachment' }),
   }));
+  const uploads = new Map();
   await page.route('**/api/attachments/**', route => {
-    const url = new URL(route.request().url()), file = files.find(file => file.name === url.searchParams.get('name'));
-    return route.fulfill({ json: file ? { ...file, id: url.pathname.split('/').at(-1) } : {} });
+    const request = route.request(), url = new URL(request.url());
+    const [, id, action] = url.pathname.match(/^\/api\/attachments\/([a-f0-9]{32})\/(upload|parts\/0|complete)$/) || [];
+    assert.ok(action, 'The layout fixture handles the multipart upload contract');
+    if (action === 'upload') {
+      assert.equal(request.method(), 'POST');
+      const { name, size } = request.postDataJSON(), file = files.find(file => file.name === name);
+      assert.ok(file);
+      assert.equal(size, content.length);
+      uploads.set(id, file);
+      return route.fulfill({ json: { part_size: content.length, size } });
+    }
+    const file = uploads.get(id);
+    assert.ok(file, 'Parts and completion belong to an initialized upload');
+    if (action === 'parts/0') {
+      assert.equal(request.method(), 'PUT');
+      assert.equal(url.searchParams.get('name'), file.name);
+      return route.fulfill({ json: { part: 0, sha256: checksum } });
+    }
+    assert.equal(request.method(), 'POST');
+    return route.fulfill({ json: { ...file, id } });
   });
   for (const formSelector of ['#task-form', '#message-form']) {
     if (formSelector === '#message-form') {
@@ -2007,7 +2029,7 @@ for (const width of [1440, 768, 320]) test(`attachment cards preserve content ge
       }
     }
     const form = page.locator(formSelector);
-    await form.locator('input[type=file]').setInputFiles(files.map(file => ({ name: file.name, mimeType: file.media_type, buffer: Buffer.from('synthetic file') })));
+    await form.locator('input[type=file]').setInputFiles(files.map(file => ({ name: file.name, mimeType: file.media_type, buffer: content })));
     await form.locator('.draft-attachment small').filter({ hasText: '123 B' }).nth(2).waitFor();
     await assertCardContentsFit(form.locator('.attachment-open'));
     await assertCardContentsFit(form.locator('.draft-attachment'));

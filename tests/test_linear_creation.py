@@ -28,7 +28,11 @@ def test_linear_creation_respects_connection_and_session_boundaries(workspace, m
     monkeypatch.setattr(app.state.connectors, 'request', forbidden)
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': 'linear_create_issue', 'arguments': ARGS})
-    assert response.status_code in {401, 403}
+    if restriction in {'read_only', 'disabled', 'disconnect'}:
+        assert response.status_code == 200 and response.json()['outcome'] == 'rejected'
+        assert response.json()['dispatched'] is False
+    else:
+        assert response.status_code in {401, 403}
     assert not app.state.store.approvals(run_id)
 
 
@@ -63,4 +67,5 @@ def test_invalid_ticket_still_fails_before_provider_call(workspace, monkeypatch)
     monkeypatch.setattr(app.state.connectors, 'request', forbidden)
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
         json={'name': 'linear_create_issue', 'arguments': {**ARGS, 'team_id': 'unknown-team'}})
-    assert response.status_code == 422 and not app.state.store.approvals(run_id)
+    assert response.status_code == 200 and response.json()['code'] == 'invalid_arguments'
+    assert response.json()['dispatched'] is False and not app.state.store.approvals(run_id)

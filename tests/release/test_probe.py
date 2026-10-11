@@ -68,7 +68,7 @@ def test_stop_after_worker_exit_can_wait_for_replacement(production_shape):
     assert Release.execution_stopped(stopped)
 
 
-@pytest.mark.parametrize('phase,unsafe', [('monitor', 1), ('save', 1), ('finish', 1),
+@pytest.mark.parametrize('phase,unsafe', [('launch', 1), ('monitor', 1), ('save', 1), ('finish', 1),
     ('new_unknown_phase', 1), ('warm_cleanup', 1), ('waiting_credential', 0), ('warm', 0), ('prepare', 0)])
 def test_active_and_unknown_phases_block_the_switch(production_shape, phase, unsafe):
     store, url, schema, _ = production_shape
@@ -78,9 +78,24 @@ def test_active_and_unknown_phases_block_the_switch(production_shape, phase, uns
     with psycopg.connect(url) as connection:
         result = snapshot(connection, schema)
     assert result['unsafe_sessions'] == unsafe
+    # No worker owns this database and an independent sandbox can be between
+    # requests. Neither fact proves that its execution has stopped.
+    assert Release.execution_stopped({'ok': True, **result}) is (not unsafe)
     store.update_run(run['id'], status='stopping')
     with psycopg.connect(url) as connection:
-        assert snapshot(connection, schema)['unsafe_sessions'] == 1
+        stopped = snapshot(connection, schema)
+    assert stopped['unsafe_sessions'] == 1
+    assert Release.execution_stopped({'ok': True, **stopped}) is (not unsafe)
+
+
+def test_legacy_execution_without_a_worker_blocks_the_switch(production_shape):
+    store, url, schema, _ = production_shape
+    run = store.create_run('Synthetic detached legacy execution', '', 'demo', [], chat_enabled=True)
+    store.update_run(run['id'], status='running')
+    with psycopg.connect(url) as connection:
+        result = snapshot(connection, schema)
+    assert result['legacy_active_sessions'] == 1
+    assert not Release.execution_stopped({'ok': True, **result})
 
 
 @pytest.mark.parametrize('production_shape', [False, True], indirect=True)
@@ -93,12 +108,26 @@ def test_release_fingerprint_matches_actual_runtime_policy(production_shape):
     assert policy_fingerprint(settings.model_copy(update={'encryption_key': 'different'})) != state['policy']
     assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_pool_size': 1})) != state['policy']
     assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_idle_seconds': 600})) != state['policy']
+    assert policy_fingerprint(settings.model_copy(update={'independent_agent_runtime': not settings.independent_agent_runtime})) != state['policy']
+    for name in ('max_concurrent_runs', 'max_concurrent_model_requests'):
+        changed = 1 if getattr(settings, name) == 0 else 0
+        assert policy_fingerprint(settings.model_copy(update={name: changed})) != state['policy']
+
+
+@pytest.mark.parametrize('independent', [False, True])
+def test_release_policy_matches_current_runtime_without_database(independent):
+    from app.database import runtime_fingerprint
+    settings = Settings(_env_file=None, independent_agent_runtime=independent)
+    assert policy_fingerprint(settings) == runtime_fingerprint(settings)
 
 
 @pytest.mark.parametrize('extra', [
     {}, {'moyai_separate_broker': False},
     {'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300},
-    {'moyai_separate_broker': False, 'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300}])
+    {'moyai_separate_broker': False, 'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300},
+    {'moyai_separate_broker': True, 'moyai_coordinator_handoff': True,
+     'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300,
+     'independent_agent_runtime': False}])
 def test_first_upgrade_verifies_each_running_build_fingerprint_without_schema_fallback(extra):
     values = {key: getattr(Settings(_env_file=None), key) for key in POLICY_FIELDS}
     expected = hashlib.sha256(json.dumps(values | extra, sort_keys=True).encode()).hexdigest()

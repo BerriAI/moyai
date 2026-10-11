@@ -103,12 +103,25 @@ PostgreSQL owner, then waits for the old API owner to disappear. Coordinator,
 broker and worker owner identities (PID plus database connection start time)
 must remain unchanged throughout the observed rollout.
 
-Render's configured shutdown allowance is 300 seconds. API Uvicorn drains for up
-to **270 seconds after SIGTERM**, reserving time for application cleanup. Other
-roles retain their existing 20-second timeout. These are finite deadlines:
+Render's configured shutdown allowance is 300 seconds. After the first SIGTERM,
+the API keeps accepting requests for **30 seconds** while private-network routing
+converges, then closes its listener and drains admitted requests for up to **240
+seconds**. The combined wait budget is capped at 270 seconds from that first
+signal (plus Uvicorn's short shutdown scheduling overhead), reserving approximately
+30 seconds for application cleanup. The grace yields to the event loop and keeps
+application ownership until ordinary lifespan cleanup.
+Repeated SIGTERM does not extend the deadline; SIGINT skips the listener grace
+and retains Uvicorn's force-exit behavior during shutdown. Signals received before
+startup completes do not add a delay. Brokers use the same 30-second listener grace
+and 240-second request drain; coordinators add a 30-second grace before their
+existing 20-second HTTP drain. Workers retain their existing 20-second timeout.
+These are finite deadlines:
 event streams/computer sockets must reconnect, and an upload/transcription or
 other API request exceeding the deadline can be interrupted. Broker model streams
-are on the unchanged broker. This path does not make coordinator, worker, broker
+are on the unchanged broker.
+Deadline cancellation and application cleanup still have to fit within Render's
+hard 300-second process limit; the grace does not guarantee they will complete.
+This path does not make coordinator, worker, broker
 or schema upgrades seamless.
 
 ## Failure and rollback

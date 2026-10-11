@@ -248,7 +248,12 @@ def test_connection_and_run_restrictions_block_edits(rules, restriction):
     else:
         app.state.store.update_run(run_id, token_hash=digest('changed'))
     response = call('github_update_ruleset_reviewers', args)
-    assert response.status_code in {401, 403} and not provider.writes
+    if restriction in {'read_only', 'disabled', 'disconnect'}:
+        assert response.status_code == 200
+        assert response.json()['outcome'] == 'rejected' and response.json()['dispatched'] is False
+    else:
+        assert response.status_code in {401, 403}
+    assert not provider.writes
     if restriction == 'read_only':
         names = [tool['name'] for tool in client.get(f'/broker/{run_id}/tools', headers=headers).json()]
         assert 'github_ruleset' in names and 'github_update_ruleset_reviewers' not in names
@@ -302,5 +307,8 @@ def test_invalid_edits_are_rejected_at_broker_boundary(rules, change):
             args['required_reviewers'][0]['reviewer']['type'] = 'User'
         else:
             args['required_reviewers'][0]['file_patterns'] = ['']
-    assert call('github_update_ruleset_reviewers', args).status_code == 422
+    response = call('github_update_ruleset_reviewers', args)
+    assert response.status_code == 200
+    assert response.json()['code'] == 'invalid_arguments' and response.json()['dispatched'] is False
+    assert response.json()['fields']
     assert not provider.writes

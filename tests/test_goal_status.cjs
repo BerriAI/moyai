@@ -16,10 +16,27 @@ test('goal timer survives pauses and resumes without counting paused time',()=>{
   run.goal={status:'active',active_since:150,elapsed_seconds:25};
   assert.equal(goal.elapsed(goal.current(run),run,160000),35);
   run.status='interrupted';run.updated_at=new Date(155000).toISOString();
-  assert.equal(goal.current(run).status,'paused');
+  assert.equal(goal.current(run).status,'interrupted');
   assert.equal(goal.elapsed(goal.current(run),run,200000),30);
 });
 test('waiting and verified completion are distinct from running',()=>{
   assert.equal(goal.current({status:'waiting_credential',goal:{status:'active'}}).status,'waiting');
   assert.equal(goal.current({status:'idle',goal:{status:'completed'}}).status,'completed');
+});
+
+test('budget exhaustion and reporting never imply completion',()=>{
+  for(const status of ['wrapping','budget_exhausted','needs_input','interrupted']) assert.equal(goal.current({status:'idle',goal:{status}}).status,status);
+  assert.equal(goal.elapsed({elapsed_seconds:10800},{status:'idle'},999999999),10800);
+});
+
+test('report schedules remain distinct from stop budgets and confirmed delivery',()=>{
+  globalThis.MoyaiActivity=require('../app/static/activity.js');
+  const schedule={at_seconds:[10800,21600],interval_seconds:3600};
+  const text=goal.reporting({reporting:schedule,checkpoint:{elapsed_seconds:10800}});
+  assert.match(text,/Report checkpoints at/);
+  assert.match(text,/Report every/);
+  assert.match(text,/Checkpoints do not end the goal/);
+  assert.match(text,/Last checkpoint saved/);
+  assert.doesNotMatch(text,/delivered|completed|Timebox/);
+  assert.equal(goal.reporting({}), '');
 });
