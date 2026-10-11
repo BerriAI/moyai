@@ -192,6 +192,9 @@ async def test_background_compaction_keeps_working_preserves_tail_and_replays(du
 
     app = durable_app
     manager, store = app.state.manager, app.state.store
+    # Keep this byte-counted pressure fixture independent of the bundled skill
+    # catalog size. Skill loading is exercised separately through the real broker.
+    store.execute("UPDATE skills SET archived=1 WHERE owner_id=?", ('system:bundled-coding-skills',))
     app.state.settings.litellm_api_base = 'https://scripted-provider.invalid/v1'
     app.state.settings.model_context_limits['test-model'] = ModelContextLimits(
         context_window=25000, max_input_tokens=25000, max_output_tokens=8192, default_output_tokens=4096)
@@ -425,6 +428,8 @@ async def test_private_checkpoint_is_rebuilt_from_public_journal(durable_app):
     from app.native_sessions import mark_private_context
     from app.security import digest
     manager, store = durable_app.state.manager, durable_app.state.store
+    # Start without private skill-index context, then explicitly taint the turn.
+    store.execute("UPDATE skills SET archived=1 WHERE owner_id=?", ('system:bundled-coding-skills',))
     run = store.create_run('Continue the public task.', '', 'modal', [], chat_enabled=True,
         harness='deepagents-temporal', model='test-model', user_id='owner')
     manager.submit(run)
