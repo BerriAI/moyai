@@ -171,7 +171,8 @@ async def test_unlimited_broker_rejects_new_work_after_owner_loss_but_cleans_liv
         await slots.is_full()
 
 
-async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified):
+@pytest.mark.parametrize('draining_component', ['memory', 'repository_context'])
+async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified, draining_component):
     broker, _ = verified
     old, new = broker(), broker()
     cleaning, cleaned = asyncio.Event(), asyncio.Event()
@@ -187,8 +188,12 @@ async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified):
     first_memory.start = lambda: calls.append('old')
     next_memory.start = lambda: calls.append('new')
     spend = lambda: SimpleNamespace(start=lambda: None, close=AsyncMock())
-    first = BrokerMaintenance(old.state.store, first_memory, spend())
-    replacement = BrokerMaintenance(new.state.store, next_memory, spend())
+    if draining_component == 'repository_context':
+        first = BrokerMaintenance(old.state.store, spend(), spend(), first_memory)
+        replacement = BrokerMaintenance(new.state.store, spend(), spend(), next_memory)
+    else:
+        first = BrokerMaintenance(old.state.store, first_memory, spend())
+        replacement = BrokerMaintenance(new.state.store, next_memory, spend())
     first.start()
     while calls != ['old']:
         await asyncio.sleep(.01)

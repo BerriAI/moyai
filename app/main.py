@@ -234,6 +234,7 @@ def _create_app(settings, store):
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
     memory.github = connectors.github
+    repository_context = connectors.github.context_index
     from .model_slots import ModelSlots, PostgresModelSlots
     overlap_broker = settings.moyai_runtime_role == 'broker' and not store.schema_updates
     broker_work = None
@@ -248,7 +249,7 @@ def _create_app(settings, store):
     broker_requests = None
     if overlap_broker:
         from .broker_ownership import BrokerMaintenance, BrokerRequests
-        broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery))
+        broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery, repository_context))
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     memory_review.context_budget = context_budget
@@ -301,6 +302,7 @@ def _create_app(settings, store):
             if owns_inference:
                 spend.recovery.start()
                 memory_review.start()
+                repository_context.start()
             watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
             tracing.start()
             lens_feedback.start()
@@ -320,7 +322,7 @@ def _create_app(settings, store):
         if handoff:
             slack.chat.begin_drain()
         closes = ([hook_inbox.close] if hook_inbox else []) + [
-            session_lifecycle.close, memory_review.close, spend.recovery.close,
+            session_lifecycle.close, repository_context.close, memory_review.close, spend.recovery.close,
             harness_gateway.maintenance.close, harness_gateway.live_context.close,
             computer.close, session_pull_requests.close, session_titles.close,
             infrastructure.close, automations.close, environments.close,
@@ -398,11 +400,12 @@ def _create_app(settings, store):
                     else:
                         spend.recovery.start()
                         memory_review.start()
+                        repository_context.start()
                     yield
                 finally:
                     errors = []
                     closes = ([broker_requests.close] if broker_requests else []) + [
-                        memory_review.close, spend.recovery.close,
+                        repository_context.close, memory_review.close, spend.recovery.close,
                         harness_gateway.maintenance.close, harness_gateway.live_context.close,
                         manager.shutdown, manager.modal_clients.close, environments.close,
                         session_lifecycle.close, computer.close, session_pull_requests.close, tracing.close,
@@ -478,6 +481,7 @@ def _create_app(settings, store):
     app.include_router(memory.routes())
     app.state.memory = memory
     app.state.memory_review = memory_review
+    app.state.repository_context = repository_context
     app.state.model_slots = model_slots
     session_folders = SessionFolders(store, security, checkpoints)
     app.state.session_folders = session_folders
@@ -1581,6 +1585,7 @@ def _create_app(settings, store):
     harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
         checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
         model_slots=model_slots, memory=memory, skills=skills, tracing=tracing, context_budget=context_budget)
+    harness_gateway.repository_context = repository_context
 
     from .slack_sources import TOOL as SLACK_CONTEXT_TOOL, SILENCE_TOOL as SLACK_PARTICIPATION_TOOL
     from .goals import Goals, GoalArgs, TOOL as GOAL_TOOL
@@ -1683,16 +1688,11 @@ def _create_app(settings, store):
         payload = {key: value for key, value in body.items() if key in allowed}
         native_sessions.observe_scope(run)
         payload['messages'] = await asyncio.to_thread(store.attachments.with_images, run, scrub_memory_history(payload['messages']))
-        skill_context, memory_context = await harness_gateway.library_context(run, selected_model, payload=payload)
-        if memory_context:
-            # Resolve references for the current requester on every inference.
-            # No retrieved note body goes into sandbox history or tool output.
-            payload['messages'] = [{'role':'system','content':memory_context}, *payload['messages']]
-        if skill_context:
-            # The original platform system instructions stay last and take
-            # precedence. Skill definitions never enter sandbox tool results,
-            # conversation snapshots, event logs or Temporal workflow history.
-            payload['messages'] = [{'role':'system','content':skill_context}, *payload['messages']]
+        contexts = await harness_gateway.library_context(run, selected_model, payload=payload)
+        # Resolve all private views for the current requester on every inference.
+        # The original platform instructions stay last and take precedence;
+        # injected views never enter sandbox history or durable transcripts.
+        payload['messages'] = [{'role': 'system', 'content': context} for context in contexts if context] + payload['messages']
         if selected_model == ASTRA_ULTRAFAST:
             raise HTTPException(422, 'GPT-6 Astra Ultrafast requires the Responses API. Use Codex or regular GPT-6 Astra.')
         payload["model"] = selected_model
