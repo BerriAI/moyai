@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import re
 import secrets
@@ -81,7 +82,8 @@ class RunManager:
         self.jobs = {}
         self.sandboxes = {}
         self.releases = {}
-        self.slots = asyncio.Semaphore(settings.max_concurrent_runs)
+        self.slots = (asyncio.Semaphore(settings.max_concurrent_runs) if settings.max_concurrent_runs
+                      else contextlib.nullcontext())
         self.closing = False
         self.prepare_context = None
         self.environments = None

@@ -4,17 +4,17 @@ Moyai can use one elected background coordinator and multiple Temporal execution
 workers with PostgreSQL and shared object storage. The opt-in
 [rolling deployment topology](rolling-deploy.md) also permits overlapping API,
 broker and coordinator instances during compatible releases. The default remains `standalone`, with
-100 occupied sandboxes, 1,000 unfinished sessions and 8 model requests. Higher
+1,000 unfinished sessions and no limit on occupied sandboxes or concurrent model requests. Higher
 budgets are now configurable; this does not provision provider quota or replicas.
 
 ## What each limit controls
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `MAX_CONCURRENT_RUNS` | 100 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. |
+| `MAX_CONCURRENT_RUNS` | 0 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. 0 means unlimited: warm machines are not evicted to free capacity, but idle timeout and normal cleanup still apply. |
 | `MAX_PENDING_RUNS` | 1,000 | Unfinished sessions, including active work and queued work; this is not just the waiting queue. |
-| `MAX_CONCURRENT_MODEL_REQUESTS` | 8 | Concurrent requests through the inference model gate; shared across overlapping verified brokers. Full foreground requests receive the existing explicit, unbilled queue response. |
-| `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections per process, plus one process-ownership connection. A verified broker also holds one model-slot ownership connection. Range 1–256. |
+| `MAX_CONCURRENT_MODEL_REQUESTS` | 0 | Concurrent requests through the inference model gate. 0 means unlimited. A positive value is shared across overlapping verified brokers, and full foreground requests over it receive the existing explicit, unbilled queue response. |
+| `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections per process, plus one process-ownership connection. A verified broker also holds one model-slot health/ownership connection, including in unlimited mode. Range 1–256. |
 | `TEMPORAL_WORKER_ACTIVITIES` | 120 | Activities executing per worker process. An activity can observe a live sandbox for about 20 seconds. |
 | `TEMPORAL_WORKFLOW_CACHE_SIZE` | 200 | Cached workflows per worker; eviction causes replay, not session loss. |
 | `TEMPORAL_DISPATCH_BATCH_SIZE` | 200 | Maximum wake-outbox entries processed in each coordinator batch. |
@@ -25,6 +25,19 @@ admission controls: 3,000 active sandboxes do not require 3,000 simultaneous mod
 calls or database connections. Sandbox CPUs affect work inside a sandbox. Add
 execution workers when Temporal activity queue latency is the bottleneck; increase
 model capacity only with upstream RPM/TPM and measured inference-owner headroom.
+
+Existing deployments keep their explicit environment values: deploying this
+default change does not replace a configured `32` model limit or `100` sandbox
+limit. Set both `MAX_CONCURRENT_MODEL_REQUESTS=0` and `MAX_CONCURRENT_RUNS=0` on
+every role to remove those two app ceilings. This does not remove
+`MAX_PENDING_RUNS`, `MAX_PARALLEL_AGENTS`, worker activity limits, provider quotas
+or resource constraints. Idle timeout and normal sandbox cleanup still apply.
+
+In the verified rolling topology these settings participate in the shared
+configuration fingerprints. A capacity change requires the documented shared
+policy transition; it cannot be mixed into a compatible rolling code replacement
+while old owners retain a different policy. Do not overwrite fingerprints or
+bypass ownership checks to activate unlimited mode.
 
 ## Supported topology
 
@@ -113,7 +126,7 @@ loops; use scheduling diagnostics to find remaining stalls.
    coordinator. Start with existing budgets, then increase in measured steps.
 5. Replicas of the same build/policy may overlap during worker replacement.
    For the full rolling topology, perform the one-time offline migration to the
-   selected release's schema (currently revision 9), activate dedicated API/edge
+   selected release's schema (currently revision 15), activate dedicated API/edge
    routing, and enable coordinator handoff with the reviewed shared settings.
    Then use the [rolling release procedure](rolling-deploy.md) to replace workers,
    broker, coordinator and API while users continue submitting work. Compatible

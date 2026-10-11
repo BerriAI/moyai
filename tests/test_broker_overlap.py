@@ -127,7 +127,52 @@ async def test_capacity_uses_one_connection_per_broker_not_per_request(verified)
     second_slots.release(three)
 
 
-async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified):
+@pytest.mark.parametrize('verified', [0], indirect=True)
+async def test_unlimited_brokers_admit_without_capacity_locks_and_count_local_work(verified):
+    broker, _ = verified
+    first, second = broker(), broker()
+    slots = [first.state.model_slots, second.state.model_slots]
+    assert all(not slot.locked() for slot in slots)
+    assert not any(await asyncio.gather(*(slot.is_full() for slot in slots)))
+    requests = [slots[index % 2] for index in range(128)]
+    permits = await asyncio.wait_for(asyncio.gather(*(slot.acquire() for slot in requests)), 10)
+    try:
+        for slot in slots:
+            report = slot.snapshot()
+            assert report['active'] == report['local_active'] == 64
+            assert report['active_scope'] == 'broker'
+            assert report['waiting'] == 0
+            assert not await slot.is_full()
+        owners = [slot._connection.info.backend_pid for slot in slots]
+        assert first.state.store.rows('''SELECT count(*) AS n FROM pg_locks
+            WHERE locktype='advisory' AND classid=726947 AND pid=ANY(?)''', (owners,))[0]['n'] == 0
+    finally:
+        await asyncio.gather(*(slot.release_async(permit) for slot, permit in zip(requests, permits)))
+    assert all(slot.snapshot()['active'] == slot.waiting == 0 for slot in slots)
+    assert all(not slot._permits for slot in slots)
+
+
+@pytest.mark.parametrize('verified', [0], indirect=True)
+async def test_unlimited_broker_rejects_new_work_after_owner_loss_but_cleans_live_work(verified):
+    from app.database import DatabaseError
+
+    broker, _ = verified
+    first = broker()
+    slots = first.state.model_slots
+    permit = await asyncio.wait_for(slots.acquire(), 2)
+    first.state.store.database.owner.close()
+    with pytest.raises(DatabaseError, match='ownership connection was lost'):
+        await slots.acquire()
+    await slots.release_async(permit)
+    assert slots.active == slots.waiting == 0
+    assert not slots._permits
+    slots.close()
+    with pytest.raises(DatabaseError, match='ownership was lost'):
+        await slots.is_full()
+
+
+@pytest.mark.parametrize('draining_component', ['memory', 'repository_context'])
+async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified, draining_component):
     broker, _ = verified
     old, new = broker(), broker()
     cleaning, cleaned = asyncio.Event(), asyncio.Event()
@@ -143,8 +188,12 @@ async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified):
     first_memory.start = lambda: calls.append('old')
     next_memory.start = lambda: calls.append('new')
     spend = lambda: SimpleNamespace(start=lambda: None, close=AsyncMock())
-    first = BrokerMaintenance(old.state.store, first_memory, spend())
-    replacement = BrokerMaintenance(new.state.store, next_memory, spend())
+    if draining_component == 'repository_context':
+        first = BrokerMaintenance(old.state.store, spend(), spend(), first_memory)
+        replacement = BrokerMaintenance(new.state.store, spend(), spend(), next_memory)
+    else:
+        first = BrokerMaintenance(old.state.store, first_memory, spend())
+        replacement = BrokerMaintenance(new.state.store, next_memory, spend())
     first.start()
     while calls != ['old']:
         await asyncio.sleep(.01)
@@ -161,6 +210,43 @@ async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified):
         while calls != ['old', 'new']:
             await asyncio.sleep(.01)
     await replacement.close()
+
+
+async def test_skill_learning_handoff_waits_for_review_cleanup(verified, monkeypatch):
+    broker, _ = verified
+    old, new = broker(), broker()
+    started, successor, cleaning, cleaned = (asyncio.Event() for _ in range(4))
+
+    async def cleanup():
+        cleaning.set()
+        await cleaned.wait()
+
+    monkeypatch.setattr(old.state.skill_learning, 'start', started.set)
+    monkeypatch.setattr(new.state.skill_learning, 'start', successor.set)
+    monkeypatch.setattr(old.state.skill_learning, 'close', cleanup)
+    old_context = old.router.lifespan_context(old)
+    new_context = new.router.lifespan_context(new)
+    closing = None
+    try:
+        await old_context.__aenter__()
+        await asyncio.wait_for(started.wait(), 2)
+        await new_context.__aenter__()
+        assert not successor.is_set()
+        closing = asyncio.create_task(old_context.__aexit__(None, None, None))
+        await asyncio.wait_for(cleaning.wait(), 2)
+        # Real PostgreSQL ownership must remain held while review cleanup waits.
+        assert not new.state.broker_requests.maintenance.acquire()
+        assert not successor.is_set() and not closing.done()
+        cleaned.set()
+        await asyncio.wait_for(closing, 2)
+        await asyncio.wait_for(successor.wait(), 2)
+    finally:
+        cleaned.set()
+        if closing:
+            await asyncio.gather(closing, return_exceptions=True)
+        else:
+            await old_context.__aexit__(None, None, None)
+        await new_context.__aexit__(None, None, None)
 
 
 def test_completed_receipt_releases_ownership_atomically(verified):
@@ -267,6 +353,7 @@ def test_recovery_rechecks_receipts_and_new_backend_identity_after_read_probe(ve
     assert len(recovering.state.store.rows('SELECT 1 FROM broker_work_owners')) == 3
 
 
+@pytest.mark.parametrize('verified', [0, 2], indirect=True)
 async def test_existing_native_stream_finishes_while_replacement_handles_new_inference(verified, monkeypatch):
     import httpx
     from app.security import digest
@@ -407,6 +494,7 @@ asyncio.run(run())
         child.stderr.close()
 
 
+@pytest.mark.parametrize('verified', [0, 2], indirect=True)
 async def test_owner_loss_cancels_routes_without_replaying_or_releasing_before_cleanup(verified):
     from app.broker_ownership import BrokerOwnershipMiddleware
 
@@ -439,8 +527,12 @@ async def test_owner_loss_cancels_routes_without_replaying_or_releasing_before_c
             await asyncio.wait_for(cleaning.wait(), 2)
             assert first.state.broker_requests.failed
             waiting = asyncio.create_task(replacement.state.model_slots.acquire())
-            await asyncio.sleep(.1)
-            assert not waiting.done()
+            if replacement.state.model_slots.capacity:
+                await asyncio.sleep(.1)
+                assert not waiting.done()
+            else:
+                await asyncio.wait_for(asyncio.shield(waiting), 2)
+                assert first.state.model_slots.active == 1
             assert calls == ['sent']
             cleanup.set()
             with pytest.raises(asyncio.CancelledError):
@@ -475,6 +567,7 @@ def test_model_attempt_cannot_commit_without_its_ownership_record(verified, monk
     assert not first.state.store.rows('SELECT * FROM broker_work_owners')
 
 
+@pytest.mark.parametrize('verified', [0, 2], indirect=True)
 async def test_slot_wait_keeps_event_loop_responsive_when_runtime_pool_is_full(verified):
     from contextlib import ExitStack
 
@@ -493,6 +586,7 @@ async def test_slot_wait_keeps_event_loop_responsive_when_runtime_pool_is_full(v
     await first.state.model_slots.release_async(permit)
 
 
+@pytest.mark.parametrize('verified', [0, 2], indirect=True)
 async def test_cancelled_admission_drains_and_releases_an_acquired_slot(verified, monkeypatch):
     import threading
 

@@ -7,6 +7,25 @@
 
 ## Skills
 
+Moyai ships three organization skills: `moyai-dev-and-test`, `pr-feedback-loop`,
+and `pr-delivery`. They cover this repository's setup/checks, repairing existing PR
+feedback, and evidence-backed PR handoff. The Moyai runbook applies only to
+`BerriAI/moyai`; other repositories should have their own verified runbooks.
+
+The release installs these templates at application startup using the existing
+encrypted, versioned library. No model call, sandbox startup or network lookup is
+needed. Their initial directory fits the shared model budget; instructions and reference
+files load on demand as described below. Simply having a skill does not invoke it.
+
+Admins can edit or archive them in Settings. Template upgrades preserve edits,
+renames, archives and existing names. Only unmodified, active
+templates receive a higher bundled source version; restarting an older release
+does not downgrade them. Set `BUNDLED_SKILLS_ENABLED=false` to stop future
+installation/upgrades; archive installed entries to remove them from discovery.
+These defaults require no schema migration and are independent of skill learning.
+See the [initial coding-pack evaluation](coding-skills-evaluation.md) for observed
+selection, overhead, limitations, and reproduction commands.
+
 The **Skills** library stores reusable Markdown instructions. Add a name, a
 description of when to use the skill, and Markdown text, or import a `SKILL.md`.
 You can also ask Moyai in chat to “save this as a personal skill” or, as an admin,
@@ -96,3 +115,81 @@ on chat, automation, and delegated surfaces. They are independent of a user's
 private library. The shared `repository_guidance` tool resolves workspace
 `AGENTS.md` files from root to the directory being edited, with scopes, hashes,
 and complete range reads. Native duplicate guidance loading is disabled.
+
+The editable coding templates are stored in `agent/skill_templates/` and installed
+by `app/skill_templates.py`. Public build-pinned procedures in `agent/skills/`
+keep their separate `bundled_skill_read` path; template edits, archives and disabled
+installation never expose a duplicate template through that public catalog.
+
+## Suggestions learned from completed work
+
+In **Settings → Skills**, enable **Suggest skills** to have Moyai draft reusable
+procedures after future tasks finish. It is off for each user until enabled.
+No historical scan runs on startup. Learning is separate from personal memory:
+preferences belong in Memory; concrete repeatable procedures belong in Skills.
+
+Suggestions are private, encrypted drafts. Open **Review** to inspect the reason,
+exact supporting requests and successful command records, edit the instructions,
+and choose Personal or Organization before saving. Organization publishing still
+requires an administrator. Updates are proposed only for your own personal skills;
+acceptance checks the original revision and preserves supporting files. Dismissed
+names are suppressed within the repository; a dismissed update is suppressed for
+that target revision. This is exact deduplication, not a guarantee against all
+semantic paraphrases. Turning learning off cancels queued reviews and removes
+unaccepted drafts; saved skills remain available.
+
+The first version learns only from completed, non-automated root chat turns in
+single-requester conversations. A verified personal account (including a fresh
+matching Slack identity) is required. Demo runs, subagents, failed tasks, deleted
+sessions and conversations with other requesters are excluded. Evidence is checked
+again before a draft is written or accepted. Changed/deleted sources invalidate
+the draft without treating it as a dismissal: later valid work can propose the
+same workflow again, using a new draft ID. No private tool payloads, raw tool outputs, reasoning or native SDK
+history are sent to the reviewer. Secret-pattern rejection is defense in depth,
+not a guarantee of detecting arbitrary secrets.
+
+Each review uses at most three eligible requests from the same user and repository
+within 14 days of review, captured since enabling learning. It includes bounded
+final answers and up to eight successful terminal command summaries per request.
+A final answer is a claim, and exit code zero alone does not establish correctness.
+A proposal must cite the current request plus either a successful command or a
+second request demonstrating recurrence. Human review determines whether the
+procedure is useful and accurate. Model quality has not been established by the
+synthetic transport tests.
+
+This keeps the harness thin: settlement enqueues an ID; a tool-free maintenance
+worker proposes at most one draft; accepted procedures use the existing versioned
+library, bounded metadata index and on-demand loading. No model review or extra
+container acquisition occurs before the task's first response.
+
+Operational bounds:
+
+At 20 pending drafts, queued reviews wait for capacity instead of being discarded.
+The worker defers that person's due backlog for 60 seconds without consuming retry
+attempts, while other people's reviews can continue. Accepting or dismissing a
+draft frees capacity; the next due review can proceed. Invalid source evidence is
+retired during listing and review claiming, so it cannot hold a slot indefinitely.
+
+- `SKILL_LEARNING_ENABLED=true` permits the feature; personal opt-in is still required.
+- `SKILL_LEARNING_MODEL` defaults to the completed turn's approved model.
+- `SKILL_LEARNING_IDLE_SECONDS=60` delays review after completion; busy sessions defer again.
+- `SKILL_LEARNING_TIMEOUT_SECONDS=60` bounds a review. Transport output is capped at
+  64,000 bytes, completion at 3,072 tokens, serialized input at 48,000 characters.
+- At most 20 pending drafts per owner; at most three attempts per captured turn.
+  Foreground inference can reclaim the shared model slot. Spend is attributed to
+  the original requester and turn. Reviews add background model cost.
+- The inference owner alone recovers/runs reviews: the separate broker, or the
+  standalone/coordinator process when no separate broker is configured. API
+  replicas and execution workers never start this worker. With verified broker
+  overlap, only the broker holding maintenance ownership runs learning; handoff
+  waits for its reviews to drain before a replacement starts.
+- Schema revision **15** adds the preferences, queue and draft tables after the
+  released sign-in, swarm and rolling-release migrations. This release
+  needs the normal coordinated schema migration with runtime owners stopped;
+  it is not an API-only compatible release. See [schema migrations](schema-migrations.md).
+
+Run `uv run python scripts/skill_learning_demo.py --port 8842`, then open
+`http://127.0.0.1:8842/demo/login` for a local demo. The task history and model
+response are simulated; review, editing, acceptance, storage and skill loading use
+the real APIs. `/demo/recall` checks the saved skill through normal broker context.
+The temporary local database is removed when the server stops.

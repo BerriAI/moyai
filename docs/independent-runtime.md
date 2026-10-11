@@ -9,16 +9,16 @@ questions before acquiring its full workspace computer. A shell, repository,
 browser, credential command or file operation acquires that computer under the
 same turn. The agent retains its model, conversation, goals and requester.
 
-This is an unreleased, opt-in path for **Codex on Modal with durable execution**.
-`INDEPENDENT_AGENT_RUNTIME` defaults to `false`. Other harnesses and providers
+This path is enabled by default for **Codex on Modal with durable execution**.
+`INDEPENDENT_AGENT_RUNTIME` defaults to `true`; set it to `false` to opt out. Other harnesses and providers
 use their existing runtime. A computer already kept warm also finishes through
 the existing path. No harness or model is silently substituted.
 
 ## Qualify a deployment
 
 Use a staging deployment with the existing Modal connection, model gateway,
-durable runtime and connected apps. This change requires schema revision **9**
-and API, worker, broker and coordinator protocol revision **4**. Follow the
+durable runtime and connected apps. This change requires schema revision **13**
+and API, worker, broker and coordinator protocol revision **15**. Follow the
 [coordinated migration procedure](schema-migrations.md); it is not an API-only
 or compatible rolling update from revision 8.
 

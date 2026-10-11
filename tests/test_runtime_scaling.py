@@ -59,7 +59,7 @@ def test_capacity_can_exceed_old_ceilings_without_changing_default_budgets():
                         moyai_database_pool_size=32, temporal_worker_activities=256)
     assert (settings.max_concurrent_runs, settings.max_pending_runs, settings.max_concurrent_model_requests) == (3000, 20000, 3000)
     defaults = Settings(_env_file=None)
-    assert (defaults.max_concurrent_runs, defaults.max_pending_runs, defaults.max_concurrent_model_requests) == (100, 1000, 8)
+    assert (defaults.max_concurrent_runs, defaults.max_pending_runs, defaults.max_concurrent_model_requests) == (0, 1000, 0)
     with pytest.raises(ValueError, match='PostgreSQL and Temporal'):
         Settings(_env_file=None, moyai_runtime_role='worker')
     with pytest.raises(ValueError, match='shared object storage'):
@@ -313,6 +313,27 @@ async def test_three_thousand_model_tasks_respect_configured_capacity_and_cancel
     release.set()
     await asyncio.gather(*tasks, return_exceptions=True)
     assert slots.snapshot()['active'] == slots.snapshot()['waiting'] == 0
+
+
+async def test_zero_model_capacity_admits_every_request_at_once():
+    slots = ModelSlots(0)
+    release = asyncio.Event()
+    admitted = asyncio.Event()
+
+    async def request():
+        assert not slots.locked()
+        async with slots:
+            if slots.active == 3000:
+                admitted.set()
+            await release.wait()
+
+    tasks = [asyncio.create_task(request()) for _ in range(3000)]
+    await asyncio.wait_for(admitted.wait(), 3)
+    assert slots.snapshot()['waiting'] == 0
+    assert not slots.locked()
+    release.set()
+    await asyncio.gather(*tasks)
+    assert slots.snapshot()['active'] == 0
 
 
 def test_worker_startup_leaves_coordinator_jobs_untouched_and_rejects_http(cluster, monkeypatch):

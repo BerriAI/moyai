@@ -94,7 +94,7 @@ def hermes_config(spec, broker_url, workspace):
         # listing to the model until a schema is requested.
         "tools": {"tool_search": {"enabled": "on", "defer": [],
                                    "listing": "auto", "listing_max_tokens": 600}},
-        "mcp_servers": {"workspace": {"command": "/usr/local/bin/python", "args": ["/opt/workspace-runner/agent/tools/mcp_bridge.py"],
+        "mcp_servers": {"workspace": {"command": sys.executable, "args": ["/opt/workspace-runner/agent/tools/mcp_bridge.py"],
                                       # SDKs may sanitize env or serialize it to argv.
                                       # Keep edge secrets in the relay process only.
                                       "env": {"MOYAI_WORKSPACE": str(workspace), "WORKSPACE_BROKER_URL": broker_url, "WORKSPACE_GIT_BROKER_URL": broker_url,
