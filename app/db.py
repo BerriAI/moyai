@@ -905,17 +905,35 @@ class Store:
 
     def access_actor(self, identity):
         """Read a pinned account from this request's verified Access claims."""
-        rows = self.rows('''SELECT binding.user_id,binding.email AS access_email,
+        with self.connect() as conn:
+            return self.access_actor_in(conn, identity)
+
+    @staticmethod
+    def access_actor_in(conn, identity):
+        binding = conn.execute('''SELECT binding.user_id,binding.email AS access_email,
             users.kind,users.email AS user_email FROM access_identities binding
             LEFT JOIN users ON users.id=binding.user_id
-            WHERE binding.issuer=? AND binding.subject=?''', (identity['issuer'], identity['sub']))
-        if not rows:
+            WHERE binding.issuer=? AND binding.subject=?''', (identity['issuer'], identity['sub'])).fetchone()
+        if not binding:
             return None
-        binding = rows[0]
         if (binding['kind'] not in {'google', 'cloudflare'}
                 or binding['access_email'] != identity['email'] or binding['user_email'] != identity['email']):
             raise ValueError('Access account mapping requires administrator review.')
         return binding['user_id']
+
+    def touch_access_identity(self, identity, actor, seen_at):
+        """Maintain an enrolled account without enrolling or rebinding it.
+
+        A queued update may run after an administrator changes a mapping. Check
+        it again under the writer lock before updating sign-in accounting.
+        """
+        with self.connect() as conn:
+            conn.begin_write()
+            if self.access_actor_in(conn, identity) != actor:
+                return
+            conn.execute('UPDATE users SET updated_at=CASE WHEN updated_at<? THEN ? ELSE updated_at END WHERE id=?',
+                         (seen_at, seen_at, actor))
+            self.reconcile_email_in(conn, identity['email'])
 
     def access_identity(self, identity):
         """Pin a verified Access subject to a person without changing ownership.

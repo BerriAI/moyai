@@ -48,6 +48,7 @@ from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from .session_lifecycle import SessionLifecycle
+from .session_maintenance import SessionMaintenance
 from .session_metadata import is_session_id_request
 from .session_pull_requests import SessionPullRequests
 from agent.memory_history import scrub_memory_history
@@ -444,11 +445,13 @@ def _create_app(settings, store):
             async with background_lifespan():
                 yield
         finally:
+            await session_maintenance.close()
             if overlap_broker:
                 await asyncio.to_thread(model_slots.close)
             await asyncio.to_thread(store.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
+    session_maintenance = SessionMaintenance(store)
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
                   dependencies=[Depends(session_lifecycle.require_live_api)])
     if settings.moyai_runtime_role == 'worker':
@@ -470,6 +473,7 @@ def _create_app(settings, store):
         app.add_middleware(BrokerOwnershipMiddleware, owner=broker_requests)
     app.state.broker_requests = broker_requests
     app.state.session_lifecycle = session_lifecycle
+    app.state.session_maintenance = session_maintenance
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
     app.include_router(session_lifecycle.routes())
@@ -612,22 +616,29 @@ def _create_app(settings, store):
                 raise HTTPException(503, 'Database is unavailable.', headers=headers) from None
         return JSONResponse({"status": "ok"}, headers=headers)
 
-    @app.get("/api/session")
-    def session(request: Request):
-        sid = security.session(request)
+    def load_session(request: Request):
+        info = security.session_info(request) or {}
+        sid = info.get('sid')
         response = JSONResponse({})
         if not sid and security.local_preview():
             sid = security.new_session(response, local=True)
-        role = security.role(request) or ("admin" if sid else None)
-        info = security.session_info(request) or {}
+        role = info.get('role') or ("admin" if sid else None)
+        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
         user_id = None
         if info:
-            user_id = store.identity(info)
+            user_id = actor if actor is not None else store.identity(info)
         response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role,
                                    "identity": info.get("identity"), "user_id": user_id, "preferences": user_preferences.get(user_id), "google_enabled": settings.google_enabled(),
                                    "google_domains": sorted(settings.google_domains()) if settings.google_enabled() else [],
                                    "password_enabled": settings.password_login_enabled and bool(settings.workspace_password or settings.workspace_member_password)}).encode()
         response.headers["content-length"] = str(len(response.body))
+        return response, info, actor
+
+    @app.get("/api/session")
+    async def session(request: Request):
+        response, info, actor = await database(load_session, request)
+        if actor is not None:
+            session_maintenance.schedule(info['identity'], actor)
         return response
 
     @app.post("/api/login")
