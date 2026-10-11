@@ -263,14 +263,14 @@ async function navigate(view,initialConfig) {
   if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
-  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
+  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',performance:'Performance',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(settingsViews.has(view)) {
     MoyaiUI.render($('#content'), '<p class="settings-loading" role="status">Loading…</p>');
     $('#content').scrollTop=0;
   }
   try {
-  if(view==='settings')await renderSettings(true);else if(view==='automations')await renderAutomations(false,true);else if(view==='tasks')await renderHome(initialConfig,true);else if(view==='connections')await renderConnections(true);else if(view==='spend')await renderSpend(false,true);else if(view==='users')await renderUsers(true);else if(view==='environments')await renderEnvironments(false,true);else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills(true);else if(view==='memory')await renderMemory(true);else await renderRuntime(true);
+  if(view==='settings')await renderSettings(true);else if(view==='automations')await renderAutomations(false,true);else if(view==='tasks')await renderHome(initialConfig,true);else if(view==='connections')await renderConnections(true);else if(view==='performance')await renderPerformance();else if(view==='spend')await renderSpend(false,true);else if(view==='users')await renderUsers(true);else if(view==='environments')await renderEnvironments(false,true);else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills(true);else if(view==='memory')await renderMemory(true);else await renderRuntime(true);
   } catch(error) {
     if(version!==state.pageVersion)return;
     if(!settingsViews.has(view))throw error;

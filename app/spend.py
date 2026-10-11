@@ -180,13 +180,18 @@ class Spend:
     def gateway_scope(self) -> str:
         return gateway_scope(self.settings.litellm_api_base)
 
-    def begin(self, run, model):
+    def begin(self, run, model, *, startup=False):
         request_id = str(uuid4())
         user_id = run['active_user_id'] if run['chat_enabled'] else run['owner_id']
         retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
         with self.store.connect() as conn:
+            conn.begin_write()
+            started_at = now()
             conn.execute('INSERT INTO model_requests(id,key_hash,run_id,message_id,user_id,model,created_at,gateway_scope,cost_next_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)',
-                         (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, now(), self.gateway_scope, retry_at))
+                         (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, started_at, self.gateway_scope, retry_at))
+            if startup:
+                from .performance import model_started_in
+                model_started_in(conn, run['active_message_id'], started_at)
             if owner := getattr(self.store, 'broker_work', None):
                 owner.claim_in(conn, 'model', request_id)
         return request_id

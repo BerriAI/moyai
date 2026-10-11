@@ -725,6 +725,16 @@ def _create_app(settings, store):
             model['source'] = 'separate_broker'
         return {**await database(snapshot, store, settings), 'model': model}
 
+    @app.get('/api/admin/performance')
+    async def performance_report(request: Request, hours: int = Query(24, ge=1, le=168),
+                                 kind: Literal['all', 'new_chat', 'follow_up'] = 'all',
+                                 model: str = Query('', max_length=200),
+                                 send_kind: Literal['all', 'explicit', 'automatic'] = 'all'):
+        await database(security.require, request, admin=True)
+        from .performance import report
+        result = await database(report, store, hours=hours, kind=kind, model=model, send_kind=send_kind)
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+
     @app.get("/api/organization")
     async def organization(request: Request):
         security.require(request)
@@ -795,6 +805,7 @@ def _create_app(settings, store):
 
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
+        received_at = now()
         await database(security.require, request, mutation=True)
         if body.swarm and (not settings.temporal_enabled or body.mode != 'modal'):
             raise HTTPException(422, 'Swarm mode requires the durable cloud runtime.')
@@ -835,7 +846,7 @@ def _create_app(settings, store):
                                    attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request,
                                    swarm_budget_seconds=body.swarm.budget_seconds if body.swarm else None,
                                    durable_submit=manager.submit_in if body.swarm else None,
-                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None)
+                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None, received_at=received_at)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -977,6 +988,7 @@ def _create_app(settings, store):
 
     @app.post("/api/runs/{run_id}/messages", status_code=202)
     async def send_message(run_id: str, body: ChatMessage, request: Request):
+        received_at = now()
         # Validation and the enqueue transaction stay off the event loop so a
         # slow database cannot stall other conversations' streams and pages.
         security.require(request, mutation=True)
@@ -987,9 +999,9 @@ def _create_app(settings, store):
             # Time edits and expiry share the root execution lease. A deadline
             # observer cannot cancel a swarm after a human has extended it.
             async with manager.session_guard(run_id):
-                message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+                message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request, received_at)
         else:
-            message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+            message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request, received_at)
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
         if not metadata_request:
@@ -1002,7 +1014,7 @@ def _create_app(settings, store):
                     manager.submit(run)
         return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
 
-    def enqueue_follow_up(run_id: str, body: ChatMessage, request: Request):
+    def enqueue_follow_up(run_id: str, body: ChatMessage, request: Request, received_at: str):
         security.require(request, mutation=True)
         run = store.run(run_id)
         if not run:
@@ -1026,9 +1038,11 @@ def _create_app(settings, store):
             # Resolve on every send so the saved choice also applies to other
             # tabs and older clients. Explicit Send now remains available.
             send_immediately = user_preferences.get(user_id)['send_immediately']
-            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id,
-                                       body.attachment_ids, body.send_now, send_immediately=send_immediately,
-                                       **({'metadata_request': True} if metadata_request else {}))
+            from .performance import web_request
+            with web_request(received_at):
+                message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id,
+                                           body.attachment_ids, body.send_now, send_immediately=send_immediately,
+                                           **({'metadata_request': True} if metadata_request else {}))
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         return message, created, metadata_request
@@ -1076,12 +1090,13 @@ def _create_app(settings, store):
 
     @app.patch('/api/runs/{run_id}/messages/{message_id}')
     async def change_queued_message(run_id: str, message_id: int, body: QueueChange, request: Request):
+        received_at = now()
         security.require(request, mutation=True)
         if body.action == 'edit' and body.content is None:
             raise HTTPException(422, 'Enter the updated message.')
         actor = store.identity(security.session_info(request))
-        result = message_queue.change(run_id, message_id, actor, security.role(request) == 'admin',
-                                      body.revision, body.action, body.content)
+        result = await database(message_queue.change, run_id, message_id, actor, security.role(request) == 'admin',
+                                body.revision, body.action, body.content, requested_at=received_at)
         await checkpoints.flush()
         slack.chat.wake.set()
         if store.has_queued_messages(run_id):
@@ -1734,7 +1749,7 @@ def _create_app(settings, store):
              run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
         if not admitted:
             raise HTTPException(429, "This run reached its model request limit.")
-        request_id = spend.begin(run, selected_model)
+        request_id = spend.begin(run, selected_model, startup=True)
         model_stage(request, 'upstream', request_id=request_id)
         # Keep user/session accounting local. The existing virtual key remains
         # the sole billing credential; sandbox-supplied attribution is ignored.

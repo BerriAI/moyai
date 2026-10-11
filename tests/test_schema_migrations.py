@@ -429,3 +429,25 @@ def test_revision_nine_upgrade_adds_chat_projection_without_rewriting_saved_mess
         assert api.state.store.rows('SELECT * FROM messages WHERE run_id=?', (run['id'],)) == messages
     finally:
         api.state.store.close()
+
+
+def test_performance_schema_upgrade_preserves_queued_conversations(split_settings):
+    from app import performance
+    settings = ready(split_settings)
+    app = main.create_app(settings)
+    run = app.state.store.create_run('Queued before instrumentation', '', 'modal', [], chat_enabled=True)
+    app.state.store.close()
+    # This additive migration adds only this table to schema 16; retain real
+    # conversation data while recreating its previous schema state.
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE performance_samples')
+        conn.execute('UPDATE schema_state SET revision=16')
+    ready(settings)
+    app = main.create_app(settings)
+    try:
+        assert app.state.store.messages(run['id'])[0]['status'] == 'queued'
+        assert app.state.store.rows('SELECT * FROM performance_samples') == []
+        assert performance.report(app.state.store)['metrics']['first_model']['total'] == 0
+    finally:
+        app.state.store.close()

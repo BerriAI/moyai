@@ -9,7 +9,8 @@ class MessageQueue:
     def __init__(self, store, mirror=None):
         self.store, self.mirror = store, mirror
 
-    def change(self, run_id, message_id, actor, admin, revision, action, content=None):
+    def change(self, run_id, message_id, actor, admin, revision, action, content=None, *, requested_at=None):
+        requested_at = requested_at or now()
         with self.store.connect() as conn:
             conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
@@ -39,6 +40,8 @@ class MessageQueue:
                     raise HTTPException(409, 'Moyai is already picking up another queued message.')
                 conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (message_id, run_id))
                 conn.execute('UPDATE messages SET revision=revision+1 WHERE id=?', (message_id,))
+                from .performance import prioritized_in
+                prioritized_in(conn, run_id, message_id, requested_at)
                 # A pending approval has no external side effect. Retire it to
                 # let its blocked tool return before the safe steering boundary.
                 conn.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
@@ -101,9 +104,12 @@ class MessageQueue:
         with self.store.connect() as conn:
             conn.begin_write()
             for message_id in ids:
+                applied_at = now()
                 changed = conn.execute("UPDATE messages SET status='injected',started_at=? WHERE id=? AND run_id=? AND steering_parent_id=? AND status='queued' AND queue_locked=1",
-                                       (now(), message_id, run_id, turn_id)).rowcount
+                                       (applied_at, message_id, run_id, turn_id)).rowcount
                 if changed:
+                    from .performance import picked_up_in
+                    picked_up_in(conn, message_id, applied_at, 'steering')
                     conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=? AND steer_message_id=?', (run_id, message_id))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Your message is guiding the current task.',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'turn_id': turn_id, 'phase': 'steering'}), now()))

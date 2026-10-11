@@ -165,7 +165,7 @@ const server=http.createServer(async(req,res)=>{
   (['PUT','DELETE'].includes(req.method) && /^\/api\/memory\/[^/]+$/.test(p)) ||
   (req.method==='POST' && /^\/api\/automations\/[^/]+\/state$/.test(p));
  if(req.method!=='GET'&&!supportedWrite)return json(res,501,{detail:'This operation is not available in the visual preview.'});
- if(fixture==='error'&&['/api/settings/sandboxes','/api/skills','/api/credentials','/api/memory','/api/admin/environments','/api/admin/spend','/api/spend','/api/admin/adoption','/api/automations'].includes(p))return json(res,503,{detail:'This preview simulates a service outage.'});
+ if(fixture==='error'&&['/api/settings/sandboxes','/api/skills','/api/credentials','/api/memory','/api/admin/environments','/api/admin/spend','/api/spend','/api/admin/adoption','/api/admin/performance','/api/automations'].includes(p))return json(res,503,{detail:'This preview simulates a service outage.'});
  if(p==='/api/settings/sandboxes'){
   if(req.method==='PUT'){
    if(role!=='admin')return json(res,403,{detail:'Administrator access required.'});
@@ -215,6 +215,7 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/api/admin/environments')return json(res,200,{environments:empty?[]:envs,templates:[recipe('New environment','example/project')],automatic_setup:true});
  if(p==='/api/automations')return json(res,200,{automations:empty?[]:automations,enabled:true,connected:true,event_choices:{github:[['check_run.completed','Check completed']]},templates:[{name:'My Linear tickets → PR',plugins:['linear','github'],prompt:'Pick a ticket, implement a fix, and prepare a PR.'}]});
  if(p.startsWith('/api/automations/')&&p.endsWith('/state')){const a=automations.find(a=>a.id===p.split('/')[3]);a.paused=body.paused;return json(res,200,{});}
+ if(p==='/api/admin/performance')return json(res,role==='admin'?200:403,role==='admin'?require('./performance_ui_fixture.cjs')(url.searchParams,empty):{detail:'Administrator access required.'});
  if(p==='/api/admin/spend')return json(res,200,spend);
  if(p==='/api/admin/pull-requests'){
   if(role!=='admin')return json(res,403,{detail:'Administrator access required.'});

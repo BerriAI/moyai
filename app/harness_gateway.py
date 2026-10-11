@@ -360,7 +360,7 @@ class HarnessGateway:
                  run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
-            request_id = self.spend.begin(run, model)
+            request_id = self.spend.begin(run, model, startup=not compact)
             stage = 'upstream'
             if not compact:
                 model_stage(request, stage, request_id=request_id)
