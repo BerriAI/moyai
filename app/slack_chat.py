@@ -520,38 +520,47 @@ class SlackChat:
             self.queue(conn, run_id, f'answer:{message_id}:{index}', 'answer', chunk + suffix, metadata)
 
     def collect(self):
+        # Each thread has its own cursor and deduplicated outbox. Release the
+        # global write lock between threads so historical Slack conversations
+        # cannot hold up every API, broker and worker write for the whole scan.
+        for row in self.store.rows('SELECT run_id FROM slack_threads ORDER BY run_id'):
+            self.collect_thread(row['run_id'])
+
+    def collect_thread(self, run_id):
         with self.store.connect() as conn:
             conn.begin_write()
-            # Revalidate after acquiring the write lock; a collector may have
-            # waited while an operator disabled Slack or replaced its identity.
+            # Re-read the binding and policy after acquiring the lock: it may
+            # have been removed, paused or disabled since the candidate scan.
+            binding = conn.execute("""SELECT t.*,r.status,r.updated_at,r.deleted_at,r.deletion_requested_at
+                FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?""", (run_id,)).fetchone()
+            if not binding:
+                return
             enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
             team = self.owner.connectors.slack_installation().get('team_id')
-            for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at,r.deletion_requested_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
-                run_id = binding['run_id']
-                allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
-                if not allowed:
-                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
-                self.collect_answers_in(conn, binding, allowed)
-                self.collect_progress_in(conn, binding, allowed)
-                if not allowed or binding['paused']:
-                    continue
-                for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
-                    self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
-                               'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
-                # A child can ask while the Slack-linked parent waits for it.
-                if 'credential_requests' in conn.table_names():
-                    self.owner.access.collect_in(conn, binding)
-                if binding['status'] == 'interrupted':
-                    # An injected input belongs to its parent's answer, while
-                    # an unstarted follow-up still needs its own stop notice.
-                    source = conn.execute("""SELECT m.id,a.id AS answer_id FROM messages m
-                        LEFT JOIN messages a ON a.run_id=m.run_id AND a.response_to_id=m.id
-                        WHERE m.run_id=? AND m.role='user'
-                        AND (m.steering_parent_id IS NULL OR m.started_at='')
-                        ORDER BY m.id DESC LIMIT 1""", (run_id,)).fetchone()
-                    key = (f"answer:{source['answer_id']}:outcome" if source and source['answer_id'] else
-                           f"interrupted:{run_id}:{source['id'] if source else binding['updated_at']}")
-                    self.queue(conn, run_id, key, 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
+            allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
+            if not allowed:
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
+            self.collect_answers_in(conn, binding, allowed)
+            self.collect_progress_in(conn, binding, allowed)
+            if not allowed or binding['paused']:
+                return
+            for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
+                self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
+                           'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
+            # A child can ask while the Slack-linked parent waits for it.
+            if 'credential_requests' in conn.table_names():
+                self.owner.access.collect_in(conn, binding)
+            if binding['status'] == 'interrupted':
+                # An injected input belongs to its parent's answer, while
+                # an unstarted follow-up still needs its own stop notice.
+                source = conn.execute("""SELECT m.id,a.id AS answer_id FROM messages m
+                    LEFT JOIN messages a ON a.run_id=m.run_id AND a.response_to_id=m.id
+                    WHERE m.run_id=? AND m.role='user'
+                    AND (m.steering_parent_id IS NULL OR m.started_at='')
+                    ORDER BY m.id DESC LIMIT 1""", (run_id,)).fetchone()
+                key = (f"answer:{source['answer_id']}:outcome" if source and source['answer_id'] else
+                       f"interrupted:{run_id}:{source['id'] if source else binding['updated_at']}")
+                self.queue(conn, run_id, key, 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
 
     def reconcile_sending(self) -> None:
         # The supported single process owns every live send. A lost receipt
