@@ -14,6 +14,7 @@ import sys
 
 from scripts.release.api_deploy import topology
 from scripts.release.deploy import (ACTIVE_DEPLOYS, BROKER, COORDINATOR, WORKER,
+                                    PROBE_FAILURES, PROBE_VALIDATION_STAGES, TRANSIENT_PROBE_FAILURES,
                                     Release, ReleaseError, SHARED_DEFAULTS, SHARED_KEYS)
 
 ROLES = ('api', 'worker', 'broker', 'coordinator')
@@ -95,7 +96,9 @@ class RollingRelease(Release):
         return item, owner
 
     def check_state(self, state, *, settled=False, schema=None):
-        if (not state.get('ok') or any(state.get(key) != self.baseline[key]
+        if not isinstance(state, dict) or state.get('ok') is not True:
+            raise ReleaseError('Runtime probe did not return verified state; release stopped.')
+        if (any(state.get(key) != self.baseline[key]
                 for key in ('policy', 'contracts'))
                 or state.get('schema') != (self.baseline['schema'] if schema is None else schema)):
             raise ReleaseError('Cluster policy, schema or compatibility contracts changed; release stopped.')
@@ -140,11 +143,39 @@ class RollingRelease(Release):
         for sid, service in self.expected.items():
             if sid == self.selected:
                 continue
-            state = self.probe(service)
+            state = self.required_state(service)
             self.check_state(state)
             if state.get('ready') is not True or state.get('identity') != self.identities[sid]:
                 raise ReleaseError('An unaffected service lost readiness or changed its process identity.')
             self.check_schema_support(state, sid)
+
+    def required_state(self, service):
+        # Only known read-only transport failures may retry. SSHMigration.run,
+        # Render PUT/POST, validated drift and explicit unready states do not.
+        for attempt in range(1, 4):
+            state = self.probe(service)
+            if isinstance(state, dict) and state.get('ok') is True:
+                if attempt > 1:
+                    self.check_control_plane()
+                return state
+            reason = state.get('reason') if isinstance(state, dict) else None
+            stage = state.get('stage') if isinstance(state, dict) else None
+            valid_stage = (reason == 'runtime_validation_failed' and isinstance(stage, str)
+                           and stage in PROBE_VALIDATION_STAGES)
+            classified = (isinstance(state, dict) and (set(state) == {'ok', 'reason'} or
+                          (set(state) == {'ok', 'reason', 'stage'} and valid_stage))
+                          and state['ok'] is False and isinstance(reason, str) and reason in PROBE_FAILURES)
+            reason = reason if classified else 'probe_output_invalid'
+            details = {'stage': stage} if classified and valid_stage else {}
+            self.record.setdefault('probe_failures', []).append(
+                {'role': service.role, 'reason': reason, 'attempt': attempt, **details})
+            self.save()
+            if reason not in TRANSIENT_PROBE_FAILURES or attempt == 3:
+                label = reason + (f':{stage}' if details else '')
+                raise ReleaseError(f'Read-only {service.role} probe failed ({label}) after {attempt} attempt(s); release stopped.')
+            self.log(f'Retrying read-only {service.role} probe ({reason}); attempt {attempt + 1} of 3.', flush=True)
+            self.sleep(2)
+            self.check_control_plane()
 
     def check_schema_support(self, state, sid, *, candidate=False):
         expected = self.candidate.get('schema_support') if candidate else self.schema_supports[sid]
@@ -193,7 +224,7 @@ class RollingRelease(Release):
         entry.update(status=receipt['status'], confirmed=True)
         self.save()
         self.check_control_plane()
-        states = {sid: self.probe(service) for sid, service in self.expected.items()}
+        states = {sid: self.required_state(service) for sid, service in self.expected.items()}
         for sid, state in states.items():
             self.check_state(state, schema=plan['to_revision'])
             if state.get('ready') is not True or state.get('identity') != self.identities[sid]:
@@ -303,7 +334,7 @@ class RollingRelease(Release):
                 if item_owner != owner or any(item.env.get(key, SHARED_DEFAULTS.get(key, '')) !=
                         coordinator.env.get(key, SHARED_DEFAULTS.get(key, '')) for key in SHARED_KEYS):
                     raise ReleaseError('Rolling services do not share the required configuration.')
-            states = {sid: self.probe(service) for sid, service in self.expected.items()}
+            states = {sid: self.required_state(service) for sid, service in self.expected.items()}
             if any(not state.get('ok') or state.get('ready') is not True or not state.get('identity')
                    for state in states.values()):
                 raise ReleaseError('Preflight readiness or rolling release support is missing; no changes made.')

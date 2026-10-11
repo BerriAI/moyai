@@ -23,6 +23,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from scripts.release.errors import ReleaseError
+
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = 'BerriAI/moyai'
 COORDINATOR = 'srv-db41eiqj9qps73fpuan0'
@@ -30,6 +32,11 @@ WORKER = 'srv-db4s0b142hec73epgpt0'
 BROKER = 'srv-db4tlsajnfac738gigb0'
 SERVICE_NAMES = {'coordinator': 'moyai-private', 'worker': 'moyai-worker', 'broker': 'moyai-broker', 'api': 'moyai-api'}
 MUTABLE = {'MOYAI_BUILD_SHA', 'MAINTENANCE_DRAIN', 'RENDER_MIGRATION_STAGE'}
+TRANSIENT_PROBE_FAILURES = {'ssh_timeout', 'ssh_connection_lost', 'database_unavailable'}
+PROBE_FAILURES = TRANSIENT_PROBE_FAILURES | {
+    'probe_request_invalid', 'ssh_failed', 'probe_output_invalid', 'database_error',
+    'health_unavailable', 'runtime_validation_failed'}
+PROBE_VALIDATION_STAGES = {'environment', 'configuration', 'snapshot', 'contracts', 'health_identity'}
 ACTIVE_DEPLOYS = {'created', 'queued', 'build_in_progress', 'pre_deploy_in_progress', 'update_in_progress'}
 FAILED_DEPLOYS = {'build_failed', 'pre_deploy_failed', 'update_failed', 'canceled', 'deactivated'}
 SHARED_KEYS = ('MOYAI_DATABASE_URL', 'MOYAI_DATABASE_SCHEMA', 'SESSION_SECRET', 'ENCRYPTION_KEY',
@@ -38,10 +45,6 @@ SHARED_KEYS = ('MOYAI_DATABASE_URL', 'MOYAI_DATABASE_SCHEMA', 'SESSION_SECRET', 
                'MAX_CONCURRENT_RUNS', 'MAX_PENDING_RUNS', 'MAX_CONCURRENT_MODEL_REQUESTS',
                'SANDBOX_PREPARED_POOL_SIZE', 'SANDBOX_PREPARED_IDLE_SECONDS')
 SHARED_DEFAULTS = {'SANDBOX_PREPARED_POOL_SIZE': '0', 'SANDBOX_PREPARED_IDLE_SECONDS': '300'}
-
-
-class ReleaseError(RuntimeError):
-    """Only fixed, credential-free messages may be used here."""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -207,7 +210,7 @@ class SSHProbe:
     def run(self, service: Service, options, *, marker, timeout=50, source=None):
         options = json.dumps(options, separators=(',', ':'))
         if len(options.encode()) > 65536:
-            return {'ok': False}
+            return {'ok': False, 'reason': 'probe_request_invalid'}
         # Both possible container UIDs retain the existing environment. Never
         # create a root-owned SQLite file or import app.main in this probe.
         command = ('cd /app && if [ "$(id -u)" = 0 ]; then exec runuser -u workspace -- '
@@ -222,12 +225,22 @@ class SSHProbe:
             result = subprocess.run(args, input=self.source.read_text() if source is None else source, text=True,
                                     capture_output=True, timeout=timeout)
             if result.returncode:
-                return {'ok': False}
+                stderr = getattr(result, 'stderr', '')
+                transient = (result.returncode == 255 and any(message in stderr for message in (
+                    'Connection timed out', 'Connection reset by peer', 'Connection refused', 'Connection closed by'))
+                    and not any(message in stderr for message in (
+                        'Permission denied', 'Host key verification failed', 'REMOTE HOST IDENTIFICATION HAS CHANGED')))
+                return {'ok': False, 'reason': 'ssh_connection_lost' if transient else 'ssh_failed'}
             lines = [line.removeprefix(marker) for line in result.stdout.splitlines()
                      if line.startswith(marker)]
-            return json.loads(lines[-1]) if len(lines) == 1 else {'ok': False}
-        except (subprocess.TimeoutExpired, ValueError, OSError):
-            return {'ok': False}
+            value = json.loads(lines[0]) if len(lines) == 1 else None
+            return value if isinstance(value, dict) else {'ok': False, 'reason': 'probe_output_invalid'}
+        except subprocess.TimeoutExpired:
+            return {'ok': False, 'reason': 'ssh_timeout'}
+        except ValueError:
+            return {'ok': False, 'reason': 'probe_output_invalid'}
+        except OSError:
+            return {'ok': False, 'reason': 'ssh_failed'}
 
 
 class Release:

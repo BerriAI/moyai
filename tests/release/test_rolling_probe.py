@@ -98,6 +98,99 @@ def response(role, *, status=200):
     return body
 
 
+@pytest.fixture
+def observed_probe(monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    from scripts.release import rolling_probe
+    calls = []
+    contracts = dict(zip(('api', 'worker', 'broker', 'coordinator'), (c * 64 for c in 'abcd')))
+    state = {'owners': ['42@start'], 'coordinators': [], 'brokers': [], 'broker_leaders': [],
+             'policy': 'f' * 64, 'schema': 18, 'contracts': dict(contracts)}
+    settings = SimpleNamespace(moyai_schema_mode='verify', moyai_separate_broker=True,
+        moyai_coordinator_handoff=True, temporal_enabled=True, moyai_database_url='private-dsn',
+        moyai_database_schema='synthetic', public_url='https://synthetic.example')
+    options = {'sha': 'a' * 40, 'role': 'worker', 'staged': False, 'drain': False,
+               'env_keys': [], 'env_digest': hashlib.sha256(b'{}').hexdigest()}
+    for key, value in {'RENDER_GIT_COMMIT': options['sha'], 'MOYAI_BUILD_SHA': options['sha'],
+            'MOYAI_RUNTIME_ROLE': 'worker', 'RENDER_MIGRATION_STAGE': 'false',
+            'MAINTENANCE_DRAIN': 'false', 'MOYAI_COORDINATOR_HANDOFF': 'true'}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr('render_start.configure_environment', lambda: None)
+    monkeypatch.setattr('app.config.Settings', lambda **kwargs: settings)
+    monkeypatch.setattr('app.runtime_compatibility.api_fingerprint', lambda _: contracts['api'])
+    monkeypatch.setattr('app.runtime_compatibility.background_fingerprint', lambda _, role: contracts[role])
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    monkeypatch.setattr(psycopg, 'connect', lambda *args, **kwargs: Connection())
+    def snapshot(*args):
+        calls.append('snapshot')
+        return dict(state)
+    monkeypatch.setattr(rolling_probe, 'snapshot', snapshot)
+    monkeypatch.setattr(rolling_probe, 'schema_capability', lambda *args: {
+        'schema_support': {'protocol': 1, 'required': 18, 'compatibility': 18}})
+    def health(*args, **kwargs):
+        calls.append('health')
+        return response('worker')
+    monkeypatch.setattr(rolling_probe.urllib.request, 'urlopen', health)
+    return rolling_probe, options, state, calls
+
+
+@pytest.mark.parametrize('error,reason', [
+    (psycopg.errors.ConnectionFailure, 'database_unavailable'),
+    (psycopg.errors.AdminShutdown, 'database_unavailable'),
+    (psycopg.errors.InvalidPassword, 'database_error'),
+    (psycopg.OperationalError, 'database_error'),
+    (psycopg.errors.QueryCanceled, 'database_error'),
+])
+def test_only_classified_connection_establishment_failures_can_retry(observed_probe, monkeypatch, capsys, error, reason):
+    module, options, _, calls = observed_probe
+    def connect(*args, **kwargs): raise error('private-diagnostic')
+    monkeypatch.setattr(psycopg, 'connect', connect)
+    assert module.result(options) == {'ok': False, 'reason': reason}
+    assert calls == [] and capsys.readouterr() == ('', '')
+
+
+@pytest.mark.parametrize('stage', ['snapshot', 'schema_capability', 'health'])
+def test_errors_after_observation_begins_are_terminal_even_when_transport_is_transient(
+        observed_probe, monkeypatch, stage):
+    from scripts.release.deploy import TRANSIENT_PROBE_FAILURES
+    module, options, state, calls = observed_probe
+    state['policy'] = '0' * 64  # A later healthy sample must not hide this observation.
+    def failed(*args, **kwargs):
+        if stage == 'health': raise TimeoutError('private-diagnostic')
+        raise psycopg.errors.QueryCanceled('private-diagnostic')
+    if stage == 'health': monkeypatch.setattr(module.urllib.request, 'urlopen', failed)
+    else: monkeypatch.setattr(module, stage, failed)
+    value = module.result(options)
+    assert value == {'ok': False, 'reason': 'health_unavailable' if stage == 'health' else 'database_error'}
+    assert value['reason'] not in TRANSIENT_PROBE_FAILURES
+    assert calls == ([] if stage == 'snapshot' else ['snapshot'])
+
+
+@pytest.mark.parametrize('change', ['environment', 'configuration', 'snapshot', 'contracts', 'health_identity', 'health_unready', 'none'])
+def test_validated_runtime_checks_do_not_become_retryable_failures(observed_probe, monkeypatch, change):
+    module, options, state, _ = observed_probe
+    if change == 'environment': monkeypatch.setenv('MOYAI_BUILD_SHA', 'b' * 40)
+    elif change in {'configuration', 'snapshot'}:
+        def failed(*args, **kwargs): raise ValueError('private-diagnostic')
+        if change == 'configuration': monkeypatch.setattr('app.config.Settings', failed)
+        else: monkeypatch.setattr(module, 'snapshot', failed)
+    elif change == 'contracts': state['contracts']['worker'] = '0' * 64
+    elif change == 'health_identity':
+        body = response('worker')
+        body.headers.replace_header('X-Moyai-Build', 'b' * 40)
+        monkeypatch.setattr(module.urllib.request, 'urlopen', lambda *args, **kwargs: body)
+    elif change == 'health_unready':
+        monkeypatch.setattr(module.urllib.request, 'urlopen', lambda *args, **kwargs: response('worker', status=503))
+    value = module.result(options)
+    if change in {'none', 'health_unready'}:
+        assert value['ok'] is True and value['ready'] is (change == 'none')
+    else:
+        assert value == {'ok': False, 'reason': 'runtime_validation_failed', 'stage': change}
+
+
 @pytest.mark.parametrize('role', ['api', 'worker', 'broker', 'coordinator'])
 @pytest.mark.parametrize('status', [200, 503])
 def test_health_is_bound_to_exact_build_role_and_database_process(role, status):
