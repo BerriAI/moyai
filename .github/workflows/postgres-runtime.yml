@@ -91,6 +91,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Verify scheduling under Postgres contention and real Temporal restart
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_scheduling_diagnostics.py tests/test_temporal_integration.py tests/test_active_steering.py tests/test_steering_latency.py tests/test_automation_environments.py tests/test_automation_parity.py tests/test_automation_temporal.py
+      - name: Verify Deep Agents session continuation and recovery on Postgres
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_deepagents_runtime.py
       - name: Demonstrate responsive scheduling during Postgres writer and pool waits
         run: uv run --frozen --python 3.13 python scripts/scheduling_stall_demo.py
 

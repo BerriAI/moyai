@@ -946,10 +946,14 @@ def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(
     finish(app, run_id, 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>. Not <@U00000001>, <@U99999999>, <!channel> or `<@U0B1TDTHL4Q>`')
     app.state.slack.chat.last_post.clear()
     client.portal.call(app.state.slack.chat.deliver_one)
-    text = sent[-1]['text']
+    # Status/activity requests can complete after the answer. Inspect the
+    # answer itself rather than whichever Slack request happened to finish last.
+    wait_for(lambda: any(item.get('text', '').startswith('Credit to ') for item in sent))
+    answer = next(item for item in sent if item.get('text', '').startswith('Credit to '))
+    text = answer['text']
     assert 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>.' in text
     assert 'Not &lt;@U00000001&gt;, &lt;@U99999999&gt;, &lt;!channel&gt; or `&lt;@U0B1TDTHL4Q&gt;`' in text
-    assert sent[-1]['blocks'][0]['text']['text'].startswith('Credit to <@U0B1TDTHL4Q>')
+    assert answer['blocks'][0]['text']['text'].startswith('Credit to <@U0B1TDTHL4Q>')
 
 
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):

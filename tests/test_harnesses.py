@@ -17,27 +17,31 @@ from test_slack_chat import send
 OPUS = 'anthropic/claude-opus-5-5'
 
 
-def test_session_harness_validation_persistence_and_idempotency(workspace, monkeypatch):
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'deepagents'])
+def test_session_harness_validation_persistence_and_idempotency(workspace, monkeypatch, harness):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     assert len(client.get('/api/config').json()['harnesses']) == 8
     assert client.post('/api/runs', json={'prompt': 'bad choice', 'harness': 'unknown'}).status_code == 422
     assert client.post('/api/runs', json={'prompt': 'bad model', 'harness': 'claude-agent-sdk', 'model': 'unconfigured/model'}).status_code == 422
-    body = {'prompt': 'SDK task', 'harness': 'claude-agent-sdk', 'model': OPUS, 'client_id': 'harness-test-1'}
+    body = {'prompt': 'SDK task', 'harness': harness, 'model': OPUS, 'client_id': 'harness-test-1'}
     response = client.post('/api/runs', json=body)
     assert response.status_code == 201, response.text
     run = response.json()
-    assert run['harness'] == 'claude-agent-sdk'
+    assert run['harness'] == harness
     assert client.post('/api/runs', json=body).json()['id'] == run['id']
     assert client.post('/api/runs', json={**body, 'harness': 'hermes'}).status_code == 409
+    # Changing the default must not migrate saved sessions or their followups.
+    use_model_defaults(app.state.settings)
     reopened = Store(app.state.settings.data_dir)
-    assert reopened.run(run['id'])['harness'] == 'claude-agent-sdk'
+    assert reopened.run(run['id'])['harness'] == harness
+    reopened.close()
     endpoint = f"/api/runs/{run['id']}/messages"
     assert client.post(endpoint, json={'content': 'follow up', 'client_id': 'harness-followup-astra', 'model': 'astra'}).status_code == 202
     assert client.post(endpoint, json={'content': 'follow up', 'client_id': 'harness-followup'}).status_code == 202
-    assert app.state.manager.spec(app.state.store.run(run['id']))['harness'] == 'claude-agent-sdk'
-    legacy = client.post('/api/runs', json={'prompt': 'default task'}).json()
-    assert legacy['harness'] == 'hermes'
+    assert app.state.manager.spec(app.state.store.run(run['id']))['harness'] == harness
+    fresh = client.post('/api/runs', json={'prompt': 'default task'}).json()
+    assert fresh['harness'] == 'deepagents-temporal'
 
 
 def test_slack_harness_command_and_followups(slack_app):

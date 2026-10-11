@@ -92,10 +92,15 @@ class DeferredWorker:
 
 
 @pytest.mark.parametrize('failure', [False, True])
-async def test_worker_readiness_waits_for_asynchronous_validation(cluster, monkeypatch, failure):
+@pytest.mark.parametrize('pending_pool', ['controller', 'agent'])
+async def test_worker_readiness_waits_for_asynchronous_validation(cluster, monkeypatch, failure, pending_pool):
     _, settings = cluster
     worker = DeferredWorker(failure=failure)
-    monkeypatch.setattr(TemporalRunManager, 'make_worker', lambda *args: worker)
+    ready_worker = DeferredWorker()
+    ready_worker.validated.set()
+    controller, agent = (worker, ready_worker) if pending_pool == 'controller' else (ready_worker, worker)
+    monkeypatch.setattr(TemporalRunManager, 'make_worker', lambda *args: controller)
+    monkeypatch.setattr(TemporalRunManager, 'make_agent_worker', lambda *args: agent)
     app = main.create_app(worker_settings(settings, temporal_startup_timeout_seconds=1))
     manager = app.state.manager
     try:
@@ -110,7 +115,7 @@ async def test_worker_readiness_waits_for_asynchronous_validation(cluster, monke
             assert not manager.ready.is_set()
         else:
             await manager.wait_ready()
-            assert worker.is_running
+            assert controller.is_running and agent.is_running
     finally:
         worker.validated.set()
         await asyncio.wait_for(manager.shutdown(), 2)
@@ -118,10 +123,15 @@ async def test_worker_readiness_waits_for_asynchronous_validation(cluster, monke
         app.state.store.close()
 
 
-async def test_startup_timeout_cancels_worker_stuck_in_validation(cluster, monkeypatch):
+@pytest.mark.parametrize('pending_pool', ['controller', 'agent'])
+async def test_startup_timeout_cancels_worker_stuck_in_validation(cluster, monkeypatch, pending_pool):
     _, settings = cluster
     worker = DeferredWorker()
-    monkeypatch.setattr(TemporalRunManager, 'make_worker', lambda *args: worker)
+    ready_worker = DeferredWorker()
+    ready_worker.validated.set()
+    controller, agent = (worker, ready_worker) if pending_pool == 'controller' else (ready_worker, worker)
+    monkeypatch.setattr(TemporalRunManager, 'make_worker', lambda *args: controller)
+    monkeypatch.setattr(TemporalRunManager, 'make_agent_worker', lambda *args: agent)
     app = main.create_app(worker_settings(settings, temporal_startup_timeout_seconds=1))
     manager = app.state.manager
     try:
@@ -129,9 +139,11 @@ async def test_startup_timeout_cancels_worker_stuck_in_validation(cluster, monke
         with pytest.raises(RuntimeError, match='startup deadline'):
             await manager.wait_ready()
         await asyncio.wait_for(manager.shutdown(), 2)
-        assert manager.worker_task.cancelled()
+        pending_task = manager.worker_task if pending_pool == 'controller' else manager.agent_worker_task
+        assert pending_task.cancelled()
         assert worker.shutdown_calls == 0
         assert worker.finished.is_set()
+        assert ready_worker.shutdown_calls == 1 and ready_worker.finished.is_set()
     finally:
         worker.validated.set()
         await asyncio.wait_for(manager.shutdown(), 2)

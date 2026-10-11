@@ -12,7 +12,7 @@ from app.environments import Environments, EnvironmentPending
 from app.temporal_runtime import TemporalRunManager
 from app.db import Store
 from test_environment_discovery import connections, environments, new_run
-from test_durable import durable
+from test_durable import durable, sandbox_harness_catalog
 from test_agents import attach
 from test_environments import recipe
 
@@ -76,9 +76,10 @@ async def test_missing_and_cyclic_shared_dependencies_are_explicit(environments)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('outcome', ['ready', 'failed', 'stopped'])
-async def test_real_swarm_bootstrap_waits_without_worker_computers_and_survives_restart(durable, outcome):
+async def test_legacy_swarm_bootstrap_waits_without_worker_computers_and_survives_restart(durable, sandbox_harness_catalog, outcome):
     manager, cloud, _ = durable
     attach(manager)
+    manager.settings.independent_agent_runtime = False  # Exercise computer-bound saved runtimes.
     manager.settings.modal_token_id = manager.settings.modal_token_secret = 'test'
     env = Environments(manager.store, manager.settings, None, manager, connections(), SimpleNamespace(flush=AsyncMock()))
     manager.environments = env

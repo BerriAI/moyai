@@ -7,8 +7,8 @@ dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
   "httpx>=0.28,<1",
-  "openai-agents==0.17.3",
-  # Compatible SDK usage schema; covered by real SDK transport tests.
+  # Session titles also use this SDK; keep its usage schema compatible with OpenAI.
+  "openai-agents==0.20.0",
   "openai==2.54.0",
   "cryptography>=44",
   "pydantic-settings>=2.8,<3",

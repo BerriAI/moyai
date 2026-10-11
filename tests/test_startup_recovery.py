@@ -272,7 +272,7 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
             assert self.headers['Authorization'] == 'Bearer test-token'
             reads.append(started())
             unavailable = outcome == 'exhausted' or (outcome == 'transient' and len(reads) == 1) or (
-                outcome == 'late' and len(reads) > 1)
+                outcome == 'late' and started())
             self.send_response(int(outcome) if outcome in {'401', '403'} else 502 if unavailable else 200)
             self.end_headers()
             self.wfile.write(json.dumps({'input_budget': 0 if outcome == 'invalid' else
@@ -329,10 +329,14 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
                 assert final['startup_retry'] == {'version': 1, 'stage': 'context_window', 'reason': 'HTTP 502'}
                 assert reads == [0] and not invocations
             elif outcome in {'control', 'timeout'}:
-                assert not invocations and len(reads) == (0 if outcome == 'control' else 1)
+                assert not invocations
+                assert not reads if outcome == 'control' else reads and not any(reads)
             else:
                 assert invocations == ([64000, 32000] if outcome == 'followup' else [64000])
-                assert reads == ([0, 0] if outcome == 'transient' else [0, 1])
+                # Skill catalog initialization may also read the budget. Every
+                # startup read must precede execution; continuation reads must
+                # follow it. Do not couple this contract to the number of GETs.
+                assert reads and not any(reads) if outcome == 'transient' else reads[-1] == 1 and not any(reads[:-1])
                 store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
                 try:
                     assert 'saved-receipt' in json.dumps(store.history()) and not store.pending

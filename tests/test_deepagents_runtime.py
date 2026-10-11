@@ -396,6 +396,58 @@ async def test_default_engine_uses_real_broker_skills_and_settles_answer_without
         assert store.rows('SELECT 1 FROM session_items WHERE run_id=?', (run['id'],))
 
 
+@pytest.mark.parametrize('actor,model_name', [('owner', 'test-model'), ('collaborator', 'anthropic/claude-opus-5-5')])
+async def test_queued_followup_keeps_history_and_rotates_capability(durable_app, actor, model_name):
+    manager, store = durable_app.state.manager, durable_app.state.store
+    manager.settings.model_context_limits[model_name] = manager.settings.model_context_limits['test-model']
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def model(scope, messages, settings, parameters):
+        calls.append((scope, str(messages), manager.token(scope.run_id, scope.message_id)))
+        if len(calls) == 1:
+            entered.set()
+            await release.wait()
+            return AIMessage(content='The first answer is saved.')
+        assert 'The first answer is saved.' in str(messages)
+        assert 'Continue with the saved answer.' in str(messages)
+        return AIMessage(content='The followup is complete.')
+
+    manager.deepagents_runtime.model_request = model
+    run = store.create_run('Answer the first request.', '', 'modal', [], chat_enabled=True,
+        harness='deepagents-temporal', model='test-model', user_id='owner')
+    manager.submit(run)
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        manager.temporal = configured_client(env.client, DataConverter(payload_codec=PrivatePayloadCodec(manager.payloads)))
+        async with manager.make_worker(manager.temporal), manager.make_agent_worker(manager.temporal):
+            try:
+                await drive_session(manager, run['id'], lambda state: entered.is_set())
+                args = (run['id'], 'Continue with the saved answer.', 'followup-once', model_name)
+                followup, created = store.enqueue_message(*args, user_id=actor)
+                assert created
+                assert not store.enqueue_message(*args, user_id=actor)[1]
+                manager.submit(store.run(run['id']))
+            finally:
+                release.set()
+            # A completed turn briefly becomes idle before the controller
+            # claims its queued successor. Drive both turns to settlement.
+            await drive_session(manager, run['id'], lambda state:
+                state.get('phase') == 'idle' and not store.has_queued_messages(run['id']))
+
+    assert len(calls) == 2
+    first, second = calls
+    assert second[0].message_id == followup['id'] != first[0].message_id
+    assert (second[0].actor_id, second[0].model) == (actor, model_name)
+    assert second[2] != first[2]
+    messages = store.messages(run['id'])
+    assert [m['content'] for m in messages if m['role'] == 'assistant'] == [
+        'The first answer is saved.', 'The followup is complete.']
+    assert all(m['status'] == 'completed' for m in messages)
+    assert store.run(run['id'])['harness'] == 'deepagents-temporal'
+    assert store.run(run['id'])['token_hash'] == ''
+    assert not store.has_queued_messages(run['id'])
+
+
 async def test_credential_wait_resumes_saved_turn_and_acknowledges_resolution(durable_app):
     from app.credentials import Resolve
     manager, store = durable_app.state.manager, durable_app.state.store
@@ -422,6 +474,42 @@ async def test_credential_wait_resumes_saved_turn_and_acknowledges_resolution(du
         manager.credentials.reconcile_resolutions(run['id'])
         assert not store.rows("SELECT id FROM messages WHERE run_id=? AND status='queued'", (run['id'],))
         assert store.rows('SELECT status FROM messages WHERE id=?', (message_id,))[0]['status'] == 'completed'
+
+
+async def test_child_wait_resumes_parent_once_with_saved_results(durable_app):
+    manager, store = durable_app.state.manager, durable_app.state.store
+    calls = []
+
+    async def model(scope, messages, settings, parameters):
+        calls.append(scope.run_id)
+        if store.run(scope.run_id)['parent_run_id']:
+            return AIMessage(content='The child verified its assignment.')
+        if 'PARALLEL WORKERS HAVE SETTLED' in str(messages):
+            assert 'The child verified its assignment.' in str(messages)
+            return AIMessage(content='The parent integrated the saved result.')
+        return AIMessage(content='', tool_calls=[{'name': 'workspace_call', 'args': {
+            'name': 'agents_fanout', 'arguments_json': json.dumps({'request_key': 'one-child', 'wait': True,
+                'tasks': [{'label': 'Verification', 'prompt': 'Verify the assigned result.'}]})}, 'id': 'fanout'}])
+
+    manager.deepagents_runtime.model_request = model
+    run = store.create_run('Delegate verification and integrate the result.', '', 'modal', [], chat_enabled=True,
+        harness='deepagents-temporal', model='test-model', user_id='owner')
+    manager.submit(run)
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        manager.temporal = configured_client(env.client, DataConverter(payload_codec=PrivatePayloadCodec(manager.payloads)))
+        async with manager.make_worker(manager.temporal), manager.make_agent_worker(manager.temporal):
+            waiting = await drive_session(manager, run['id'], lambda state: state.get('phase') == 'waiting_children')
+            children = manager.coordinator.children(waiting['wait_group'])
+            assert len(children) == 1 and children[0]['harness'] == 'deepagents-temporal'
+            assert not store.run(run['id'])['token_hash']
+            await drive_session(manager, children[0]['id'])
+            await drive_session(manager, run['id'])
+    assert calls == [run['id'], children[0]['id'], run['id']]
+    assert len(manager.coordinator.children(waiting['wait_group'])) == 1
+    assert store.run(run['id'])['summary'] == 'The parent integrated the saved result.'
+    assert store.run(run['id'])['status'] == 'idle'
+    assert store.run(children[0]['id'])['summary'] == 'The child verified its assignment.'
+    assert not store.run(run['id'])['sandbox_id']
 
 
 async def test_private_checkpoint_is_rebuilt_from_public_journal(durable_app):
