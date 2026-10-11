@@ -1,4 +1,4 @@
-"""Opt-in owner DMs, independent of a session's Slack conversation binding.
+"""Default-on owner DMs for sessions outside Slack.
 
 Only current, durable attention states are eligible. Preparing a DM is safe to
 retry; a message whose Slack receipt is lost is never replayed automatically.
@@ -29,7 +29,7 @@ class SlackNotifications:
         if not user:
             return None
         if user['kind'] == 'slack' and user['linked_user_id']:
-            # A spend override alone does not opt another person into DMs.
+            # A spend override alone does not transfer notification preferences.
             linked = conn.execute("SELECT * FROM users WHERE id=? AND kind IN ('google','cloudflare')", (user['linked_user_id'],)).fetchone()
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(user['profile_checked_at'])).total_seconds()
@@ -39,6 +39,9 @@ class SlackNotifications:
                     and user['link_status'] in {'linked', 'manual'} and user['email']
                     and user['email'] == linked['email']):
                 return linked['id']
+            # Do not fall back to a default-enabled Slack preference while a
+            # linked account's opt-out cannot be safely resolved.
+            return None
         return user['id'] if user['kind'] in {'google', 'cloudflare', 'slack'} else None
 
     def signal_in(self, conn, run):
@@ -84,8 +87,9 @@ class SlackNotifications:
 
     def queue_in(self, conn, run, signal, user_id, team_id, status):
         preference = conn.execute('SELECT slack_notifications_since FROM user_preferences WHERE user_id=?', (user_id,)).fetchone()
-        if preference and signal[4] < preference['slack_notifications_since']:
-            status = 'skipped'  # Covers Slack identities first linked after opt-in.
+        rollout = conn.execute('SELECT enabled_since FROM slack_notification_state WHERE id=1').fetchone()
+        if signal[4] < rollout['enabled_since'] or (preference and signal[4] < preference['slack_notifications_since']):
+            status = 'skipped'  # Neither rollout nor re-enabling replays historical events.
         conn.execute('''INSERT INTO slack_notifications
             (run_id,event_key,target_run_id,user_id,owner_id,team_id,status,created_at)
             VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,event_key) DO NOTHING''',
@@ -110,30 +114,25 @@ class SlackNotifications:
 
     def enabled_in(self, conn, run, user_id):
         preference = conn.execute('SELECT slack_notifications FROM user_preferences WHERE user_id=?', (user_id,)).fetchone()
-        paused = conn.execute('SELECT paused FROM slack_threads WHERE run_id=?', (run['id'],)).fetchone()
-        return (preference and preference['slack_notifications']
-                and self.preference_owner_in(conn, run) == user_id and not (paused and paused['paused']))
+        on_slack = conn.execute('''SELECT 1 FROM slack_threads WHERE run_id=?
+            UNION ALL SELECT 1 FROM slack_events WHERE run_id=? LIMIT 1''', (run['id'], run['id'])).fetchone()
+        return ((not preference or preference['slack_notifications']) and not on_slack
+                and self.preference_owner_in(conn, run) == user_id)
 
     def collect(self):
         bot, allowed = self.installation()
         with self.store.connect() as conn:
             conn.begin_write()
-            # No scan or provider requests when nobody has opted in.
-            users = {row['user_id'] for row in conn.execute('SELECT user_id FROM user_preferences WHERE slack_notifications=1')}
-            if not users:
-                return
-            for run in conn.execute("""SELECT r.* FROM runs r WHERE r.parent_run_id=''
-                AND r.deleted_at='' AND r.deletion_requested_at='' AND EXISTS(
-                    SELECT 1 FROM users u JOIN user_preferences p
-                    ON p.user_id=u.id OR p.user_id=u.linked_user_id
-                    WHERE u.id=r.owner_id AND p.slack_notifications=1)""").fetchall():
+            for run in conn.execute("""SELECT r.* FROM runs r JOIN users u ON u.id=r.owner_id
+                WHERE r.parent_run_id='' AND r.deleted_at='' AND r.deletion_requested_at=''
+                AND u.kind IN ('google','cloudflare','slack')""").fetchall():
                 user_id = self.preference_owner_in(conn, run)
-                if user_id not in users:
+                if not user_id or not self.enabled_in(conn, run, user_id):
                     continue
                 signal = self.signal_in(conn, run)
                 if signal:
                     self.queue_in(conn, run, signal, user_id, bot.get('team_id') or '',
-                                  'pending' if allowed and self.enabled_in(conn, run, user_id) else 'skipped')
+                                  'pending' if allowed else 'skipped')
 
     def current(self, row):
         bot, allowed = self.installation()
@@ -269,3 +268,8 @@ def initialize_schema(store):
             UNIQUE(run_id,event_key)
         );
         CREATE INDEX IF NOT EXISTS idx_slack_notifications_pending ON slack_notifications(status,retry_at,id);''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS slack_notification_state (
+            id INTEGER PRIMARY KEY CHECK(id=1), enabled_since TEXT NOT NULL)''')
+        # Persist once at rollout, including when no one has saved preferences.
+        # Restarts must still deliver new events created while the worker was down.
+        conn.execute('INSERT INTO slack_notification_state VALUES(1,?) ON CONFLICT(id) DO NOTHING', (now(),))

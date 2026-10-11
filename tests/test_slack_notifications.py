@@ -42,7 +42,6 @@ def notifications(tmp_path, monkeypatch):
 
     original = httpx.AsyncClient
     monkeypatch.setattr('app.connectors.httpx.AsyncClient', lambda **kw: original(transport=httpx.MockTransport(transport), **kw))
-    app.state.user_preferences.save('google:alice', {'slack_notifications': True})
     yield app, requests
     store.close()
 
@@ -70,6 +69,8 @@ async def poll(app):
 
 async def test_web_owner_gets_one_dm_with_session_link_even_after_other_participant_replies(notifications):
     app, requests = notifications
+    assert not app.state.store.rows('SELECT * FROM user_preferences')
+    assert app.state.user_preferences.get('google:alice')['slack_notifications'] is True
     run_id, message_id = create(app)
     app.state.store.execute("UPDATE runs SET active_user_id='google:bob' WHERE id=?", (run_id,))
     finish(app, run_id, message_id)
@@ -96,10 +97,113 @@ async def test_no_historical_backfill_and_preference_is_personal(notifications):
     first, turn = create(app)
     finish(app, first, turn)
     app.state.user_preferences.save('google:alice', {'slack_notifications': True})
+    app.state.user_preferences.save('google:bob', {'slack_notifications': False})
     other, turn = create(app, 'google:bob')
     finish(app, other, turn)
     await poll(app)
     assert not posts(requests)
+
+
+@pytest.mark.parametrize('origin', ['thread', 'paused_thread', 'legacy_event'])
+@pytest.mark.parametrize('state', ['ready', 'approval', 'failed'])
+async def test_slack_conversations_do_not_get_extra_owner_dms(notifications, origin, state):
+    app, requests = notifications
+    run_id, turn = create(app)
+    bind_slack(app, run_id, origin)
+    if state == 'approval':
+        app.state.store.execute("INSERT INTO approvals VALUES('approval1',?,'test','{}','pending',?,'')", (run_id, now()))
+    else:
+        finish(app, run_id, turn, 'completed' if state == 'ready' else state)
+    await poll(app)
+    assert not requests
+    assert not app.state.store.rows('SELECT * FROM slack_notifications')
+
+
+def bind_slack(app, run_id, origin):
+    if origin == 'legacy_event':
+        app.state.store.execute('''INSERT INTO slack_events
+            (event_id,run_id,channel,thread_ts,user_id,created_at) VALUES(?,?,'C12345678','1.0','U12345678',?)''',
+            ('event-' + run_id, run_id, now()))
+    else:
+        app.state.store.execute('''INSERT INTO slack_threads
+            (team_id,channel,thread_ts,run_id,started_ts,paused) VALUES('T12345678','C12345678','1.0',?,'1.0',?)''',
+            (run_id, int(origin == 'paused_thread')))
+
+
+@pytest.mark.parametrize('origin', ['thread', 'legacy_event'])
+async def test_slack_binding_added_during_delivery_suppresses_queued_dm(notifications, monkeypatch, origin):
+    app, requests = notifications
+    run_id, turn = create(app)
+    finish(app, run_id, turn)
+    original = app.state.connectors.request
+
+    async def request(method, url, **kwargs):
+        result = await original(method, url, **kwargs)
+        if url.endswith('conversations.open'):
+            bind_slack(app, run_id, origin)
+        return result
+
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    await poll(app)
+    assert not posts(requests)
+    assert app.state.store.rows('SELECT status FROM slack_notifications')[0]['status'] == 'skipped'
+
+
+async def test_default_rollout_skips_old_events_but_restart_keeps_new_events(notifications):
+    from app.slack_notifications import initialize_schema
+    app, requests = notifications
+    store = app.state.store
+    old, turn = create(app)
+    finish(app, old, turn)
+    # Model migration of a pre-feature database that already contains an answer.
+    store.execute('DROP TABLE slack_notification_state')
+    initialize_schema(store)
+    cutoff = store.rows('SELECT * FROM slack_notification_state')
+    await poll(app)
+    assert not requests
+    current, turn = create(app)
+    finish(app, current, turn)
+    initialize_schema(store)  # A restart must not move the durable cutoff.
+    assert store.rows('SELECT * FROM slack_notification_state') == cutoff
+    await poll(app)
+    assert len(posts(requests)) == 1
+    assert posts(requests)[0]['blocks'][3]['elements'][0]['url'].endswith(current)
+
+
+async def test_first_save_of_unrelated_preference_keeps_default_notifications(notifications):
+    app, requests = notifications
+    app.state.user_preferences.save('google:alice', {'send_immediately': True})
+    run_id, turn = create(app)
+    finish(app, run_id, turn)
+    await poll(app)
+    assert len(posts(requests)) == 1
+
+
+async def test_explicit_opt_out_suppresses_new_web_events_and_survives_other_saves(notifications):
+    app, requests = notifications
+    app.state.user_preferences.save('google:alice', {'slack_notifications': False})
+    app.state.user_preferences.save('google:alice', {'send_immediately': True})
+    run_id, turn = create(app)
+    finish(app, run_id, turn)
+    await poll(app)
+    assert not requests
+    assert app.state.user_preferences.get('google:alice')['slack_notifications'] is False
+    assert app.state.user_preferences.get('google:bob')['slack_notifications'] is True
+
+
+@pytest.mark.parametrize('checked_at', [now(), '2000-01-01T00:00:00+00:00'])
+async def test_linked_account_opt_out_never_falls_back_to_slack_default(notifications, checked_at):
+    app, requests = notifications
+    store = app.state.store
+    with store.connect() as conn:
+        actor = store.slack_identity_in(conn, 'T12345678', 'U12345678')
+        conn.execute("""UPDATE users SET linked_user_id='google:alice',email='alice@berri.ai',
+            profile_eligible=1,profile_checked_at=?,link_status='linked' WHERE id=?""", (checked_at, actor))
+    app.state.user_preferences.save('google:alice', {'slack_notifications': False})
+    run_id, turn = create(app, actor)
+    finish(app, run_id, turn)
+    await poll(app)
+    assert not requests
 
 
 async def test_later_linking_a_slack_owner_does_not_backfill_old_answers(notifications):
@@ -297,7 +401,7 @@ def test_personal_toggle_persists_without_overwriting_other_preferences(notifica
     assert saved.status_code == 200
     assert saved.json()['slack_notifications'] is True and saved.json()['send_immediately'] is True
     sign_in(app, client, 'bob', 'bob@berri.ai')
-    assert client.get('/api/settings/preferences').json()['slack_notifications'] is False
+    assert client.get('/api/settings/preferences').json()['slack_notifications'] is True
 
 
 def test_shared_login_cannot_enable_personal_notifications(notifications):

@@ -9,7 +9,7 @@ class ChatPreferences(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     send_immediately: bool = False
     omit_private_tool_payloads: bool = False
-    slack_notifications: bool = False
+    slack_notifications: bool = True
 
 
 class UserPreferences:
@@ -20,8 +20,13 @@ class UserPreferences:
             initialize_schema(store)
 
     def get(self, user_id):
-        rows = self.store.rows('SELECT * FROM user_preferences WHERE user_id=?', (user_id,))
-        return {name: bool(rows and rows[0][name]) for name in ChatPreferences.model_fields}
+        rows = self.store.rows('''SELECT u.kind,p.* FROM users u LEFT JOIN user_preferences p
+            ON p.user_id=u.id WHERE u.id=?''', (user_id,))
+        values = {name: bool(rows[0][name]) if rows and rows[0][name] is not None else field.default
+                  for name, field in ChatPreferences.model_fields.items()}
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'slack'}:
+            values['slack_notifications'] = False
+        return values
 
     def for_run(self, run):
         message_id = run.get('active_message_id') or run.get('message_id')
@@ -57,19 +62,22 @@ class UserPreferences:
         with self.store.connect() as conn:
             conn.begin_write()
             user = conn.execute('SELECT kind FROM users WHERE id=?', (user_id,)).fetchone()
-            if changes.get('slack_notifications') and (not user or user['kind'] not in {'google', 'cloudflare', 'slack'}):
+            personal = bool(user and user['kind'] in {'google', 'cloudflare', 'slack'})
+            if changes.get('slack_notifications') and not personal:
                 raise HTTPException(400, 'Sign in with your work account to receive personal Slack notifications.')
             previous = conn.execute('SELECT slack_notifications FROM user_preferences WHERE user_id=?', (user_id,)).fetchone()
+            was_enabled = bool(previous['slack_notifications']) if previous else personal
             # Only validated fields enter SQL; independent switches retain each other's values.
-            columns = ','.join(changes)
+            inserts = {'slack_notifications': personal, **changes}
+            columns = ','.join(inserts)
             updates = ','.join(f'{key}=excluded.{key}' for key in changes)
             conn.execute(f'''INSERT INTO user_preferences(user_id,{columns})
-                VALUES(?,{','.join('?' for _ in changes)})
-                ON CONFLICT(user_id) DO UPDATE SET {updates}''', (user_id, *changes.values()))
-            if changes.get('slack_notifications') and not (previous and previous['slack_notifications']):
+                VALUES(?,{','.join('?' for _ in inserts)})
+                ON CONFLICT(user_id) DO UPDATE SET {updates}''', (user_id, *inserts.values()))
+            if changes.get('slack_notifications') and not was_enabled:
                 conn.execute('UPDATE user_preferences SET slack_notifications_since=? WHERE user_id=?', (now(), user_id))
             if (self.notifications and 'slack_notifications' in changes
-                    and bool(previous and previous['slack_notifications']) != changes['slack_notifications']):
+                    and was_enabled != changes['slack_notifications']):
                 self.notifications.preferences_changed_in(conn, user_id, changes['slack_notifications'])
 
 
@@ -84,6 +92,6 @@ def initialize_schema(store):
                 INTEGER NOT NULL DEFAULT 0 CHECK(omit_private_tool_payloads IN (0,1))''')
         if 'slack_notifications' not in conn.column_names('user_preferences'):
             conn.execute('''ALTER TABLE user_preferences ADD COLUMN slack_notifications
-                INTEGER NOT NULL DEFAULT 0 CHECK(slack_notifications IN (0,1))''')
+                INTEGER NOT NULL DEFAULT 1 CHECK(slack_notifications IN (0,1))''')
         if 'slack_notifications_since' not in conn.column_names('user_preferences'):
             conn.execute("ALTER TABLE user_preferences ADD COLUMN slack_notifications_since TEXT NOT NULL DEFAULT ''")

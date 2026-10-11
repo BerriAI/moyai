@@ -1,7 +1,7 @@
 """Local notification demo using real preferences, sessions and delivery worker.
 
 Run: uv run python scripts/slack_notifications_demo.py --port 8846
-Open /demo/login, enable notifications in Settings, then open /demo/notifications.
+Open /demo/login, then /demo/notifications. Notifications are already on by default.
 Slack transport and login use synthetic fixtures; no external writes are made.
 """
 from pathlib import Path
@@ -64,16 +64,22 @@ def demo(directory, port):
     @app.get('/demo/state')
     async def state():
         return {'enabled': app.state.user_preferences.get(owner)['slack_notifications'], 'delivered': delivered,
-                'run_id': scenario.get('run_id'), 'state': store.run(scenario['run_id'])['status'] if scenario else 'No session yet'}
+                'run_id': scenario.get('run_id'), 'source': scenario.get('source', ''),
+                'state': store.run(scenario['run_id'])['status'] if scenario else 'No session yet'}
 
     @app.post('/demo/scenario/{action}')
     async def action(action: str):
         def apply():
-            if action == 'start':
-                run = store.create_run('Review checkout rollout', '', 'demo', [], chat_enabled=True, user_id=owner)
+            if action in {'start', 'start-slack'}:
+                if action == 'start-slack':
+                    from uuid import uuid4
+                    run = store.create_slack_run(uuid4().hex, 'Review checkout rollout in Slack', [],
+                        'C12345678', '1790719999.000001', 'U12345678', team_id='T12345678', model='demo-model')
+                else:
+                    run = store.create_run('Review checkout rollout', '', 'demo', [], chat_enabled=True, user_id=owner)
                 message = store.claim_message(run['id'])
                 store.update_run(run['id'], status='running')
-                scenario.update(run_id=run['id'], message_id=message['id'])
+                scenario.update(run_id=run['id'], message_id=message['id'], source='Slack' if action == 'start-slack' else 'Web')
             elif action == 'approval' and scenario:
                 store.execute("""INSERT INTO approvals VALUES(?,?,'demo.action','{}','pending',?,'')
                     ON CONFLICT(id) DO NOTHING""", ('demo-' + scenario['run_id'], scenario['run_id'], now()))
@@ -105,14 +111,14 @@ button.secondary{background:#293952;color:#f0f4ff}.card{background:#1c2b43;borde
 </style><main><header><div class="badge">Local verification · synthetic session</div><h1>Moyai session notifications</h1>
 <p>Real preferences, session state and delivery worker. Slack transport is captured locally; no messages are sent to Slack.</p></header>
 <div class="grid"><section class="panel"><h2>Session controls</h2><p id="preference"></p><a href="/#settings">Open Moyai Settings</a>
-<div id="state" class="status">Loading…</div><button id="start">Start session</button><button id="approval" class="secondary">Request approval</button>
+<div id="state" class="status">Loading…</div><button id="start">Start web session</button><button id="start-slack" class="secondary">Start Slack session</button><button id="approval" class="secondary">Request approval</button>
 <button id="finish" class="secondary">Finish reply</button><button id="poll" class="secondary">Check again</button>
-<p class="muted">“Check again” runs collection and delivery again to verify that a saved event produces only one DM.</p><a id="session" hidden>Open session</a></section>
+<p class="muted">Web sessions notify their owner by default. Slack sessions keep updates in Slack, with no extra DM. “Check again” verifies that saved events are not delivered twice.</p><a id="session" hidden>Open session</a></section>
 <section class="panel"><h2>Captured DM payloads <span id="count">0</span></h2><p class="muted">Recipient: Alex · D12345678</p><div id="inbox"><p>No alerts delivered yet.</p></div></section></div></main>
 <script src="/demo/notifications.js"></script></html>'''
 
 SCRIPT = '''const $=s=>document.querySelector(s);
-function paint(data){$('#preference').textContent='Slack session notifications: '+(data.enabled?'On':'Off — enable in Settings');$('#state').textContent='Session: '+data.state;$('#count').textContent='('+data.delivered.length+')';
+function paint(data){$('#preference').textContent='Slack session notifications: '+(data.enabled?'On (default)':'Off — disabled in Settings');$('#state').textContent=(data.source?data.source+' session: ':'Session: ')+data.state;$('#count').textContent='('+data.delivered.length+')';
 if(data.run_id){$('#session').hidden=false;$('#session').href='/#run='+data.run_id;}
 const inbox=$('#inbox');inbox.replaceChildren();if(!data.delivered.length){inbox.textContent='No alerts delivered yet.';}
 for(const payload of data.delivered){const card=document.createElement('article');card.className='card';

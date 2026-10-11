@@ -7,10 +7,12 @@
 
 ## Personal session notifications
 
-In **Settings → Preferences**, turn on **Slack session notifications** to receive
-DMs about sessions you own, including sessions started on the web. It is off by
-default and is saved separately for each person. Turning it on applies to future
-responses and requests; it does not replay existing completed sessions.
+**Slack session notifications** are on by default for sessions you own outside
+Slack, including sessions started on the web. No Preferences visit is required.
+Chats originating in Slack or connected to a Slack thread keep their updates
+there and do not generate extra owner DMs, including when the thread is paused.
+You can turn notifications off in **Settings → Preferences**; the choice is saved
+separately for each person. Rollout and re-enabling never replay old events.
 
 Alerts show the session title and an **Open session** button when a reply is
 ready, approval or access is needed, or execution fails or is interrupted.
@@ -21,20 +23,20 @@ child's session. Child-agent completions do not generate separate DMs.
 
 The recipient is the verified **session owner**, even when somebody else sends
 a follow-up. Web owners use the existing verified work-email-to-Slack resolution;
-shared-password/local accounts cannot opt into personal notifications. The bot
+shared-password/local accounts cannot receive personal notifications. The bot
 needs its existing `chat:write`, `im:write`, `users:read` and `users:read.email`
 permissions, identity linking for web owners, and the owner must be included in
 `SLACK_SESSION_USERS`. No app scopes or live Slack settings are changed by this
 feature. Existing thread replies continue as before.
 
-Pausing a thread, disabling Slack/DMs, making the connection read-only, opting
+Disabling Slack/DMs, making the connection read-only, opting
 out, deleting the session, or resolving the request suppresses unsent alerts.
 Each event is durably deduplicated. Preparation failures retry up to three times;
 if a message send has an uncertain outcome, it is not replayed on restart. The
 answer remains available in Moyai. Notification failures never stop agent work.
 
 PostgreSQL deployments using explicit migrations must run the offline schema
-migration before starting this release (schema revision 7).
+migration before starting this release (schema revision 8).
 
 ## Chat with Moyai in Slack
 
