@@ -241,8 +241,7 @@ def _create_app(settings, store):
         from .broker_ownership import BrokerWork
         broker_work = store.broker_work = BrokerWork(store)
     model_slots = (PostgresModelSlots(settings.max_concurrent_model_requests, store.database)
-                   if overlap_broker and settings.max_concurrent_model_requests
-                   else ModelSlots(settings.max_concurrent_model_requests))
+                   if overlap_broker else ModelSlots(settings.max_concurrent_model_requests))
     from .memory_review import MemoryReview
     memory_review = MemoryReview(memory, settings, spend, model_slots)
     memory.reviewer = store.memory_review = memory_review
@@ -429,7 +428,7 @@ def _create_app(settings, store):
             async with background_lifespan():
                 yield
         finally:
-            if isinstance(model_slots, PostgresModelSlots):
+            if overlap_broker:
                 await asyncio.to_thread(model_slots.close)
             await asyncio.to_thread(store.close)
 

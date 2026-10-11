@@ -124,11 +124,12 @@ class ModelSlots:
 
 
 class PostgresModelSlots(ModelSlots):
-    """One cluster-wide limit, held on one extra connection per broker.
+    """An optional cluster-wide limit, with one extra connection per broker.
 
     Locks have no expiry: a slow live call never frees somebody else's slot.
     This session is distinct from the runtime ownership session so losing that
     owner can cancel and drain local calls before releasing their capacity.
+    At zero, tokens track cleanup locally without reserving capacity locks.
     """
     def __init__(self, capacity, database):
         import hashlib
@@ -159,7 +160,7 @@ class PostgresModelSlots(ModelSlots):
                 if self._connection is None:
                     self._connection = psycopg.connect(self.database.pool.conninfo, autocommit=True, connect_timeout=10)
                     self._connection.execute("SET statement_timeout = '2s'")
-                held = [value[0] & 0xffffffff for value in self._permits.values()]
+                held = [key & 0xffffffff for key, _ in self._permits.values() if key is not None]
                 count = self._connection.execute("""SELECT count(*) FROM pg_locks
                     WHERE locktype='advisory' AND pid=pg_backend_pid() AND classid=726947
                     AND objsubid=2 AND objid=ANY(%s::oid[]) AND granted""", (held,)).fetchone()[0]
@@ -171,12 +172,17 @@ class PostgresModelSlots(ModelSlots):
     def _shared_count(self):
         with self._guard:
             self.check()
+            if not self.capacity:
+                return self.active
             return self._connection.execute('''SELECT count(*) FROM pg_locks
                 WHERE locktype='advisory' AND classid=726947 AND objsubid=2
                 AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
                 AND objid=ANY(%s::oid[]) AND granted''', (list(self._unsigned_keys),)).fetchone()[0]
 
     def locked(self):
+        if not self.capacity:
+            self.check()
+            return False
         if self._shared_count() < self.capacity:
             return False
         return self._background_holder() is None or asyncio.current_task() in self._maintenance
@@ -184,6 +190,9 @@ class PostgresModelSlots(ModelSlots):
     async def is_full(self):
         from .db import database
 
+        if not self.capacity:
+            await database(self.check)
+            return False
         if await database(self._shared_count) < self.capacity:
             return False
         return self._background_holder() is None or asyncio.current_task() in self._maintenance
@@ -195,6 +204,12 @@ class PostgresModelSlots(ModelSlots):
             conn.check_owner()
         with self._guard:
             self.check()
+            if not self.capacity:
+                # Keep request tokens and owner checks without allocating a
+                # database capacity lock. Cancellation still drains this claim.
+                token = uuid4().hex
+                self._permits[token] = None, current
+                return token
             held = {value[0] for value in self._permits.values()}
             candidates = [key for key in self._keys if key not in held]
             if not candidates:
@@ -263,7 +278,7 @@ class PostgresModelSlots(ModelSlots):
             # uncertain unlock must never make a session lock reentrant again.
             if self._connection.closed or self._connection.broken:
                 self._failed = True
-            else:
+            elif key is not None:
                 try:
                     unlocked = self._connection.execute('SELECT pg_advisory_unlock(726947,%s)', (key,)).fetchone()[0]
                 except psycopg.Error:
@@ -297,7 +312,8 @@ class PostgresModelSlots(ModelSlots):
         await self.release_async(entered[-1])
 
     def snapshot(self):
-        return {**super().snapshot(), 'active': self._shared_count(), 'local_active': self.active}
+        return {**super().snapshot(), 'active': self._shared_count(), 'local_active': self.active,
+                'active_scope': 'cluster' if self.capacity else 'broker'}
 
     def close(self):
         with self._guard:

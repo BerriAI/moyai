@@ -11,10 +11,10 @@ budgets are now configurable; this does not provision provider quota or replicas
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `MAX_CONCURRENT_RUNS` | 0 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. 0 means unlimited, so warm machines are only released by their idle timeout. |
+| `MAX_CONCURRENT_RUNS` | 0 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. 0 means unlimited: warm machines are not evicted to free capacity, but idle timeout and normal cleanup still apply. |
 | `MAX_PENDING_RUNS` | 1,000 | Unfinished sessions, including active work and queued work; this is not just the waiting queue. |
 | `MAX_CONCURRENT_MODEL_REQUESTS` | 0 | Concurrent requests through the inference model gate. 0 means unlimited. A positive value is shared across overlapping verified brokers, and full foreground requests over it receive the existing explicit, unbilled queue response. |
-| `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections per process, plus one process-ownership connection. A verified broker with a positive model limit also holds one model-slot ownership connection. Range 1–256. |
+| `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections per process, plus one process-ownership connection. A verified broker also holds one model-slot health/ownership connection, including in unlimited mode. Range 1–256. |
 | `TEMPORAL_WORKER_ACTIVITIES` | 120 | Activities executing per worker process. An activity can observe a live sandbox for about 20 seconds. |
 | `TEMPORAL_WORKFLOW_CACHE_SIZE` | 200 | Cached workflows per worker; eviction causes replay, not session loss. |
 | `TEMPORAL_DISPATCH_BATCH_SIZE` | 200 | Maximum wake-outbox entries processed in each coordinator batch. |
@@ -25,6 +25,19 @@ admission controls: 3,000 active sandboxes do not require 3,000 simultaneous mod
 calls or database connections. Sandbox CPUs affect work inside a sandbox. Add
 execution workers when Temporal activity queue latency is the bottleneck; increase
 model capacity only with upstream RPM/TPM and measured inference-owner headroom.
+
+Existing deployments keep their explicit environment values: deploying this
+default change does not replace a configured `32` model limit or `100` sandbox
+limit. Set both `MAX_CONCURRENT_MODEL_REQUESTS=0` and `MAX_CONCURRENT_RUNS=0` on
+every role to remove those two app ceilings. This does not remove
+`MAX_PENDING_RUNS`, `MAX_PARALLEL_AGENTS`, worker activity limits, provider quotas
+or resource constraints. Idle timeout and normal sandbox cleanup still apply.
+
+In the verified rolling topology these settings participate in the shared
+configuration fingerprints. A capacity change requires the documented shared
+policy transition; it cannot be mixed into a compatible rolling code replacement
+while old owners retain a different policy. Do not overwrite fingerprints or
+bypass ownership checks to activate unlimited mode.
 
 ## Supported topology
 
