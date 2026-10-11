@@ -9,6 +9,7 @@ from typing import Literal
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 from pydantic import Field, StrictBool, ValidationError, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from .connector_errors import ConnectorError
 from .github import GitHubError
@@ -91,6 +92,10 @@ class SessionPullRequests:
         if cached:
             self.cache.move_to_end(key)
             return cached
+        return self.restored(key)
+
+    def restored(self, key):
+        """Read a persisted observation without touching event-loop state."""
         rows = self.store.rows('''SELECT snapshot FROM github_pr_snapshots
             WHERE connection_version=? AND repository_id=? AND number=?''', key)
         if rows:
@@ -107,17 +112,21 @@ class SessionPullRequests:
 
     def status(self, receipt, context):
         """Resolve a receipt through current access before reading its status."""
+        target, key = self.resolve(receipt, context)
+        return target, key, self._cached(key) if target else None
+
+    def resolve(self, receipt, context):
         if not context:
-            return None, None, None
+            return None, None
         version, credentials = context
         try:
             target = self.github.target(receipt.repository_id or receipt.repository, credentials)
         except (ConnectorError, KeyError, TypeError, ValueError):
             # Legacy migration remains owned by the normal GitHub connection.
             key = (version, 0, 0) if 'repository_ids' not in credentials else None
-            return None, key, None
+            return None, key
         key = (version, target, receipt.number)
-        return target, key, self._cached(key)
+        return target, key
 
     def receipts(self, run_ids):
         """Both status summaries and detail reads use the same live family scope."""
@@ -182,15 +191,34 @@ class SessionPullRequests:
             if (current_target, fresh.number) != (target, receipt.number):
                 raise HTTPException(404, 'This pull request is no longer available in this session.')
 
-    def summaries(self, run_ids, *, receipts=None):
+    def summary_inputs(self, run_ids, receipts, cached_keys):
+        """Finish SQL in one worker; cache mutation and scheduling stay on the loop."""
+        parsed = self.receipts(run_ids) if receipts is None else receipts
+        context = self.context() if parsed else None
+        resolved, observations = {}, {}
+        entries = []
+        for row, receipt in parsed:
+            identity = (receipt.repository_id or receipt.repository, receipt.number)
+            if identity not in resolved:
+                resolved[identity] = self.resolve(receipt, context)
+            target, key = resolved[identity]
+            if target and key not in cached_keys and key not in observations:
+                observations[key] = self.restored(key)
+            entries.append((row, receipt, target, key))
+        # Database work can overlap connection revocation while the loop serves
+        # another request. Never publish observations prepared under old access.
+        if context and self.context() != context:
+            return [(row, receipt, None, None) for row, receipt, _, _ in entries], {}
+        return entries, observations
+
+    async def summaries(self, run_ids, *, receipts=None):
         result = {identity: {'open': 0, 'merged': 0, 'closed': 0, 'unknown': 0,
                              'stale': False, 'label': '', 'pull_requests': []} for identity in run_ids}
         if not result:
             return result
-        parsed = self.receipts(result) if receipts is None else receipts
-        context = self.context()
+        entries, observations = await run_in_threadpool(self.summary_inputs, result, receipts, set(self.cache))
         receipt_ids = {}
-        for row, receipt in parsed:
+        for row, receipt, _, _ in entries:
             if receipt.repository_id:
                 for run_id in {row['ancestor_id']} & result.keys():
                     receipt_ids.setdefault((run_id, receipt.url.casefold()), set()).add(receipt.repository_id)
@@ -199,8 +227,10 @@ class SessionPullRequests:
         wanted = []
         # Prefer permanent receipts before considering their legacy duplicates.
         # This affects presentation only; target() still owns every access check.
-        for row, receipt in parsed:
-            target, key, cached = self.status(receipt, context)
+        for row, receipt, target, key in entries:
+            cached = (self.cache.get(key) or observations.get(key)) if target else None
+            if key in self.cache:
+                self.cache.move_to_end(key)
             if key:
                 wanted.append(key)
             snapshot = cached.value if cached else None
@@ -220,26 +250,26 @@ class SessionPullRequests:
                 summary[item['state']] += 1
                 summary['stale'] |= stale
                 summary['pull_requests'].append(item)
-        self.queue_refreshes(wanted)
+        self.queue_refreshes(wanted, observations=observations)
         for summary in result.values():
             ready = [pr for pr in summary['pull_requests'] if pr['state'] == 'open' and not pr['draft']]
             if ready and not summary['stale'] and not summary['unknown']:
                 summary['label'] = 'Review PR' if any(pr['review_requested'] for pr in ready) else 'PR is ready'
         return result
 
-    def queue_refreshes(self, keys):
+    def queue_refreshes(self, keys, *, observations=None):
         keys = list(dict.fromkeys(keys))
         if keys and len(self.pending) < self.MAX_PENDING:
             start = self.cursor % len(keys)
             for offset in range(len(keys)):
                 position = (start + offset) % len(keys)
-                self.schedule(keys[position])
+                self.schedule(keys[position], observations=observations)
                 self.cursor = position + 1
                 if len(self.pending) >= self.MAX_PENDING:
                     break
 
-    def schedule(self, key):
-        cached = self._cached(key)
+    def schedule(self, key, *, observations=None):
+        cached = (self.cache.get(key) or observations.get(key)) if observations is not None else self._cached(key)
         if (self.closed or key in self.pending or len(self.pending) >= self.MAX_PENDING
                 or (cached and cached.retry_at > time.monotonic())):
             return

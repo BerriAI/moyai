@@ -59,13 +59,14 @@ def counting_input(payload):
     """
     images = []
 
-    def visit(value, content_block=False):
-        if isinstance(value, list):
-            return [visit(item, content_block) for item in value]
+    def visit_content(value):
+        return [visit_block(item) for item in value] if isinstance(value, list) else value
+
+    def visit_block(value):
         if not isinstance(value, dict):
             return value
         kind = value.get('type')
-        if content_block and kind in {'image_url', 'input_image', 'image'}:
+        if kind in {'image_url', 'input_image', 'image'}:
             if kind == 'image':
                 source = value.get('source', {})
                 url = (f"data:{source.get('media_type')};base64,{source.get('data')}"
@@ -79,14 +80,33 @@ def counting_input(payload):
                 raise HTTPException(422, 'Cannot count the image in this request.')
             images.append({'type': 'image_url', 'image_url': item})
             return '[image counted separately]'
-        if content_block and kind in {'input_audio', 'audio', 'input_file', 'file', 'video', 'video_url'}:
+        if kind in {'input_audio', 'audio', 'input_file', 'file', 'video', 'video_url'}:
             raise HTTPException(422, 'This media type needs a supported token counter before inference.')
-        return {key: visit(item, key in {'content', 'input'}) for key, item in value.items()}
+        if kind == 'tool_result' and 'content' in value:
+            return {**value, 'content': visit_content(value['content'])}
+        return value
+
+    def visit_item(value, *, responses=False):
+        if not isinstance(value, dict):
+            return value
+        kind = value.get('type', 'message')
+        if responses and kind in {'function_call_output', 'custom_tool_call_output'} and 'output' in value:
+            return {**value, 'output': visit_content(value['output'])}
+        if kind in {'message', 'input_message', 'output_message'} and 'content' in value:
+            return {**value, 'content': visit_content(value['content'])}
+        return value
 
     fields = {key: payload[key] for key in ('messages', 'input', 'system', 'instructions',
         'tools', 'tool_choice', 'response_format', 'text') if key in payload}
     try:
-        serialized = json.dumps(visit(fields), ensure_ascii=False, separators=(',', ':'))
+        # Only protocol content positions contain media. Tool arguments and
+        # schemas can have arbitrary keys named input, content, or output.
+        for key in ('messages', 'input'):
+            if isinstance(fields.get(key), list):
+                fields[key] = [visit_item(value, responses=key == 'input') for value in fields[key]]
+        if 'system' in fields:
+            fields['system'] = visit_content(fields['system'])
+        serialized = json.dumps(fields, ensure_ascii=False, separators=(',', ':'))
         byte_count = len(serialized.encode())
     except (ValueError, TypeError, UnicodeError, AttributeError, RecursionError):
         raise HTTPException(422, 'The request cannot be represented for token counting.') from None

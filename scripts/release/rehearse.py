@@ -111,7 +111,7 @@ class Render:
             owners += 1
             brokers += 1
         return {'ok': self.probe_ok, 'owners': owners, 'coordinators': 1, 'brokers': brokers,
-                'unsafe_sessions': self.unsafe, 'legacy_active_sessions': 0,
+                'unsafe_sessions': self.unsafe, 'executing_sessions': 0, 'legacy_active_sessions': 0,
                 'model_requests': self.models, 'live_leases': 0, 'database_connections': 16}
 
 

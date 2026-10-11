@@ -185,6 +185,48 @@ async def test_sidebar_receipts_still_schedule_pr_refreshes_on_event_loop(users_
     await unused.close()
 
 
+@pytest.mark.parametrize('view', ['detail', 'sidebar'])
+@pytest.mark.parametrize('phase', ['receipts', 'context', 'resolve', 'restored'])
+async def test_slow_pr_summary_reads_do_not_stall_other_requests(users_app, monkeypatch, view, phase):
+    app, client = users_app
+    sign_as(app, client, 'tin@berri.ai')
+    run = app.state.store.create_run('Saved pull request', '', 'demo', [], user_id='google:tin')
+    publication(app, run['id'], 100)
+    unused, _, _ = sidebar_github(app, monkeypatch)
+    service = app.state.session_pull_requests
+    # Isolate loading from the provider refresh that loading schedules.
+    service.MAX_PENDING = 0
+    entered, release = Event(), Event()
+    original = getattr(service, phase)
+
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(3), 'Timed out waiting for test release'
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service, phase, held)
+
+    @app.get('/test/pr-summary-ping')
+    async def ping():
+        return {'ready': True}
+
+    fallback = Timer(2, release.set)
+    fallback.start()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app),
+                                base_url=str(client.base_url), cookies=client.cookies) as reader:
+        path = '/api/runs?view=sidebar' if view == 'sidebar' else '/api/runs/' + run['id']
+        pending = asyncio.create_task(reader.get(path))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert (await reader.get('/test/pr-summary-ping')).json() == {'ready': True}
+            assert not release.is_set(), f'PR {phase} SQL blocked the event loop'
+        finally:
+            release.set()
+            fallback.cancel()
+            assert (await pending).status_code == 200
+    await unused.close()
+
+
 @pytest.mark.parametrize('operation', ['create', 'detail'])
 async def test_startup_authorization_reads_do_not_block_other_requests(users_app, monkeypatch, operation):
     app, client = users_app

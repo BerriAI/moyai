@@ -5,12 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: Rolling requires the activated four-service handoff topology and reviewed compatible changes
+        description: Deploy main at button press; rolling keeps work running and rejects incompatible schemas before deployment
         type: choice
-        options: [coordinated, api, rolling]
-        default: coordinated
+        options: [rolling, api, coordinated]
+        default: rolling
       preflight_only:
-        description: Only check configuration (no deployment)
+        description: Optional check only (every deployment already runs preflight)
         type: boolean
         default: false
 

@@ -110,6 +110,8 @@ class Store:
             initialize_schema(self)
             from .swarm_chat import initialize_schema as initialize_swarm_chat
             initialize_swarm_chat(self)
+            from .performance import initialize_schema as initialize_performance
+            initialize_performance(self)
         if not self.database:
             self.path.chmod(0o600)
         self.objects = object_storage if object_storage is not None else ObjectStorage()
@@ -546,7 +548,7 @@ class Store:
             row['swarm'] = public_mission(mission[0])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None, received_at=None):
         if swarm_budget_seconds is not None and (not chat_enabled or mode != 'modal' or metadata_request or not durable_submit):
             raise ValueError('Swarm mode requires a durable cloud chat session.')
         sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
@@ -605,6 +607,9 @@ class Store:
                 if metadata_request:
                     from .session_metadata import complete_in
                     complete_in(conn, run_id, message_id, stamp, initial=True)
+                else:
+                    from .performance import submitted_in
+                    submitted_in(conn, run_id, message_id, 'new_chat', stamp, received_at=received_at)
             elif attachment_ids:
                 raise ValueError('Attachments require a chat session.')
             if swarm_budget_seconds is not None:
@@ -758,6 +763,8 @@ class Store:
         from .harnesses import validate_harness
         validate_harness(row['harness'], model)
         message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?) RETURNING id", (run_id, content, client_id, stamp, model, user_id, send_immediately)).fetchone()[0]
+        from .performance import submitted_in
+        submitted_in(conn, run_id, message_id, 'follow_up', stamp, send_now=send_now, immediate=send_immediately)
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         if restore_archived:
             conn.execute('DELETE FROM session_archives WHERE owner_id=? AND run_id=?',
@@ -785,7 +792,10 @@ class Store:
             row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 WHEN send_immediately=1 THEN 1 WHEN client_id LIKE 'swarm:%' THEN 3 ELSE 2 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
             if not row:
                 return None
-            conn.execute("UPDATE messages SET status='running',started_at=? WHERE id=?", (now(), row["id"]))
+            picked_at = now()
+            conn.execute("UPDATE messages SET status='running',started_at=? WHERE id=?", (picked_at, row["id"]))
+            from .performance import picked_up_in
+            picked_up_in(conn, row['id'], picked_at, 'turn')
             if row['id'] == run['steer_message_id']:
                 conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=?', (run_id,))
             conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',pending_result='',active_model=?,active_user_id=?,active_message_id=? WHERE id=?", (row['model'], row['user_id'], row['id'], run_id))

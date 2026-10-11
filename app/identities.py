@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
-from .db import now
+from .db import database, now
 from .connector_errors import ConnectorError
 
 PROFILE_SCOPES = {'users:read', 'users:read.email'}
@@ -41,17 +41,17 @@ class SlackIdentities:
         if not self.connectors.allowed('slack_me'):
             raise ConnectorError('The Slack connection is disabled.')
 
-    async def requester(self, run: Mapping[str, object] | None) -> dict[str, str]:
+    async def requester(self, run: Mapping[str, object] | None, *, session_owner: bool = False) -> dict[str, str]:
         """Resolve the broker's requester, never a caller-supplied email or accounting override."""
-        actor = (run or {}).get('active_user_id')
+        actor = (run or {}).get('owner_id' if session_owner else 'active_user_id')
         if not actor and run and not run.get('chat_enabled'):
             actor = run.get('owner_id')
-        rows = self.store.rows('SELECT * FROM users WHERE id=?', (actor,)) if isinstance(actor, str) and actor else []
+        rows = await database(self.store.rows, 'SELECT * FROM users WHERE id=?', (actor,)) if isinstance(actor, str) and actor else []
         if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'slack'} or not run:
             raise ConnectorError('Slack identity requires an identified requester. Sign in with Google or message the bot in Slack.')
         user = rows[0]
-        installation = self.connectors.slack_installation()
-        self.check_requester(run, installation)
+        installation = await database(self.connectors.slack_installation)
+        await database(self.check_requester, run, installation)
         team = installation.get('team_id')
         if not isinstance(team, str) or not re.fullmatch(r'T[A-Z0-9]{7,30}', team):
             raise ConnectorError('Reconnect Slack to identify the bot workspace.')
@@ -63,48 +63,51 @@ class SlackIdentities:
         email = user['email']
         if not email or email.rpartition('@')[2] not in self.settings.google_domains():
             raise ConnectorError('Your verified work email is no longer allowed in this workspace.')
-        if not self.status()['ready']:
+        if not (await database(self.status))['ready']:
             raise ConnectorError('Enable Slack identity linking and reconnect the bot with users:read and users:read.email.')
 
         def candidates():
             return self.store.rows("""SELECT * FROM users WHERE kind='slack' AND id LIKE ?
                 AND (linked_user_id=? OR email=?)""", (f'slack:{team}:%', actor, email))
 
-        matches = candidates()
+        matches = await database(candidates)
         if not matches:
             # Slack's lookup is scoped to the installed bot and the trusted SSO email.
             token = await self.connectors.slack_bot_token()
-            self.check_requester(run, installation)
+            await database(self.check_requester, run, installation)
             result = await self.connectors.request('GET', 'https://slack.com/api/users.lookupByEmail',
                 headers={'Authorization': f'Bearer {token}'}, params={'email': email}, allowed_errors=('users_not_found',))
-            self.check_requester(run, installation)
+            await database(self.check_requester, run, installation)
             profile = result.get('user') or {}
             recipient = profile.get('id') if isinstance(profile, dict) else None
             if (not result.get('ok') or not isinstance(recipient, str)
                     or not re.fullmatch(r'[UW][A-Z0-9]{7,30}', recipient) or profile.get('team_id') != team):
                 raise ConnectorError('No Slack account was verified for your work email in this workspace.')
-            with self.store.connect() as conn:
-                identity = self.store.slack_identity_in(conn, team, recipient)
-            matches = self.store.rows('SELECT * FROM users WHERE id=?', (identity,))
+            def remember():
+                with self.store.connect() as conn:
+                    return self.store.slack_identity_in(conn, team, recipient)
+            identity = await database(remember)
+            matches = await database(self.store.rows, 'SELECT * FROM users WHERE id=?', (identity,))
         if len(matches) != 1:
             raise ConnectorError('Your Slack identity is ambiguous. Review the linked accounts before sending a DM.')
         match = matches[0]
         if (match['profile_conflict'] or match['link_status'] == 'email_changed'
                 or (match['email'] and match['email'] != email)):
             raise ConnectorError('Your Slack account link needs review before it can be used for a DM.')
-        if not self.same_requester(actor, match['id']):
+        if not await database(self.same_requester, actor, match['id']):
             await self.resolve(match, team)
             await self.checkpoints.flush()
-        self.check_requester(run, installation)
+        await database(self.check_requester, run, installation)
         # Re-read after provider awaits; historical/manual spend links alone never select a recipient.
-        google = self.store.rows("SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,))
-        matches = candidates()
+        google = await database(self.store.rows, "SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,))
+        matches = await database(candidates)
         if len(google) != 1 or google[0]['id'] != actor or len(matches) != 1:
             raise ConnectorError('Your Slack identity is ambiguous. Review the linked accounts before sending a DM.')
         match = matches[0]
         if (match['linked_user_id'] != actor or match['link_status'] not in {'linked', 'manual'}
-                or not self.same_requester(actor, match['id'])):
+                or not await database(self.same_requester, actor, match['id'])):
             raise ConnectorError('Your Slack account link could not be verified. Check the profile email or refresh the account link.')
+        await database(self.check_requester, run, installation)
         return {'user_id': match['id'].removeprefix(f'slack:{team}:'), 'team_id': team,
                 'email': email, 'name': user['name']}
 
@@ -169,7 +172,7 @@ class SlackIdentities:
     async def resolve(self, row, team):
         user = row['id'].removeprefix(f'slack:{team}:')
         if not re.fullmatch(r'[UW][A-Z0-9]{7,30}', user):
-            self.store.execute("UPDATE users SET profile_next_check=?,link_status='ineligible',profile_eligible=0 WHERE id=?", (int(time.time()) + 86400, row['id']))
+            await database(self.store.execute, "UPDATE users SET profile_next_check=?,link_status='ineligible',profile_eligible=0 WHERE id=?", (int(time.time()) + 86400, row['id']))
             return
         checked = now()
         try:
@@ -178,7 +181,8 @@ class SlackIdentities:
                 result = await self.connectors.request('GET', 'https://slack.com/api/users.info',
                     headers={'Authorization': f'Bearer {token}'}, params={'user': user},
                     allowed_errors=('user_not_found', 'missing_scope', 'ratelimited'))
-            if not self.status()['ready'] or self.status()['team_id'] != team:
+            connection_status = await database(self.status)
+            if not connection_status['ready'] or connection_status['team_id'] != team:
                 return  # Connection/policy changed while the request was in flight.
             if not result.get('ok'):
                 raise ValueError('Profile unavailable')
@@ -193,8 +197,11 @@ class SlackIdentities:
             name = data.get('real_name') or data.get('display_name') or profile.get('real_name') or row['name']
             name = str(name)[:160]
         except Exception:
-            self.store.execute("UPDATE users SET link_status=CASE WHEN link_method='manual' THEN 'manual' WHEN linked_user_id IS NOT NULL THEN 'review' ELSE 'unavailable' END,profile_eligible=0,profile_next_check=? WHERE id=?", (int(time.time()) + 300, row['id']))
+            await database(self.store.execute, "UPDATE users SET link_status=CASE WHEN link_method='manual' THEN 'manual' WHEN linked_user_id IS NOT NULL THEN 'review' ELSE 'unavailable' END,profile_eligible=0,profile_next_check=? WHERE id=?", (int(time.time()) + 300, row['id']))
             return
+        await database(self.record_profile, row, email, eligible, checked, name)
+
+    def record_profile(self, row, email, eligible, checked, name):
         with self.store.connect() as conn:
             conn.begin_write()
             current = conn.execute('SELECT * FROM users WHERE id=?', (row['id'],)).fetchone()

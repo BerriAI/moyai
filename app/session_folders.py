@@ -50,6 +50,10 @@ class SessionFolders:
 
     def actor(self, request, mutation=False):
         self.security.require(request, mutation=mutation)
+        if not mutation and self.security.settings.cloudflare_access_login:
+            actor = getattr(request.state, 'access_actor', None)
+            if actor is not None:
+                return actor
         return self.store.identity(self.security.session_info(request))
 
     def memberships(self, owner):

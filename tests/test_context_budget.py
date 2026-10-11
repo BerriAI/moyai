@@ -108,6 +108,145 @@ async def test_full_serialized_input_and_images_reach_counter(monkeypatch):
     assert len(seen) == 1
 
 
+@pytest.mark.parametrize('kind', ['function_call_output', 'custom_tool_call_output'])
+def test_responses_tool_images_are_counted_as_images_without_changing_wire(kind):
+    image = {'type': 'input_image', 'image_url': 'data:image/png;base64,' + 'A' * 10000, 'detail': 'high'}
+    payload = {'input': [{'type': kind, 'call_id': 'image-call', 'id': 'output-id', 'output': [
+        {'type': 'input_text', 'text': 'Screenshot receipt'}, image]}]}
+    original = json.dumps(payload)
+    messages, byte_count, images = counting_input(payload)
+    content = messages[0]['content']
+    assert images and byte_count < 300
+    assert content[1:] == [{'type': 'image_url', 'image_url': {'url': image['image_url'], 'detail': 'high'}}]
+    assert json.loads(content[0]['text']) == {'input': [
+        {**payload['input'][0], 'output': [{'type': 'input_text', 'text': 'Screenshot receipt'},
+                                        '[image counted separately]']} ]}
+    assert json.dumps(payload) == original
+
+
+def test_nested_anthropic_tool_result_keeps_images_separate():
+    image = {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'fixture'}}
+    payload = {'messages': [{'role': 'user', 'content': [
+        {'type': 'tool_result', 'tool_use_id': 'mcp-image-call', 'content': [
+            {'type': 'text', 'text': 'MCP screenshot'}, image]}]}]}
+    messages, _, images = counting_input(payload)
+    assert images
+    assert messages[0]['content'][1] == {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,fixture'}}
+    assert image == payload['messages'][0]['content'][0]['content'][1]
+
+
+@pytest.mark.parametrize('media_type', ['input_image', 'input_file'])
+def test_image_like_argument_and_schema_dictionaries_are_opaque(media_type):
+    opaque = {'type': media_type, 'image_url': 'user-data-not-an-image', 'content': [{'type': media_type}]}
+    payload = {
+        'tools': [{'name': 'schema', 'input_schema': {'input': opaque, 'content': opaque, 'output': opaque}}],
+        'input': [{'type': 'custom_tool_call', 'call_id': 'call', 'input': opaque},
+                  {'type': 'function_call', 'call_id': 'call-2', 'arguments': {'content': opaque}},
+                  {'role': 'user', 'content': {'input': opaque}}],
+        'messages': [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'call-3', 'input': opaque}]}],
+    }
+    messages, byte_count, images = counting_input(payload)
+    assert not images
+    assert len(messages[0]['content']) == 1
+    assert json.loads(messages[0]['content'][0]['text']) == payload
+    assert byte_count == len(messages[0]['content'][0]['text'].encode())
+
+
+@pytest.mark.parametrize('kind', ['function_call_output', 'custom_tool_call_output'])
+@pytest.mark.parametrize('media_type', ['input_audio', 'audio', 'input_file', 'file', 'video', 'video_url'])
+def test_unsupported_media_in_responses_tool_output_fails_before_counting(kind, media_type):
+    with pytest.raises(HTTPException) as exc:
+        counting_input({'input': [{'type': kind, 'call_id': 'media-call', 'output': [{'type': media_type}]}]})
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['function_call_output', 'custom_tool_call_output'])
+async def test_tool_image_uses_provider_count_instead_of_base64_text_bound(monkeypatch, kind):
+    image = {'type': 'input_image', 'image_url': 'data:image/png;base64,' + 'A' * 1200000, 'detail': 'high'}
+    original = {'model': 'astra', 'input': [{'role': 'user', 'content': 'Inspect the screenshot.'}]}
+    payload = {**original, 'input': [*original['input'], {'type': kind, 'call_id': 'image-call', 'output': [image]}]}
+    seen = []
+    def upstream(request):
+        body = json.loads(request.content)
+        content = body['messages'][0]['content']
+        assert len(content[0]['text']) < 300
+        assert content[1]['image_url'] == {'url': image['image_url'], 'detail': 'high'}
+        seen.append(body)
+        return httpx.Response(200, json={'total_tokens': 110000, 'tokenizer_type': 'openai_api'})
+    budget = service(monkeypatch, upstream, {'astra': limits(922000, 128000)})
+    budget.remember(original, {'prompt_tokens': 109182}, 'run')
+    result = await budget.check(payload, scope='run')
+    assert result.input_tokens == 110000 and result.input_budget == 714600
+    assert result.method == 'provider_serialization_estimate'
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['function_call_output', 'custom_tool_call_output'])
+@pytest.mark.parametrize('counter', [
+    (503, {}), (200, {'total_tokens': 1, 'tokenizer_type': 'openai_tokenizer'}),
+    (200, {'total_tokens': 0, 'tokenizer_type': 'openai_api'}),
+])
+async def test_new_tool_image_never_uses_text_fallback_when_counter_unavailable(monkeypatch, kind, counter):
+    budget = service(monkeypatch, lambda req: httpx.Response(counter[0], json=counter[1]), {'astra': limits()})
+    original = {'model': 'astra', 'input': [{'role': 'user', 'content': 'Inspect.'}]}
+    budget.remember(original, {'prompt_tokens': 100}, 'run')
+    payload = {**original, 'input': [*original['input'], {'type': kind, 'call_id': 'image-call', 'output': [
+        {'type': 'input_image', 'image_url': 'https://example.test/image.png'}]}]}
+    with pytest.raises(HTTPException) as exc:
+        await budget.check(payload, scope='run')
+    assert exc.value.status_code == 503 and 'not sent' in exc.value.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['function_call_output', 'custom_tool_call_output'])
+async def test_unchanged_tool_image_prefix_uses_usage_but_appended_image_requires_counter(monkeypatch, kind):
+    calls = []
+    def upstream(request):
+        calls.append(request)
+        return httpx.Response(503)
+    budget = service(monkeypatch, upstream, {'astra': limits()})
+    image = {'type': kind, 'call_id': 'image-call', 'output': [
+        {'type': 'input_image', 'image_url': 'data:image/png;base64,' + 'A' * 100000}]}
+    original = {'model': 'astra', 'input': [image]}
+    budget.remember(original, {'prompt_tokens': 2500}, 'run')
+    followup = {**original, 'input': [image, {'role': 'user', 'content': 'Explain it.'}]}
+    result = await budget.check(followup, scope='run')
+    assert result.method == 'usage_plus_utf8_delta' and 2500 < result.input_tokens < 2700
+    assert not calls
+    with pytest.raises(HTTPException) as exc:
+        await budget.check({**followup, 'input': [*followup['input'], {**image, 'call_id': 'new-call'}]}, scope='run')
+    assert exc.value.status_code == 503 and len(calls) == 1
+
+
+@pytest.mark.parametrize('kind', ['function_call_output', 'custom_tool_call_output'])
+def test_tool_image_reaches_inference_with_original_tool_identity(workspace, monkeypatch, kind):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    monkeypatch.setattr(app.state.context_budget, 'count', ContextBudget.count.__get__(app.state.context_budget))
+    image = {'type': 'input_image', 'image_url': 'data:image/png;base64,fixture', 'detail': 'low'}
+    output = {'type': kind, 'id': 'output-id', 'call_id': 'image-call', 'output': [image]}
+    seen = []
+    def upstream(request):
+        body = json.loads(request.content)
+        seen.append(request.url.path)
+        if request.url.path == '/utils/token_counter':
+            assert body['messages'][0]['content'][1]['image_url'] == {'url': image['image_url'], 'detail': 'low'}
+            return httpx.Response(200, json={'total_tokens': 100, 'tokenizer_type': 'openai_api'})
+        assert request.url.path == '/v1/responses'
+        assert body['input'][-1] == output
+        return httpx.Response(200, json={'status': 'completed', 'output': [], 'usage': {'input_tokens': 100, 'output_tokens': 1}})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.context_budget.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('inspect image', '', 'modal', [])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    response = client.post(f"/broker/{run['id']}/v1/responses", headers={'Authorization': 'Bearer cap'},
+                           json={'input': [output]})
+    assert response.status_code == 200, response.text
+    assert seen == ['/utils/token_counter', '/v1/responses']
+
+
 @pytest.mark.asyncio
 async def test_counter_outage_uses_conservative_text_bound_but_never_guesses_images(monkeypatch):
     budget = service(monkeypatch, lambda req: httpx.Response(503), {'alias': limits()})

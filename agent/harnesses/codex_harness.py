@@ -341,6 +341,44 @@ class CodexAgent(HarnessAgent):
             await asyncio.gather(request, return_exceptions=True)
 
     async def compact_context(self, client, thread_id, turn_ids):
+        """Retry failed inference inside compaction without replacing live tools."""
+        relay = self.context.relay
+        pressure = getattr(relay, 'context_required', None)
+        while True:
+            previous_failure = getattr(relay, 'last_failure', None)
+            error = None
+            try:
+                if await self._compact_context(client, thread_id, turn_ids):
+                    return True
+            except Exception as exc:
+                error = exc
+            failed_request = getattr(relay, 'last_failure', None)
+            if (self.stopped.is_set() or self.boundary_failed
+                    or getattr(relay, 'uncertain_tool', False)
+                    or getattr(relay, 'context_required', None) is not pressure
+                    or failed_request is previous_failure
+                    or not retryable_failure(failed_request, live=True)
+                    or self.transport_attempt >= MAX_TRANSPORT_ATTEMPTS):
+                if error is not None:
+                    raise error
+                return False
+            # This retries only the model-only compact operation on the same
+            # native thread. Pending commands retain their runtime and handles;
+            # they never enter the cold recovery path or get replayed.
+            self.transport_attempt += 1
+            self.context.activity.emit('status',
+                'Reconnecting to finish context compaction with the existing tools.',
+                {'activity_version': 1, 'phase': 'reconnecting', 'stage': 'context_transport'})
+            await self.await_with_tool_events(client, turn_ids, asyncio.sleep(2 ** self.transport_attempt))
+            if (not await self.wait_for_model(client, turn_ids, failed_request, context_pressure=pressure)
+                    or not relay.resume_model(failed_request, live=True)):
+                if error is not None:
+                    raise error
+                return False
+            self.context.activity.emit('status', 'Connection restored. Finishing context compaction.',
+                {'activity_version': 1, 'phase': 'recovered', 'stage': 'context_transport'})
+
+    async def _compact_context(self, client, thread_id, turn_ids):
         # This public SDK operation subscribes to thread events only; it does
         # not create a native goal. Compact has no returned turn ID to subscribe
         # to. Release the route before starting another ordinary native turn.
@@ -360,6 +398,9 @@ class CodexAgent(HarnessAgent):
                     compact_turn = payload['turn']['id']
                 elif event.method == 'item/completed' and payload['item']['type'] == 'contextCompaction':
                     compacted = True
+                elif event.method == 'error':
+                    if codex_details(payload.get('error')).get('code') == 'responseStreamDisconnected':
+                        self.context.relay.note_stream_disconnect()
                 elif event.method == 'turn/completed' and payload['turn']['id'] == compact_turn:
                     result = compacted and payload['turn']['status'] == 'completed'
 
@@ -414,7 +455,7 @@ class CodexAgent(HarnessAgent):
             # Neither elapsed time nor raw output IDs are completion receipts.
             pass
 
-    async def wait_for_model(self, client, turn_ids, observed_failure):
+    async def wait_for_model(self, client, turn_ids, observed_failure, *, context_pressure=None):
         """Keep native history/tools alive while the broker process restarts."""
         relay = self.context.relay
         loop = asyncio.get_running_loop()
@@ -425,7 +466,8 @@ class CodexAgent(HarnessAgent):
                 await self.drain_tool_events(client, turn_ids)
                 limit = self.context.spec.get('max_iterations')
                 if (self.stopped.is_set() or self.boundary_failed or relay.uncertain_tool
-                        or relay.last_failure is not observed_failure or relay.context_required
+                        or relay.last_failure is not observed_failure
+                        or relay.context_required is not context_pressure
                         or (limit and self.model_calls >= limit)):
                     return False
                 remaining = deadline - loop.time()

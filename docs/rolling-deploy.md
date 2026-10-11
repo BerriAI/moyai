@@ -1,8 +1,16 @@
 # Compatible rolling deployments
 
 After the four-service rolling topology has been activated and tested, choose
-**GitHub → Actions → Deploy production → Run workflow → main → rolling**.
-Run with **Only check configuration** first. A successful preflight writes nothing.
+**GitHub → Actions → Deploy production → Run workflow → main → Run workflow**.
+Leave the default **release_type: rolling** selected and **preflight_only** unchecked
+to deploy. The action selects the latest main commit at button press; later pushes
+do not change that release.
+
+Every deployment already waits for the selected commit's CI and runs the full
+preflight before changing any service. **preflight_only** is an optional check
+without deployment, useful after configuration changes. It is not a required
+separate run. An incompatible schema, contract or shared configuration is rejected
+before deployment and needs a separately planned transition.
 
 This mode replaces the worker, broker, coordinator and API in that order. Users
 can continue sending messages and admitted work stays under its existing durable
