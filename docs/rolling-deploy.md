@@ -73,13 +73,16 @@ Active sessions, model requests and leases do not need to reach zero. The shared
 model limit remains unchanged while brokers overlap. A process failure may still
 produce bounded retry/lease-recovery delay; this is not a zero-latency promise.
 
-Render's shutdown window is finite. The API keeps accepting for 30 seconds after
-SIGTERM for routing convergence, then drains admitted requests for up to 240
-seconds, capped at 270 seconds after the first signal. Brokers retain their
-270-second application drain. Both leave cleanup headroom within the 300-second
-platform allowance. The API grace reduces a brief routing/listener race; it is
+Render's shutdown window is finite. The API and broker keep accepting for 30
+seconds after SIGTERM for routing convergence, then drain admitted requests for
+up to 240 seconds, capped at 270 seconds after the first signal. The coordinator
+keeps accepting for 30 seconds, then retains its existing 20-second HTTP drain,
+leaving approximately 250 seconds for background cleanup. These waits leave
+cleanup headroom within the 300-second platform allowance. The grace reduces a
+brief routing/listener race; it is
 not a guarantee that private routing always converges within 30 seconds. Validate
-the real ingress path during each rollout. A stream
+the real ingress path during each rollout. Ownership and background handoff still
+use the existing lifespan protocols. Worker and standalone shutdown are unchanged. A stream
 that outlasts that window can be interrupted and follows the existing durable
 failure/uncertainty rules. The controller cannot guarantee uninterrupted streams
 of unlimited duration and does not retry ambiguous external work.

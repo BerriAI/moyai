@@ -29,8 +29,12 @@ requests while the previous generation retains this maintenance leadership. The
 old generation closes maintenance before releasing leadership. Context jobs and
 model requests retain their individual ownership throughout this handoff.
 
-On Render, broker shutdown allows existing HTTP requests up to **270 seconds**,
-with a required platform shutdown allowance of **300 seconds**. The replacement
+On Render, a broker keeps accepting requests for **30 seconds after SIGTERM**
+while private routing converges, then drains admitted HTTP requests for up to
+**240 seconds**. The first signal fixes the combined 270-second wait budget;
+repeated SIGTERM cannot extend it. Model ownership and shared slots remain held
+until ordinary request/lifespan cleanup. The required platform shutdown allowance
+is **300 seconds**, including cleanup. The replacement
 must become ready before the platform stops the old instance. Requests longer
 than the drain allowance can still be interrupted. This is a bounded graceful
 deployment guarantee, not a promise that an unlimited stream survives termination
@@ -40,5 +44,8 @@ possibly billed model request or an external tool write.
 `tests/test_broker_overlap.py` checks real PostgreSQL ownership, maintenance
 transfer, unchanged capacity at 32 and 128, a separate-process crash, and an old
 native SSE stream completing while a replacement starts and serves new inference.
+`tests/test_render_shutdown_roles.py` additionally checks a real socket admitting
+a model stream during listener grace, with the stream and ownership retained
+after the listener closes and the replacement accepts another model request.
 Temporal and the model provider are deterministic test boundaries; these tests do
 not constitute a production Render routing rehearsal.

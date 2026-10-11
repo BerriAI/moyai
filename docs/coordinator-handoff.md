@@ -24,6 +24,16 @@ short transfer and are handled by the successor. Requests already admitted to th
 old HTTP process must finish before its ASGI shutdown starts; configure Render's
 shutdown allowance and Uvicorn drain accordingly.
 
+On Render, the coordinator keeps accepting signed hooks for **30 seconds after
+the first SIGTERM** to cover private-routing convergence, then closes its listener
+and allows **20 seconds** for admitted HTTP requests. These waits share a fixed
+50-second budget (plus short scheduling overhead), leaving approximately 250
+seconds of the required 300-second platform allowance for background cleanup.
+Leadership is retained during the grace and cleanup; the standby can accept hooks
+throughout, but cannot begin background processing until the old owner releases
+its lock. Repeated SIGTERM does not extend the grace. The finite platform deadline
+still applies, and a production ingress rehearsal is required to verify routing.
+
 Every background database operation inherits the coordinator owner context and
 checks that the same runtime owner still holds 726943. A lost owner connection or
 revoked compatibility record fences further operations and fails readiness. The

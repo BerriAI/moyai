@@ -141,7 +141,7 @@ def test_invalid_custom_origins_never_start(monkeypatch, url):
         configure_environment()
 
 
-@pytest.mark.parametrize('role,seconds', [('api', 240), ('coordinator', 20), ('broker', 270), ('worker', 20)])
+@pytest.mark.parametrize('role,seconds', [('api', 240), ('coordinator', 20), ('broker', 240), ('worker', 20), ('standalone', 20)])
 def test_render_api_shutdown_budget_leaves_time_for_cleanup(monkeypatch, role, seconds):
     import render_start
     monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example')
@@ -152,6 +152,8 @@ def test_render_api_shutdown_budget_leaves_time_for_cleanup(monkeypatch, role, s
     render_start.main()
     assert calls[0].config.timeout_graceful_shutdown == seconds
     assert calls[0].config.workers == 1
-    assert isinstance(calls[0], render_start.RenderAPIServer) is (role == 'api')
-    if role == 'api':
+    assert isinstance(calls[0], render_start.RenderOverlapServer) is (role in {'api', 'broker', 'coordinator'})
+    if role in {'api', 'broker'}:
         assert calls[0].listener_grace_seconds + seconds == 270
+    elif role == 'coordinator':
+        assert calls[0].listener_grace_seconds + seconds == 50
