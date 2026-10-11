@@ -12,6 +12,16 @@ without deployment, useful after configuration changes. It is not a required
 separate run. An incompatible schema, contract or shared configuration is rejected
 before deployment and needs a separately planned transition.
 
+Rolling **preflight_only** also repeats the four-service read checks for three
+rounds after the initial baseline. This exercises repeated SSH connections without
+changing environments, deploying containers, or applying a migration. Failed SSH
+checks record only fixed error categories, exit codes, elapsed time, authentication
+and command-request milestones, and whether probe output arrived. Raw SSH output
+and command arguments are never written to the receipt. A connection failure after
+any stdout is terminal: an incomplete observation must not be discarded in favor
+of a later healthy sample. These diagnostics identify deployment transport failures;
+they do not establish that production continuity has been verified.
+
 This mode replaces the worker, broker, coordinator and API in that order. Users
 can continue sending messages and admitted work stays under its existing durable
 ownership. Each replacement must become healthy, and its predecessor must retire,
