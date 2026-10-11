@@ -138,7 +138,7 @@ class SlackChat:
                 # before saving a possible instant answer to this new input.
                 self.collect_answers_in(conn, binding, allowed)
                 self.collect_progress_in(conn, binding, allowed)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, restore_archived=not metadata_request)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, human_control=True, restore_archived=not metadata_request)
             if created and binding:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
@@ -402,16 +402,18 @@ class SlackChat:
         conn.execute("""UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='progress'
             AND status='pending' AND json_number(metadata,'turn_id') IS DISTINCT FROM ?""", (run_id, turn_id))
         events = conn.execute("""SELECT id,message FROM events WHERE run_id=? AND kind='message'
-            AND json_number(data,'public_update')=1 AND json_number(data,'public_reply_to') IS NOT NULL
+            AND json_number(data,'public_update')=1
             AND json_number(data,'turn_id')=? ORDER BY id""",
                               (run_id, turn_id)).fetchall()
         for event in events:
-            key = f"progress:{event['id']}"
             text = slack_text(self.scrub(event['message']))
-            self.queue(conn, run_id, key, 'progress', text + '\n\n' + self.link(run_id),
-                       {'event_id': event['id'], 'turn_id': turn_id})
-            if not allowed or binding['paused']:
-                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
+            chunks = split_reply(text)
+            for index, chunk in enumerate(chunks):
+                key = f"progress:{event['id']}" + (f':part:{index}' if index else '')
+                self.queue(conn, run_id, key, 'progress', chunk + ('\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''),
+                           {'event_id': event['id'], 'turn_id': turn_id})
+                if not allowed or binding['paused']:
+                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
 
     def progress_turn_in(self, conn, run_id):
         turn_id = active_turn(conn, run_id)
@@ -420,13 +422,14 @@ class SlackChat:
             return None  # A received answer supersedes progress while files save.
         return turn_id
 
-    def settle_answer_in(self, conn, run_id):
-        """Commit the saved answer and its existing delivery intent together."""
+    def settle_public_in(self, conn, run_id):
+        """Commit saved public text and its existing delivery intent together."""
         binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
         if binding:
             allowed = (self.settings.slack_thread_chat_enabled and self.owner.status()['enabled'] and
                        binding['team_id'] == self.owner.connectors.slack_installation().get('team_id'))
             self.collect_answers_in(conn, binding, allowed)
+            self.collect_progress_in(conn, binding, allowed)
 
     def collect_answers_in(self, conn, binding, allowed):
         run_id = binding['run_id']
@@ -693,10 +696,10 @@ class SlackChat:
         with self.store.connect() as conn:
             current = self.progress_turn_in(conn, row['run_id'])
             metadata = json.loads(row['metadata'])
-            # Also retire routine posts queued by an older release. Eligibility
-            # comes from the saved server-owned event, not outbox metadata alone.
+            # Eligibility comes from the saved server-owned event, not outbox
+            # metadata alone. Every public update uses the same turn fence.
             reply = conn.execute("""SELECT 1 FROM events WHERE run_id=? AND id=? AND kind='message'
-                AND json_number(data,'public_update')=1 AND json_number(data,'public_reply_to') IS NOT NULL
+                AND json_number(data,'public_update')=1
                 AND json_number(data,'turn_id')=?""", (row['run_id'], metadata.get('event_id'), current)).fetchone()
             if current is not None and metadata.get('turn_id') == current and reply:
                 return False

@@ -667,11 +667,11 @@ def test_broker_hides_delegation_without_temporal_and_keeps_run_scope(workspace)
 
 
 @pytest.mark.parametrize('name', ['max_concurrent_runs', 'max_concurrent_model_requests'])
-def test_capacity_configuration_supports_explicit_scale_but_requires_positive_budgets(name):
+def test_capacity_configuration_supports_explicit_scale_and_zero_as_unlimited(name):
     assert getattr(Settings(_env_file=None, **{name: 3000}), name) == 3000
-    for invalid in (0, -1):
-        with pytest.raises(ValidationError):
-            Settings(_env_file=None, **{name: invalid})
+    assert getattr(Settings(_env_file=None), name) == 0
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{name: -1})
 
 
 async def test_direct_child_chat_joins_pending_work_and_keeps_sender_and_model(durable):
@@ -704,8 +704,8 @@ async def test_handoff_rechecks_followup_arriving_during_capacity_wait(durable, 
     await drive(manager, child)
     admission = manager.admission
     @asynccontextmanager
-    async def admit(run_id):
-        async with admission(run_id) as available:
+    async def admit(run_id, **options):
+        async with admission(run_id, **options) as available:
             coordinator.enqueue_child(child, 'Check one more case', 'during-admission', None, 'google:bob')
             yield available
     monkeypatch.setattr(manager, 'admission', admit)

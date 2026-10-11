@@ -725,7 +725,9 @@ def test_failed_turn_is_not_saved_as_a_completed_assistant_answer(workspace):
     assert [m['status'] for m in app.state.store.messages(run['id'])]==['failed','failed']
 
 
-def test_relay_only_pauses_for_an_authenticated_delegation_response():
+@pytest.mark.parametrize('name', ['agents_fanout', 'swarm_start', 'agents_retry', 'agents_wait'])
+@pytest.mark.parametrize('multipart', [False, True])
+def test_relay_only_pauses_for_an_authenticated_delegation_response(name, multipart):
     group = 'f' * 32
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -744,7 +746,7 @@ def test_relay_only_pauses_for_an_authenticated_delegation_response():
         headers = {'Authorization': 'Bearer token'}
         httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'slack_search'})
         assert relay.wait_group == ''
-        response = httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'agents_fanout'})
+        response = httpx.post(relay.url + '/tools/call', headers=headers, json={'name': name, **({'moyai_payload': {'digest': 'a'*64, 'parts': 1}} if multipart else {})})
         assert response.json()['moyai_wait_group'] == relay.wait_group == group
     finally:
         relay.close()
@@ -783,8 +785,15 @@ def test_relay_retries_only_explicit_unbilled_model_admission(monkeypatch):
         relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
 
 
-def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkeypatch):
-    app, client = workspace
+@pytest.fixture
+def finite_model_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv('MAX_CONCURRENT_MODEL_REQUESTS', '8')
+    with contextmanager(workspace.__wrapped__)(tmp_path, monkeypatch) as value:
+        yield value
+
+
+def test_full_model_capacity_returns_unbilled_admission_marker(finite_model_workspace, monkeypatch):
+    app, client = finite_model_workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     run = active(app)
     received = []
@@ -803,7 +812,7 @@ def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkey
         calls = [pool.submit(client.post, endpoint, json={'messages':[]}, headers=headers) for _ in range(8)]
         try:
             wait_for(lambda: len(received) == 8)
-            queued = client.post(endpoint, json={'messages':[]}, headers=headers)
+            queued = pool.submit(client.post, endpoint, json={'messages':[]}, headers=headers).result(timeout=5)
             assert queued.status_code == 429 and queued.headers['X-Moyai-Model-Queue'] == '1'
             assert len(app.state.store.rows('SELECT * FROM model_requests')) == 8
         finally:
@@ -866,13 +875,16 @@ def test_superseded_model_wait_never_submits_another_gateway_call(monkeypatch):
 
 
 def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
+    import base64
+    import hashlib
+    from sandbox.broker_transport import send_payload
     received = []
     payload = {'name': 'github_create_pull_request', 'arguments': {'content': 'x' * (6 * 1024 * 1024)}}
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_POST(self):
             raw = self.rfile.read(int(self.headers['Content-Length']))
-            received.append(json.loads(unseal('runtime-token', self.path, raw)))
+            received.append((self.path, json.loads(unseal('runtime-token', self.path, raw))))
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -884,8 +896,18 @@ def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
     try:
         with httpx.Client(base_url=relay.url, timeout=10) as client:
             headers = {'Authorization': 'Bearer runtime-token'}
-            assert client.post('/tools/call', json=payload, headers=headers).json() == {'ok': True}
+            def send(path, body):
+                response = client.post(path, json=body, headers=headers)
+                assert response.status_code == 200, response.text
+                return response.json()
+            assert send_payload('/tools/call', payload, send) == {'ok': True}
             assert client.post('/v1/chat/completions', json=payload, headers=headers).status_code == 413
-        assert received == [payload]
+        parts, (path, manifest) = received[:-1], received[-1]
+        assert path == '/tools/call' and manifest['name'] == payload['name']
+        assert all(path == '/payloads' for path, _ in parts)
+        complete = b''.join(base64.b64decode(value['data']) for _, value in parts)
+        assert len(parts) == manifest['moyai_payload']['parts']
+        assert hashlib.sha256(complete).hexdigest() == manifest['moyai_payload']['digest']
+        assert json.loads(complete) == payload
     finally:
         relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)

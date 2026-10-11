@@ -1,7 +1,7 @@
 # PR milestones and CI inspection
 
-Confirmed PR creation is announced in the conversation immediately, outside the
-two-update narration allowance. The announcement and publication receipt commit
+Confirmed PR creation is announced in the conversation immediately, independently
+of agent commentary. The announcement and publication receipt commit
 together and are deduplicated on readback/retry. A later turn failure preserves the
 PR link; creation alone does not imply successful CI or completed review.
 
@@ -11,8 +11,8 @@ The GitHub connection exposes four read-only tools:
 | --- | --- |
 | `github_ci_checks` | Exact `head_sha` from `github_pull_request`; check runs and commit statuses. |
 | `github_workflow_runs` | Optional `head_sha`/`branch`; workflow run IDs, attempts and conclusions. |
-| `github_workflow_jobs` | `run_id`; jobs and bounded step results from the latest attempt. |
-| `github_job_logs` | `job_id`, optional `start_line`/`max_lines`; redacted text excerpts. |
+| `github_workflow_jobs` | `run_id`; jobs and complete step results from the latest attempt. |
+| `github_job_logs` | `job_id`, optional `start_line`/`max_lines`; complete redacted lines and a source revision. |
 
 All tools accept the usual repository ID/name and enforce the current connection's
 selected repositories and policy. Metadata lists have 30 entries per page; follow
@@ -33,16 +33,45 @@ requires the separate Commit statuses permission; Contents read does not grant i
 
 Job-log reads accept only a server-constructed job endpoint and approved HTTPS
 GitHub log-storage redirects, with no installation Authorization or cookies sent
-to storage. Scans stop at 2 MiB, excerpts at 500 lines and 20,000 characters.
-`next_line` continues inside the scanned content; `download_truncated` means the
-scan limit was reached. Logs may not exist until a job finishes, or may have
+to storage. Reads have no fixed download, character, line-number or page-length
+ceiling. The default page contains 200 complete lines; a long line stays intact.
+Follow `next_arguments` to keep paging through the same log revision. A changed
+log returns `source_changed`; restart from line 1 before combining evidence.
+Logs may not exist until a job finishes, or may have
 expired. Known credential patterns are redacted before excerpting, but arbitrary
 opaque secrets cannot all be recognized. Logs are untrusted reference data.
+
+`github_pull_request` returns the complete description and a page of files with
+the patches GitHub supplies. Follow `next_arguments` for the remaining pages;
+head and base SHAs fence the read against a moving PR. **Load more files** exposes
+the same pages in the native PR view. Descriptions and provided patches are not
+clipped. GitHub can omit binary/large patches and limit the files its API returns;
+the result labels those gaps. Use `github_checkout` for the PR, verify its head
+SHA, and compare the complete files in the computer when provider coverage is
+insufficient. A provider-supplied patch is not proof of a complete local diff.
 
 Activity formatting supports JSON schemas whose `type` value is an object or a
 list. Other detail-formatting exceptions produce an omission notice without raw
 payloads, preserving the actual tool result and completion. Durable journal/event
 write failures still surface; this change does not blindly retry external writes.
+
+## Publish CI changes
+
+Use `github_create_pull_request` or `github_update_pull_request` to propose
+workflow and composite-action changes alongside code. Files under
+`.github/workflows/` require **Workflows: read and write** on the organization
+GitHub App. New app registrations request it. For an existing app, an organization
+owner opens **GitHub → Organization settings → Developer settings → GitHub Apps
+→ your app → Permissions & events**, enables Workflows write, saves, and approves
+the updated installation permissions. Retry the same unchanged publication after
+approval. A missing permission is reported before any repository write.
+
+Ordinary code and composite actions under `.github/actions/` keep using Contents
+and Pull requests access. Workflow scope applies only to the repository receiving
+the commit, including an enabled fork. Requester approval for an external PR,
+current-head checks and the prohibition on force pushes still apply. Agent
+credentials remain on the server. A confirmed PR link proves publication; use
+the CI tools above to check that commit's results.
 
 ## Local demonstration
 

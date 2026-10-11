@@ -121,7 +121,9 @@ def plan(directory: Path, *, database_url: str = '', database_schema: str = 'moy
 
 def plan_connection(directory: Path, conn) -> dict:
     upgraded = {'data_ref', 'preview_ref', 'preview_size'} <= attachment_columns(conn)
-    pending = "data_ref='' OR ((preview_size>0 OR length(preview)>0) AND preview_ref='')" if upgraded else '1=1'
+    chunked = 'part_size' in attachment_columns(conn)
+    pending = (("(part_size=0 AND data_ref='')" if chunked else "data_ref=''") +
+               " OR ((preview_size>0 OR length(preview)>0) AND preview_ref='')") if upgraded else '1=1'
     attachments = dict(conn.execute(f'''SELECT count(*) AS count,
         coalesce(sum(length(data)+length(preview)),0) AS retained_bytes,
         coalesce(sum(CASE WHEN {pending} THEN 1 ELSE 0 END),0) AS pending
@@ -131,6 +133,8 @@ def plan_connection(directory: Path, conn) -> dict:
     artifacts = {'count': 0, 'retained_bytes': 0, 'pending': 0}
     parts = dict(conn.execute('''SELECT count(*) AS count, coalesce(sum(length(data)),0) AS retained_bytes,
         coalesce(sum(CASE WHEN reference='' THEN 1 ELSE 0 END),0) AS pending FROM artifact_parts''').fetchone()) if table_exists(conn, 'artifact_parts') else {'count': 0, 'retained_bytes': 0, 'pending': 0}
+    input_parts = dict(conn.execute('''SELECT count(*) AS count, coalesce(sum(length(data)),0) AS retained_bytes,
+        coalesce(sum(CASE WHEN reference='' THEN 1 ELSE 0 END),0) AS pending FROM attachment_parts''').fetchone()) if table_exists(conn, 'attachment_parts') else {'count': 0, 'retained_bytes': 0, 'pending': 0}
     for name, _ in acknowledged_files(directory, conn):
         try:
             size = (directory / 'artifacts' / name).stat(follow_symlinks=False).st_size
@@ -152,7 +156,7 @@ def plan_connection(directory: Path, conn) -> dict:
                 inventory['unmanifested'] += path.relative_to(root).as_posix() not in manifested
     return {'operation': 'plan', 'schema_ready': upgraded and table_exists(conn, 'artifact_objects'),
             'attachments': attachments, 'legacy_artifacts': artifacts, 'local_inventory': inventory,
-            'remote_artifacts': len(manifested), 'artifact_parts': parts, 'source_files_preserved': True}
+            'remote_artifacts': len(manifested), 'artifact_parts': parts, 'attachment_parts': input_parts, 'source_files_preserved': True}
 
 
 def verified_payload(objects, raw: bytes, reference: str = '') -> str:
@@ -169,7 +173,7 @@ def migrate_attachment(store, row, clear: bool) -> tuple[bool, int]:
         if len(data) != row['size'] or hashlib.sha256(data).hexdigest() != row['sha256']:
             raise MaintenanceError('Legacy attachment does not match its metadata. Original bytes were preserved.')
         data_ref = verified_payload(store.objects, data, data_ref)
-    elif not data_ref:
+    elif not data_ref and not row.get('part_size'):
         raise MaintenanceError('Legacy attachment bytes are missing. Restore the original file before migration.')
     if preview:
         preview_ref = verified_payload(store.objects, preview, preview_ref)
@@ -220,7 +224,9 @@ def migrate(store, *, limit: int = 100, clear_attachment_blobs: bool = False) ->
     if not 1 <= limit <= 10000:
         raise MaintenanceError('Use a migration batch size between 1 and 10000.')
     directory = store.path.parent
-    pending = "data_ref='' OR ((preview_size>0 OR length(preview)>0) AND preview_ref='')"
+    with store.connect() as conn:
+        chunked = 'part_size' in attachment_columns(conn)
+    pending = ("(part_size=0 AND data_ref='')" if chunked else "data_ref=''") + " OR ((preview_size>0 OR length(preview)>0) AND preview_ref='')"
     if clear_attachment_blobs:
         pending += ' OR length(data)>0 OR length(preview)>0'
     # Enumerate IDs only; at most one attachment's bytes are held at a time.
@@ -236,26 +242,29 @@ def migrate(store, *, limit: int = 100, clear_attachment_blobs: bool = False) ->
         result['attachments_published' if published else 'superseded'] += 1
         result['attachment_bytes_cleared'] += cleared
     remaining = limit - len(ids)
-    with store.connect() as conn:
-        has_parts = table_exists(conn, 'artifact_parts')
-    result['artifact_parts_published'] = 0
-    if has_parts:
-        pending_parts = store.rows("SELECT run_id,upload_id,part FROM artifact_parts WHERE reference='' ORDER BY run_id,upload_id,part LIMIT ?", (remaining,))
+    for table, columns in [('artifact_parts', ('run_id','upload_id','part')), ('attachment_parts', ('attachment_id','part'))]:
+        with store.connect() as conn:
+            has_parts = table_exists(conn, table)
+        result[table+'_published'] = 0
+        if not has_parts:
+            continue
+        fields, where = ','.join(columns), ' AND '.join(key+'=?' for key in columns)
+        pending_parts = store.rows(f"SELECT {fields} FROM {table} WHERE reference='' ORDER BY {fields} LIMIT ?", (remaining,))
         for item in pending_parts:
-            keys = tuple(item[key] for key in ('run_id', 'upload_id', 'part'))
-            rows = store.rows('SELECT * FROM artifact_parts WHERE run_id=? AND upload_id=? AND part=?', keys)
+            keys = tuple(item[key] for key in columns)
+            rows = store.rows(f'SELECT * FROM {table} WHERE {where}', keys)
             if not rows:
                 continue
             row = rows[0]
             raw = bytes(row['data'])
             if len(raw) != row['size'] or hashlib.sha256(raw).hexdigest() != row['sha256']:
-                raise MaintenanceError('Artifact part failed verification; original bytes preserved.')
+                raise MaintenanceError('File part failed verification; original bytes preserved.')
             reference = verified_payload(store.objects, raw)
             with store.connect() as conn:
                 conn.begin_write()
-                conn.execute("UPDATE artifact_parts SET reference=?,data=? WHERE run_id=? AND upload_id=? AND part=? AND reference='' AND sha256=?",
+                conn.execute(f"UPDATE {table} SET reference=?,data=? WHERE {where} AND reference='' AND sha256=?",
                              (reference, b'', *keys, row['sha256']))
-            result['artifact_parts_published'] += 1
+            result[table+'_published'] += 1
             remaining -= 1
     with store.connect() as conn:
         names = list(acknowledged_files(directory, conn))
@@ -279,30 +288,43 @@ def verify(store) -> dict:
         raise MaintenanceError('Configure private object storage before verification.')
     with store.connect() as conn:
         before = plan_connection(store.path.parent, conn)
-    if (before['attachments']['pending'] or before['legacy_artifacts']['pending'] or before['artifact_parts']['pending']
+    if (before['attachments']['pending'] or before['legacy_artifacts']['pending'] or before['artifact_parts']['pending'] or before['attachment_parts']['pending']
             or before['local_inventory']['unmanifested'] or before['local_inventory']['symlinks']):
         raise MaintenanceError('Shared file verification requires no pending payloads, unmanifested local files or symlinks. Inspect the plan on the original disk.')
     checked = 0
     # Metadata only; no database transaction is held during object downloads.
-    attachments = store.rows('SELECT id,data_ref,preview_ref,size,sha256,preview_size FROM attachments ORDER BY id')
+    with store.connect() as conn:
+        chunked = 'part_size' in attachment_columns(conn)
+        has_input_parts = table_exists(conn, 'attachment_parts')
+    attachment_sql = 'SELECT id,data_ref,preview_ref,size,sha256,preview_size' + (',part_size,upload_state' if chunked else '') + ' FROM attachments ORDER BY id'
+    attachments = store.rows(attachment_sql)
     artifacts = store.rows('SELECT name,reference,size,sha256 FROM artifact_objects ORDER BY name')
     with store.connect() as conn:
         has_parts = table_exists(conn, 'artifact_parts')
     parts_sql = 'SELECT run_id,upload_id,part,reference,size,sha256 FROM artifact_parts ORDER BY run_id,upload_id,part'
     parts = store.rows(parts_sql) if has_parts else []
-    for row in attachments + artifacts + parts:
+    input_parts_sql = 'SELECT attachment_id,part,reference,size,sha256 FROM attachment_parts ORDER BY attachment_id,part'
+    input_parts = store.rows(input_parts_sql) if has_input_parts else []
+    for row in attachments + artifacts + parts + input_parts:
         reference = row.get('data_ref', row.get('reference'))
-        if not reference or reference.rsplit(':', 1)[-1] != row['sha256']:
-            raise MaintenanceError('Published file metadata does not match its object checksum.')
-        store.objects.verify(reference, row['size'])
-        checked += 1
+        if not row.get('part_size'):
+            if not reference or reference.rsplit(':', 1)[-1] != row['sha256']:
+                raise MaintenanceError('Published file metadata does not match its object checksum.')
+            store.objects.verify(reference, row['size'])
+            checked += 1
+        elif row['upload_state'] == 'ready':
+            from types import SimpleNamespace
+            from .attachment_uploads import AttachmentUploads
+            for _ in AttachmentUploads(SimpleNamespace(store=store)).chunks(row):
+                pass
         if row.get('preview_ref'):
             store.objects.verify(row['preview_ref'], row['preview_size'])
             checked += 1
     # A migration receipt is only meaningful for unchanged references/inventory.
-    if (attachments != store.rows('SELECT id,data_ref,preview_ref,size,sha256,preview_size FROM attachments ORDER BY id')
+    if (attachments != store.rows(attachment_sql)
             or artifacts != store.rows('SELECT name,reference,size,sha256 FROM artifact_objects ORDER BY name')
-            or (has_parts and parts != store.rows(parts_sql))):
+            or (has_parts and parts != store.rows(parts_sql))
+            or (has_input_parts and input_parts != store.rows(input_parts_sql))):
         raise MaintenanceError('File inventory changed during verification. Retry after draining file writers.')
     with store.connect() as conn:
         if before != plan_connection(store.path.parent, conn):

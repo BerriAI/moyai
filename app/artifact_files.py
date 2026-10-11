@@ -15,7 +15,7 @@ import zlib
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from . import captures
-from .attachments import inspect_file, MAX_FILE as IMAGE_PREVIEW_BYTES
+from .attachments import inspect_file, IMAGE_PREVIEW_BYTES
 from .published_artifacts import text_page
 
 PREVIEW_PAGE = 128 * 1024

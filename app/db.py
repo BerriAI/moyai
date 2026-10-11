@@ -88,8 +88,9 @@ class Store:
         self.default_model = default_model
         self.tracing = None
         self.memory_review = None
+        self.skill_learning = None
         self.goals = None
-        self.answer_delivery = None
+        self.public_delivery = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
@@ -107,6 +108,8 @@ class Store:
             self._initialize_schema(default_model)
             from .swarms import initialize_schema
             initialize_schema(self)
+            from .swarm_chat import initialize_schema as initialize_swarm_chat
+            initialize_swarm_chat(self)
         if not self.database:
             self.path.chmod(0o600)
         self.objects = object_storage if object_storage is not None else ObjectStorage()
@@ -560,7 +563,11 @@ class Store:
                     if previous['deleted_at'] or previous['deletion_requested_at']:
                         raise ValueError('This session was deleted. Start a new session.')
                     mission = conn.execute('SELECT budget_seconds FROM swarm_missions WHERE run_id=?', (previous['run_id'],)).fetchone()
-                    if (mission['budget_seconds'] if mission else None) != swarm_budget_seconds:
+                    original_time = conn.execute("SELECT data FROM events WHERE run_id=? AND json_text(data,'phase')='swarm_initial_time' ORDER BY id LIMIT 1",
+                                                 (previous['run_id'],)).fetchone() if mission else None
+                    initial_budget = (json.loads(original_time['data'])['budget_seconds'] if original_time
+                                      else mission['budget_seconds'] if mission else None)
+                    if initial_budget != swarm_budget_seconds:
                         raise ValueError('That submission ID was already used for different content.')
                     if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
@@ -572,15 +579,15 @@ class Store:
                 parent = conn.execute("SELECT prompt,summary FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''", (side_chat_of,)).fetchone()
                 if not parent:
                     raise ValueError('The original session no longer exists.')
-                recent = conn.execute("SELECT role,content FROM messages WHERE run_id=? AND status NOT IN ('queued','deleted') ORDER BY id DESC LIMIT 30", (side_chat_of,)).fetchall()
-                context_data = {'task': parent['prompt'][:4000], 'latest_result': parent['summary'][:8000],
-                                'conversation': [dict(row) | {'content': row['content'][:3000]} for row in reversed(recent)]}
-                while len(json.dumps(context_data, ensure_ascii=False)) > 48000:
-                    if context_data['conversation']:
-                        context_data['conversation'].pop(0)
-                    else:
-                        field = max(('task', 'latest_result'), key=lambda key: len(context_data[key]))
-                        context_data[field] = context_data[field][:len(context_data[field]) // 2]
+                messages = conn.execute('''SELECT id,role,content,status,user_id,created_at,input_kind,source_json,response_to_id
+                    FROM messages WHERE run_id=? AND status!='deleted' ORDER BY id''', (side_chat_of,)).fetchall()
+                conversation = []
+                for row in messages:
+                    item = dict(row)
+                    item['source'] = json.loads(item.pop('source_json'))
+                    conversation.append(item)
+                context_data = {'source_run_id':side_chat_of, 'captured_at':stamp,
+                                'task':parent['prompt'], 'latest_result':parent['summary'], 'conversation':conversation}
                 context = json.dumps(context_data, ensure_ascii=False)
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
             if pending >= self.max_pending_runs and not metadata_request:
@@ -658,7 +665,7 @@ class Store:
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
             m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,m.input_kind,m.source_json,m.reply_policy,
-            CASE WHEN m.input_kind='observation' THEN 'Slack observation' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
+            CASE WHEN m.input_kind='observation' THEN 'Slack observation' WHEN m.input_kind='delegation' THEN 'Agent guidance' WHEN m.input_kind='automation' THEN 'Scheduled workflow' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),
@@ -688,7 +695,7 @@ class Store:
                 if name in {'', slack_user, 'Slack ' + slack_user, message['user_id']}:
                     name = (email or '').strip() or 'Slack teammate'
                 message['display_content'] = f'Slack reply from {name}:\n' + message['content'][len(prefix):]
-        self.slack_mentions.decorate(messages)
+        self.slack_mentions.decorate(messages, connection=connection)
         # Inputs that never started (cancelled/failed while waiting) stay where
         # they were sent: before the first later-sent input that did run.
         ordered = [m for m in messages if not (m['role'] == 'user' and not m['started_at'])]
@@ -697,7 +704,7 @@ class Store:
                           and (m['created_at'], m['id']) > (orphan['created_at'], orphan['id'])), len(ordered))
             ordered.insert(index, orphan)
         messages = ordered + [m for m in messages if m['role'] == 'user' and not m['started_at'] and m['status'] == 'queued']
-        return self.attachments.messages(run_id, messages)
+        return self.attachments.messages(run_id, messages, connection=connection)
 
     def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.connect() as conn:
@@ -707,7 +714,7 @@ class Store:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, restore_archived):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, human_control=False, restore_archived):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row and (row['deleted_at'] or row['deletion_requested_at']):
@@ -720,7 +727,13 @@ class Store:
                     or self.attachments.message_ids(conn, existing['id']) != set(attachment_ids or [])):
                 raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
-        from .swarms import execution_policy, remaining_seconds
+        from .swarms import execution_policy, prepare_human_message_in, remaining_seconds
+        # Only authenticated human transports opt into changing a swarm's
+        # lifetime. Tool/peer/automatic messages cannot renew their own budget.
+        # This follows the receipt check so retried extensions apply once.
+        if human_control and not metadata_request and not row['parent_run_id']:
+            prepare_human_message_in(conn, run_id, content)
+            row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
         mission = execution_policy(self, run_id, connection=conn)
         if mission and (mission['status'] != 'active' or remaining_seconds(mission) <= 0):
             if mission['status'] in {'paused', 'blocked'} and remaining_seconds(mission) > 0:
@@ -812,14 +825,16 @@ class Store:
             self.save_answer_in(conn, run_id, message_id, content, status)
         else:
             conn.execute("UPDATE messages SET status='steered' WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id))
-        if self.answer_delivery:
-            self.answer_delivery(conn, run_id)
+        if self.public_delivery:
+            self.public_delivery(conn, run_id)
         if self.tracing:
             # Commit the answer and its pending span together. A crash
             # after saving the answer must not lose its root trace.
             self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
         if status == 'completed' and self.memory_review:
             self.memory_review.enqueue_in(conn, message_id)
+        if status == 'completed' and self.skill_learning:
+            self.skill_learning.enqueue_in(conn, message_id)
         return content
 
     def finish_message(self, run_id, message_id, content, status="completed"):
@@ -997,6 +1012,8 @@ class Store:
             with self.connect() as conn:
                 conn.begin_write()
                 record(conn, run_id, message, data, now())
+                if self.public_delivery:
+                    self.public_delivery(conn, run_id)
             return
         if kind != 'chat':
             # A queued user's creation time can precede the current response.

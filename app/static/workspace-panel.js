@@ -161,7 +161,7 @@
             const previous=MoyaiPullRequest.presentation(t.prStatus).state;t.prStatus=data;
             if(MoyaiPullRequest.presentation(data).state!==previous)draw();
           },
-          load:({refresh=false}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`,{recent:!refresh})}));return;
+          load:({refresh=false,page,head_sha,base_sha}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}${page?`&page=${page}&head_sha=${encodeURIComponent(head_sha||'')}&base_sha=${encodeURIComponent(base_sha||'')}`:''}`,{recent:!refresh})}));return;
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}
@@ -254,7 +254,7 @@
     function renderAgents(host){
       const focused=host.contains(document.activeElement)?document.activeElement?.getAttribute('data-agent-id'):null;
       const ready=agents.filter(child=>['idle','completed'].includes(child.status)).length;
-      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`);
+      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}">${globalThis.MoyaiAgentIcon(child.id)}<span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`);
       if(focused)host.querySelector(`[data-agent-id="${focused}"]`)?.focus({preventScroll:true});
     }
     function syncAgents(data){

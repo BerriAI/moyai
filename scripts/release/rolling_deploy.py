@@ -16,6 +16,7 @@ from scripts.release.deploy import (ACTIVE_DEPLOYS, BROKER, COORDINATOR, WORKER,
                                     Release, ReleaseError, SHARED_DEFAULTS, SHARED_KEYS)
 
 ROLES = ('api', 'worker', 'broker', 'coordinator')
+WORKSPACE_IMAGE_PREDEPLOY = '/app/.venv/bin/python /app/build_workspace_image.py'
 
 
 def candidate_contract(environment):
@@ -50,16 +51,19 @@ class RollingRelease(Release):
         metadata = self.render.call('GET', '/services/' + service_id)
         details = metadata['serviceDetails']
         docker = details.get('envSpecificDetails', {})
+        # Image preparation does not start runtime owners or migrate the database.
+        predeploy_commands = ((None, '', WORKSPACE_IMAGE_PREDEPLOY)
+                              if role in {'worker', 'coordinator'} else (None, ''))
         if (item.env.get('MOYAI_SCHEMA_MODE') != 'verify'
                 or item.env.get('MOYAI_SEPARATE_BROKER') != 'true'
                 or item.env.get('MOYAI_COORDINATOR_HANDOFF') != 'true'):
             raise ReleaseError('Rolling releases require the activated four-service handoff topology and verified schema.')
         if (details.get('disk') or details.get('runtime') != 'docker'
                 or details.get('maxShutdownDelaySeconds') != 300
-                or docker.get('preDeployCommand') or docker.get('dockerCommand')
+                or docker.get('preDeployCommand') not in predeploy_commands or docker.get('dockerCommand')
                 or docker.get('dockerfilePath') not in {'Dockerfile', './Dockerfile'}
                 or docker.get('dockerContext') != '.' or metadata.get('rootDir', '') not in {'', '.'}):
-            raise ReleaseError('Every rolling service requires diskless Docker startup, no command overrides and a 300-second shutdown allowance.')
+            raise ReleaseError('Rolling services require diskless Docker startup, no start override, only the approved worker/coordinator image-build hook, and a 300-second shutdown allowance.')
         self.topologies[service_id] = topology(metadata)
         return item, owner
 

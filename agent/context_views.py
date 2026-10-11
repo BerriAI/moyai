@@ -104,3 +104,15 @@ def current_view(prompt, *, directory, budget=None):
     return ('CURRENT USER REQUEST: its complete text exceeds this model input allocation. '
             'Read the saved user record before acting.\n'+encoded(history_view(
                 [{'role': 'user', 'content': prompt}], directory=directory, budget=budget)))
+
+
+def context_view(value, *, label, directory, budget=None):
+    """Keep complete instruction/reference components without a permanent overflow."""
+    text = value if isinstance(value, str) else encoded(value)
+    if budget is None or len(text.encode()) <= budget:
+        return text
+    path = save_records([{'role':'assistant', 'context_label':label, 'content':text}], directory)
+    return (f'{label}: complete source saved at {path}, line 1 ({len(text.encode())} UTF-8 bytes). '
+            'This component exceeds its allocation in the selected model window. Read the complete '
+            'source with byte-range file reads before relying on its requirements or evidence. '
+            'Its original scope and authority are unchanged; the saved source contains the complete text.')

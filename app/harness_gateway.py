@@ -116,6 +116,7 @@ class HarnessGateway:
         self.tracing = tracing
         self.context_budget = context_budget
         self.native_sessions = None
+        self.repository_context = None
         from .context_maintenance import ContextMaintenance
         self.maintenance = ContextMaintenance(self)
         from .live_context import LiveContext
@@ -127,8 +128,10 @@ class HarnessGateway:
         # This is a view allocation, derived from the actual input window. A
         # byte per token is conservative; final admission still counts the wire.
         allocation = max(1, budget.input_budget // 8)
-        contexts = await asyncio.gather(asyncio.to_thread(self.skills.context, run),
-                                       asyncio.to_thread(self.memory.context, run))
+        reads = [asyncio.to_thread(self.skills.context, run), asyncio.to_thread(self.memory.context, run)]
+        if self.repository_context:
+            reads.append(asyncio.to_thread(self.repository_context.context, run))
+        contexts = await asyncio.gather(*reads)
         return [fit_context(context, allocation) for context in contexts]
 
     async def context_window(self, run_id, request):

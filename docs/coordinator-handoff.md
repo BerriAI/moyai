@@ -3,7 +3,7 @@
 `MOYAI_COORDINATOR_HANDOFF=true` opts a verified PostgreSQL cluster into standby
 coordinators. Keep it false until the dedicated API and broker routes are active,
 all roles run the same compatible contracts, and the selected release's schema
-(currently revision 7) is migrated offline. See [rolling deployment](rolling-deploy.md).
+(currently revision 15) is migrated offline. See [rolling deployment](rolling-deploy.md).
 The flag belongs to the shared runtime settings on every role. This is an
 application protocol; it does not remove Render disk or shutdown restrictions.
 
@@ -23,6 +23,16 @@ requests do not need to become idle. New hook events can accumulate during this
 short transfer and are handled by the successor. Requests already admitted to the
 old HTTP process must finish before its ASGI shutdown starts; configure Render's
 shutdown allowance and Uvicorn drain accordingly.
+
+On Render, the coordinator keeps accepting signed hooks for **30 seconds after
+the first SIGTERM** to cover private-routing convergence, then closes its listener
+and allows **20 seconds** for admitted HTTP requests. These waits share a fixed
+50-second budget (plus short scheduling overhead), leaving approximately 250
+seconds of the required 300-second platform allowance for background cleanup.
+Leadership is retained during the grace and cleanup; the standby can accept hooks
+throughout, but cannot begin background processing until the old owner releases
+its lock. Repeated SIGTERM does not extend the grace. The finite platform deadline
+still applies, and a production ingress rehearsal is required to verify routing.
 
 Every background database operation inherits the coordinator owner context and
 checks that the same runtime owner still holds 726943. A lost owner connection or

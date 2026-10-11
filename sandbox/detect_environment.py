@@ -16,8 +16,6 @@ class DetectionError(ValueError):
 
 
 def read_json(path):
-    if path.stat().st_size > 128000:
-        raise DetectionError('Project configuration is too large.')
     try:
         value = json.loads(path.read_text())
     except (ValueError, UnicodeError):
@@ -37,10 +35,10 @@ def detect(root, recipe):
         if set(data) - allowed or not isinstance(data.get('verify'), str) or not data['verify'].strip():
             raise DetectionError('.moyai/environment.json needs a verify command and only supported recipe fields.')
         for key in allowed - {'apt_packages'}:
-            if key in data and (not isinstance(data[key], str) or len(data[key]) > 12000):
-                raise DetectionError('Project recipe commands must be strings of at most 12000 characters.')
+            if key in data and not isinstance(data[key], str):
+                raise DetectionError('Project recipe commands and instructions must be strings.')
         packages = data.get('apt_packages', [])
-        if (not isinstance(packages, list) or len(packages) > 40 or
+        if (not isinstance(packages, list) or
                 any(not isinstance(p, str) or not re.fullmatch(r'[a-z0-9][a-z0-9+.-]{0,79}', p) for p in packages)):
             raise DetectionError('Project recipe apt_packages must be Debian package names.')
         return {**recipe, **data, 'instructions': data.get('instructions', '') + '\nSetup source: .moyai/environment.json.'}

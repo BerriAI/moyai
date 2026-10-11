@@ -17,7 +17,7 @@ from app.security import digest
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
-                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01)
+                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01, repository_context_enabled=False, bundled_skills_enabled=False)
     app = create_app(settings)
     # Existing endpoint tests use synthetic providers. Keep the real budget
     # check, but supply fixture limits/counting instead of external metadata.
@@ -91,7 +91,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
     assert response.status_code == 200
     catalogs.append(response.json())
-    safe = set('''swarm_board agents_results agents_read_artifact automation_environments automation_webhook_info
+    safe = set('''swarm_board agents_results agents_read_artifact automation_environments automation_webhook_info automation_history automation_self_read
         credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
         github_pull_request github_pull_request_comments github_ci_checks github_workflow_runs github_workflow_jobs github_job_logs
         linear_my_issues linear_teams linear_search linear_issue
@@ -99,9 +99,10 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         workspace_diagnostics history_read bundled_skill_read artifacts_list artifact_read'''.split())
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
-    read_effects = set('''automation_list memory_search memory_read skills_search skills_load skills_read_file'''.split())
-    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
-        automation_update automation_enable automation_pause automation_claim_item credentials_resolve
+    read_effects = set('''automation_list memory_search memory_read skills_search skills_load skills_read_file
+        repository_context_search repository_context_read'''.split())
+    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel agents_send agents_wait automation_webhook_setup automation_create
+        automation_update automation_enable automation_pause automation_grant automation_self_update automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request
         github_update_pull_request github_comment_pull_request linear_comment linear_create_issue

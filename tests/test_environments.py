@@ -157,9 +157,11 @@ async def test_build_reattaches_publishes_only_after_verification(workspace, mon
     sandbox = SimpleNamespace(object_id='sb-existing', terminate=aio(AsyncMock()), snapshot_filesystem=aio(AsyncMock(return_value=SimpleNamespace(object_id='im-new'))))
     monkeypatch.setattr(env.manager, 'client', AsyncMock(return_value='client'))
     monkeypatch.setattr('app.environments.modal.Sandbox.from_name', aio(AsyncMock(return_value=sandbox)))
-    env.rpc = AsyncMock(return_value={'done': True, 'success': success, 'commit_sha': 'b' * 40, 'log': 'Verification result'})
+    log = 'First verification\n' + 'Complete build output 😀\n'*10000 + 'Final verification\n'
+    env.rpc = AsyncMock(return_value={'done': True, 'success': success, 'commit_sha': 'b' * 40, 'log': log})
     await env.advance(env.build(build['id']))
     assert env.build(build['id'])['phase'] == ('ready' if success else 'failed')
+    assert env.build(build['id'])['log'] == log
     assert env.get('e' * 32)['active_build'] == (build['id'] if success else old)
     assert env.rpc.await_args.args[1] == 'status'  # No setup replay after restart.
     assert sandbox.snapshot_filesystem.aio.await_count == (1 if success else 0)

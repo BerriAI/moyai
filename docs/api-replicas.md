@@ -22,7 +22,7 @@ that mode. Coordinated mode refuses the activated four-service topology.
 - `MOYAI_SEPARATE_BROKER=true` and `MOYAI_SCHEMA_MODE=verify` on all roles.
 - Offline schema migration to the revision required by the selected release (currently 8). Revision 2 adds the durable session-title
   inbox and a partial index for pending deletion scans; revision 3 adds the API
-  compatibility policy. These preserve saved
+  compatibility policy; revision 8 adds opt-in skill-learning jobs and private drafts. These preserve saved
   sessions, keys and runtime policy. Follow
   [schema migrations](schema-migrations.md), including stopping **all** runtime
   owners before `python -m app.schema_migrations --apply`.
@@ -107,7 +107,7 @@ proof that arbitrary source changes are safe. Before retaining the revision:
 
 This API contract does not add Temporal build routing or rolling schema migration.
 Initial activation of the full rolling topology requires the selected release's
-offline schema migration (currently revision 8) and a contract-publishing
+offline schema migration (currently revision 15) and a contract-publishing
 coordinator. Old processes without those contracts cannot participate in that
 one-time transition. Later compatible releases use coordinator ownership transfer
 and broker request drain; they do not move a live stream between processes.

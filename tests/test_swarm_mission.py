@@ -62,15 +62,13 @@ def test_equal_validated_goals_and_rosters_have_stable_internal_keys():
     assert key != changed_goal.fanout().request_key
     assert key != changed_roster.fanout().request_key
     # The shared contract does not ask models or users to supply host identities.
-    assert set(json.loads(first.model_dump_json())) == {'task', 'agents'}
+    assert set(json.loads(first.model_dump_json())) == {'task', 'agents', 'wait'}
 
 
 @pytest.mark.parametrize('input', [
     {'task': 'ab', 'agents': [{}]},
     {'task': ' ', 'agents': [{}]},
-    {'task': 'x' * 16001, 'agents': [{}]},
     {'task': 'Review it.', 'agents': []},
-    {'task': 'Review it.', 'agents': [{}] * 101},
     {'task': 'Review it.', 'agents': [{'name': 'Athena'}, {'name': 'ATHENA'}]},
     {'task': 'Review it.', 'agents': [{}], 'request_key': 'injected'},
     {'task': 'Review it.', 'agents': [{}], 'leader_id': 'injected'},
@@ -94,9 +92,11 @@ def test_internal_key_is_order_independent_but_keeps_ordered_roster_identity():
     assert internal_request_key({'agents': ['A', 'B']}) != internal_request_key({'agents': ['B', 'A']})
 
 
-def test_manual_fanout_keeps_its_original_prompt_limits():
-    with pytest.raises(ValidationError):
-        Fanout(request_key='manual', tasks=[{'label': 'One', 'prompt': 'x' * 12001}])
-    with pytest.raises(ValidationError):
-        Fanout(request_key='manual', instructions='x' * 8001,
-               tasks=[{'label': 'One', 'prompt': 'Do the assigned work.'}])
+def test_delegation_keeps_complete_inputs_beyond_former_limits():
+    prompt = 'x' * 24001
+    instructions = 'y' * 32001
+    fanout = Fanout(request_key='manual', instructions=instructions, tasks=[{'label': 'One', 'prompt': prompt}])
+    assert fanout.assignments()[0][1] == instructions + '\n\n' + prompt
+    shared = SharedMission(task=instructions, agents=[Agent()] * 101)
+    assert len(shared.fanout().assignments()) == 101
+    assert all(text.endswith(instructions) for _, text in shared.fanout().assignments())
