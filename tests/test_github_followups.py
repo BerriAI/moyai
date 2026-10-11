@@ -77,6 +77,27 @@ def comment_args():
     return Comment(repository=PAYLOAD['repository'], number=100, body='@review-bot review', request_key='review-second-head')
 
 
+def test_uncertain_comment_is_found_beyond_one_hundred_pages(published, monkeypatch):
+    _, _, run, _, github, api = published
+    api.lose = 'comment'
+    args = comment_args()
+    with pytest.raises(ConnectorError, match='Lost'):
+        asyncio.run(github.comment(run, args))
+    original = api.request
+    pages = []
+    async def paged(method, path, **kwargs):
+        if method == 'GET' and path.endswith('/comments'):
+            page = kwargs['params']['page']
+            pages.append(page)
+            if page <= 100:
+                return [{'body': f'Unrelated comment on page {page}'}] * 100
+        return await original(method, path, **kwargs)
+    monkeypatch.setattr(github, 'request', paged)
+    result = asyncio.run(github.comment(run, args))
+    assert result['id'] == 321 and pages == list(range(1, 102))
+    assert sum(method == 'POST' and path.endswith('/comments') for method, path, _ in api.calls) == 1
+
+
 def another_session(app):
     run = app.state.store.create_run('Continue an existing PR', '', 'modal', ['github'])
     token = 'another-run-capability'

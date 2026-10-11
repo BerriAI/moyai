@@ -636,3 +636,114 @@ was rendered and inspected at desktop/mobile widths. These are source/protocol
 checks, not live model-quality evidence.
 
 Schema remains 12; all role protocols are 12. Nothing was deployed.
+
+## Complete input files and transcripts (WP2/WP6)
+
+Web uploads publish complete files through immutable, authenticated parts and a
+verified attachment manifest. Drafts reserve their declared storage before
+transfer; incomplete files cannot be sent. Lost acknowledgments can retry the
+same part without replacing its bytes. Ownership, generation and quota checks
+fence publication after remote I/O. The existing database/object store holds
+parts; migration and verification understand them. Older clients retain their
+single-request compatibility route; new clients use multipart transfer.
+
+Removed the eight-file, 10 MiB per-file, 20 MiB per-message and 50 MiB draft
+ceilings. The configured workspace storage budget remains. Slack normalizes all
+file references in SDK batches and streams private-host downloads, checking exact
+provider size and live access before binding. Computer restoration streams and
+verifies complete files before atomic replacement. Audio playback reads verified
+part ranges. Whole-file memory buffers are unnecessary in these transfer paths.
+
+Every referenced image can enter the model request instead of silently dropping
+images after the tenth. Actual model/media capacity still applies. Removed the
+16,000-character transcript/composer cutoffs and the microphone's two-minute and
+10 MiB automatic stops. Decoder/transcription failure preserves the original,
+with an explicit processing error in the UI and agent context. Bounded image/text
+previews are labeled views; original bytes remain available.
+
+Validation: the initial focused run passed 99 cases; four old eight-file Slack
+expectations were corrected. Storage/source checks passed 59 cases, PostgreSQL
+intake checks passed 69 with one legacy-only skip, and 84 migration/role checks
+passed. The final audio, file, skill-import and storage run passed 115 cases;
+all 11 updated input contracts passed on PostgreSQL. Two publication-race cases
+also passed. The broader session, Slack, gateway and artifact run passed 403
+cases. All 557 Node checks passed. The real local UI/API flow, using fixture
+sign-in and demo execution, passed at 1440/768/320 pixels with twelve files,
+two files over 10 MiB, an acknowledgment lost after part storage, retry, exact
+download and reload. Matched baseline/current screens and product/storage guides
+were rendered and inspected. No live Slack, transcription or cloud provider was
+used to claim end-to-end deployment quality.
+
+The earlier frozen full regression finished with 5,388 passes, 298 skips and eight
+failures: seven obsolete automation-validation fixtures already fixed on main,
+and one timing-sensitive SDK outage assertion. All 39 affected recovery/validation
+cases passed on the newer source. The outage fixture now waits for the actual
+admission fence instead of sleeping one second; its focused real SDK case passes.
+
+Schema is revision 13; all role protocols are 13. Earlier schema digests are
+preserved. Release roles together after the offline migration; nothing was deployed.
+
+## Attachment handoff to initial swarm workers (WP6/WP7)
+
+Initial workers copy the complete attachment manifest and its immutable parts
+inside the same transaction as their scoped message, session and dispatch intent.
+Database parts are copied in SQL; object references stay shared and immutable.
+Parent deletion cannot remove a child's manifest, and unrelated sessions cannot
+read it. Storage admission and deduplicated bootstrap still apply.
+
+Validation: 66 swarm/file cases passed locally; all five initial-upload cases
+passed on PostgreSQL. The handoff cases cover legacy/multipart files, database
+and simulated object storage, exact child reads, retry, source deletion and
+session isolation. Schema and role protocols remain 13. Nothing was deployed.
+
+## GitHub workflow publication and complete traversal (WP6)
+
+The existing publisher now accepts workflow and composite-action files. Workflow
+edits and deletions request Workflows write only for the actual head repository;
+ordinary code, composite actions, checkout, CI and ruleset operations retain their
+own narrower scopes. Missing installation permission stops before repository
+mutations and explains how an organization owner can enable it. Existing apps
+without that scope keep their ordinary code/PR functionality. External-PR grants,
+exact heads, no force pushes, credential/access-control restrictions and immutable
+write receipts remain in place. Registration and the CI guide explain the flow.
+
+Removed the 25-component file-path cutoff and the 100-page limits on repository
+discovery and uncertain-comment lookup. Recovery still refuses to repost a
+comment whose outcome remains uncertain.
+
+Validation: the initial GitHub regression passed 257 cases with three failures
+in the new token-service fixture, which incorrectly treated write permission as
+not granting reads. The corrected eight workflow cases passed. The final focused
+traversal/schema set passed 14 cases with 39 optional database skips; 76 migration
+and role-compatibility cases then passed with PostgreSQL enabled. The PostgreSQL
+publication/follow-up/access suite passed all 163 cases. Rendered registration
+and documentation were inspected at desktop/mobile widths; the registration
+button is reachable at 1440/768/320. Provider responses are simulated; no GitHub
+App permissions were changed externally. Schema remains 13, role protocols are
+14, and nothing was deployed.
+
+## Shared environment readiness and complete setup evidence (WP7)
+
+Snapshotless children resolve preparation through their persisted parent chain.
+They wait on the existing shared build journal, release execution capacity while
+waiting, and inherit the parent's pinned version before computer allocation.
+Concurrent starts coalesce; later admin rebuilds cannot split the team across
+versions. Existing workspace snapshots and Base tools only retain precedence.
+Missing/cyclic ancestry is explicit. No new scheduler or dependency table is used.
+
+Every restored computer runs service startup and verification before advertising
+readiness. These scripts use the computer lifecycle rather than a separate
+five-minute timeout. Removed recipe-command/instruction lengths, package-count
+ceilings, repository-JSON size rejection and both 48 KB build-log cuts. Logs are
+currently retrieved as a complete response, so very large logs incur full-read
+cost on each status poll; no streaming-performance claim is made.
+
+Validation: 60 initial environment contracts passed; 163 environment, swarm and
+delegation checks passed on PostgreSQL. The final setup/automation suite passed
+73 cases, and all 40 revised environment cases passed on PostgreSQL. Another
+40 package/startup/independent-runtime checks passed with one optional skip.
+Cases cover twenty-worker bootstrap before coordinator preparation, shared
+failure, stop, restart, immutable version inheritance, long setup/log sources and
+actual local shell verification. The updated guide was rendered and inspected.
+No real cloud build or live model was used. Schema remains 13; role protocols are
+15. Nothing was deployed.

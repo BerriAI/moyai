@@ -246,6 +246,9 @@ class SwarmMissions:
                 columns = list(copy)
                 conn.execute('INSERT INTO attachments(' + ','.join(columns) + ') VALUES(' + ','.join('?' for _ in columns) + ')',
                              tuple(copy[column] for column in columns))
+                conn.execute('''INSERT INTO attachment_parts(attachment_id,part,size,sha256,reference,data)
+                    SELECT ?,part,size,sha256,reference,data FROM attachment_parts WHERE attachment_id=?''',
+                    (copy['id'], upload['id']))
             self.manager.submit_in(conn, {'id': child_id})
         conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'agents',?,?,?)",
                      (run_id, f'Queued {INITIAL_TEAM_SIZE} agents across configured harnesses. Workers start as capacity becomes available.',

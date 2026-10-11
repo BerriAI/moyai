@@ -106,18 +106,28 @@ def test_packages_committed_uncommitted_new_deleted_executable_and_ignores_ignor
     assert payload['base_sha'] == json.loads((repo / '.git/moyai.json').read_text())['base_sha']
 
 
-@pytest.mark.parametrize('kind', ['symlink', 'credential', 'workflow'])
+@pytest.mark.parametrize('kind', ['symlink', 'credential'])
 def test_unsafe_working_tree_changes_never_leave_sandbox(checkout, kind):
     repo, _, _, _, _ = checkout
     if kind == 'symlink':
         (repo / 'link').symlink_to(repo.parent / 'outside')
     elif kind == 'credential':
         (repo / '.env.secret').write_text('test secret')
-    elif kind == 'workflow':
-        (repo / '.github/workflows').mkdir(parents=True)
-        (repo / '.github/workflows/test.yml').write_text('test')
     with pytest.raises(local.GitHubToolError):
         local.collect(str(repo), 'Test PR', 'Body', 'request-123')
+
+
+def test_collects_complete_workflows_and_composite_actions(checkout):
+    repo, _, _, _, _ = checkout
+    contents = {'.github/workflows/test.yml': 'name: CI\non: push\n',
+                '.github/actions/test/action.yml': 'name: Test\nruns:\n  using: composite\n',
+                '/'.join(['nested']*30)+'/test.py': 'print(42)\n'}
+    for name, content in contents.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    payload = local.collect(str(repo), 'Test PR', 'Body', 'request-123')
+    assert {f['path']: f['content'] for f in payload['files']} == contents
 
 
 def test_escape_and_existing_nonrepo_refused(checkout):

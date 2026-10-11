@@ -708,10 +708,13 @@ def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=prin
     if delay_continuation or late_blocked_result:
         query, receive, before_model = ClaudeSDKClient.query, ClaudeSDKClient.receive_messages, relay.before_model
         continued = asyncio.Event()
+        automatic_blocked = threading.Event()
         async def delayed_query(client, prompt, **kwargs):
             continuation = isinstance(prompt, str) and 'Recovery input:' in prompt
             if continuation and delay_continuation:
-                await asyncio.sleep(1)
+                # Synchronize on the race being exercised. A fixed sleep can
+                # pass without observing the stale request on a busy machine.
+                assert await asyncio.to_thread(automatic_blocked.wait, 10), 'The automatic turn never reached its admission fence'
             result = await query(client, prompt, **kwargs)
             if continuation:
                 continued.set()
@@ -732,6 +735,7 @@ def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=prin
                 return before_model(request)
             except InputPending:
                 state['blocked'] += 1
+                automatic_blocked.set()
                 raise
         monkeypatch.setattr(ClaudeSDKClient, 'query', delayed_query)
         monkeypatch.setattr(ClaudeSDKClient, 'receive_messages', delayed_receive)

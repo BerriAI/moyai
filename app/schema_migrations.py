@@ -11,7 +11,7 @@ import json
 
 from .database import DatabaseError, identifier
 
-SCHEMA_REVISION = 12
+SCHEMA_REVISION = 13
 # Dependency order; optional features are prepared even when disabled at runtime.
 COMPONENTS = (
     'user_roles', 'sandbox_settings', 'github_repositories', 'github_write_access',

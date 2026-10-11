@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from PIL import Image
 import pytest
 
-from app.attachments import MAX_FILE, inspect_file
+from app.attachments import LEGACY_UPLOAD_BYTES as MAX_FILE, inspect_file
 from app.db import Store
 from app.persistence import Checkpoints, restore_checkpoint
 from app.security import digest
@@ -122,7 +122,7 @@ def test_upload_auth_limits_safe_names_and_idempotency(workspace, monkeypatch, s
     assert client.put('/api/attachments/' + uuid4().hex, params={'name': 'x'}, content=b'x', headers={'X-CSRF-Token': ''}).status_code == 403
     client.delete(first.json()['url'])
     assert client.get(first.json()['url']).status_code == 404
-    monkeypatch.setattr('app.attachments.MAX_DRAFT', 5)
+    app.state.settings.attachment_storage_limit_mb = 5 / (1024 * 1024)
     assert upload(client, data=b'123456').status_code == 422
     assert not app.state.store.rows('SELECT id FROM attachments')
 
@@ -142,11 +142,10 @@ def test_preview_does_not_serve_html_svg_or_trust_claimed_mime(workspace, storag
     assert 'no-store' in preview.headers['cache-control']
 
 
-def test_binding_rolls_back_whole_message_and_checks_total_size(workspace, monkeypatch):
+def test_binding_rolls_back_whole_message_for_duplicate_files(workspace, monkeypatch):
     app, client = workspace
     file = upload(client).json()
-    monkeypatch.setattr('app.attachments.MAX_MESSAGE', 2)
-    assert start(app, client, monkeypatch, [file]).status_code == 409
+    assert start(app, client, monkeypatch, [file, file]).status_code == 409
     assert not app.state.store.rows('SELECT id FROM runs')
     assert app.state.store.rows('SELECT message_id FROM attachments')[0]['message_id'] is None
 
@@ -281,30 +280,24 @@ def test_deleted_session_attachment_is_not_readable(workspace):
 
 
 @pytest.mark.parametrize('followup', [False, True])
-def test_eight_files_persist_and_ninth_or_duplicate_is_rejected(workspace, monkeypatch, followup, storage_mode):
+def test_all_files_persist_and_duplicates_are_rejected(workspace, monkeypatch, followup, storage_mode):
     app, client = workspace
     store = app.state.store
-    files = [upload(client, f'file-{i}.txt').json() for i in range(9)]
+    files = [upload(client, f'file-{i}.txt').json() for i in range(12)]
     ids = [file['id'] for file in files]
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     run_id = start(app, client, monkeypatch, []).json()['id'] if followup else None
     endpoint = f'/api/runs/{run_id}/messages' if followup else '/api/runs'
     body = {'content' if followup else 'prompt': 'Inspect files', 'client_id': 'eight-file-boundary'}
     before = len(store.rows('SELECT id FROM messages'))
-    assert client.post(endpoint, json={**body, 'attachment_ids': ids}).status_code == 422
     assert client.post(endpoint, json={**body, 'attachment_ids': [ids[0]] * 2}).status_code == 409
     assert len(store.rows('SELECT id FROM messages')) == before
     assert all(row['message_id'] is None for row in store.rows('SELECT message_id FROM attachments'))
-    # Exercise the storage guard independently of the request schema.
-    with pytest.raises(ValueError, match='different files'):
-        store.create_run('Too many files', '', 'demo', [], chat_enabled=True, attachment_ids=ids)
-    assert len(store.rows('SELECT id FROM messages')) == before
-    response = client.post(endpoint, json={**body, 'attachment_ids': ids[:8]})
+    response = client.post(endpoint, json={**body, 'attachment_ids': ids})
     assert response.status_code == (202 if followup else 201), response.text
     run_id = run_id or response.json()['id']
     reopened = Store(app.state.settings.data_dir)
-    assert {f['id'] for f in reopened.messages(run_id)[-1]['attachments']} == set(ids[:8])
-    assert store.rows('SELECT message_id FROM attachments WHERE id=?', (ids[8],))[0]['message_id'] is None
+    assert {f['id'] for f in reopened.messages(run_id)[-1]['attachments']} == set(ids)
 
 @pytest.mark.parametrize('failure_at', [0, 1])
 def test_remote_upload_failure_never_publishes_a_partial_attachment_or_holds_writer_lock(workspace, monkeypatch, failure_at):
@@ -372,17 +365,14 @@ def test_upload_rechecks_identity_and_quota_after_remote_io(workspace, monkeypat
     assert store.rows('SELECT owner_id FROM attachments')[0]['owner_id'] == 'different-owner'
 
 
-@pytest.mark.parametrize('quota', ['global', 'draft'])
-def test_full_quota_rejects_before_uploading_remote_objects(workspace, monkeypatch, quota):
+def test_full_quota_rejects_before_uploading_remote_objects(workspace, monkeypatch):
     app, _ = workspace
     store = app.state.store
     store.objects = backend = MemoryObjects()
-    if quota == 'draft':
-        monkeypatch.setattr('app.attachments.MAX_DRAFT', 10)
-    limit = 10 if quota == 'global' else 100
+    limit = 10
     store.attachments.save(uuid4().hex, 'owner', 'first.txt', b'a' * 10, inspect_file(b'a' * 10), limit)
     backend.fail = True  # Any attempted object I/O would turn this into a 503.
-    with pytest.raises(ValueError, match='storage is full' if quota == 'global' else 'Too many unsent files'):
+    with pytest.raises(ValueError, match='storage is full'):
         store.attachments.save(uuid4().hex, 'owner', 'second.txt', b'b', inspect_file(b'b'), limit)
     assert len(backend.values) == 1
     assert len(store.rows('SELECT id FROM attachments')) == 1
@@ -392,7 +382,6 @@ def test_quota_preflight_excludes_expired_drafts_without_deleting_them_before_up
     app, _ = workspace
     store = app.state.store
     store.objects = backend = MemoryObjects()
-    monkeypatch.setattr('app.attachments.MAX_DRAFT', 10)
     first = store.attachments.save(uuid4().hex, 'owner', 'expired.txt', b'a' * 10, inspect_file(b'a' * 10), 10)
     store.execute("UPDATE attachments SET created_at='2000-01-01T00:00:00+00:00'")
     original_put = backend.put
@@ -407,7 +396,7 @@ def test_quota_preflight_excludes_expired_drafts_without_deleting_them_before_up
 def test_legacy_schema_upgrade_is_idempotent_and_preserves_preview_bytes(tmp_path):
     store = Store(tmp_path)
     with store.connect() as conn:
-        for name in ('data_ref', 'preview_ref', 'preview_size'):
+        for name in ('data_ref', 'preview_ref', 'preview_size', 'part_size', 'upload_state', 'processing_error'):
             conn.execute(f'ALTER TABLE attachments DROP COLUMN {name}')
         conn.execute('INSERT INTO attachments VALUES(?,?,NULL,?,?,?,?,?,?,?,?)',
                      (uuid4().hex, 'legacy-owner', 'legacy.png', 3, 'hash', 'image/png', '', '2026-01-01', b'raw', b'preview'))
@@ -417,4 +406,3 @@ def test_legacy_schema_upgrade_is_idempotent_and_preserves_preview_bytes(tmp_pat
         assert row['preview_size'] == 7 and not row['data_ref'] and not row['preview_ref']
         assert restored.attachments.payload(row) == b'raw'
         assert restored.attachments.payload(row, 'preview') == b'preview'
-
