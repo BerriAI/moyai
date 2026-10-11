@@ -133,6 +133,7 @@ class Decision(BaseModel):
 class ToolCall(BaseModel):
     name: str = Field(max_length=80)
     arguments: dict
+    input_id: int | None = Field(default=None, gt=0)
 
 
 class Login(BaseModel):
@@ -1384,6 +1385,13 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.input_id is not None and run['harness'] == 'deepagents-temporal':
+            def accepts_input():
+                with store.connect() as conn:
+                    return message_queue.current_input(conn, run_id, run['active_message_id'], body.input_id)
+            if not await asyncio.to_thread(accepts_input):
+                return {'isError': True, 'outcome': 'cancelled', 'dispatched': False,
+                        'error': 'Cancelled before dispatch because the request changed.'}
         if body.name == 'computer_operation_read':
             if computer_operations is None:
                 raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')

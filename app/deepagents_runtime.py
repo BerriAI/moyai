@@ -5,7 +5,7 @@ It preserves the current capability, skill catalog, journal and computer receipt
 """
 import asyncio
 from dataclasses import replace
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 import base64
 import hashlib
 import json
@@ -15,7 +15,7 @@ import time
 import httpx
 from openai import AsyncOpenAI, APIStatusError
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, messages_to_dict
+from langchain_core.messages import HumanMessage, message_chunk_to_message, messages_to_dict
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -29,7 +29,7 @@ from agent.tools import computer_tools, github_tools
 from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
 from agent.tools.remote_computer import requires_computer
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
-from .db import database
+from .db import database, now
 from .deepagents_workflow import TurnInput, TurnScope
 from .security import digest
 from .model_selection import gateway_model
@@ -53,6 +53,15 @@ class SealedModelTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self):
         await self.transport.aclose()
+
+
+def public_snapshot(text, *, partial=False):
+    # Buffer an incomplete token/tag before sanitizing the accumulated text so
+    # chunk boundaries cannot reveal a secret prefix or a reasoning envelope.
+    if partial:
+        text = re.sub(r'<[^>]*$', '', text)
+        text = re.sub(r'\S+$', '', text)
+    return public_text(split_focus(text)[1], None)
 
 
 class DeepAgentsRuntime:
@@ -146,6 +155,9 @@ class DeepAgentsRuntime:
 
     async def _model_request(self, scope, messages, settings, parameters):
         await database(self.current, scope)
+        settings = dict(settings or {})
+        public_id = settings.pop('moyai_public_id', '')
+        input_id = settings.pop('moyai_input_id', scope.message_id)
         token = self.runner.token(scope.run_id, scope.message_id)
         async with httpx.AsyncClient(transport=SealedModelTransport(token)) as client:
             sdk = AsyncOpenAI(api_key=token, base_url=self.url(scope) + '/v1',
@@ -155,7 +167,18 @@ class DeepAgentsRuntime:
                 root_async_client=sdk, async_client=sdk.chat.completions, max_retries=0)
             try:
                 bound = model.bind_tools(parameters) if parameters else model
-                result = await bound.ainvoke(messages, **(settings or {}))
+                result, last_text, published_at = None, '', 0.0
+                async with aclosing(bound.astream(messages, **settings)) as stream:
+                    async for chunk in stream:
+                        result = chunk if result is None else result + chunk
+                        if public_id and time.monotonic() - published_at >= .1:
+                            text = public_snapshot(result.text, partial=True)
+                            if text and text != last_text:
+                                await database(self.stream_text, scope, public_id, input_id, text)
+                                last_text, published_at = text, time.monotonic()
+                if result is None:
+                    raise ValueError('Empty model stream')
+                result = message_chunk_to_message(result)
             except APIStatusError as exc:
                 raise ApplicationError(f'Model request failed ({exc.status_code}).', type='ModelRequestFailed',
                     non_retryable=exc.status_code not in {408, 429, 500, 502, 503, 504}) from None
@@ -164,6 +187,22 @@ class DeepAgentsRuntime:
                                        type=type(exc).__name__) from None
         await database(self.current, scope)
         return result
+
+    def stream_text(self, scope, identity, input_id, text):
+        # A conditional insert fences a late chunk in the same transaction as
+        # publication. Partial text never creates Slack progress deliveries.
+        metadata = {'phase': 'streaming', 'activity_version': 1, 'turn_id': scope.message_id,
+                    'input_id': input_id, 'activity_id': f'deepagents:{scope.message_id}:{scope.segment}:{identity}'}
+        with self.runner.store.connect(write_scope=scope.run_id) as conn:
+            conn.begin_write()
+            if not self.runner.message_queue.current_input(conn, scope.run_id, scope.message_id, input_id):
+                return
+            conn.execute("""INSERT INTO events(run_id,kind,message,data,created_at)
+                SELECT id,'message',?,?,? FROM runs WHERE id=? AND token_hash=? AND active_message_id=?
+                AND active_user_id IS NOT DISTINCT FROM ? AND status IN ('running','reconnecting','awaiting_approval')
+                AND deleted_at='' AND deletion_requested_at='' """,
+                (text, json.dumps(metadata), now(), scope.run_id,
+                 digest(self.runner.token(scope.run_id, scope.message_id)), scope.message_id, scope.actor_id))
 
     async def catalog(self, scope):
         tools = await self.broker(scope, '/tools')
@@ -176,6 +215,31 @@ class DeepAgentsRuntime:
         async with self.work_clock(scope):
             return await self._call_tool(scope, call_id, name, arguments)
 
+    @activity.defn(name='deepagents_computer_v1')
+    async def computer(self, scope: TurnScope) -> None:
+        """Manual wake shares tool capacity; signals and Stop keep their own pool."""
+        async def pulse():
+            while True:
+                activity.heartbeat()
+                await asyncio.sleep(1)
+        heartbeat = asyncio.create_task(pulse())
+        r = self.runner
+        try:
+            while True:
+                async with r.session_guard(scope.run_id, wait=False) as acquired:
+                    if acquired:
+                        await database(self.current, scope)
+                        state = await database(r.state, scope.run_id)
+                        if not state.get('computer_requested'):
+                            return
+                        await r.agent_runtime.computer_step(scope.run_id, state)
+                        if not state.get('computer_requested'):
+                            return
+                await asyncio.sleep(.1)
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
     async def _call_tool(self, scope, call_id, name, arguments):
         if name not in {t['name'] for t in await self.catalog(scope)}:
             return {'isError': True, 'error': 'Tool is not in the authorized catalog. No action was attempted.'}
@@ -186,15 +250,24 @@ class DeepAgentsRuntime:
         await database(reporter.start, call_id, name, arguments)
         try:
             if requires_computer(name):
-                body = {'action': 'computer_call', 'request_id': identity, 'name': name, 'arguments': arguments}
+                body = {'action': 'computer_call', 'request_id': identity, 'name': name, 'arguments': arguments,
+                        'input_id': scope.input_id or scope.message_id}
                 while True:
                     value = await self.broker(scope, '/agent-runtime', body)
                     if value['status'] in {'completed', 'unknown', 'cancelled', 'rejected'}:
                         value = value['result']
                         break
-                    await asyncio.sleep(.25)
+                    # Computer acquisition and observation use tool capacity,
+                    # not the controller slots needed by other conversations.
+                    async with r.session_guard(scope.run_id, wait=False) as acquired:
+                        if acquired:
+                            await database(self.current, scope)
+                            state = await database(r.state, scope.run_id)
+                            await r.agent_runtime.computer_step(scope.run_id, state)
+                    await asyncio.sleep(.1)
             else:
-                value = await self.broker(scope, '/tools/call', {'name': name, 'arguments': arguments})
+                value = await self.broker(scope, '/tools/call', {'name': name, 'arguments': arguments,
+                    'input_id': scope.input_id or scope.message_id})
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -297,15 +370,19 @@ class DeepAgentsRuntime:
         return TurnInput(scope, prompt, instructions, messages, r.settings.max_agent_iterations or None, applied)
 
     @activity.defn(name='deepagents_publish_v1')
-    async def publish(self, scope: TurnScope, identity: str, text: str) -> None:
+    async def publish(self, scope: TurnScope, identity: str, text: str, input_id: int = 0) -> None:
         _, text = split_focus(text)
         await database(self.append, scope, [{'id': f'deepagents:{scope.message_id}:{scope.segment}:{identity}',
             'message': {'role': 'assistant', 'content': text}}])
-        await database(self.runner.store.event, scope.run_id, 'message', public_text(text, None), {})
+        await database(self.runner.store.event, scope.run_id, 'message', public_text(text, None),
+            {'phase': 'commentary', 'activity_version': 1, 'input_id': input_id or scope.message_id,
+             'activity_id': f'deepagents:{scope.message_id}:{scope.segment}:{identity}'})
 
     @activity.defn(name='deepagents_boundary_v1')
-    async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None) -> dict:
+    async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None, receipt_only: bool = False) -> dict:
         run = await database(self.current, scope)
+        if receipt_only:
+            return await self.broker(scope, '/control', {'version': 2, 'applied': applied, 'receipt_only': True})
         # prepare's resolved access context is now recorded in Temporal history.
         # A lost receipt acknowledgment can safely repeat for this exact generation.
         if scope.credential_request and scope.credential_generation is not None and self.runner.credentials:

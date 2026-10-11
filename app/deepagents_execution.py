@@ -53,7 +53,13 @@ class DeepAgentsExecution:
         if r.settings.run_timeout_seconds and time.time() - state['turn_started'] >= r.settings.run_timeout_seconds:
             await database(r.fail, run_id, state, 'This response reached its configured time limit.')
             return True
-        await r.agent_runtime.computer_step(run_id, state)
+        await self.steer(run_id)
+        if state.get('computer_requested'):
+            try:
+                await r.temporal.get_workflow_handle(state['deepagents_workflow_id']).signal(DeepAgentsTurnWorkflow.request_computer)
+            except RPCError as exc:
+                if exc.status != RPCStatusCode.NOT_FOUND:
+                    raise
         handle = r.temporal.get_workflow_handle(state['deepagents_workflow_id'], result_type=TurnResult)
         description = await handle.describe()
         if description.status == WorkflowExecutionStatus.RUNNING:
@@ -71,11 +77,23 @@ class DeepAgentsExecution:
                                  'applied': completed.applied}).encode()
         pointer = await asyncio.to_thread(self.payloads.put, checkpoint)
         result = {**completed.result, 'message_id': state['message_id']}
+        state.pop('computer_requested', None)
         await database(r.message_queue.acknowledge, run_id, state['message_id'], completed.applied)
         await database(r.receive_result, run_id, result)
         state.update(phase='save', deepagents_checkpoint=pointer, result=result, exit_code=0)
         await database(r.save, run_id, state)
         return True
+
+    async def steer(self, run_id):
+        r = self.runner
+        state = await database(r.state, run_id)
+        identity = state.get('deepagents_workflow_id')
+        if identity and await database(r.message_queue.accept_steer, run_id, state['message_id']):
+            try:
+                await r.temporal.get_workflow_handle(identity).signal(DeepAgentsTurnWorkflow.steer)
+            except RPCError as exc:
+                if exc.status != RPCStatusCode.NOT_FOUND:
+                    raise
 
     async def cancel(self, state):
         if identity := state.get('deepagents_workflow_id'):

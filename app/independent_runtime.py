@@ -177,7 +177,8 @@ class IndependentRuntime:
         if operation['status'] == 'dispatched' and operation['machine_id'] != computer['sandbox_id']:
             await database(self.operations.settle, operation, 'unknown', receipt('The original computer is unavailable. No action was replayed.'))
             return
-        await database(self.operations.dispatch, run, operation, computer['sandbox_id'])
+        if not await database(self.operations.dispatch, run, operation, computer['sandbox_id']):
+            return
         result = await self.job(run_id, state, await r.sandbox(computer), operation['request_id'],
                                 {'name': operation['name'], 'arguments': json.loads(operation['arguments'])})
         if result is not None:

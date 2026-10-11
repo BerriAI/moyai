@@ -57,7 +57,7 @@ class ComputerOperations:
                 'result': json.loads(row['result'])}
 
     def exchange(self, caller, body):
-        if not isinstance(body, dict) or set(body) != {'action', 'request_id', 'name', 'arguments'}:
+        if not isinstance(body, dict) or set(body) - {'input_id'} != {'action', 'request_id', 'name', 'arguments'}:
             raise HTTPException(422, 'Supply a computer_call with its stable request identity, tool name and arguments.')
         identity, name, arguments = body['request_id'], body['name'], body['arguments']
         allowed = LOCAL_TOOLS | {tool['name'] for tool in BROWSER_TOOLS}
@@ -85,6 +85,13 @@ class ComputerOperations:
             conn.execute('''INSERT INTO computer_operations
                 (run_id,request_id,turn_id,actor_id,capability,name,arguments) VALUES(?,?,?,?,?,?,?)''',
                 (run['id'], identity, run['active_message_id'], run['active_user_id'], run['token_hash'], name, request))
+            if 'input_id' in body:
+                from .message_queue import MessageQueue
+                if not MessageQueue.current_input(conn, run['id'], run['active_message_id'], body['input_id']):
+                    result = {'isError': True, 'error': 'Cancelled before dispatch because the request changed.'}
+                    conn.execute("UPDATE computer_operations SET status='cancelled',result=? WHERE run_id=? AND request_id=?",
+                                 (encoded(result), run['id'], identity))
+                    return {'request_id': identity, 'status': 'cancelled', 'result': result}
             self.submit(conn, run)
             return {'request_id': identity, 'status': 'queued', 'result': {}}
 
@@ -103,11 +110,14 @@ class ComputerOperations:
             if not row or (row['turn_id'], row['actor_id'], row['capability']) != (
                     caller['active_message_id'], caller['active_user_id'], caller['token_hash']):
                 raise HTTPException(409, 'The computer operation owner changed.')
+            if row['status'] == 'cancelled':
+                return False
             if row['status'] == 'queued':
                 conn.execute("UPDATE computer_operations SET status='dispatched',machine_id=? WHERE seq=?",
                              (machine_id, row['seq']))
             elif row['status'] != 'dispatched' or row['machine_id'] != machine_id:
                 raise HTTPException(409, 'This operation cannot be dispatched to another computer.')
+            return True
 
     def settle(self, operation, status, result):
         if status not in {'completed', 'unknown', 'cancelled', 'rejected'}:

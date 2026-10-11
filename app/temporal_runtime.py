@@ -10,11 +10,9 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 from temporalio.converter import DataConverter, DefaultFailureConverterWithEncodedAttributes
-from temporalio.deepagents import DeepAgentsPlugin
-from .deepagents_context import RuntimeInterceptor, deepagents_plugin
+from .deepagents_context import deepagents_plugin
 from .deepagents_execution import DeepAgentsExecution
 from .deepagents_runtime import DeepAgentsRuntime
-from .deepagents_workflow import DeepAgentsTurnWorkflow
 from .temporal_payloads import PrivatePayloads, PrivatePayloadCodec
 
 from .db import database
@@ -104,6 +102,8 @@ class TemporalRunManager(DurableRunner):
         self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
         self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
         self.submit(self.store.run(run_id))
+        if state.get('deepagents_workflow_id') and self.temporal:
+            await self.deepagents_execution.cancel(state)
         if self.coordinator:
             await self.coordinator.cancel_children(run_id)
 
@@ -174,16 +174,11 @@ class TemporalRunManager(DurableRunner):
                       graceful_shutdown_timeout=timedelta(seconds=1))
 
     def make_agent_worker(self, client):
-        # Tool activities can wait for computer capacity/receipts. Keep their
-        # slots separate from the controller that must dispatch those actions.
-        plugins = [] if any(isinstance(p, DeepAgentsPlugin) for p in client.config().get('plugins', [])) else [deepagents_plugin()]
-        return Worker(client, task_queue=self.settings.temporal_task_queue + '-agents-v1',
-                      workflows=[DeepAgentsTurnWorkflow],
-                      activities=[self.deepagents_runtime.prepare, self.deepagents_runtime.boundary, self.deepagents_runtime.publish],
-                      plugins=plugins, interceptors=[RuntimeInterceptor(self.deepagents_runtime)],
-                      max_concurrent_activities=self.settings.temporal_worker_activities,
-                      max_cached_workflows=self.settings.temporal_workflow_cache_size,
-                      graceful_shutdown_timeout=timedelta(seconds=1))
+        from .deepagents_workers import agent_workers
+        return agent_workers(client, self.deepagents_runtime, self.settings.temporal_task_queue + '-agents-v1',
+            max_concurrent_activities=self.settings.temporal_worker_activities,
+            max_cached_workflows=self.settings.temporal_workflow_cache_size,
+            graceful_shutdown_timeout=timedelta(seconds=1))
 
     async def serve(self):
         self.dispatch_loop = asyncio.get_running_loop()
@@ -274,6 +269,7 @@ class TemporalRunManager(DurableRunner):
                     task_queue=self.settings.temporal_task_queue, start_signal='wake',
                     rpc_timeout=timedelta(seconds=10),
                 )
+                await self.deepagents_execution.steer(row['run_id'])
                 await database(self.store.execute,
                     'UPDATE durable_sessions SET delivered=greatest(delivered,?) WHERE run_id=?',
                     (row['revision'], row['run_id']), write_scope=row['run_id'])

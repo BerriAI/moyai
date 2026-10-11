@@ -103,6 +103,7 @@ class MessageQueue:
             return
         with self.store.connect() as conn:
             conn.begin_write()
+            durable_agent = conn.execute("SELECT 1 FROM runs WHERE id=? AND harness='deepagents-temporal'", (run_id,)).fetchone()
             for message_id in ids:
                 applied_at = now()
                 changed = conn.execute("UPDATE messages SET status='injected',started_at=? WHERE id=? AND run_id=? AND steering_parent_id=? AND status='queued' AND queue_locked=1",
@@ -110,9 +111,22 @@ class MessageQueue:
                 if changed:
                     from .performance import picked_up_in
                     picked_up_in(conn, message_id, applied_at, 'steering')
+                    # A native Deep Agents input is now journaled in Temporal.
+                    # Cancel only work that has not crossed the dispatch fence.
+                    if durable_agent:
+                        conn.execute("""UPDATE computer_operations SET status='cancelled',result=?
+                            WHERE run_id=? AND turn_id=? AND status='queued'""",
+                            (json.dumps({'isError': True, 'error': 'Cancelled before dispatch because the request changed.'}),
+                             run_id, turn_id))
                     conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=? AND steer_message_id=?', (run_id, message_id))
-                    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Your message is guiding the current task.',?,?)",
+                    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Your message was accepted by the running agent.',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'turn_id': turn_id, 'phase': 'steering'}), now()))
+
+    @staticmethod
+    def current_input(conn, run_id, turn_id, input_id):
+        row = conn.execute("""SELECT id FROM messages WHERE run_id=? AND steering_parent_id=?
+            AND status='injected' ORDER BY started_at DESC,id DESC LIMIT 1""", (run_id, turn_id)).fetchone()
+        return input_id == (row['id'] if row else turn_id)
 
     def live_control(self, run_id, turn_id, applied, *, checkpointed=False):
         self.acknowledge(run_id, turn_id, applied)

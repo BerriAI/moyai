@@ -15,6 +15,7 @@ from temporalio.converter import DataConverter, DefaultFailureConverterWithEncod
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 
+from deepagents_provider import response_stream
 from app.blob_storage import ObjectStorage
 from app.deepagents_context import RuntimeInterceptor, deepagents_plugin
 from app.deepagents_workflow import DeepAgentsTurnWorkflow, TurnInput, TurnScope
@@ -37,12 +38,12 @@ class ScriptedRuntime:
             'Private test request: write once, then report.', 'Use workspace tools.')
 
     @activity.defn(name='deepagents_boundary_v1')
-    async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None) -> dict:
+    async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None, receipt_only: bool = False) -> dict:
         self.controls.append((list(applied), answer))
         return {}
 
     @activity.defn(name='deepagents_publish_v1')
-    async def publish(self, scope: TurnScope, identity: str, text: str) -> None:
+    async def publish(self, scope: TurnScope, identity: str, text: str, input_id: int = 0) -> None:
         self.published.append(text)
 
     async def catalog(self, scope):
@@ -79,9 +80,8 @@ def configured_client(client, conversion):
 
 
 def worker(client, runtime):
-    return Worker(client, task_queue='deepagents-test', workflows=[DeepAgentsTurnWorkflow],
-        activities=[runtime.prepare, runtime.boundary, runtime.publish],
-        interceptors=[RuntimeInterceptor(runtime)], graceful_shutdown_timeout=timedelta(seconds=.1))
+    from app.deepagents_workers import agent_workers
+    return agent_workers(client, runtime, 'deepagents-test', graceful_shutdown_timeout=timedelta(seconds=.1))
 
 
 async def test_real_temporal_restart_does_not_replay_completed_tool(tmp_path):
@@ -110,6 +110,56 @@ async def test_real_temporal_restart_does_not_replay_completed_tool(tmp_path):
         assert 'Saved exactly once' not in history.to_json()
         await Replayer(workflows=[DeepAgentsTurnWorkflow], data_converter=client.data_converter,
                        plugins=[deepagents_plugin()]).replay_workflow(history)
+
+
+async def test_accepted_steering_survives_worker_restart_and_replays_once(tmp_path):
+    class SteeringRuntime(ScriptedRuntime):
+        def __init__(self, directory):
+            super().__init__(directory)
+            self.offer = False
+            self.accepted, self.correcting = asyncio.Event(), asyncio.Event()
+
+        @activity.defn(name='deepagents_boundary_v1')
+        async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float,
+                           answer: str | None, receipt_only: bool = False) -> dict:
+            if receipt_only and 2 in applied:
+                self.accepted.set()
+            if self.offer and 2 not in applied:
+                return {'input': {'id': 2, 'content': 'Keep the write, change the explanation.'}}
+            return {}
+
+        async def model_request(self, scope, messages, settings, parameters):
+            if 'Keep the write, change the explanation.' in str(messages):
+                self.correcting.set()
+                await self.release.wait()
+                return AIMessage(content='Kept the write and revised the explanation.')
+            return await super().model_request(scope, messages, settings, parameters)
+
+    runtime = SteeringRuntime(tmp_path)
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        client = configured_client(env.client, converter(tmp_path))
+        first = worker(client, runtime)
+        task = asyncio.create_task(first.run())
+        handle = await client.start_workflow(DeepAgentsTurnWorkflow.run, TurnScope('test', 1),
+            id='deepagents-steering-restart', task_queue='deepagents-test')
+        try:
+            await asyncio.wait_for(runtime.after_write.wait(), 25)
+            runtime.offer = True
+            await handle.signal(DeepAgentsTurnWorkflow.steer)
+            await asyncio.wait_for(runtime.accepted.wait(), 10)
+            await asyncio.wait_for(runtime.correcting.wait(), 10)
+        finally:
+            await first.shutdown()
+            await task
+        runtime.release.set()
+        async with worker(client, runtime):
+            result = await asyncio.wait_for(handle.result(), 30)
+        assert result.applied == [2]
+        assert result.result['message'] == 'Kept the write and revised the explanation.'
+        assert sum(m['data']['content'] == 'Keep the write, change the explanation.' for m in result.messages) == 1
+        assert runtime.tool_calls == 1 and (tmp_path / 'note.txt').read_text() == 'one write\n'
+        await Replayer(workflows=[DeepAgentsTurnWorkflow], data_converter=client.data_converter,
+                       plugins=[deepagents_plugin()]).replay_workflow(await handle.fetch_history())
 
 
 async def test_uncertain_write_is_not_automatically_retried(tmp_path):
@@ -159,7 +209,7 @@ async def test_steering_uses_library_cancellation_before_unexecuted_tools(tmp_pa
         return await original(scope, applied, elapsed, answer)
     # Bound methods retain their Temporal activity definitions via a small test adapter.
     @activity.defn(name='deepagents_boundary_v1')
-    async def boundary(scope: TurnScope, applied: list[int], elapsed: float, answer: str | None) -> dict:
+    async def boundary(scope: TurnScope, applied: list[int], elapsed: float, answer: str | None, receipt_only: bool = False) -> dict:
         return await redirect(scope, applied, elapsed, answer)
     runtime.boundary = boundary
     async def corrected_model(scope, messages, settings, parameters):
@@ -265,9 +315,10 @@ async def test_background_compaction_keeps_working_preserves_tail_and_replays(du
                 'content': [{'type': 'output_text', 'text': 'Finished with both new receipts.', 'annotations': []}]}]
             print('ADOPTED: summary plus both exact new tool receipts; original task and correction retained.', flush=True)
         tokens = counting_input(body)[1]
-        return httpx.Response(200, json={'id': f'resp_{number}', 'object': 'response', 'status': 'completed',
+        value = {'id': f'resp_{number}', 'object': 'response', 'status': 'completed',
             'model': 'test-model', 'created_at': 1770000000, 'output': output,
-            'usage': {'input_tokens': tokens, 'output_tokens': 40, 'total_tokens': tokens + 40}})
+            'usage': {'input_tokens': tokens, 'output_tokens': 40, 'total_tokens': tokens + 40}}
+        return httpx.Response(200, content=b''.join(response_stream(value)), headers={'content-type': 'text/event-stream'})
     class ProviderClient(actual_client):
         def __init__(self, **kwargs):
             super().__init__(transport=httpx.MockTransport(upstream), **kwargs)
@@ -677,8 +728,9 @@ async def test_official_provider_sdk_uses_sealed_responses_broker(model_name):
                 'created_at': 1770000000, 'output': [{'id': 'msg_1', 'type': 'message', 'role': 'assistant',
                     'status': 'completed', 'content': [{'type': 'output_text', 'text': 'SDK response.', 'annotations': []}]}],
                 'usage': {'input_tokens': 10, 'output_tokens': 4, 'total_tokens': 14}}).encode()
+            raw = b''.join(response_stream(json.loads(raw)))
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)

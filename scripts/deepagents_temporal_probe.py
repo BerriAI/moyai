@@ -52,11 +52,11 @@ class Proof:
             'Write one line to note.txt, then report completion.', 'Use the workspace tool boundary.')
 
     @activity.defn(name='deepagents_boundary_v1')
-    async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None) -> dict:
+    async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None, receipt_only: bool = False) -> dict:
         return {}
 
     @activity.defn(name='deepagents_publish_v1')
-    async def publish(self, scope: TurnScope, identity: str, text: str) -> None:
+    async def publish(self, scope: TurnScope, identity: str, text: str, input_id: int = 0) -> None:
         self.record('Agent response: ' + text)
 
     async def catalog(self, scope):
@@ -78,9 +78,8 @@ class Proof:
         return {'result': {'saved': True}}
 
     def worker(self, client):
-        return Worker(client, task_queue='moyai-local-proof', workflows=[DeepAgentsTurnWorkflow],
-            activities=[self.prepare, self.boundary, self.publish], interceptors=[RuntimeInterceptor(self)],
-            graceful_shutdown_timeout=timedelta(seconds=.1))
+        from app.deepagents_workers import agent_workers
+        return agent_workers(client, self, 'moyai-local-proof', graceful_shutdown_timeout=timedelta(seconds=.1))
 
 
 async def demonstrate(output, pause):

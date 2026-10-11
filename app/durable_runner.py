@@ -254,7 +254,9 @@ class DurableRunner(RunManager):
             return True
 
     async def advance(self, run_id):
-        async with self.session_guard(run_id):
+        async with self.session_guard(run_id, wait=False) as acquired:
+            if not acquired:
+                return {'retry_seconds': .25}
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
                 await database(self.credentials.reconcile_resolutions, run_id)
             row = await database(self.store.run, run_id)
