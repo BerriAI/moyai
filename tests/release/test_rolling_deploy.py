@@ -114,6 +114,33 @@ def test_preflight_and_noop_make_no_writes(setup, preflight):
     assert release.record['status'] == ('preflight_passed' if preflight else 'success')
 
 
+def test_preflight_exercises_repeated_transport_without_migrations_or_deployments(setup):
+    release, render, _ = setup
+    release.preflight_only = True
+    probe, calls = release.probe, []
+    def observed(service):
+        calls.append(service.id)
+        return probe(service)
+    release.probe = observed
+    release.migrate = lambda *a: pytest.fail('Read-only preflight invoked migration')
+    release.run()
+    assert len(calls) == 16 and all(calls.count(sid) == 4 for sid in render.env)
+    assert release.record['transport_check_rounds'] == 3 and not render.calls
+
+
+def test_preflight_detects_transport_failure_after_initial_successes(setup):
+    release, render, _ = setup
+    release.preflight_only = True
+    probe, calls = release.probe, []
+    def observed(service):
+        calls.append(service.id)
+        return probe(service) if len(calls) <= 8 else {'ok': False, 'reason': 'ssh_failed'}
+    release.probe = observed
+    with pytest.raises(ReleaseError, match='after 1 attempt'):
+        release.run()
+    assert len(calls) == 9 and not render.calls
+
+
 def probe_sequence(release, outcomes, *, preflight=False):
     original, attempts = release.probe, []
     def probe(service):
@@ -177,6 +204,85 @@ def test_fixed_validation_stage_is_reported_without_retry(setup, stage):
     assert len(attempts) == 1 and not render.calls
     assert release.record['probe_failures'] == [
         {'role': 'coordinator', 'reason': 'runtime_validation_failed', 'stage': stage, 'attempt': 1}]
+
+
+@pytest.mark.parametrize('reason,kind,output,attempts_expected', [
+    ('ssh_connection_lost', 'connection_closed', 'absent', 3),
+    ('probe_output_interrupted', 'connection_closed', 'complete', 1),
+    ('ssh_failed', 'auth_denied', 'absent', 1),
+])
+def test_safe_transport_details_are_persisted_with_bounded_retry_policy(setup, reason, kind, output, attempts_expected):
+    release, render, _ = setup
+    details = {'kind': kind, 'returncode': 255, 'elapsed_ms': 1800,
+               'output': output, 'authenticated': True, 'command_requested': False}
+    value = {'ok': False, 'reason': reason, 'transport': details}
+    attempts = probe_sequence(release, [value] * 4)
+    with pytest.raises(ReleaseError, match=f'{kind}.*after {attempts_expected} attempt'):
+        release.run()
+    assert len(attempts) == attempts_expected and not render.calls
+    assert release.record['probe_failures'] == [
+        {'role': 'coordinator', 'reason': reason, 'attempt': attempt, 'transport': details}
+        for attempt in range(1, attempts_expected + 1)]
+
+
+@pytest.mark.parametrize('change', [
+    {'kind': 'private-diagnostic'}, {'extra': 'private-diagnostic'}, {'returncode': True},
+    {'returncode': 'private-diagnostic'}, {'elapsed_ms': -1}, {'elapsed_ms': 'private-diagnostic'},
+    {'authenticated': 'private-diagnostic'}, {'command_requested': []},
+    {'output': 'complete'}, {'kind': 'auth_denied'}, {'returncode': 1},
+])
+def test_invalid_or_contradictory_transport_metadata_is_terminal_and_redacted(setup, change):
+    release, render, _ = setup
+    details = {'kind': 'connection_closed', 'returncode': 255, 'elapsed_ms': 1800,
+               'output': 'absent', 'authenticated': True, 'command_requested': False, **change}
+    attempts = probe_sequence(release, [{'ok': False, 'reason': 'ssh_connection_lost', 'transport': details}])
+    with pytest.raises(ReleaseError, match='probe_output_invalid.*after 1 attempt'):
+        release.run()
+    assert len(attempts) == 1 and not render.calls
+    assert 'private-diagnostic' not in release.receipt.read_text()
+
+
+@pytest.mark.parametrize('phase', ['readiness', 'retirement'])
+@pytest.mark.parametrize('reason', ['probe_output_interrupted', 'ssh_failed', 'probe_output_invalid'])
+def test_terminal_candidate_probe_stops_before_replacing_another_role(setup, phase, reason):
+    release, render, _ = setup
+    probe, attempts = release.probe, []
+    def failed(service):
+        current_phase = 'retirement' if release.record['phase'].startswith('Wait for old ') else 'readiness'
+        if service.id == WORKER and release.active_deploy and current_phase == phase and not attempts:
+            attempts.append(service.id)
+            return {'ok': False, 'reason': reason}
+        return probe(service)
+    release.probe = failed
+    with pytest.raises(ReleaseError, match=f'{phase} probe failed.*{reason}'):
+        release.run()
+    assert attempts == [WORKER]
+    assert [call[1] for call in render.calls if call[0] == 'POST'] == [WORKER]
+    assert release.record['replacements'] == []
+    assert release.record['probe_failures'][-1] == {
+        'role': 'worker', 'reason': reason, 'attempt': 1, 'phase': phase}
+
+
+@pytest.mark.parametrize('phase', ['readiness', 'retirement'])
+@pytest.mark.parametrize('failure', [
+    {'ok': False, 'reason': 'ssh_connection_lost'},
+    {'ok': False, 'reason': 'health_unavailable'},
+    {'ok': False, 'reason': 'runtime_validation_failed', 'stage': 'environment'},
+])
+def test_named_candidate_transients_can_recover_within_existing_polling_bound(setup, phase, failure):
+    release, render, _ = setup
+    probe, attempts = release.probe, []
+    def observed(service):
+        current_phase = 'retirement' if release.record['phase'].startswith('Wait for old ') else 'readiness'
+        if service.id == WORKER and release.active_deploy and current_phase == phase and not attempts:
+            attempts.append(service.id)
+            return deepcopy(failure)
+        return probe(service)
+    release.probe = observed
+    release.run()
+    assert release.record['status'] == 'success' and attempts == [WORKER]
+    assert release.record['probe_failures'][-1]['phase'] == phase
+    assert len([call for call in render.calls if call[0] == 'POST']) == 4
 
 
 @pytest.mark.parametrize('change', ['policy', 'contracts', 'schema', 'owners', 'identity', 'ready', 'schema_support'])
@@ -349,7 +455,7 @@ def test_old_owner_that_never_retires_blocks_the_next_role(setup):
 def test_candidate_probe_uncertainty_does_not_trigger_rollback(setup):
     release, render, _ = setup
     render.unreachable, render.retirement_polls = True, 1000
-    with pytest.raises(ReleaseError, match='readiness could not'): release.run()
+    with pytest.raises(ReleaseError, match='readiness probe failed.*probe_output_invalid'): release.run()
     assert [call for call in render.calls if call[0] == 'POST'] == [('POST', WORKER, NEW)]
 
 

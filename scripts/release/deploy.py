@@ -24,6 +24,7 @@ import urllib.parse
 import urllib.request
 
 from scripts.release.errors import ReleaseError
+from scripts.release.ssh_diagnostics import failure as ssh_failure
 
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = 'BerriAI/moyai'
@@ -34,7 +35,7 @@ SERVICE_NAMES = {'coordinator': 'moyai-private', 'worker': 'moyai-worker', 'brok
 MUTABLE = {'MOYAI_BUILD_SHA', 'MAINTENANCE_DRAIN', 'RENDER_MIGRATION_STAGE'}
 TRANSIENT_PROBE_FAILURES = {'ssh_timeout', 'ssh_connection_lost', 'database_unavailable'}
 PROBE_FAILURES = TRANSIENT_PROBE_FAILURES | {
-    'probe_request_invalid', 'ssh_failed', 'probe_output_invalid', 'database_error',
+    'probe_request_invalid', 'ssh_failed', 'probe_output_invalid', 'probe_output_interrupted', 'database_error',
     'health_unavailable', 'runtime_validation_failed'}
 PROBE_VALIDATION_STAGES = {'environment', 'configuration', 'snapshot', 'contracts', 'health_identity'}
 ACTIVE_DEPLOYS = {'created', 'queued', 'build_in_progress', 'pre_deploy_in_progress', 'update_in_progress'}
@@ -216,31 +217,32 @@ class SSHProbe:
         command = ('cd /app && if [ "$(id -u)" = 0 ]; then exec runuser -u workspace -- '
                    '/app/.venv/bin/python - ' + shlex.quote(options) +
                    '; else exec /app/.venv/bin/python - ' + shlex.quote(options) + '; fi')
-        args = ['ssh', '-T', '-i', str(self.key), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+        # Capture verbose milestones privately. Only fixed categories and booleans
+        # leave this transport; raw SSH diagnostics can contain command arguments.
+        args = ['ssh', '-v', '-T', '-i', str(self.key), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
                 '-o', 'StrictHostKeyChecking=yes', '-o', 'GlobalKnownHostsFile=/dev/null',
                 '-o', 'UserKnownHostsFile=' + str(ROOT / 'render-known-hosts'), '-o', 'ConnectTimeout=10',
                 '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
                 service.id + '@ssh.oregon.render.com', command]
+        started = time.monotonic()
+        def failed(stdout, stderr, returncode=None, kind=None):
+            return ssh_failure(stdout=stdout, stderr=stderr, returncode=returncode, marker=marker,
+                               elapsed_ms=round((time.monotonic() - started) * 1000), kind=kind)
         try:
             result = subprocess.run(args, input=self.source.read_text() if source is None else source, text=True,
                                     capture_output=True, timeout=timeout)
             if result.returncode:
-                stderr = getattr(result, 'stderr', '')
-                transient = (result.returncode == 255 and any(message in stderr for message in (
-                    'Connection timed out', 'Connection reset by peer', 'Connection refused', 'Connection closed by'))
-                    and not any(message in stderr for message in (
-                        'Permission denied', 'Host key verification failed', 'REMOTE HOST IDENTIFICATION HAS CHANGED')))
-                return {'ok': False, 'reason': 'ssh_connection_lost' if transient else 'ssh_failed'}
+                return failed(result.stdout, getattr(result, 'stderr', ''), result.returncode)
             lines = [line.removeprefix(marker) for line in result.stdout.splitlines()
                      if line.startswith(marker)]
             value = json.loads(lines[0]) if len(lines) == 1 else None
             return value if isinstance(value, dict) else {'ok': False, 'reason': 'probe_output_invalid'}
-        except subprocess.TimeoutExpired:
-            return {'ok': False, 'reason': 'ssh_timeout'}
+        except subprocess.TimeoutExpired as exc:
+            return failed(exc.stdout, exc.stderr, kind='command_timeout')
         except ValueError:
             return {'ok': False, 'reason': 'probe_output_invalid'}
         except OSError:
-            return {'ok': False, 'reason': 'ssh_failed'}
+            return failed(None, None, kind='local_os_error')
 
 
 class Release:
