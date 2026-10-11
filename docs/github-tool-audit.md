@@ -58,6 +58,14 @@ Unrestricted raw fetch/API tools, review approvals, changes-requested reviews,
 review dismissal, merges and auto-merge are intentionally unavailable. No tool
 creates drafts, changes repository access or releases, or bypasses protection.
 
+`github_search` accepts plain terms and double-quoted phrases separated by
+spaces. Apostrophes and Unicode are preserved literally in the outgoing query;
+for example, `don't "user's café"` stays intact. Empty terms, unmatched or
+adjacent quotes, qualifiers, boolean operators, backslashes and control
+characters are rejected before provider access. The broker quotes every term
+and appends the selected repository and issue/PR kind itself. All four search
+kinds use the same parser and serialization path.
+
 ## Follow-up session audit
 
 A second pass on October 11 reviewed ten Slack threads from October 7–10,

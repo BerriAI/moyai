@@ -173,11 +173,57 @@ def test_artifact_pages_are_complete_and_revision_pinned(coding):
     assert call('github_download_artifact', artifact_id=9, revision=result['revision']).json()['code'] == 'source_changed'
 
 
-@pytest.mark.parametrize('query', ['bug repo:other/repo', 'bug OR repo:other/repo', 'bug OR anything', 'bug\nanything'])
-def test_search_cannot_expand_repository_scope(coding, query):
-    *_, call = coding
-    response = call('github_search', kind='code', query=query)
-    assert response.status_code == 422 or 'error' in response.json()
+SEARCH_KINDS = [
+    ('code', 'code', '', 'contents'),
+    ('issues', 'issues', ' is:issue', 'issues'),
+    ('pull_requests', 'issues', ' is:pr', 'pull_requests'),
+    ('commits', 'commits', '', 'contents'),
+]
+
+
+@pytest.mark.parametrize('kind,endpoint,suffix,permission', SEARCH_KINDS)
+@pytest.mark.parametrize('query,terms', [
+    ("don't", '"don\'t"'),
+    ("it's", '"it\'s"'),
+    ("user's", '"user\'s"'),
+    ("don't it's", '"don\'t" "it\'s"'),
+    ('café 中文 🚀', '"café" "中文" "🚀"'),
+    ('cafe\u0301', '"cafe\u0301"'),
+    ('user’s “café”', '"user’s" "“café”"'),
+    ('bug "connection timeout"', '"bug" "connection timeout"'),
+    ('"user\'s café" 中文', '"user\'s café" "中文"'),
+    ('  bug\u00a0  timeout  ', '"bug" "timeout"'),
+    ('"a  b"', '"a  b"'),
+    ('bug#42 C++ foo/bar (-flag) /regex/', '"bug#42" "C++" "foo/bar" "(-flag)" "/regex/"'),
+    ('a ' * 249 + 'aa', '"a" ' * 249 + '"aa"'),
+])
+def test_search_preserves_text_and_scope_in_provider_request(coding, kind, endpoint, suffix, permission, query, terms):
+    _, _, _, _, _, provider, call = coding
+    response = call('github_search', kind=kind, query=query, page=2)
+    assert response.status_code == 200, response.text
+    assert 'error' not in response.json(), response.text
+    assert provider.searches == [(f'/search/{endpoint}', {
+        'q': terms + ' repo:BerriAI/litellm' + suffix, 'per_page': '25', 'page': '2',
+    })]
+    assert provider.minted == [{'metadata': 'read'}, {permission: 'read'}]
+    assert not provider.dispatches
+
+
+@pytest.mark.parametrize('kind', [case[0] for case in SEARCH_KINDS])
+@pytest.mark.parametrize('query', [
+    '', '   ', '""', '"   "', 'bug ""', '"unterminated', 'trailing"', 'a' * 501,
+    'bug"phrase"', '"phrase"bug', '"first""second"',
+    'bug repo:other/repo', 'bug OR repo:other/repo', '"repo:other/repo"',
+    'bug is:pr', 'bug is:issue', 'bug OR anything', 'bug NOT anything', 'bug AND anything',
+    'bug \\" OR anything', 'bug\\thing', 'bug\nanything', 'bug\rany', 'bug\tany',
+    'bug\x00any', 'bug\x1fany', 'bug\x7fany', 'bug\x85any', 'bug\u2028any', 'bug\u2029any',
+])
+def test_invalid_search_is_rejected_before_provider_access(coding, kind, query):
+    _, _, _, _, _, provider, call = coding
+    response = call('github_search', kind=kind, query=query)
+    assert response.json().get('code') == 'invalid_arguments', response.text
+    assert response.json()['dispatched'] is False
+    assert not provider.calls and not provider.minted and not provider.searches
 
 
 def test_no_merge_or_approval_surface(coding):

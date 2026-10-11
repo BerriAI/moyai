@@ -26,7 +26,7 @@ body{background:#f6f5fa;color:#24202f;font:16px/1.55 system-ui;margin:0}main{max
 <main><div class="eyebrow">MOYAI · GITHUB CONNECTOR VERIFICATION</div><h1>Complete the coding workflow.</h1>
 <p>Actual Moyai broker, permissions and local Git packager. GitHub responses are simulated.<br>No live repository writes or production deployment.</p>
 <div class="cards"><div class="card"><strong>31</strong><small>new coding tools</small></div><div class="card"><strong>.env.example</strong><small>accepted in both publishing layers</small></div><div class="card"><strong>No merge / approval</strong><small>comment-only reviews</small></div></div>
-<div class="actions"><button id="run">Run the coding workflow</button><button id="audit">Run trace-audit additions</button><button id="bounds">Verify the boundaries</button></div>
+<div class="actions"><button id="search">Verify search fixes</button><button id="run">Run the coding workflow</button><button id="audit">Run trace-audit additions</button><button id="bounds">Verify the boundaries</button></div>
 <pre id="result">Ready. Run actual requests and inspect the results here.</pre>
 <p class="note">Fixture scope: one selected repository, one confirmed workspace PR, current head and workflow attempt.</p></main>
 <script>
@@ -36,6 +36,7 @@ async function post(path,body){const response=await fetch(path,{method:'POST',he
 async function init(){csrf=(await(await fetch('/api/session')).json()).csrf}const ready=init();
 function pause(){return new Promise(resolve=>setTimeout(resolve,900))}
 async function step(label,operation){const data=await post('/demo/step',{operation});line(label+' · '+data.message);await pause()}
+document.querySelector('#search').onclick=async function(){this.disabled=true;out.textContent='Actual outgoing GitHub search queries (simulated provider):\\n\\n';try{await ready;for(const kind of ['code','issues','pull_requests','commits'])await step('PASS','search_'+kind);await step('PASS','search_invalid');await step('PASS','merge');await step('PASS','approve');line('Apostrophes, Unicode and phrases preserved. Repository scope enforced.')}catch(error){line('ERROR · '+error.message)}finally{this.disabled=false}};
 document.querySelector('#run').onclick=async function(){this.disabled=true;out.textContent='';try{await ready;await step('PASS','template');await step('PASS','metadata');await step('PASS','review');await step('PASS','workflow');await step('PASS','receipt');line('Workflow complete. All calls ran through the real broker.')}catch(error){line('ERROR · '+error.message)}finally{this.disabled=false}};
 document.querySelector('#audit').onclick=async function(){this.disabled=true;out.textContent='';try{await ready;await step('PASS','capabilities');await step('PASS','publication');await step('PASS','close');line('Audit additions complete. No merge or approval capability.')}catch(error){line('ERROR · '+error.message)}finally{this.disabled=false}};
 document.querySelector('#bounds').onclick=async function(){this.disabled=true;out.textContent='';try{await ready;await step('PASS','secret');await step('PASS','merge');await step('PASS','approve');await step('PASS','head');line('No forbidden operation reached the provider.')}catch(error){line('ERROR · '+error.message)}finally{this.disabled=false}};
@@ -106,6 +107,24 @@ def main():
                     response = await client.post(f'/broker/{run["id"]}/tools/call', headers={'Authorization': 'Bearer local-demo-capability'},
                                                  json={'name': name, 'arguments': values})
                 return response, response.json()
+            if operation == 'search_invalid':
+                before = (len(provider.calls), len(provider.minted))
+                for query in ['bug repo:other/repo', 'bug is:pr', 'bug OR anything', '"unterminated', '""', 'bug\nany']:
+                    _, result = await invoke('github_search', {'repository_id': 101, 'kind': 'issues', 'query': query})
+                    assert result.get('code') == 'invalid_arguments' and result['dispatched'] is False
+                assert (len(provider.calls), len(provider.minted)) == before
+                return {'message': '6 malformed/scope-changing queries rejected before GitHub access'}
+            if operation.startswith('search_'):
+                kind = operation.removeprefix('search_')
+                query = 'don\'t "user\'s café" 中文'
+                before = len(provider.searches)
+                _, result = await invoke('github_search', {'repository_id': 101, 'kind': kind, 'query': query})
+                assert 'error' not in result and len(provider.searches) == before + 1
+                endpoint, params = provider.searches[-1]
+                suffix = {'issues': ' is:issue', 'pull_requests': ' is:pr'}.get(kind, '')
+                assert params['q'] == '"don\'t" "user\'s café" "中文" repo:BerriAI/litellm' + suffix
+                assert endpoint == '/search/' + ('issues' if kind == 'pull_requests' else kind)
+                return {'message': kind + ' → ' + params['q']}
             if operation == 'template':
                 from app.github import Publish
                 with patch.object(github_tools, 'ROOT', workspace):

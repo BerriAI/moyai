@@ -21,6 +21,7 @@ class CodingProvider:
         self.pr = copy.deepcopy(PR)
         self.issue = {'number': 10, 'title': 'Bug', 'body': 'full body' * 5000}
         self.comments = []
+        self.searches = []
         self.dispatches = []
         self.wrong_comment = self.wrong_run = self.wrong_thread = False
         self.archive = bytes(range(256)) * 600
@@ -104,6 +105,7 @@ class CodingProvider:
         if path.endswith('/actions/artifacts/9'):
             return httpx.Response(200, json={'id': 9, 'expired': False})
         if path.startswith('/search/'):
+            self.searches.append((path, dict(request.url.params)))
             assert 'repo:BerriAI/litellm' in request.url.params['q']
             return httpx.Response(200, json={'items': [{'body': self.issue['body']}], 'total_count': 1001, 'incomplete_results': False})
         if '/contents/' in path:

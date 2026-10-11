@@ -3,7 +3,7 @@ import base64
 import hashlib
 import json
 import re
-import shlex
+import unicodedata
 from typing import Annotated, Literal
 from urllib.parse import quote
 
@@ -20,6 +20,24 @@ SCOPES = {f'{resource}_{level}': {resource: level} for resource in
 SCOPES.pop('contents_write')
 
 
+def quoted_search_query(query: str) -> str:
+    """Compile plain terms/double-quoted phrases into GitHub's query syntax."""
+    if (any(c in ':\\' or unicodedata.category(c) in {'Cc', 'Cs', 'Zl', 'Zp'} for c in query)
+            or re.search(r'\b(?:AND|OR|NOT)\b', query)):
+        raise ValueError('Use plain search terms without qualifiers, boolean operators, escapes or control characters.')
+    # Only double quotes delimit phrases. Apostrophes and Unicode are text,
+    # not shell quoting or JSON escapes. Require whitespace between terms.
+    term = r'"[^"]+"|[^\s"]+'
+    if not re.fullmatch(rf'\s*(?:{term})(?:\s+(?:{term}))*\s*', query):
+        raise ValueError('Use nonempty terms or double-quoted phrases separated by spaces.')
+    terms = re.findall(term, query)
+    if any(not value.strip('"').strip() for value in terms):
+        raise ValueError('Search terms and phrases must not be empty.')
+    # Every term is quoted, and none can contain an embedded quote/backslash.
+    # Trusted repository/kind qualifiers are appended separately by the caller.
+    return ' '.join(value if value.startswith('"') else f'"{value}"' for value in terms)
+
+
 class Repository(BaseModel):
     model_config = ConfigDict(extra='forbid')
     repository_id: int | None = Field(default=None, gt=0, strict=True)
@@ -33,13 +51,12 @@ class Page(Repository):
 class Search(Page):
     kind: Literal['code', 'issues', 'pull_requests', 'commits']
     query: str = Field(min_length=1, max_length=500,
-        description='Plain search terms. Repository scope is fixed by the connection; no qualifiers or boolean operators.')
+        description='Plain terms or double-quoted phrases separated by spaces; apostrophes and Unicode are literal. '
+                    'Repository scope is fixed by the connection. No qualifiers, boolean operators, backslashes or control characters.')
 
     @model_validator(mode='after')
     def plain_query(self):
-        if any(c in self.query for c in ':\\\r\n') or re.search(r'\b(?:OR|NOT)\b', self.query):
-            raise ValueError('Use plain search terms without qualifiers or boolean operators.')
-        shlex.split(self.query)
+        quoted_search_query(self.query)
         return self
 
 
@@ -341,7 +358,7 @@ class GitHubCoding:
         params = {'per_page': PAGE_SIZE, 'page': page}
         if name == 'github_search':
             kind = 'issues' if args.kind == 'pull_requests' else args.kind
-            query = ' '.join(json.dumps(term) for term in shlex.split(args.query)) + ' repo:' + self.repository_name(target)
+            query = quoted_search_query(args.query) + ' repo:' + self.repository_name(target)
             if kind == 'issues':
                 query += ' is:pr' if args.kind == 'pull_requests' else ' is:issue'
             # Divide the provider's 1000-result ceiling exactly; a partial
