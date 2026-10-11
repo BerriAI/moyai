@@ -14,10 +14,10 @@ async function api(path, options = {}) {
     const response = await fetch(path, {...requestOptions, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...requestOptions.headers}});
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const upload = options.method === 'PUT' && path.startsWith('/api/attachments/');
+      const upload = ['PUT','POST'].includes(options.method) && path.startsWith('/api/attachments/');
       const fallback = upload ? (
         response.status === 403 ? 'The hosting firewall blocked this upload (HTTP 403). Refresh the page and retry the file.' :
-        response.status === 413 ? 'This file is too large. Attach a file under 10 MB.' :
+        response.status === 413 ? 'The upload part was rejected. Refresh the page and retry the file.' :
         response.status === 429 ? 'Other files are uploading. Retry this file in a moment.' :
         response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
         `Upload failed (HTTP ${response.status}). Retry this file.`

@@ -24,7 +24,7 @@
   }
   function changes(data,esc){
     const files=data.files||[];
-    return (data.files_truncated?'<div data-region-key="notice" data-region-leaf><p class="pr-notice">Showing the first 100 files. Open GitHub for all changes.</p></div>':'')+
+    return (data.files_truncated?`<div data-region-key="notice" data-region-leaf><p class="pr-notice">${files.length} of ${esc(data.changed_files)} files loaded.${data.next_arguments?'':' GitHub did not return the remaining files. Open GitHub for more information.'}</p>${data.next_arguments?'<button type="button" data-load-files>Load more files</button>':''}</div>`:'')+
       (files.length?files.map(file=>`<div data-region-key="file:${esc(file.filename)}" data-region-preserve data-pr-file="${esc(file.filename)}"></div>`).join(''):'<div data-region-key="empty" data-region-leaf><p class="pr-notice">No changed files.</p></div>');
   }
   function mount({element,url,load,markdown,escape:esc,onStatus=()=>{}}){
@@ -66,6 +66,7 @@
         if(entry.detail.open)renderDiff(entry);
         else if(entry.rendered!==null&&entry.rendered!==entry.signature){MoyaiUI.render(entry.body,'');entry.rendered=null;}
       });
+      const more=q('[data-load-files]');if(more)more.onclick=()=>read(false,true);
     }
     function renderDescription(){
       if(!data)return;
@@ -104,13 +105,23 @@
       }
       payloadSignature=signature;
     }
-    async function read(force=false){
+    async function read(force=false,more=false){
+      if(more&&!data?.next_arguments)return;
       const request=++epoch;
       if(!alive||!active)return;
       refresh.disabled=true;status.textContent=data?'Refreshing…':'Loading pull request…';
+      const moreButton=q('[data-load-files]');if(moreButton)moreButton.disabled=true;
       try{
-        const result=await load({refresh:force});
+        const result=await load({refresh:force,...(more?data.next_arguments:{})});
         if(!alive||!active||request!==epoch)return;
+        if(more){
+          if(data.head!==result.head||data.base_sha!==result.base_sha)throw Object.assign(new Error('The pull request changed.'),{status:409});
+          result.files=[...new Map([...data.files,...result.files].map(file=>[file.filename,file])).values()];
+        } else if(!force&&data?.head&&data.head===result.head&&data.base_sha===result.base_sha&&data.files.length>result.files.length){
+          // Returning to the tab retains earlier pages of the same immutable diff.
+          result.files=[...new Map([...data.files,...result.files].map(file=>[file.filename,file])).values()];
+          for(const key of ['page','next_page','next_arguments','files_truncated','remaining_files','coverage'])result[key]=data[key];
+        }
         data=result;render();onStatus(data);status.textContent='';
       }catch(error){
         if(!alive||!active||request!==epoch)return;
@@ -118,7 +129,7 @@
           clear();q('[data-state]').className='pr-state';q('[data-state]').textContent='Unavailable';onStatus(null);
         }
         status.textContent=(data?'Could not refresh. Showing the previous version. ':'')+error.message+' Use Refresh to try again.';
-      }finally{if(alive&&active&&request===epoch)refresh.disabled=false;}
+      }finally{if(alive&&active&&request===epoch){refresh.disabled=false;const button=q('[data-load-files]');if(button)button.disabled=false;}}
     }
     refresh.onclick=()=>read(true);
     element.querySelectorAll('[data-section]').forEach(button=>button.onclick=()=>{

@@ -5,9 +5,47 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.durable_runner import DurableRunner
+from app.database import PostgresConnection, SQLiteConnection
+from app.durable_runner import DurableRunner, initialize_schema
 from scripts.admission_benchmark import populate
 from test_durable import durable
+
+
+@pytest.mark.parametrize('fail_replacement', [False, True])
+def test_capacity_index_upgrade_is_atomic_and_preserves_current_predicate(durable, monkeypatch, fail_replacement):
+    manager, _, run_id = durable
+    store = manager.store
+    with store.connect() as conn:
+        conn.begin_write()
+        conn.execute('DROP INDEX idx_durable_sessions_occupied')
+        conn.execute("CREATE INDEX idx_durable_sessions_occupied ON durable_sessions(run_id) WHERE run_id != ''")
+    query = ("SELECT indexdef AS definition FROM pg_indexes WHERE schemaname=current_schema() AND indexname=?"
+             if store.database else "SELECT sql AS definition FROM sqlite_schema WHERE type='index' AND name=?")
+    before = store.rows(query, ('idx_durable_sessions_occupied',))
+    connection_type = PostgresConnection if store.database else SQLiteConnection
+    execute = connection_type.execute
+
+    def replace(conn, sql, params=()):
+        if fail_replacement and sql.startswith('CREATE INDEX idx_durable_sessions_occupied'):
+            raise RuntimeError('Synthetic index creation failure')
+        return execute(conn, sql, params)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(connection_type, 'execute', replace)
+        if fail_replacement:
+            with pytest.raises(RuntimeError, match='Synthetic index creation failure'):
+                initialize_schema(store)
+            assert store.rows(query, ('idx_durable_sessions_occupied',)) == before
+        else:
+            initialize_schema(store)
+    # Retrying a failed upgrade must install the new admission predicate too.
+    initialize_schema(store)
+    assert 'independent_runtime' in store.rows(query, ('idx_durable_sessions_occupied',))[0]['definition']
+    manager.settings.max_concurrent_runs = 1
+    manager.save(run_id, {'phase': 'monitor', 'independent_runtime': True, 'computer': {'phase': 'idle'}})
+    assert manager.has_capacity()
+    manager.save(run_id, {'phase': 'monitor', 'independent_runtime': True, 'computer': {'phase': 'launch'}})
+    assert not manager.has_capacity()
 
 
 @pytest.mark.parametrize('phase,occupied', [

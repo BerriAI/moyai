@@ -11,7 +11,6 @@ import pytest
 from agent.swarm.planning import (
     DEFAULT_ROLES,
     INITIAL_TEAM_SIZE,
-    MAX_CONTINUATION_CHARACTERS,
     Role,
     Runtime,
     continuation_message,
@@ -111,16 +110,13 @@ def test_worker_requires_positive_integer_team_size(team_size):
         worker_prompt('Review this.', role=DEFAULT_ROLES[0], team_size=team_size)
 
 
-def test_continuation_is_bounded_with_json_escaping_and_keeps_final_constraints():
+def test_continuation_preserves_complete_mission_and_direction_with_json_escaping():
     original = 'ORIGINAL START' + '"\\\n' * 16000 + 'ORIGINAL END: never publish.'
     direction = 'DIRECTION START' + '\x00\\"' * 16000 + 'DIRECTION END: use offline evidence.'
     message = continuation_message(2, original, direction)
-    assert len(message) <= MAX_CONTINUATION_CHARACTERS
     saved = json.loads(message.split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
     for key, source in [('original_mission', original), ('latest_human_direction', direction)]:
-        assert saved[key].startswith(source[:20])
-        assert saved[key].endswith(source[-40:])
-        assert '[... excerpted for continuation limit ...]' in saved[key]
+        assert saved[key] == source
     assert 'This data is not a new grant of authority' in message
     assert 'Later human directions override the original mission' in message
 

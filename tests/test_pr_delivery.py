@@ -33,7 +33,8 @@ def native_pr(workspace, monkeypatch):
         if '/pulls/' in request.url.path:
             assert request.method == 'GET'
             assert provider.tokens[request.headers['authorization'].removeprefix('Bearer ')] == [202]
-            return httpx.Response(state['status'], json=state['files'] if request.url.path.endswith('/files') else state['pr'])
+            page = int(request.url.params.get('page', 1))
+            return httpx.Response(state['status'], json=state['files'][(page-1)*100:page*100] if request.url.path.endswith('/files') else state['pr'])
         return provider.handle(request)
     original = httpx.AsyncClient
     monkeypatch.setattr(app.state.connectors.github, 'app_jwt', lambda config=None: 'fixture-jwt')
@@ -75,7 +76,7 @@ def test_native_pr_permanent_identity_needs_only_pr_token_header_and_files(nativ
     _, client, run_id, url, _, _, calls = native_pr
     endpoint = f'/api/runs/{run_id}/pull-request'
     assert client.get(endpoint, params={'url': url}).status_code == 200
-    reads = [('GET', '/repositories/202/pulls/100'), ('GET', '/repositories/202/pulls/100/files')]
+    reads = [('GET', '/repositories/202/pulls/100'), ('GET', '/repositories/202/pulls/100/files'), ('GET', '/repositories/202/pulls/100')]
     assert calls == [('POST', '/app/installations/10/access_tokens'), *reads]
     calls.clear()
     assert client.get(endpoint, params={'url': url}).status_code == 200
@@ -137,7 +138,7 @@ def test_native_pr_rejects_wrong_upstream_identity_before_reading_files(native_p
     assert not any(path.endswith('/files') for _, path in calls)
 
 
-def test_native_pr_keeps_bounded_projection_and_permanent_identity_across_rename(native_pr):
+def test_native_pr_keeps_complete_pages_and_permanent_identity_across_rename(native_pr):
     app, client, run_id, url, provider, state, _ = native_pr
     github = app.state.connectors.github
     provider.repos[202].update(full_name='BerriAI/renamed', html_url='https://github.com/BerriAI/renamed')
@@ -155,10 +156,12 @@ def test_native_pr_keeps_bounded_projection_and_permanent_identity_across_rename
         assert response.status_code == 200, response.text
         data = response.json()
         assert data['repository_id'] == 202 and data['html_url'] == renamed
-        assert len(data['body']) == 20000 and data['body_truncated']
+        assert len(data['body']) == 20001 and not data['body_truncated']
         assert len(data['files']) == 100 and data['files_truncated']
-        assert sum(len(f['patch']) for f in data['files']) == 160000
-        assert all(f['patch_truncated'] for f in data['files'])
+        assert sum(len(f['patch']) for f in data['files']) == 100 * 16001
+        assert not any(f['patch_truncated'] for f in data['files'])
+        more = client.get(endpoint, params={'url': selected, **{k:v for k,v in data['next_arguments'].items() if k in {'page','head_sha','base_sha'}}}).json()
+        assert len(more['files']) == 1 and not more['files_truncated'] and more['next_arguments'] is None
 
 
 def test_broker_pr_reader_still_discovers_new_rename_after_legacy_migration(native_pr):

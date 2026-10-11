@@ -108,8 +108,12 @@ def test_only_live_direct_chat_can_discover_and_call(users_app, change):
                         'deleted': ('deleted_at', now()), 'token': ('token_hash', '')}[change]
         store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (value, caller['id']))
     listing = client.get(url, headers=headers)
-    assert listing.status_code == 401 or 'sessions_read' not in {t['name'] for t in listing.json()}
-    assert read(client, caller, session=target['id']).status_code in {401, 403}
+    if change in {'child', 'automated'}:
+        assert [t['name'] for t in listing.json()].count('sessions_read') == 1
+        assert read(client, caller, session=target['id']).status_code == (200 if change == 'child' else 403)
+    else:
+        assert listing.status_code == 401 or 'sessions_read' not in {t['name'] for t in listing.json()}
+        assert read(client, caller, session=target['id']).status_code in {401, 403}
 
 
 @pytest.mark.parametrize('field,value', [('active_user_id', 'google:other'), ('active_message_id', 999999)])

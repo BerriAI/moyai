@@ -276,10 +276,10 @@ class PublishedArtifacts:
             if offset < 0 or length < 1:
                 raise HTTPException(422, 'Use a nonnegative byte offset and positive length.')
             if inline:
-                from .attachments import inspect_file, MAX_FILE
+                from .attachments import inspect_file, IMAGE_PREVIEW_BYTES
                 # This is an image decoder safety bound, not a file retention or
                 # download limit. The original remains available at its exact URL.
-                if manifest['size'] > MAX_FILE:
+                if manifest['size'] > IMAGE_PREVIEW_BYTES:
                     raise HTTPException(415, 'Download this image to view it at its original size.')
                 try:
                     _, pixels, _ = inspect_file(b''.join(self.chunks(manifest)))

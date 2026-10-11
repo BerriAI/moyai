@@ -13,7 +13,6 @@ from cryptography.fernet import Fernet, InvalidToken
 CONTENT_TYPE = 'application/vnd.moyai.broker-v1'
 MAX_BODY = 5 * 1024 * 1024
 MAX_WIRE = 7 * 1024 * 1024
-from agent.tools.github_limits import MAX_PUBLICATION_BODY
 
 
 def send_payload(path, body, send):
@@ -32,11 +31,11 @@ def send_payload(path, body, send):
 
 
 def body_limit(path):
-    return MAX_PUBLICATION_BODY if path == '/tools/call' else MAX_BODY
+    return MAX_BODY
 
 
 def wire_limit(path):
-    return 4 * ((body_limit(path) + 4096) // 3 + 1) if path == '/tools/call' else MAX_WIRE
+    return MAX_WIRE
 
 
 def cipher(token):

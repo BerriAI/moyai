@@ -8,7 +8,9 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .automations import Definition, Save, Toggle, SCHEDULE_VERSION
+from .automations import Definition, Save, Timing, Toggle, SCHEDULE_VERSION
+from .automation_permissions import AutomationPermissions, Permission
+from .automation_history import History, DESCRIPTION as HISTORY_DESCRIPTION, read_history
 from .automation_events import WebhookSetup
 from .connector_errors import ConnectorError
 
@@ -46,6 +48,21 @@ class Update(Target):
     definition: Definition
 
 
+class Grant(Target):
+    permissions: list[Permission] = Field(description='Owner-requested permissions for this chat turn and its descendants. Empty revokes the grant. Does not enable persistent self-management.')
+
+
+class ScopedRead(Arguments):
+    automation_id: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
+
+
+class ScopedUpdate(Target):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    prompt: str | None = Field(default=None, min_length=3)
+    schedules: dict[str, Timing] | None = Field(default=None,
+        description='Map existing schedule trigger IDs to their new timing. Cannot add triggers or change event sources.')
+
+
 class WebhookRead(Arguments):
     automation_id: str = Field(pattern=r'^[0-9a-f]{32}$')
 
@@ -56,6 +73,10 @@ class WebhookConfigure(Target):
 
 
 SPECS = {
+    'automation_grant': (Grant, 'Grant owner-requested instruction or schedule changes to this chat and its delegated workers for the current human turn. Read automation_list first. Empty permissions revokes this grant. Only use when the owner authorized those changes; agent or event messages cannot grant authority. The grant expires when the authorizing turn/requester changes or stops. Persistent automated self-management is a separate owner-selected definition setting.'),
+    'automation_self_read': (ScopedRead, 'Inspect owner-granted automation targets, their current complete definition, permissions, revision and scheduler state. Omit automation_id to list granted targets. Automated work can access only its own automation, and delegated work only the parent’s live grants. Use before automation_self_update.'),
+    'automation_self_update': (ScopedUpdate, 'Change only an owner-granted automation’s instructions (prompt) or timing of existing schedule triggers. Read automation_self_read first for turn_id, permissions and revision. Preserves whether the automation is enabled or paused. Cannot create schedules, add event sources, change connections, recipients, budgets, runtime or grants. Supply a stable request_key; identical retries recover the recorded outcome. Report the returned state and next_run_at; pending_sync does not confirm a next run.'),
+    'automation_history': (History, HISTORY_DESCRIPTION),
     'automation_environments': (EnvironmentListing, 'List reusable organization project environments for automation setup, including their last validated build and setup blockers. Select an id as definition.environment_id to reuse installed tools and services such as PostgreSQL/Prisma. Does not build or enable environments or grant repository access. Ask an administrator to prepare a missing environment; keep setup scripts in its versioned recipe, not automation prompts or metadata.'),
     'automation_webhook_info': (WebhookRead, 'Inspect the current requester’s automation receiver URLs, provider configuration and recent deliveries. Readiness means a receiver secret exists, not that a provider webhook has been registered. Never returns secrets.'),
     'automation_webhook_setup': (WebhookConfigure, 'Configure or rotate a webhook RECEIVER owned by the current requester. First obtain a non-expiring persistent generic credential using credentials_request, name=webhook-signing-secret, format=env, input_fields=[{name: WEBHOOK_SECRET, label: Webhook signing secret}]. Pass its request_id only. The user must permit persistent reuse: this copies the secret into durable automation configuration. Configuring pauses the automation and increments its revision. It affects all triggers for that provider. Register the same secret and returned callback URL at the provider separately; this tool does not register GitHub or other remote webhooks. Use the current revision and a stable request_key for identical retries. No secrets are returned.'),
@@ -74,15 +95,19 @@ class AutomationTools:
         self.service = automations
         self.store = automations.store
         self.same_requester = same_requester
+        self.permissions = AutomationPermissions(self.store)
         if self.store.schema_updates:
             initialize_schema(self.store)
 
-    def actor(self, run, turn_id=None):
-        run = self.store.run(run['id'])
-        if (not run or not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']
+    def actor(self, run, turn_id=None, *, history=False, scoped=False):
+        caller, run = run, self.store.run(run['id'])
+        if (not run or run['deleted_at'] or run['deletion_requested_at'] or not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}):
             raise HTTPException(403, 'Automation controls require an authenticated chat turn.')
-        if run.get('parent_run_id') or self.store.rows('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],)):
+        if any(run[key] != caller[key] for key in ('active_message_id', 'active_user_id', 'token_hash')):
+            raise HTTPException(409, 'The requester, turn or execution changed. Use the current chat.')
+        source = self.history_source(run)
+        if (run.get('parent_run_id') or source) and not (scoped or history):
             raise HTTPException(403, 'Manage schedules from a direct user chat, not a delegated or automated run.')
         if turn_id is not None and turn_id != run['active_message_id']:
             raise HTTPException(409, 'The requester or turn changed. Use automation_list again.')
@@ -97,8 +122,16 @@ class AutomationTools:
             raise HTTPException(403, 'Sign in with Google first. Slack scheduling also needs a fresh verified matching profile.')
         return run, matches[0]['id']
 
-    def unchanged(self, run, actor):
-        fresh, current_actor = self.actor(run, run['active_message_id'])
+    def history_source(self, run):
+        rows = self.store.rows('''SELECT a.automation_id,d.owner_id FROM run_ancestry tree
+            JOIN automation_runs a ON a.run_id=tree.ancestor_id JOIN automations d ON d.id=a.automation_id
+            WHERE tree.run_id=?''', (run['id'],))
+        if len(rows) > 1:
+            raise HTTPException(409, 'Automation ancestry is ambiguous.')
+        return rows[0] if rows else None
+
+    def unchanged(self, run, actor, *, history=False, scoped=False):
+        fresh, current_actor = self.actor(run, run['active_message_id'], history=history, scoped=scoped)
         if current_actor != actor or fresh['active_user_id'] != run['active_user_id']:
             raise HTTPException(409, 'The requester changed. Use automation_list again.')
 
@@ -106,13 +139,27 @@ class AutomationTools:
         try:
             self.actor(run)
         except HTTPException:
-            return []
+            try:
+                _, actor = self.actor(run, scoped=True)
+                source = self.history_source(run)
+                with self.store.connect() as conn:
+                    targets = self.permissions.targets(conn, run, actor)
+            except HTTPException:
+                return []
+            names = (['automation_history'] if targets or (source and source['owner_id'] == actor) else [])
+            if targets:
+                names += ['automation_self_read', 'automation_self_update']
+            return [self.spec(name) for name in names]
         # Reading one automation also synchronizes its remote schedules. Only
         # these observational catalogs can replay after an unknown outcome.
-        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info', 'automation_environments'},
-                                 'idempotentHint': name in {'automation_webhook_info', 'automation_environments'}}}
-                for name, (schema, description) in SPECS.items()]
+        return [self.spec(name) for name in SPECS]
+
+    @staticmethod
+    def spec(name):
+        schema, description = SPECS[name]
+        reads = {'automation_webhook_info', 'automation_environments', 'automation_history', 'automation_self_read'}
+        return {'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
+                'annotations': {'readOnlyHint': name in reads | {'automation_list'}, 'idempotentHint': name in reads}}
 
     def owned(self, automation_id, actor):
         rows = self.store.rows('SELECT * FROM automations WHERE id=? AND owner_id=?', (automation_id, actor))
@@ -204,6 +251,38 @@ class AutomationTools:
             raise HTTPException(422, 'The credential must contain WEBHOOK_SECRET with 16 to 512 characters.') from None
         return value
 
+    def scoped_definition(self, conn, run, actor, args):
+        permissions = (['instructions'] if args.prompt is not None else []) + (['schedule'] if args.schedules else [])
+        if not permissions:
+            raise HTTPException(422, 'Supply instructions or at least one existing schedule to change.')
+        self.permissions.require(conn, run, actor, args.automation_id, permissions)
+        row = self.owned(args.automation_id, actor)
+        definition = Definition.model_validate_json(row['definition'])
+        if args.prompt is not None:
+            definition.prompt = args.prompt
+        schedules = {trigger.id: trigger for trigger in definition.triggers if trigger.schedule}
+        if set(args.schedules or {}) - schedules.keys():
+            raise HTTPException(403, 'Change only existing schedule trigger IDs; event sources and trigger membership are fixed.')
+        for key, timing in (args.schedules or {}).items():
+            schedules[key].schedule = timing
+        return Definition.model_validate(definition.model_dump())
+
+    async def scoped_read(self, run, actor, args):
+        with self.store.connect() as conn:
+            targets = self.permissions.targets(conn, run, actor)
+            if args.automation_id:
+                self.permissions.require(conn, run, actor, args.automation_id)
+                targets = {args.automation_id: targets[args.automation_id]}
+        results = []
+        for target, allowed in targets.items():
+            row = self.owned(target, actor)
+            results.append({**await self.result(row), 'permissions': sorted(allowed)})
+        self.unchanged(run, actor, scoped=True)
+        with self.store.connect() as conn:
+            for target, allowed in targets.items():
+                self.permissions.require(conn, run, actor, target, allowed)
+        return {'turn_id': run['active_message_id'], 'automations': results}
+
     async def call(self, run, name, arguments):
         try:
             args = SPECS[name][0].model_validate(arguments)
@@ -215,7 +294,27 @@ class AutomationTools:
                         {'field': '.'.join(str(part) for part in error['loc']) or 'arguments',
                          'type': error['type'], 'message': error['msg']}
                         for error in exc.errors(include_input=False, include_context=False, include_url=False)]}
-        run, actor = self.actor(run, getattr(args, 'turn_id', None))
+        scoped = name in {'automation_self_read', 'automation_self_update'}
+        run, actor = self.actor(run, getattr(args, 'turn_id', None), history=name == 'automation_history', scoped=scoped)
+        if name == 'automation_self_read':
+            return await self.scoped_read(run, actor, args)
+        if name == 'automation_history':
+            source = self.history_source(run)
+            target = args.automation_id or (source['automation_id'] if source else '')
+            if not target:
+                raise HTTPException(422, 'Select an automation_id from automation_list.')
+            if source and (source['owner_id'] != actor or target != source['automation_id']):
+                raise HTTPException(403, 'This execution can read only its own automation history.')
+            if run['parent_run_id'] and not source:
+                with self.store.connect() as conn:
+                    self.permissions.require(conn, run, actor, target)
+            self.owned(target, actor)
+            result = read_history(self.store, target, cursor=args.cursor, limit=args.limit)
+            self.unchanged(run, actor, history=True)
+            if run['parent_run_id'] and not source:
+                with self.store.connect() as conn:
+                    self.permissions.require(conn, run, actor, target)
+            return result
         if name == 'automation_environments':
             environments = self.service.environments
             catalog = environments.catalog()
@@ -252,6 +351,12 @@ class AutomationTools:
                     'instruction': 'Read an automation by automation_id for its full definition and confirmed next run before editing.'}
 
         row = self.owned(args.automation_id, actor) if isinstance(args, Target) else None
+        if name == 'automation_self_update':
+            with self.store.connect() as conn:
+                definition = self.scoped_definition(conn, run, actor, args)
+            await self.check_scope(run, definition)
+            if not row['paused']:
+                self.service.validate_execution(definition, actor)
         if name in {'automation_create', 'automation_update', 'automation_enable'}:
             definition = args.definition if hasattr(args, 'definition') else Definition.model_validate_json(row['definition'])
             await self.check_scope(run, definition)
@@ -272,9 +377,11 @@ class AutomationTools:
                                            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.store.connect() as conn:
             conn.begin_write()
-            fresh, fresh_actor = self.actor(run, args.turn_id)
+            fresh, fresh_actor = self.actor(run, args.turn_id, scoped=scoped)
             if fresh_actor != actor or fresh['active_user_id'] != run['active_user_id']:
                 raise HTTPException(409, 'The requester changed. Use automation_list again.')
+            if name == 'automation_self_update':
+                definition = self.scoped_definition(conn, fresh, actor, args)
             operation = (actor, run['id'], args.request_key)
             prior = conn.execute('SELECT * FROM automation_operations WHERE owner_id=? AND run_id=? AND request_key=?', operation).fetchone()
             if prior:
@@ -285,8 +392,19 @@ class AutomationTools:
                     raise HTTPException(409, 'This action succeeded earlier, but the automation has since changed. List it again.')
             else:
                 if name in {'automation_create', 'automation_update'}:
+                    previous = Definition.model_validate_json(row['definition']).self_management if row else None
+                    if args.definition.self_management.allowed() and args.definition.self_management != previous:
+                        self.permissions.human_source(conn, fresh)
                     row = self.service.save(Save(definition=args.definition, revision=getattr(args, 'revision', 0)), actor,
                                             getattr(args, 'automation_id', None), connection=conn)
+                elif name == 'automation_self_update':
+                    row = self.service.save(Save(definition=definition, revision=args.revision), actor,
+                                            args.automation_id, connection=conn, preserve_state=True)
+                elif name == 'automation_grant':
+                    row = self.owned(args.automation_id, actor)
+                    if row['revision'] != args.revision:
+                        raise HTTPException(409, 'This automation changed. Read it again before granting management.')
+                    self.permissions.grant(conn, fresh, actor, args.automation_id, args.permissions)
                 elif name == 'automation_webhook_setup':
                     secret = self.webhook_secret(conn, fresh, args.credential_request_id)
                     self.service.events.configure(args.automation_id,
@@ -298,8 +416,13 @@ class AutomationTools:
                 conn.execute('INSERT INTO automation_operations VALUES(?,?,?,?,?,?)', (*operation, digest, row['id'], row['revision']))
         await self.service.checkpoints.flush()
         result = (self.webhook_info(self.owned(row['id'], actor), actor) if name == 'automation_webhook_setup'
-                  else await self.result(row, synchronize=name == 'automation_enable'))
-        self.unchanged(run, actor)
+                  else await self.result(row, synchronize=name in {'automation_enable', 'automation_self_update'}))
+        self.unchanged(run, actor, scoped=scoped)
+        if scoped or name == 'automation_grant':
+            with self.store.connect() as conn:
+                if scoped:
+                    self.scoped_definition(conn, run, actor, args)
+                result['permissions'] = sorted(self.permissions.targets(conn, run, actor).get(row['id'], set()))
         return result
 
 

@@ -42,7 +42,9 @@ def test_drafts_require_explicit_enable_and_keep_identity(workspace, monkeypatch
     app.state.store.update_run(run['id'],status='idle',summary='Finished with PR link')
     next_run=client.post(path,json={'revision':1,'client_id':'fourth-occurrence'}).json()
     assert next_run['run_id'] != run['id']
-    assert 'Finished with PR link' in app.state.store.run(next_run['run_id'])['prompt']
+    assert 'automation_history' in app.state.store.run(next_run['run_id'])['prompt']
+    from app.automation_history import read_history
+    assert any(row['summary'] == 'Finished with PR link' for row in read_history(app.state.store, automation['id'])['history'])
     app.state.session_lifecycle.request_delete(run['id'], owner, False)
     history = {row['run_id']: row for row in client.get('/api/automations').json()['automations'][0]['history']}
     assert history[run['id']]['status'] == 'deleting' and history[run['id']]['outcome'] == 'started'
@@ -260,16 +262,9 @@ def test_builder_metadata_and_queue_setting_round_trip(workspace):
     assert current['paused'] and current['revision'] == 2
     assert current['definition']['metadata'] == {'team': 'platform', 'notes': notes}
     assert current['definition']['queue_events'] is True
-    for metadata in ({' ': 'empty'}, {'a' * 81: 'long key'}, {'team': 'x' * 16385}, {str(i): '' for i in range(21)}):
+    for metadata in ({' ': 'empty'}, {'team': ['invalid nested value']}):
         result = client.post('/api/automations', json={'definition': {**a['definition'], 'metadata': metadata}})
         assert result.status_code == 422
-
-
-def test_metadata_schema_advertises_entry_limits():
-    schema = Definition.model_json_schema()['properties']['metadata']
-    assert schema['maxProperties'] == 20
-    assert schema['propertyNames'] == {'minLength': 1, 'maxLength': 80}
-    assert schema['additionalProperties'] == {'type': 'string', 'maxLength': 16384}
 
 
 def test_library_templates_are_valid_editable_workflows(workspace):

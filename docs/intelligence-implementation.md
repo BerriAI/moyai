@@ -427,3 +427,323 @@ prerequisite readiness and owner-granted automation self-management remain open.
 The schema remains revision 9. All four role protocols are now revision 4 because
 older workers interpret agent-generated inputs as human messages. Drain old roles
 and use a coordinated release; rebuilding only the broker is not sufficient.
+
+## Complete automation history and scoped session reads (WP2/WP7; not deployed)
+
+Automated work receives a complete history reference rather than three summaries
+clipped to 1,000 characters. `automation_history` returns full public answers using
+keyset cursors, including tied timestamps. `sessions_read` now permits delegated
+work to inspect its session family, and automation descendants to inspect prior
+runs of their own automation. Every message includes its input kind and provenance.
+Unrelated session search still requires a direct authenticated chat; active
+requester, turn, capability and deletion checks protect reads across awaits.
+
+Settings history can load earlier runs and retains loaded rows during refresh.
+The editor preserves complete instructions and metadata and permits more than
+twenty triggers or metadata entries. Saved workflows have no fixed count ceiling.
+Configured invocation and execution capacity still apply.
+
+Validation: 272 broader automation, session, workspace and delegation cases passed;
+two catalog failures exposed an incorrect removed import and were corrected.
+The apparent duplicate `READ_TOOL` names were different tools (`history_read` and
+`sessions_read`); both remain available. Sixty-four contracts passed on PostgreSQL,
+sixteen Node cases passed, and the real UI with synthetic API fixtures passed at
+1440/768/320 pixels, including 26 history entries and complete editor saves.
+Rendered automation documentation passed desktop/mobile overflow checks.
+The frozen runtime-foundation suite finished with 5,114 passes, 296 skips, and one
+fixture failure already repaired and covered by the delegation suite.
+
+Owner-granted automation self-management remains the next implementation step.
+These are source and local behavioral checks, not deployment or model-quality proof.
+
+Integration with the latest renewable-swarm and shared-chat changes passed 96
+Python cases (one optional skip) and 40 Node/browser cases. The two corrected
+catalog cases and schema manifest check also passed. Main now requires schema 10
+(shared swarm chat) and role protocols 6 (complete automation-history references).
+Use a coordinated release of all roles; no deployment was performed.
+
+## Owner-granted automation self-management (WP7/S21; not deployed)
+
+Owners can select instruction and existing-schedule permissions in the editor or
+the saved definition. Automated runs and their descendants inspect the current
+grant with `automation_self_read`, then use `automation_self_update` to change
+only those fields. Scoped edits retain the current pause state, existing trigger
+IDs, event sources, connections, runtime, ownership and budgets. They use the
+existing scheduler and mutation receipts; concurrent owner edits produce a
+revision conflict, and retries cannot create another schedule.
+
+A direct human chat can grant the same fields to its workers with
+`automation_grant`. The durable grant references the authorizing owner, run and
+input; reads and writes recheck that source, active turn, requester, execution
+and automation revision. Parent waiting preserves the grant; a new turn,
+requester, stop, deletion or explicit revocation removes it. Granted workers can
+read the selected workflow's complete history and linked sessions. Agent and
+event inputs cannot mint grants or expand them.
+
+Scheduled inputs now carry explicit automation provenance and the immutable saved
+instructions. The UI labels them Scheduled workflow. Goal authorization reads
+only those owner-authored instructions, excluding event/history data in the
+rendered prompt, while ordinary human follow-ups retain their own attribution.
+
+Validation: 98 management/history cases and 276 broader automation, event, goal,
+session and package cases passed. Fifty-one history/permission contracts passed
+against PostgreSQL and 76 migration/role checks passed. Three additional
+revocation/provenance/manifest checks passed. The real local Temporal scheduler
+confirmed a scoped timezone/time change, retained exactly one schedule and
+reconciled the identical retry. Eleven Node/browser checks passed, including
+editing both permission fields at 1440/768/320 pixels. The rendered operator and
+automation guides passed desktop/mobile checks. Tests use synthetic account and
+provider data; deployed provider quality and latency remain unqualified.
+
+Current source requires schema 11 and all four role protocols 7. Earlier schema
+digests are preserved; revision 11 adds owner grants. Release all roles together
+after the offline migration. No deployment was performed.
+
+## Complete GitHub PR and CI reads (WP6; not deployed)
+
+The agent and native PR panel can page through every provider-returned file.
+Descriptions, comments and patches no longer lose text at local character limits.
+Head/base SHA checks protect every page, including a second check after fetching
+files, from mixed-revision evidence. The panel retains loaded pages on tab return
+and clears them after a revision/access conflict. Missing patches and incomplete
+provider file lists have explicit coverage and a checkout fallback.
+
+CI metadata retains all supplied step names and steps. Job logs no longer stop at
+2 MiB or omit long lines at 20,000 characters. Positive line/page parameters have
+no arbitrary upper cap. Redaction runs over the complete downloaded source before
+line paging; continuation arguments bind its digest, and changed logs require a
+fresh read. Provider access and credential-free redirect checks remain in place.
+The current implementation downloads and redacts the full log for each page;
+large-log memory/latency optimization remains possible without sacrificing coverage.
+
+Validation: 141 GitHub read, delivery and follow-up cases passed; the new seven
+source-completeness/revision contracts passed after correcting their fixture
+import. Another 66 read/delivery cases passed. Thirty-eight Node/browser cases
+passed, including 101 loaded files, a 25,500-character patch line, complete
+descriptions and changed-source clearing at 1440/768/320 pixels. These checks use
+synthetic GitHub responses. Provider patch/file limits remain provider limits;
+the returned patches are not proof of a complete local diff.
+
+The schema remains 11; all role protocols are 8 so mixed brokers do not disagree
+about paged read and source-revision arguments. Publication file/binary limits
+remain the next GitHub implementation step.
+
+## Complete text and binary publication (WP6; not deployed)
+
+The existing scoped GitHub publisher accepts regular text and binary files,
+complete PR descriptions and comments, and arbitrary changed-file counts.
+Removed the 100-file, 10 MiB per-file and 20 MiB total publication ceilings.
+Binary content uses canonical base64 Git blobs; existing text payloads retain
+their exact receipt serialization so old uncertain writes still reconcile.
+Large requests use the existing authenticated multipart transport. Each envelope
+has a framing limit, without imposing a total-content limit. GitHub's own API
+constraints and protected-path, exact-base, ownership and non-forced-write
+checks still apply.
+
+Validation: 234 broader GitHub and transport cases passed; the remaining test
+was updated to exercise multipart across the real loopback relay and passes.
+Nineteen payload/package cases and nineteen final binary/checkout/relay cases
+passed, including complete bytes after a fresh Git checkout, more than 100 files,
+and one publication after a lost acknowledgment. Ten publication/payload cases
+passed against PostgreSQL. Integration with main's atomic startup-index fix
+passed 65 migration/admission/runtime cases; the ownership test now waits for
+PostgreSQL to complete backend termination before asserting its fence.
+The import check also passed with the optional migration dependency, for 66
+passing integration cases. The integration guide was rendered at desktop/mobile widths and
+inspected. All provider responses in these checks are synthetic.
+
+Current source requires schema 12 (main's startup fix) and role protocols 9.
+No deployment was performed.
+
+## Complete automation sources and attributed continuations (WP2/WP7)
+
+Automation source filters now inspect complete event bodies; selected titles,
+URLs and body fields retain all text. Native session events snapshot all prior
+undeleted messages with identities, authors, roles, timestamps and input
+provenance. Removed the ten-message, 1,000-character history and 4,000-character
+body cuts. Large event prompts use the shared context/reference path. The
+snapshot is currently copied per occurrence; a future storage optimization must
+preserve its event-time contents and permissions.
+
+Swarm continuation retains the complete mission and latest actual human
+direction, removing the 16,000-character excerpt. Host-generated inputs now
+carry continuation provenance and cannot authorize a new goal, grant automation
+management, trigger human-message workflows or replace the saved human direction.
+Legacy continuations remain excluded using their server-owned receipt identity.
+Ishaan's initial twenty-worker team and renewable timing policy are preserved.
+
+Validation: 180 core contracts passed; one Unicode test compared encoded JSON
+with decoded text and its corrected case passed. The final six source/authority
+checks passed, including agent guidance after a real human direction. Fifty-one
+PostgreSQL cases passed before that assertion correction; the corrected case and
+final authority checks also passed on PostgreSQL. Another 103 automation,
+history, time-control, runtime and package regressions passed. The automation
+and swarm guides were rendered at desktop/mobile widths and inspected.
+Schema remains 12; all role protocols are 10. Nothing was deployed.
+
+## Complete public progress and independent goal checkpoints (WP4/WP9)
+
+Removed the server's two-update allowance and both 3,000/1,200-character
+commentary cuts. The model already receives guidance to report meaningful
+changes rather than narrate every tool. Updates now retain complete redacted
+text and actual input provenance. Receipt/text deduplication, stale-input
+rejection and final-answer precedence remain. All public updates reach the
+connected Slack thread through the same durable outbox, with long updates split
+into transport parts. Saved text and send intent commit together.
+
+Goals can register explicit one-off active-work checkpoints and repeating report
+intervals independently of a stopping budget. At a requested checkpoint, the
+existing clock transaction saves the latest reported progress, its age, remaining
+work and evidence references as public commentary, together with send intent.
+This path requires no additional inference. Reports do not imply verification,
+pause work or invent a cadence. Missed intervals coalesce into one current report;
+clock and event receipts prevent replay after acknowledgment loss or recovery.
+A simultaneous stop budget takes precedence and uses final report settlement.
+The goal panel shows the reporting schedule separately from the stop budget.
+
+Validation: 270 initial progress/Slack checks passed; two old suppression
+expectations were corrected. The final PostgreSQL suite passed 112 activity,
+Slack, goal and checkpoint cases, including rollback, duplicate ticks, a
+three-hour report-and-continue case, pause/resume, revocation and atomic Slack
+intent. Another 181 Slack/source/gateway/status/schema cases passed, and all ten
+new checkpoint contracts passed locally. Eight Node/browser cases passed at
+1440/768/320; before/after rendered panels and updated documentation were
+inspected. The UI build and typecheck passed. This is local behavior with a fake
+clock and synthetic Slack; the live three-hour release rehearsal remains open.
+
+Schema remains 12; all role protocols are 11. Nothing was deployed.
+
+## Complete side-chat snapshots and instruction references (WP2/WP5)
+
+Side conversations retain the complete original task, latest result and every
+undeleted message at creation time, including queued inputs. IDs, authors,
+timestamps, delivery status and input provenance remain explicit. Removed the
+30-message, per-field character and total-snapshot cuts. Later changes to the
+parent do not rewrite the snapshot or grant access to its live computer.
+
+System context composition uses the selected model window to allocate optional
+source components: the skill catalog, root repository guidance, project setup
+instructions and side-chat reference. Oversized components become explicit
+references to complete immutable records outside the repository. Their scope
+and authority remain labeled, and older references survive later compositions.
+Core orientation stays inline; complete-request admission remains authoritative.
+The allocation is conservative UTF-8 sizing, not optimal token packing.
+
+Validation: 20 focused source, lifecycle and snapshot cases passed. Four side-chat
+cases passed against PostgreSQL. The broader context, SDK, runtime and harness
+suite passed 380 cases with 66 optional runtime/database skips. The product guide
+was rendered and inspected at desktop/mobile widths. These are source/protocol
+checks, not live model-quality evidence.
+
+Schema remains 12; all role protocols are 12. Nothing was deployed.
+
+## Complete input files and transcripts (WP2/WP6)
+
+Web uploads publish complete files through immutable, authenticated parts and a
+verified attachment manifest. Drafts reserve their declared storage before
+transfer; incomplete files cannot be sent. Lost acknowledgments can retry the
+same part without replacing its bytes. Ownership, generation and quota checks
+fence publication after remote I/O. The existing database/object store holds
+parts; migration and verification understand them. Older clients retain their
+single-request compatibility route; new clients use multipart transfer.
+
+Removed the eight-file, 10 MiB per-file, 20 MiB per-message and 50 MiB draft
+ceilings. The configured workspace storage budget remains. Slack normalizes all
+file references in SDK batches and streams private-host downloads, checking exact
+provider size and live access before binding. Computer restoration streams and
+verifies complete files before atomic replacement. Audio playback reads verified
+part ranges. Whole-file memory buffers are unnecessary in these transfer paths.
+
+Every referenced image can enter the model request instead of silently dropping
+images after the tenth. Actual model/media capacity still applies. Removed the
+16,000-character transcript/composer cutoffs and the microphone's two-minute and
+10 MiB automatic stops. Decoder/transcription failure preserves the original,
+with an explicit processing error in the UI and agent context. Bounded image/text
+previews are labeled views; original bytes remain available.
+
+Validation: the initial focused run passed 99 cases; four old eight-file Slack
+expectations were corrected. Storage/source checks passed 59 cases, PostgreSQL
+intake checks passed 69 with one legacy-only skip, and 84 migration/role checks
+passed. The final audio, file, skill-import and storage run passed 115 cases;
+all 11 updated input contracts passed on PostgreSQL. Two publication-race cases
+also passed. The broader session, Slack, gateway and artifact run passed 403
+cases. All 557 Node checks passed. The real local UI/API flow, using fixture
+sign-in and demo execution, passed at 1440/768/320 pixels with twelve files,
+two files over 10 MiB, an acknowledgment lost after part storage, retry, exact
+download and reload. Matched baseline/current screens and product/storage guides
+were rendered and inspected. No live Slack, transcription or cloud provider was
+used to claim end-to-end deployment quality.
+
+The earlier frozen full regression finished with 5,388 passes, 298 skips and eight
+failures: seven obsolete automation-validation fixtures already fixed on main,
+and one timing-sensitive SDK outage assertion. All 39 affected recovery/validation
+cases passed on the newer source. The outage fixture now waits for the actual
+admission fence instead of sleeping one second; its focused real SDK case passes.
+
+Schema is revision 13; all role protocols are 13. Earlier schema digests are
+preserved. Release roles together after the offline migration; nothing was deployed.
+
+## Attachment handoff to initial swarm workers (WP6/WP7)
+
+Initial workers copy the complete attachment manifest and its immutable parts
+inside the same transaction as their scoped message, session and dispatch intent.
+Database parts are copied in SQL; object references stay shared and immutable.
+Parent deletion cannot remove a child's manifest, and unrelated sessions cannot
+read it. Storage admission and deduplicated bootstrap still apply.
+
+Validation: 66 swarm/file cases passed locally; all five initial-upload cases
+passed on PostgreSQL. The handoff cases cover legacy/multipart files, database
+and simulated object storage, exact child reads, retry, source deletion and
+session isolation. Schema and role protocols remain 13. Nothing was deployed.
+
+## GitHub workflow publication and complete traversal (WP6)
+
+The existing publisher now accepts workflow and composite-action files. Workflow
+edits and deletions request Workflows write only for the actual head repository;
+ordinary code, composite actions, checkout, CI and ruleset operations retain their
+own narrower scopes. Missing installation permission stops before repository
+mutations and explains how an organization owner can enable it. Existing apps
+without that scope keep their ordinary code/PR functionality. External-PR grants,
+exact heads, no force pushes, credential/access-control restrictions and immutable
+write receipts remain in place. Registration and the CI guide explain the flow.
+
+Removed the 25-component file-path cutoff and the 100-page limits on repository
+discovery and uncertain-comment lookup. Recovery still refuses to repost a
+comment whose outcome remains uncertain.
+
+Validation: the initial GitHub regression passed 257 cases with three failures
+in the new token-service fixture, which incorrectly treated write permission as
+not granting reads. The corrected eight workflow cases passed. The final focused
+traversal/schema set passed 14 cases with 39 optional database skips; 76 migration
+and role-compatibility cases then passed with PostgreSQL enabled. The PostgreSQL
+publication/follow-up/access suite passed all 163 cases. Rendered registration
+and documentation were inspected at desktop/mobile widths; the registration
+button is reachable at 1440/768/320. Provider responses are simulated; no GitHub
+App permissions were changed externally. Schema remains 13, role protocols are
+14, and nothing was deployed.
+
+## Shared environment readiness and complete setup evidence (WP7)
+
+Snapshotless children resolve preparation through their persisted parent chain.
+They wait on the existing shared build journal, release execution capacity while
+waiting, and inherit the parent's pinned version before computer allocation.
+Concurrent starts coalesce; later admin rebuilds cannot split the team across
+versions. Existing workspace snapshots and Base tools only retain precedence.
+Missing/cyclic ancestry is explicit. No new scheduler or dependency table is used.
+
+Every restored computer runs service startup and verification before advertising
+readiness. These scripts use the computer lifecycle rather than a separate
+five-minute timeout. Removed recipe-command/instruction lengths, package-count
+ceilings, repository-JSON size rejection and both 48 KB build-log cuts. Logs are
+currently retrieved as a complete response, so very large logs incur full-read
+cost on each status poll; no streaming-performance claim is made.
+
+Validation: 60 initial environment contracts passed; 163 environment, swarm and
+delegation checks passed on PostgreSQL. The final setup/automation suite passed
+73 cases, and all 40 revised environment cases passed on PostgreSQL. Another
+40 package/startup/independent-runtime checks passed with one optional skip.
+Cases cover twenty-worker bootstrap before coordinator preparation, shared
+failure, stop, restart, immutable version inheritance, long setup/log sources and
+actual local shell verification. The updated guide was rendered and inspected.
+No real cloud build or live model was used. Schema remains 13; role protocols are
+15. Nothing was deployed.

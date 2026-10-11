@@ -39,6 +39,13 @@ def register(env, **budget):
         'objective': 'Verify every requirement and report.', 'budget': budget})['goal']
 
 
+@pytest.mark.parametrize('kind', ['continuation', 'user'])
+def test_host_continuation_is_not_a_new_goal_authority(env, kind):
+    env.store.execute("UPDATE messages SET input_kind=?,client_id='swarm:round:2' WHERE id=?", (kind, env.source['id']))
+    with env.store.connect() as conn:
+        assert env.service.sources(conn, env.caller) == []
+
+
 def pulse(env, seconds, segment='machine1'):
     return env.service.exchange(env.caller, {'action': 'tick', 'segment': segment, 'elapsed': seconds}, internal=True)['goal']
 

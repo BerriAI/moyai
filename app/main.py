@@ -15,13 +15,14 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
+from .static_assets import versioned_index
 from .connectors import Connectors, ConnectorError, TOOLS, RETRY_SAFE_READS
 from .db import Store, now, database
 from .blob_storage import ObjectStorage
@@ -53,7 +54,7 @@ from agent.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
 from .lens_feedback import FeedbackNotConfigured, LensFeedback
-from .attachments import MAX_FILES, upload_limit
+from .attachments import upload_limit
 from .artifact_files import routes as artifact_file_routes
 from .automations import Automations
 from .computer import Computer
@@ -92,7 +93,7 @@ class NewRun(BaseModel):
     environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
-    attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
+    attachment_ids: list[AttachmentId] = Field(default_factory=list)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
     side_chat_of: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
     swarm: SwarmOptions | None = None
@@ -143,7 +144,7 @@ class ChatMessage(BaseModel):
     content: str = Field(default="")
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     model: str | None = Field(default=None, max_length=120)
-    attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
+    attachment_ids: list[AttachmentId] = Field(default_factory=list)
     send_now: bool = False
 
     @model_validator(mode='after')
@@ -949,9 +950,12 @@ def _create_app(settings, store):
         return result
 
     @app.get('/api/runs/{run_id}/pull-request')
-    async def read_pull_request(run_id: str, request: Request, url: str = Query(max_length=512)):
+    async def read_pull_request(run_id: str, request: Request, url: str = Query(max_length=512),
+                                page: int = Query(default=1, ge=1),
+                                head_sha: str = Query(default='', pattern=r'^(?:[0-9a-f]{40})?$'),
+                                base_sha: str = Query(default='', pattern=r'^(?:[0-9a-f]{40})?$')):
         security.require(request)
-        result = await session_pull_requests.read(run_id, url)
+        result = await session_pull_requests.read(run_id, url, page=page, head_sha=head_sha, base_sha=base_sha)
         security.require(request)
         return result
 
@@ -1792,9 +1796,11 @@ def _create_app(settings, store):
             return StreamingResponse(relay(), media_type='text/event-stream', headers=upstream_headers(request_id, upstream))
         return JSONResponse(value, headers=upstream_headers(request_id, upstream))
 
+    index_html = versioned_index(STATIC)
+
     @app.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html")
+        return HTMLResponse(index_html, headers={'Cache-Control': 'no-store'})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

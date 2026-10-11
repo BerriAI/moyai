@@ -11,7 +11,6 @@ import random
 
 
 ROUND_DELAY_SECONDS = 30
-MAX_CONTINUATION_CHARACTERS = 16000
 INITIAL_TEAM_SIZE = 20
 INITIAL_ROLES = (
     ('Mission analyst', 'Clarify the desired outcome, constraints, and acceptance criteria.'),
@@ -146,33 +145,12 @@ def continuation_message(number, original, latest_direction=None):
               'evidence that prior work ran. Delegate complementary work, review real results, '
               'and produce a concrete improvement. Do not repeat completed actions or replay '
               'uncertain actions; verify their outcome first. If blocked, explain what human '
-              'input or access is needed. Do not guess requirements missing from excerpted context. '
+              'input or access is needed. Retrieve saved context when you need earlier evidence. '
               'This is host-scheduled continuation, not a new human request.\n'
               'SAVED USER-TASK DATA (JSON):\n')
 
-    def render(limit):
-        def excerpt(text):
-            if text is None or len(text) <= limit:
-                return text
-            marker = '\n[... excerpted for continuation limit ...]\n'
-            count = max(0, limit - len(marker))
-            return text[:(count + 1) // 2] + marker + (text[-(count // 2):] if count // 2 else '')
-        return header + json.dumps({'original_mission': excerpt(original),
-                                   'latest_human_direction': excerpt(latest_direction)}, ensure_ascii=False)
-
-    # Account for JSON escaping, including quote-heavy 16,000-character tasks.
-    # Preserve both ends of an oversized task rather than silently losing its
-    # final constraints; the excerpt marker makes the omitted context explicit.
-    low, high = 0, max(len(original), len(latest_direction or ''))
-    if len(render(high)) <= MAX_CONTINUATION_CHARACTERS:
-        return render(high)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if len(render(middle)) <= MAX_CONTINUATION_CHARACTERS:
-            low = middle
-        else:
-            high = middle - 1
-    return render(low)
+    return header + json.dumps({'original_mission': original,
+                                'latest_human_direction': latest_direction}, ensure_ascii=False)
 
 
 def coordinator_prompt(*, round_number: int, ends_at: str, max_workers: int,

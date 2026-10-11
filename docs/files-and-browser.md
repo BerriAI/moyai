@@ -25,82 +25,75 @@ different bytes; explicit artifact revisions remain independently readable.
 
 ### Files uploaded by users
 
-Browser uploads use session-bound AES-GCM envelopes so code examples inside a
-reference file do not trigger the hosting edge's request firewall. The server
-checks sign-in, origin and CSRF before decrypting, binds each envelope to its
-upload ID and filename, and rejects tampered or older-than-five-minute packets.
-Original file bytes, previews, ownership, quotas and download access are unchanged.
-Retries create a fresh envelope with the same upload ID, so a lost response cannot
-duplicate the file. Old browser tabs can still use the legacy raw upload route;
-refresh once to get the protected uploader. Upload errors remain on the file card
-with a retry action and distinguish hosting failures from file validation errors.
+Attach files with the paperclip, drag/drop, or paste. Both new sessions and
+follow-ups show removable previews before sending. Moyai retains every selected
+file and its complete bytes; there is no per-message file count, per-file size,
+or message-total ceiling. The administrator's workspace storage budget still
+applies. If storage is full, remove unsent drafts or ask the administrator to
+increase `ATTACHMENT_STORAGE_LIMIT_MB` with enough backing capacity.
 
-Use the paperclip, drop files onto the composer, or paste clipboard files/images
-with Cmd+V / Ctrl+V. Both new sessions and follow-ups show removable previews
-before sending. Raster images open a larger preview; UTF-8 documents such as
-`SKILL.md` show a text excerpt. Other documents show a file card and download.
-Clipboard file availability depends on what the browser and source app place
-on the clipboard; the file picker and drag/drop are available as fallbacks.
+Uploads use session-bound encrypted parts. An interrupted upload keeps its
+acknowledged parts; **Retry** verifies those same parts and completes the file
+without creating another attachment. The server checks sign-in, origin, CSRF,
+upload identity and part contents before publication. A partially uploaded file
+cannot be sent to an agent. Older browser tabs retain the single-request route;
+refresh the page to use complete multipart uploads.
 
-Limits: eight files, 10 MiB each, 20 MiB total per message. Image previews accept
-PNG, JPEG, WebP and GIF up to 25 megapixels (the first GIF frame). Original bytes
-are preserved. Signed-in users own private drafts; sent files share the existing
-organization session visibility. Uploads and message submissions are idempotent,
-and file binding occurs in the same transaction as message admission.
+Raster images have sanitized previews; text documents show a labeled excerpt.
+Originals remain available even when a decoder or transcription provider cannot
+process them. The file card reports that processing failure, and the agent is
+told to inspect the retained original before making claims about it. Preview
+work remains bounded separately from original-file retention: PNG, JPEG, WebP
+and GIF previews accept up to 25 megapixels and use the first GIF frame.
 
-Files and sanitized image previews live in SQLite on Render's persistent disk,
-and are included in database checkpoints. Unsent uploads expire after 24 hours
-on the next upload; draft storage is capped at 50 MiB per user. The total storage
-cap defaults to 256 MiB (`ATTACHMENT_STORAGE_LIMIT_MB`), leaving room on the
-current 1 GB disk for sessions and result archives. Raising it requires enough
-actual disk space. Original downloads require authentication and always use
-attachment disposition; only decoded raster previews render inline.
+Drafts are private to their uploader. Sending binds each file to the exact
+message in the same transaction as admission, with the session's existing
+access rules. Unsent drafts expire after 24 hours on a later upload. Complete
+parts and previews use the configured database or private object storage; see
+[object storage](object-storage.md) for migration and verification. The default
+workspace attachment budget is 256 MiB and is configurable. Downloads require
+authentication and serve originals as attachments; only decoded previews render
+inline.
 
-Each active Modal turn restores its sent files under
-`/workspace/.moyai-attachments/<id>/<filename>` and verifies their size/hash.
-Later queued messages' files are withheld until their turn begins. Referenced
-image previews are added by the server to model requests, using the existing
-Moyai gateway key and spend tracking. Up to ten recent images are included once
-each per request; originals remain available in the sandbox. File content is
-reference data, never additional authority or an automatic skill installation.
+Each active turn restores its sent files under
+`/workspace/.moyai-attachments/<id>/<filename>`, streaming to a temporary file
+and verifying the complete size and hash before replacement. Later queued
+messages' files remain unavailable until that turn is admitted. Referenced image
+previews are added once per model request without a ten-image selection cutoff.
+The chosen model's actual input/media capacity still applies; originals remain
+available as files. File contents are reference data and do not grant authority
+or install a skill automatically.
 
 Web messages mirrored to Slack include attachment names and a protected session
-link. These user-uploaded files are not copied to Slack and require no additional
-Slack scopes. Agent demo captures referenced in completed answers use the separate
-[native Slack delivery](slack.md#chat-with-moyai-in-slack).
+link. These uploaded originals remain in Moyai. Agent output captures use the
+separate [native Slack delivery](slack.md#chat-with-moyai-in-slack) path.
 
-Incoming Slack files use this same attachment pipeline. Signed mentions, direct
-messages and replies in a bound thread retain up to eight file IDs, including
-image-only messages. AgentChat normalizes the attachment references. Once that
-turn starts, Moyai uses AgentChat's incoming-file helper to retrieve metadata and
-download from Slack's private file host using the bot's `files:read` access.
-PNG, JPEG, WebP and GIF inputs get the same validated previews, sandbox originals
-and model image inputs as web uploads; audio still gets transcribed. No private
-Slack URL or bot credential is passed to the model. AgentChat owns file transport
-and download limits; Moyai owns access checks, durable queues, content inspection,
-previews, transcription and model inputs.
+Incoming Slack files use the same durable parts and inspection pipeline. Signed
+mentions, direct messages and bound-thread replies retain every valid file ID,
+including image-only messages. AgentChat normalizes references in batches. Moyai
+then resolves live `files.info` access and streams from Slack's private file host
+with the bot's `files:read` credential, without following redirects or passing
+private URLs/tokens to the model. Metadata size is verified against received
+bytes. The live API response determines access, since saved scopes may be stale.
+A missing scope asks the user to reconnect Slack; other failures report the
+actual missing input without guessing its contents.
 
-For an initial request, the bounded conversation read can recover files missing
-from an `app_mention` event and include files from the explicitly invoked thread.
-Nearby channel messages' files and future replies are excluded. Direct-message
-history is not imported. Files queued during a response wait for their own turn;
-failures explicitly tell the agent that content is missing. Slack's live
-`files.info` response determines file access, not the saved OAuth scope list,
-which can be stale. A `missing_scope` response asks the user to reconnect Slack
-with `files:read`; other API errors do not incorrectly claim that scope is missing.
-Workspace and connection-policy checks still run before external steps and after
-reading the file. The durable intake table keeps its
-legacy `slack_audio_inputs` name to preserve pending recordings across upgrades.
+Initial context can recover files absent from an `app_mention` and files in the
+explicitly invoked thread. Nearby channel files and future queued replies are
+excluded. Direct-message history is not imported. Connection-policy and team
+checks run before download, after inspection and before binding. Downloads and
+transcription stay off the webhook acknowledgment path. The durable intake table
+retains its legacy `slack_audio_inputs` name for compatibility.
 
 ## Audio input
 
-Moyai accepts Slack voice clips and uploaded MP3, WAV, M4A/MP4, WebM, OGG and FLAC files. In the web composer, use **Record audio** or attach/drop a recording, wait for **Transcript ready**, then open the attachment to review the transcript and play the original. **Edit in message** copies an uploaded transcript into the composer; microphone recordings insert their transcript automatically. Correct the text before sending. Explicit message text takes precedence over the original transcript. Audio-only messages are valid. Browser recording requires HTTPS (or localhost), microphone permission and a supported MediaRecorder implementation; recording stops after two minutes. Uploads retain the existing 10 MB per file, eight files and 20 MB per message limits.
+Moyai accepts Slack voice clips and uploaded MP3, WAV, M4A/MP4, WebM, OGG and FLAC files. In the web composer, use **Record audio** or attach/drop a recording, wait for **Transcript ready**, then open the attachment to review the transcript and play the original. **Edit in message** copies an uploaded transcript into the composer; microphone recordings insert their transcript automatically. Correct the text before sending. Explicit message text takes precedence over the original transcript. Audio-only messages are valid. Browser recording requires HTTPS (or localhost), microphone permission and a supported MediaRecorder implementation; recording continues until you stop or cancel it. Navigating away or locking the composer releases the microphone. Browser and provider resource constraints still apply.
 
 Optional `AUDIO_TRANSCRIPTION_PROMPT` supplies a short spelling glossary without sending prior conversation history. Transcription uses `POST /audio/transcriptions` on `LITELLM_API_BASE`, authenticated with the existing server-side `LITELLM_API_KEY`. Set `AUDIO_TRANSCRIPTION_MODEL` to a transcription model/alias enabled for that gateway key (default `gpt-transcribe`; `whisper-1` remains compatible when configured). Transcription is a model request and can incur provider charges, including when previewing an unsent draft. It also runs for audio uploaded in demo mode; demo **agent responses** remain simulated. No new provider key is exposed to the browser or agent sandbox.
 
-Reconnect the Slack app once to grant its added `files:read` bot permission. Signed, authorized mentions, DMs and bound-thread replies retain the file IDs with the accepted message. The worker downloads only from Slack's private file host using the bot credential, transcribes outside the webhook acknowledgment, and attaches the original plus transcript to that sender's turn. Audio queued during a response takes a turn boundary before it is read. Transcript/download failures explicitly tell the agent what is missing and ask the sender to retry or use text. Prior messages' unrelated Slack attachments are not backfilled.
+Reconnect the Slack app once to grant its added `files:read` bot permission. Signed, authorized mentions, DMs and bound-thread replies retain the file IDs with the accepted message. The worker downloads only from Slack's private file host using the bot credential, transcribes outside the webhook acknowledgment, and attaches the original plus transcript to that sender's turn. Audio queued during a response takes a turn boundary before it is read. Download failures report missing content. A transcription failure preserves the original and reports that no transcript is available. Prior messages' unrelated Slack attachments are not backfilled.
 
-Transcripts are automatic and may contain errors. They are stored alongside the original attachment and become part of the shared session when sent, with the same access rules as other user input. Drafts remain private to their uploader. The server bounds download/response sizes, concurrency and timeouts; it does not follow file redirects or silently truncate transcripts.
+Transcripts are automatic and may contain errors. They are stored alongside the original attachment and become part of the shared session when sent, with the same access rules as other user input. Drafts remain private to their uploader. Transcripts retain their complete returned text and can be copied into the composer without a character cutoff. Uploads/downloads use bounded transport parts; storage budgets, provider capabilities, concurrency and network timeouts remain explicit operational constraints. Audio playback streams verified byte ranges. File redirects are not followed.
 
 To verify locally, configure a working transcription endpoint and run `uv run uvicorn app.main:app --host 127.0.0.1 --port 8787`. Open the web composer, attach a short spoken request without typing text, preview its transcript, and send it. With the Slack permission installed, mention the bot with a voice clip and follow up with a second clip in that thread. Tests: `uv run pytest tests/test_audio.py tests/test_attachments.py tests/test_slack.py tests/test_slack_chat.py tests/test_message_queue.py` and `node --test tests/*.cjs`.
 
@@ -154,7 +147,7 @@ Up to 32 tabs resume, including the active tab. A failed per-tab session storage
 
 Open a session pull request from the conversation, the PR list, or a saved PR tab to see its status, branches, description, and changed-file diffs directly in Moyai. This read-only view uses the organization’s selected GitHub repositories and works while the cloud workspace is asleep. Refresh updates the details; Open in GitHub provides the full review, discussion, and checks interface.
 
-The panel includes the session’s confirmed PRs and those of its direct child agents. Disabled GitHub access or removed repository selection makes the details unavailable. Large changes show explicit truncation notices; GitHub remains available for complete diffs. Computer and Saved captures retain their separate controls.
+The panel includes the session’s confirmed PRs and those of its child agents. Disabled GitHub access or removed repository selection makes the details unavailable. **Load more files** retrieves additional changed files and retains loaded pages when you return to the tab. Descriptions and provider-supplied patches remain complete. If the PR changes between pages, refresh before continuing. GitHub can omit patches or stop returning files; the panel reports those gaps. Computer and Saved captures retain their separate controls.
 
 For a local demo, run `uv run python scripts/pull_request_panel_demo.py --port 8987` and open `http://localhost:8987/demo/login`. The session and GitHub data are fixtures. Add `--live-github` to read real PR details using your existing local `gh` login; no model, cloud workspace, or GitHub write is used.
 

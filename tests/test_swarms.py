@@ -183,13 +183,31 @@ async def test_initial_team_cannot_start_after_mission_is_inactive(durable, cont
     assert all(manager.store.run(child['id'])['status'] == 'cancelled' for child in children)
 
 
-def test_initial_uploads_are_copied_into_each_child_attachment_scope(durable):
+@pytest.mark.parametrize('multipart', [False, True])
+@pytest.mark.parametrize('objects', [False, True])
+def test_initial_uploads_are_copied_into_each_child_attachment_scope(durable, multipart, objects):
+    from app.attachment_uploads import AttachmentUploads, PART_BYTES
     from app.attachments import inspect_file
     from fastapi import HTTPException
+    from storage_fixture import MemoryObjects
     manager, _, unrelated = durable
-    upload = manager.store.attachments.save('initial-swarm-upload', 'user:swarm', 'context.txt', b'Important source',
-                                           inspect_file(b'Important source'), 1024 * 1024)
+    if objects:
+        manager.store.objects = MemoryObjects()
+    raw = b'Important source' + b'\x00' * PART_BYTES if multipart else b'Important source'
+    storage_limit = manager.settings.attachment_storage_limit_mb * 1024 * 1024
+    if multipart:
+        transfer = AttachmentUploads(manager.store.attachments)
+        transfer.begin('initial-swarm-upload', 'user:swarm', 'context.txt', len(raw), storage_limit)
+        for index, offset in enumerate(range(0, len(raw), PART_BYTES)):
+            transfer.part('initial-swarm-upload', 'user:swarm', index, raw[offset:offset+PART_BYTES])
+        original, stream, checksum = transfer.stage('initial-swarm-upload', 'user:swarm')
+        with stream:
+            upload = transfer.finish(original, checksum, inspect_file(stream), storage_limit)
+    else:
+        upload = manager.store.attachments.save('initial-swarm-upload', 'user:swarm', 'context.txt', raw,
+                                               inspect_file(raw), storage_limit)
     run = bootstrap(manager, attachment_ids=[upload['id']])
+    assert bootstrap(manager, attachment_ids=[upload['id']])['id'] == run['id']
     group = manager.swarms.initial_group(run['id'])
     ids = set()
     for child in manager.coordinator.children(group['id']):
@@ -199,11 +217,17 @@ def test_initial_uploads_are_copied_into_each_child_attachment_scope(durable):
         assert len(copied) == 1 and copied[0]['id'] != upload['id']
         ids.add(copied[0]['id'])
         row = manager.store.attachments.broker_row(manager.store.run(child['id']), copied[0]['id'])
-        assert manager.store.attachments.payload(row) == b'Important source'
+        assert manager.store.attachments.payload(row) == raw
+        parts = manager.store.rows('SELECT * FROM attachment_parts WHERE attachment_id=?', (row['id'],))
+        assert len(parts) == (2 if multipart else 0)
+        assert all(bool(part['reference']) == objects for part in parts)
         with pytest.raises(HTTPException):
             manager.store.attachments.broker_row(manager.store.run(unrelated), copied[0]['id'])
     assert len(ids) == INITIAL_TEAM_SIZE
     assert manager.store.messages(run['id'])[0]['attachments'][0]['id'] == upload['id']
+    # Each scoped manifest is independent, even when immutable objects are shared.
+    manager.store.execute('DELETE FROM attachments WHERE id=?', (upload['id'],))
+    assert manager.store.attachments.payload(row) == raw
 
 
 def test_initial_upload_copies_respect_storage_limit_and_rollback_binding(durable):
@@ -318,6 +342,8 @@ async def test_continuation_carries_latest_human_direction_without_treating_agen
     automatic = manager.store.claim_message(run_id)
     manager.store.finish_message(run_id, automatic['id'], 'A later automatic result')
     manager.swarms.settle(run_id, {'message_id': automatic['id'], 'outcome': 'completed', 'response': 'A later automatic result'})
+    peer, _ = manager.store.enqueue_message(run_id, 'Peer suggestions are not human direction.', 'peer-guidance')
+    manager.store.execute("UPDATE messages SET input_kind='delegation',status='completed' WHERE id=?", (peer['id'],))
     manager.store.update_run(run_id, status='idle')
     manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
     manager.swarms.tick(run_id)
@@ -326,7 +352,7 @@ async def test_continuation_carries_latest_human_direction_without_treating_agen
     assert next_data['latest_human_direction'] == direction  # Exclude the newer server-owned message.
 
 
-async def test_long_escaped_task_and_direction_stay_within_continuation_message_limit(durable):
+async def test_long_escaped_task_and_direction_survive_continuation_as_host_input(durable):
     manager, _, run_id = durable
     original = 'Original start: ' + '\\"🙂\n' * 3990 + ' :original final constraints'
     original = original[:15950] + ' :original final constraints'
@@ -342,13 +368,10 @@ async def test_long_escaped_task_and_direction_stay_within_continuation_message_
     manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
     manager.swarms.tick(run_id)
     continuation = next(message for message in manager.store.messages(run_id) if message.get('source') == 'swarm')
-    assert len(continuation['content']) <= 16000
+    assert continuation['input_kind'] == 'continuation'
+    assert json.loads(continuation['source_json']) == {'kind':'swarm_continuation','run_id':run_id,'round':2}
     data = json.loads(continuation['content'].split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
-    assert data['original_mission'].startswith('Original start:')
-    assert data['original_mission'].endswith(':original final constraints')
-    assert data['latest_human_direction'].startswith('Human start:')
-    assert data['latest_human_direction'].endswith(':latest final constraints')
-    assert all('excerpted for continuation limit' in value for value in data.values())
+    assert data == {'original_mission':original,'latest_human_direction':direction}
 
 
 async def test_human_followup_wins_over_automatic_continuation(durable):
