@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.connector_errors import ConnectorError
-from app.github import Change, Comment, GitHub, Publish, Update, MAX_FILE, MAX_TOTAL
+from app.github import Change, Comment, GitHub, Publish, Update
 from app.security import digest
 from sandbox.broker_transport import CONTENT_TYPE, seal, unseal, MAX_BODY
 from test_github import BASE, COMMIT, TREE, PAYLOAD, GitHubAPI, connected
@@ -75,6 +75,27 @@ def update_args():
 
 def comment_args():
     return Comment(repository=PAYLOAD['repository'], number=100, body='@review-bot review', request_key='review-second-head')
+
+
+def test_uncertain_comment_is_found_beyond_one_hundred_pages(published, monkeypatch):
+    _, _, run, _, github, api = published
+    api.lose = 'comment'
+    args = comment_args()
+    with pytest.raises(ConnectorError, match='Lost'):
+        asyncio.run(github.comment(run, args))
+    original = api.request
+    pages = []
+    async def paged(method, path, **kwargs):
+        if method == 'GET' and path.endswith('/comments'):
+            page = kwargs['params']['page']
+            pages.append(page)
+            if page <= 100:
+                return [{'body': f'Unrelated comment on page {page}'}] * 100
+        return await original(method, path, **kwargs)
+    monkeypatch.setattr(github, 'request', paged)
+    result = asyncio.run(github.comment(run, args))
+    assert result['id'] == 321 and pages == list(range(1, 102))
+    assert sum(method == 'POST' and path.endswith('/comments') for method, path, _ in api.calls) == 1
 
 
 def another_session(app):
@@ -234,6 +255,7 @@ def test_broker_exposes_followups_without_approval_and_reads_feedback(published)
 
 
 def test_large_schema_passes_server_envelope_and_blob_publication(workspace, monkeypatch):
+    from sandbox.broker_transport import send_payload
     app, client = workspace
     run_id, headers = connected(app)
     api = GitHubAPI(app.state.connectors.github, monkeypatch)
@@ -242,24 +264,29 @@ def test_large_schema_passes_server_envelope_and_blob_publication(workspace, mon
     body = {'name': 'github_create_pull_request', 'arguments': {**PAYLOAD, 'files': [{'path': 'schema.d.ts', 'content': content}]}}
     raw = json.dumps(body).encode()
     assert len(raw) > MAX_BODY
-    packet = seal('run-capability-only', '/tools/call', raw)
-    assert unseal('run-capability-only', '/tools/call', packet) == raw
-    response = client.post(f'/broker/{run_id}/tools/call', headers={**headers, 'Content-Type': CONTENT_TYPE}, content=packet)
+    parts = []
+    def send(path, value):
+        parts.append(path)
+        raw = json.dumps(value, ensure_ascii=False).encode()
+        packet = seal('run-capability-only', path, raw)
+        assert unseal('run-capability-only', path, packet) == raw
+        response = client.post(f'/broker/{run_id}'+path, headers={**headers, 'Content-Type': CONTENT_TYPE}, content=packet)
+        assert response.status_code == 200, response.text
+        return response
+    response = send_payload('/tools/call', body, send)
     assert response.status_code == 200 and response.json()['number'] == 100
+    assert '/payloads' in parts and parts[-1] == '/tools/call'
     blob = next(c[2]['json'] for c in api.calls if c[1].endswith('/git/blobs'))
     assert blob == {'content': content, 'encoding': 'utf-8'}
     tree = next(c[2]['json']['tree'] for c in api.calls if c[0] == 'POST' and c[1].endswith('/git/trees'))
     assert 'content' not in tree[0] and tree[0]['sha']
 
 
-def test_utf8_byte_and_total_limits():
+def test_complete_utf8_content_beyond_former_byte_and_total_limits():
     assert Change(path='schema.d.ts', content='x' * 2_931_023)
-    assert Change(path='limit.ts', content='x' * MAX_FILE)
-    with pytest.raises(ValidationError):
-        Change(path='too-large.ts', content='é' * (MAX_FILE // 2 + 1))
-    files = [{'path': str(i), 'content': 'x' * MAX_FILE} for i in range(2)]
-    assert Publish.model_validate({**PAYLOAD, 'files': files})
-    with pytest.raises(ValidationError):
-        Publish.model_validate({**PAYLOAD, 'files': files + [{'path': 'extra', 'content': 'x'}]})
+    content = 'é' * (6 * 1024 * 1024)
+    files = [{'path': str(i), 'content': content} for i in range(2)]
+    parsed = Publish.model_validate({**PAYLOAD, 'body': 'Complete rationale ' * 2000, 'files': files})
+    assert [file.content for file in parsed.files] == [content, content]
     with pytest.raises(ValidationError):
         Comment(number=100, body='   ', request_key='empty-comment')

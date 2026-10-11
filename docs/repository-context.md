@@ -72,7 +72,7 @@ speed or guarantee provider prompt-cache hits.
 
 The inference owner runs background refreshes. During overlapping PostgreSQL
 broker releases, the existing maintenance leadership lock admits one refresher
-and shutdown drains it before ownership transfers. Schema revision 9 adds the
+and shutdown drains it before ownership transfers. Schema revision 14 adds the
 snapshot, head and turn-selection tables; run the normal offline migration
 before a verified deployment. No migration is run by joining broker replicas.
 

@@ -94,9 +94,7 @@ def main(action):
         result = json.loads((ROOT / 'result.json').read_text()) if (ROOT / 'result.json').exists() else {'done': False}
         path = ROOT / 'output.log'
         if path.exists():
-            with path.open('rb') as stream:
-                stream.seek(max(0, path.stat().st_size - 48000))
-                result['log'] = stream.read(48000).decode(errors='replace')
+            result['log'] = path.read_text(errors='replace')
         return result
     if action == 'supervise':
         supervise()

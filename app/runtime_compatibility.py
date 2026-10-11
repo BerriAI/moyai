@@ -11,13 +11,25 @@ import json
 from .database import RUNTIME_SETTINGS
 from .schema_migrations import SCHEMA_REVISION
 
-API_PROTOCOL_REVISION = 2
+# Unlimited swarms persist budget_seconds=0 and ends_at=''. Older roles parse
+# every deadline as a timestamp and cannot safely read or execute these rows.
+# Automation startup now references the broker's complete automation_history tool.
+# Scoped automation definitions, grants and attributed inputs require all roles
+# to understand self-management and immutable owner-authored workflow sources.
+# Public progress is complete and requested goal checkpoints have durable
+# reporting schedules/receipts; old roles can discard or omit their delivery.
+# Side-chat snapshots retain complete attributed inputs; workers compose large
+# instruction sources as immutable references using the selected model window.
+# Immutable attachment manifests/parts must be understood by intake and workers.
+# Publishing workflow files uses explicit per-operation Workflows permission.
+# Snapshotless workers wait for shared preparation; restored services are verified.
+API_PROTOCOL_REVISION = 15
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 2
-BROKER_PROTOCOL_REVISION = 2
-COORDINATOR_PROTOCOL_REVISION = 2
+WORKER_PROTOCOL_REVISION = 15
+BROKER_PROTOCOL_REVISION = 15
+COORDINATOR_PROTOCOL_REVISION = 15
 
 
 def api_fingerprint(settings):

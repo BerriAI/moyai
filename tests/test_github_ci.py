@@ -5,7 +5,6 @@ import httpx
 import pytest
 
 from app.github import PERMISSIONS
-from app.github_ci import MAX_LOG_BYTES
 from test_github import connected
 from test_github_rulesets import Provider
 from test_workspace import workspace
@@ -22,6 +21,7 @@ class CIProvider(Provider):
         self.many = False
         self.log_status = 302
         self.on_result = None
+        self.steps = [{'number': 1, 'name': 'test', 'conclusion': 'failure'}]
 
     def handle(self, request):
         path = request.url.path
@@ -54,8 +54,7 @@ class CIProvider(Provider):
                 'run_attempt': 2, 'status': 'completed', 'conclusion': 'failure'}] * count})
         if path.endswith('/actions/runs/7/jobs'):
             return httpx.Response(200, json={'jobs': [{'id': 8, 'run_id': 7, 'run_attempt': 2,
-                'status': 'completed', 'conclusion': 'failure', 'steps': [
-                    {'number': 1, 'name': 'test', 'conclusion': 'failure'}]}] * count})
+                'status': 'completed', 'conclusion': 'failure', 'steps': self.steps}] * count})
         assert path.endswith('/actions/jobs/8/logs')
         return httpx.Response(self.log_status, headers={'location': self.destination,
             'set-cookie': 'private=api-cookie; Domain=.blob.core.windows.net; Path=/'})
@@ -116,9 +115,10 @@ def test_log_excerpt_redacts_before_slicing_and_drops_download_credentials(ci):
     assert 'hidden-' not in json.dumps(result) and 'server-token' not in json.dumps(result)
     assert 'private-signed-url' not in json.dumps(result) and result['untrusted_content']
     assert call('github_job_logs', job_id=8, start_line=4).json()['text'] == 'last'
-    provider.log = b'good\n' + b'x' * MAX_LOG_BYTES + b'secret-at-cut'
-    bounded = call('github_job_logs', job_id=8).json()
-    assert bounded['download_truncated'] and bounded['text'] == 'good'
+    provider.log = b'good\n' + b'x' * (2 * 1024 * 1024) + b'\nuseful-after-former-cutoff'
+    complete = call('github_job_logs', job_id=8).json()
+    assert not complete['download_truncated'] and complete['text'].endswith('useful-after-former-cutoff')
+    assert len(complete['text'].splitlines()[1]) == 2 * 1024 * 1024
 
 
 @pytest.mark.parametrize('destination', ['http://test.blob.core.windows.net/a', 'https://api.github.com/a',

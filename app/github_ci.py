@@ -1,4 +1,5 @@
-"""Repository-scoped, read-only CI metadata and bounded job-log excerpts."""
+"""Repository-scoped CI metadata and complete, revision-pinned log pages."""
+import hashlib
 import re
 from urllib.parse import urlsplit
 
@@ -8,13 +9,11 @@ from agent.activity import public_text
 from .connector_errors import ConnectorError
 
 
-MAX_LOG_BYTES = 2 * 1024 * 1024
-MAX_LOG_CHARS = 20000
 PAGE_SIZE = 30
 
 
 def fields(value, names):
-    return {key: public_text(value[key], 1000) if isinstance(value[key], str) else value[key]
+    return {key: public_text(value[key], None) if isinstance(value[key], str) else value[key]
             for key in names if key in value}
 
 
@@ -76,34 +75,32 @@ class GitHubCI:
                 **fields(item, ('id', 'run_id', 'run_attempt', 'head_sha', 'name', 'status', 'conclusion', 'html_url',
                                 'started_at', 'completed_at')),
                 'steps': [fields(step, ('number', 'name', 'status', 'conclusion', 'started_at', 'completed_at'))
-                          for step in item.get('steps', [])[:100]],
-                'steps_truncated': len(item.get('steps', [])) > 100} for item in items],
+                          for step in item.get('steps', [])],
+                'steps_truncated': False} for item in items],
                 next_page=args.page + 1 if len(items) == PAGE_SIZE else None)
         else:
-            raw, cut = await self.download_job_log(prefix + f'/actions/jobs/{args.job_id}/logs', token,
+            raw = await self.download_job_log(prefix + f'/actions/jobs/{args.job_id}/logs', token,
                 lambda: self.ensure_ci_allowed(name, version, target))
-            # Remove a potentially cut secret at the byte boundary before redacting.
+            revision = hashlib.sha256(raw).hexdigest()
+            if args.revision and args.revision != revision:
+                raise ConnectorError('The job log changed. Read again from line 1 before combining evidence.',
+                                     code='source_changed', dispatched=False, retryable=True)
             text = raw.decode('utf-8', errors='replace')
-            if cut:
-                text = text.rsplit('\n', 1)[0] if '\n' in text else ''
             text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
             # The token minted for this request must never appear in a result,
             # even if an upstream log unexpectedly echoes it without a label.
-            text = public_text(text.replace(token, '[redacted]'), MAX_LOG_BYTES)
+            text = public_text(text.replace(token, '[redacted]'), None)
             lines = text.splitlines()
             start = args.start_line - 1
-            selected, length = [], 0
-            for line in lines[start:start + args.max_lines]:
-                if length + len(line) + 1 > MAX_LOG_CHARS:
-                    if not selected:
-                        selected.append('[Line omitted: exceeds the excerpt size limit.]')
-                    break
-                selected.append(line)
-                length += len(line) + 1
+            selected = lines[start:start + args.max_lines]
             end = start + len(selected)
+            next_line = end + 1 if end < len(lines) else None
             result.update(job_id=args.job_id, start_line=args.start_line, text='\n'.join(selected),
-                          next_line=end + 1 if end < len(lines) else None,
-                          download_truncated=cut, truncated=cut or end < len(lines))
+                          next_line=next_line, revision=revision, total_lines=len(lines),
+                          next_arguments={'repository_id': target, 'job_id': args.job_id,
+                              'start_line': next_line, 'max_lines': args.max_lines, 'revision': revision} if next_line else None,
+                          download_truncated=False, truncated=bool(next_line),
+                          coverage='page' if next_line else 'final_page')
         self.ensure_ci_allowed(name, version, target)
         return result
 
@@ -130,11 +127,9 @@ class GitHubCI:
                                                  'Check whether the job has finished, logs have expired, and Actions read access is enabled.')
                         raw = bytearray()
                         async for block in response.aiter_bytes():
-                            remaining = MAX_LOG_BYTES + 1 - len(raw)
-                            raw.extend(block[:remaining])
-                            if len(raw) > MAX_LOG_BYTES:
-                                break
-                        return bytes(raw[:MAX_LOG_BYTES]), len(raw) > MAX_LOG_BYTES
+                            check_access()
+                            raw.extend(block)
+                        return bytes(raw)
         except (httpx.HTTPError, ValueError):
             raise ConnectorError('Could not read GitHub job logs. Try the read again; no action was performed.') from None
         raise ConnectorError('GitHub did not return job logs.')

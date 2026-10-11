@@ -1,4 +1,5 @@
 """Local Git checkout and exact working-tree packaging, with no GitHub credential."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,6 @@ import stat
 import subprocess
 
 ROOT = Path('/workspace')
-from agent.tools.github_limits import MAX_FILE, MAX_TOTAL
 from sandbox.access_transport import git_environment
 
 
@@ -136,17 +136,15 @@ def collect(directory, title, body, request_key):
             base_entries[name] = info.decode().split()
     if not paths:
         raise GitHubToolError('There are no changed files to publish.')
-    if len(paths) > 10000:
-        raise GitHubToolError('A PR must contain between 1 and 100 changed text files. Split larger changes.')
-    files, total = [], 0
+    files = []
     for name in paths:
         parts = name.split('/')
         lower = name.lower()
         if (any(p in {'', '.', '..'} or p.lower() in {'.git', '.ssh', 'codeowners'} or p.lower().startswith('.env') for p in parts)
                 or '\\' in name or any(ord(c) < 32 or ord(c) == 127 for c in name)
                 or lower in {'.github', '.github/workflows', '.github/actions'}
-                or lower.startswith(('.github/workflows/', '.github/actions/')) or lower.endswith(('.pem', '.key'))):
-            raise GitHubToolError('Remove credential, workflow or access-control files from the change before publishing.')
+                or lower.endswith(('.pem', '.key'))):
+            raise GitHubToolError('Remove credential or access-control files from the change before publishing.')
         path = target / name
         for ancestor in [path, *path.parents]:
             if ancestor == target:
@@ -159,24 +157,25 @@ def collect(directory, title, body, request_key):
             files.append({'path': name, 'content': None, 'executable': False})
             continue
         mode = path.stat().st_mode
-        if not stat.S_ISREG(mode) or path.stat().st_size > MAX_FILE:
-            raise GitHubToolError('Publish regular text files of at most 10 MiB each.')
+        if not stat.S_ISREG(mode):
+            raise GitHubToolError('Only regular files can be published.')
         raw = path.read_bytes()
         if name.encode('utf-8') in base_entries:
             base_mode, kind, sha = base_entries[name.encode('utf-8')]
             if (kind == 'blob' and base_mode == ('100755' if mode & 0o111 else '100644')
                     and git(target, 'hash-object', '--no-filters', '--', name).decode().strip() == sha):
                 continue
-        total += len(raw)
-        if len(raw) > MAX_FILE or total > MAX_TOTAL or b'\0' in raw:
-            raise GitHubToolError('Publish at most 20 MiB of UTF-8 text per publication; binary files are unsupported.')
         try:
+            if b'\0' in raw:
+                raise UnicodeError()
             content = raw.decode('utf-8')
-        except UnicodeDecodeError:
-            raise GitHubToolError('Binary files cannot be published with this tool.') from None
-        files.append({'path': name, 'content': content, 'executable': bool(mode & 0o111)})
-    if not 1 <= len(files) <= 100:
-        raise GitHubToolError('A publication must contain between 1 and 100 changed text files.')
+            encoding = {}
+        except UnicodeError:
+            content = base64.b64encode(raw).decode()
+            encoding = {'encoding': 'base64'}
+        files.append({'path': name, 'content': content, 'executable': bool(mode & 0o111), **encoding})
+    if not files:
+        raise GitHubToolError('There are no changed files to publish.')
     return {**({'repository_id': data['repository_id']} if data.get('repository_id') else {'repository': data['repository']}), 'base_sha': data['base_sha'], 'request_key': request_key,
             'title': title, 'body': body, 'files': files}
 

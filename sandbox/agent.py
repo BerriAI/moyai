@@ -35,6 +35,11 @@ def emit(kind, message, data=None, **extra):
               "data": {**(data or {}), "activity_id": uuid.uuid4().hex, "input_id": ACTIVITY_INPUT_ID}, **extra}), flush=True)
 
 
+def on_input(input_id):
+    global ACTIVITY_INPUT_ID
+    ACTIVITY_INPUT_ID = input_id
+
+
 def run(spec):
     global ACTIVITY_INPUT_ID
     ACTIVITY_INPUT_ID = spec.get('activity_input_id')
@@ -103,15 +108,20 @@ def run_agent(spec, relay):
     original = os.getcwd()
     try:
         with native_storage(Path('/session/.native-sdk'), Path('/root'), Path('/tmp')):
+            if spec.get('independent_runtime'):
+                from sandbox.agent_runtime import run as run_runtime
+                return run_runtime(spec, relay, emit)
             return _run_agent(spec, relay)
     finally:
         os.chdir(original)
 
 
-def _run_agent(spec, relay):
-    harness = spec.get('harness', 'hermes')
-    if harness == 'hermes':
-        apply_hermes_patches()
+class ProjectUnavailable(RuntimeError):
+    pass
+
+
+def prepare_workspace(spec, relay):
+    """Prepare computer files/services without constructing a model runtime."""
     workspace = Path("/workspace")
     workspace.mkdir(exist_ok=True)
     prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting)
@@ -145,8 +155,19 @@ def _run_agent(spec, relay):
     try:
         prepare_project(spec, emit)
     except Exception:
-        emit('final', 'The prepared project services did not start successfully. Your workspace is preserved. '
-             'Ask an administrator to check the environment startup command before continuing.', completed=False)
+        raise ProjectUnavailable('The prepared project services did not start successfully. Your workspace is preserved. '
+             'Ask an administrator to check the environment startup command before continuing.') from None
+    return workspace, artifacts
+
+
+def _run_agent(spec, relay):
+    harness = spec.get('harness', 'hermes')
+    if harness == 'hermes':
+        apply_hermes_patches()
+    try:
+        workspace, artifacts = prepare_workspace(spec, relay)
+    except ProjectUnavailable as exc:
+        emit('final', str(exc), completed=False)
         return 1
     os.chdir(workspace)
     config = hermes_config(spec, relay.url, workspace)
@@ -156,10 +177,6 @@ def _run_agent(spec, relay):
         (home / "config.yaml").write_text(json.dumps(config))  # JSON is valid YAML.
         os.environ["OPENAI_API_KEY"] = os.environ["WORKSPACE_RUN_TOKEN"]
         os.environ["OPENAI_BASE_URL"] = relay.url + "/v1"
-    def on_input(input_id):
-        global ACTIVITY_INPUT_ID
-        ACTIVITY_INPUT_ID = input_id
-
     def report(kind, message, data=None, **extra):
         emit(kind, message, data, **extra)
         if kind == 'final':

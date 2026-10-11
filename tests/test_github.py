@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.connector_errors import ConnectorError
-from app.github import Change, Publish, PERMISSIONS, MAX_FILE
+from app.github import Change, Publish, PERMISSIONS
 from app.security import digest
 from test_workspace import workspace, cloud_capability
 from test_spend import sign_in
@@ -124,7 +124,7 @@ class GitHubAPI:
 
 
 @pytest.mark.parametrize('path', ['../a', '/a', 'a//b', 'a/./b', 'a\\b', '.git/config', '.GIT/config',
-    '.github', '.github/workflows', '.github/workflows/check.yml', '.github/actions', '.ssh', '.ssh/config',
+    '.github', '.github/workflows', '.github/actions', '.ssh', '.ssh/config',
     'CODEOWNERS', 'nested/codeowners', '.env.local', 'a/private.pem', 'a/key.key', 'a\nb'])
 def test_protected_paths(path):
     with pytest.raises(ValidationError):
@@ -134,7 +134,7 @@ def test_protected_paths(path):
 def test_bounds_and_ambiguous_changes():
     for files in [[{'path': 'a', 'content': 'x'}, {'path': 'A', 'content': 'x'}],
                   [{'path': 'a', 'content': 'x'}, {'path': 'a/b', 'content': 'x'}],
-                  [{'path': 'a', 'content': '\0'}], [{'path': 'a', 'content': 'a' * (MAX_FILE + 1)}]]:
+                  [{'path': 'a', 'content': 'invalid binary', 'encoding': 'base64'}]]:
         with pytest.raises(ValidationError):
             Publish.model_validate({**PAYLOAD, 'files': files})
 
@@ -177,7 +177,7 @@ def test_no_implicit_directory_deletion_or_special_file_changes(workspace, monke
     github = app.state.connectors.github
     api = GitHubAPI(github, monkeypatch)
     api.tree = [entry]
-    with pytest.raises(ConnectorError, match='regular text'):
+    with pytest.raises(ConnectorError, match='regular files'):
         asyncio.run(github.publish(app.state.store.run(run_id), Publish.model_validate(PAYLOAD)))
     assert not any(c[0] == 'POST' for c in api.calls)
 

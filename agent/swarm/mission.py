@@ -14,10 +14,6 @@ from .contracts import Arguments, Assignment, Fanout
 from .types import Agent
 
 
-MAX_MISSION_CHARACTERS = 16000
-MAX_INPUT_CHARACTERS = 240000
-
-
 def internal_request_key(payload: Mapping[str, Any] | BaseModel) -> str:
     """Deduplicate equal validated input within a host-owned execution scope.
 
@@ -70,18 +66,15 @@ def shared_worker_prompt(goal: str, name: str) -> str:
 class SharedMissionFanout(Fanout):
     """Internal adapter to existing durable fanout, keeping the goal stored once.
 
-    Legacy explicit assignments retain their original limits. Only this shared
-    mission adapter expands the complete goal into each worker's startup prompt.
+    This adapter expands the complete goal into each worker's startup prompt.
     """
 
-    instructions: str = Field(min_length=3, max_length=MAX_MISSION_CHARACTERS)
+    instructions: str = Field(min_length=3)
 
     @model_validator(mode='after')
     def valid_work(self):
         if self.items or not self.tasks:
             raise ValueError('A shared mission needs a roster, not partitioned items.')
-        if len(json.dumps(self.model_dump())) > MAX_INPUT_CHARACTERS:
-            raise ValueError('Delegation exceeds the input size limit.')
         return self
 
     def assignments(self):
@@ -92,16 +85,15 @@ class SharedMissionFanout(Fanout):
 class SharedMission(Arguments):
     """One shared task and a typed roster; members choose their own organization."""
 
-    task: str = Field(min_length=3, max_length=MAX_MISSION_CHARACTERS)
-    agents: list[Agent] = Field(min_length=1, max_length=100)
+    task: str = Field(min_length=3)
+    agents: list[Agent] = Field(min_length=1)
+    wait: bool = False
 
     @model_validator(mode='after')
     def unique_names(self):
         names = [agent.name.casefold() for agent in self.agents if agent.name is not None]
         if len(names) != len(set(names)):
             raise ValueError('Agent names must be unique within the swarm.')
-        if len(json.dumps(self.model_dump(mode='json'))) > MAX_INPUT_CHARACTERS:
-            raise ValueError('The shared mission exceeds the input size limit.')
         return self
 
     @property
@@ -124,7 +116,7 @@ class SharedMission(Arguments):
     def fanout(self) -> SharedMissionFanout:
         """Translate to durable dispatch without preselecting jobs or a leader."""
         return SharedMissionFanout(
-            request_key=internal_request_key(self), instructions=self.task,
+            request_key=internal_request_key(self), instructions=self.task, wait=self.wait,
             workers=len(self.agents), tasks=[
                 Assignment(label=name, prompt='Collaborate on the shared user goal.',
                            harness=agent.harness.value if agent.harness is not None else None,

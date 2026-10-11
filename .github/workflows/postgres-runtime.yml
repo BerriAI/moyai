@@ -33,7 +33,7 @@ jobs:
         run: uv run --frozen --python 3.13 python scripts/shared_storage_smoke.py
   runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17-alpine
@@ -68,7 +68,7 @@ jobs:
       - name: Verify saved model choices and opt-in tiers on Postgres
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_astra_ultrafast.py tests/test_model_preferences.py tests/test_model_tools.py
       - name: Verify swarm deadlines, controls and mixed-harness groups on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py tests/test_swarm_timing.py tests/test_swarm_time_controls.py tests/test_swarm_time_runtime.py tests/test_swarm_broker_timing.py tests/test_swarm_chat.py
   scheduling:
     # The broad runtime suite already approaches its job timeout. Keep the
     # real Temporal/lock-wait regressions independent so neither delays the other.

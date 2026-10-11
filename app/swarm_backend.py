@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 class MoyaiSwarmBackend:
     coordinator: 'AgentCoordinator'
     owner_id: str
+    caller: Mapping[str, Any]
 
     async def call(self, name: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-        return await self.coordinator.call(self.owner_id, name, dict(arguments))
+        return await self.coordinator.call(self.owner_id, name, dict(arguments), caller=self.caller)

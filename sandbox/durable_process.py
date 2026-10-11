@@ -144,9 +144,18 @@ def status(directory, cursor=0):
 
 def start(directory, spec_path):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Preserve the exact launch specification before acknowledging admission.
+    # A controller retry must not replace it while a detached child starts.
+    saved_spec = directory / 'spec.json'
+    with (directory / 'launch.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not saved_spec.exists():
+            atomic(saved_spec, json.loads(Path(spec_path).read_text()))
+        if (directory / 'started.json').exists():
+            return
     # Two callers may race to launch; supervise's flock and started marker
     # arbitrate before either child can execute agent code.
-    subprocess.Popen([sys.executable, __file__, 'run', str(directory), str(spec_path)],
+    subprocess.Popen([sys.executable, __file__, 'run', str(directory), str(saved_spec)],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, close_fds=True)
 
@@ -155,7 +164,9 @@ if __name__ == '__main__':
     operation, directory = sys.argv[1], Path(sys.argv[2])
     if operation == 'run':
         spec = json.loads(Path(sys.argv[3]).read_text())
-        supervise(directory, ['/opt/hermes-env/bin/python', '/opt/workspace-runner/sandbox/agent.py', sys.argv[3]],
+        entry = 'remote_tool.py' if spec.get('computer_operation') else 'agent.py'
+        python = sys.executable if spec.get('independent_runtime') else '/opt/hermes-env/bin/python'
+        supervise(directory, [python, '/opt/workspace-runner/sandbox/'+entry, sys.argv[3]],
                   deadline_at=spec.get('deadline_at'))
     elif operation == 'start':
         start(directory, sys.argv[3])

@@ -105,6 +105,31 @@ async def test_prebuild_requires_complete_credentials() -> None:
         )
 
 
+async def test_independent_prebuild_joins_cancelled_build_before_closing_client(monkeypatch):
+    import asyncio
+    entered, stopped = asyncio.Event(), asyncio.Event()
+    async def slow(*args):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopped.set()
+    async def failed(*args):
+        await entered.wait()
+        raise RuntimeError('runtime build failed')
+    class Clients:
+        async def get(self, settings):
+            return 'client'
+        async def close(self):
+            assert stopped.is_set()
+    monkeypatch.setattr('build_workspace_image.ModalClients', Clients)
+    monkeypatch.setattr('build_workspace_image.modal.App.lookup', SimpleNamespace(aio=AsyncMock(return_value='app')))
+    monkeypatch.setattr('build_workspace_image.workspace_image', lambda settings: SimpleNamespace(build=SimpleNamespace(aio=slow)))
+    monkeypatch.setattr('build_workspace_image.agent_runtime_image', lambda: SimpleNamespace(build=SimpleNamespace(aio=failed)))
+    with pytest.raises(RuntimeError, match='runtime build failed'):
+        await build_workspace_image(Settings(_env_file=None, modal_token_id='id', modal_token_secret='secret', independent_agent_runtime=True))
+
+
 @pytest.mark.parametrize('entrypoint', ['sandbox/agent.py', 'agent/tools/mcp_bridge.py'])
 def test_packaged_entrypoints_bootstrap_without_controller_or_working_directory(tmp_path, entrypoint):
     source = Path(__file__).resolve().parents[1]
