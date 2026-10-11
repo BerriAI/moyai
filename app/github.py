@@ -1,7 +1,8 @@
 """Shared GitHub App. Write credentials and the finite write API stay on Render.
 
 GitHub's pull_requests:write scope itself also permits reviews. Never expose an
-installation token, generic REST proxy, receive-pack, review or merge operation.
+installation token, generic REST proxy, receive-pack, approval or merge operation.
+Comment-only reviews fix the event to COMMENT on the trusted server.
 """
 import asyncio
 import base64
@@ -17,16 +18,18 @@ import httpx
 import jwt
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
+from agent.github_paths import publishable_path
 from .connector_errors import ConnectorError
 from .db import now
 from .github_repositories import GitHubRepositories
 from .github_write_access import GitHubWriteAccess
 from .github_ci import GitHubCI
+from .github_coding import GitHubCoding, TOOLS as CODING_TOOLS, SCOPES as CODING_SCOPES
 from .repository_context import RepositoryContext, TOOLS as CONTEXT_TOOLS
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
-MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'statuses': 'read', 'actions': 'read', 'workflows': 'write'}
+MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'statuses': 'read', 'actions': 'write', 'issues': 'write', 'workflows': 'write'}
 REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
 
@@ -144,14 +147,7 @@ class Change(Args):
     @field_validator('path')
     @classmethod
     def safe_path(cls, path):
-        parts = path.split('/')
-        lower = path.lower()
-        if (any(p in {'', '.', '..'} or p.lower() == '.git' for p in parts)
-                or '\\' in path or any(ord(c) < 32 or ord(c) == 127 for c in path)
-                or lower.startswith('.ssh/')
-                or lower in {'.github', '.github/workflows', '.github/actions', '.ssh'}
-                or parts[-1].lower() == 'codeowners' or parts[-1].lower().startswith('.env')
-                or lower.endswith(('.pem', '.key'))):
+        if not publishable_path(path):
             raise ValueError('Unsafe, credential or access-control path cannot be published.')
         return path
 
@@ -211,6 +207,7 @@ def workflow_changes(args):
 
 TOOLS = {
     **CONTEXT_TOOLS,
+    **CODING_TOOLS,
     'github_ci_checks': ('github', False, CIChecks, 'Read check runs and commit statuses for an exact PR head SHA from github_pull_request. Follow next_page until null; an empty list does not mean CI passed. No writes.'),
     'github_workflow_runs': ('github', False, WorkflowRuns, 'List GitHub Actions workflow runs, optionally filtered by exact head_sha or branch. Follow next_page until null. Returns run IDs for github_workflow_jobs. No reruns or cancellation.'),
     'github_workflow_jobs': ('github', False, WorkflowJobs, 'Read jobs and step conclusions for the latest attempt of one workflow run. Follow next_page until null. Use job IDs with github_job_logs. No writes.'),
@@ -230,7 +227,7 @@ TOOLS = {
 }
 
 
-class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
+class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
     def __init__(self, store, security, settings, connectors):
         self.store, self.security, self.settings, self.connectors = store, security, settings, connectors
         self.write_lock = asyncio.Lock()
@@ -279,7 +276,7 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                     return None
                 if not 200 <= response.status_code < 300:
                     raise GitHubError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.', response.status_code)
-                return response.json()
+                return response.json() if response.content else {}
         except (httpx.HTTPError, ValueError):
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
 
@@ -294,7 +291,7 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             self.remember_repository(items[0], credentials)
         return ', '.join(self.repository_name(i, credentials) for i in self.connected_ids(credentials))
 
-    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False, ci='', workflows=False):
+    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False, ci='', workflows=False, coding=''):
         credentials = credentials if credentials is not None else await self.ensure_connection()
         target = self.target(repository, credentials)
         if target not in self.connected_ids(credentials):
@@ -303,7 +300,9 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
         config = self.app_config()
         if workflows and (not write or rules or ci):
             raise ValueError('Workflow publication requires a repository write token.')
-        key = (config.get('id'), installation, target, write, rules, ci, workflows)
+        if coding and (coding not in CODING_SCOPES or write or rules or ci or workflows):
+            raise ValueError('Invalid coding token scope')
+        key = (config.get('id'), installation, target, write, rules, ci, workflows, coding)
         async with self.token_lock:
             cached = self.tokens.get(key)
             if not fresh and cached and cached[0] > time.time():
@@ -339,6 +338,13 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                     raise ConnectorError('The GitHub installation is suspended or belongs to another organization. Reconnect GitHub.')
                 if not supports_permissions(installed.get('permissions'), {'administration': 'write'}):
                     raise ConnectorError('Ruleset inspection is available, but editing requires Administration: read and write on the organization GitHub App. An organization owner must enable and approve that permission for this installation, then retry. Existing code and PR access still works.')
+            if coding:
+                permissions = CODING_SCOPES[coding]
+                installed = await self.installation(credentials)
+                if not supports_permissions(installed.get('permissions'), permissions):
+                    required = ', '.join(f'{key}: {value}' for key, value in permissions.items())
+                    raise ConnectorError(f'This coding operation requires {required} on the organization GitHub App. '
+                                         'An organization owner must enable and approve these permissions. Existing code and PR access still works.', dispatched=False)
             result = await self.request('POST', f'/app/installations/{installation}/access_tokens', token=self.app_jwt(config),
                                         json={'repository_ids': [target], 'permissions': permissions})
             from datetime import datetime
@@ -358,6 +364,8 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 'url': repo['html_url'], 'private': repo['private']}
 
     async def call(self, run, name, arguments):
+        if name in CODING_TOOLS:
+            return await self.coding_call(run, name, arguments)
         if name in CONTEXT_TOOLS:
             return await self.context_index.call(run, name, arguments)
         if name not in TOOLS:

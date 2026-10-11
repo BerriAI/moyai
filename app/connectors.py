@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .db import Store, now
 from .connector_errors import ConnectorError
 from .github import GitHub, TOOLS as GITHUB_TOOLS
+from .github_coding import READS as GITHUB_CODING_READS
 from .slack_origin import metadata as slack_metadata
 
 
@@ -126,6 +127,7 @@ TOOLS = {
 # Metadata/identity caches may refresh; no action or context selection is replayed.
 # github_checkout here only resolves metadata, before the sandbox changes files.
 RETRY_SAFE_READS = frozenset({
+    *GITHUB_CODING_READS,
     'github_rulesets', 'github_ruleset', 'github_repositories', 'github_repository',
     'github_checkout', 'github_pull_request', 'github_pull_request_comments',
     'github_ci_checks', 'github_workflow_runs', 'github_workflow_jobs', 'github_job_logs',
