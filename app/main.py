@@ -1128,24 +1128,37 @@ def _create_app(settings, store):
 
     def read_event_batch(run_id, cursor):
         # Each open conversation polls the database. Keep the whole read off
-        # the event loop so a busy database cannot stall navigation in other tabs.
-        row = store.run(run_id)
-        if not row or row['deleted_at']:
-            return None, [], None
-        batch = store.events(run_id, cursor)
-        status = {'status': response_status(row), 'active': manager.is_active(run_id),
+        # the event loop and reuse its snapshot/connection. Full run decoration
+        # (including swarm metadata) and a second durable activity read are not
+        # needed for every half-second status update.
+        with store.connect() as connection:
+            connection.begin_read()
+            rows = store.rows('''SELECT id,status,chat_enabled,model,active_model,updated_at,
+                active_message_id,checkpoint_error,deletion_requested_at,deleted_at,
+                pending_result,parent_run_id FROM runs WHERE id=?''', (run_id,), connection=connection)
+            if not rows or rows[0]['deleted_at']:
+                return None, [], None
+            row = rows[0]
+            batch = store.events(run_id, cursor, connection=connection)
+            root_id = store.root_id_in(connection, run_id) if row['parent_run_id'] else run_id
+        # Slack policy checks may borrow their own connection. Release the
+        # snapshot first so concurrent streams never exhaust the pool nesting it.
+        status = {'status': response_status(row), 'active': manager.is_active(run_id, run=row),
                   'model': row['model'], 'active_model': row['active_model'],
                   'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'],
                   'checkpoint_error': row['checkpoint_error'],
-                  'deletion_error': session_lifecycle.deletion_error(run_id),
+                  'deletion_error': session_lifecycle.deletion_errors.get(root_id, ''),
                   'slack_mirroring': slack.chat.mirroring(run_id)}
         return row, batch, status
 
+    def require_event_run(run_id, request):
+        security.require(request)
+        if not store.rows('SELECT 1 FROM runs WHERE id=?', (run_id,)):
+            raise HTTPException(404, 'Task not found')
+
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, request: Request, after: int = 0):
-        security.require(request)
-        if not await run_in_threadpool(store.run, run_id):
-            raise HTTPException(404, "Task not found")
+        await run_in_threadpool(require_event_run, run_id, request)
         try:
             last_id = int(request.headers.get("last-event-id", "0"))
         except ValueError:

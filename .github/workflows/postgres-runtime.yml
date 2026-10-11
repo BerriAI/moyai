@@ -68,6 +68,10 @@ jobs:
         run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py
       - name: Verify conversation authentication remains readable during writes
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_cloudflare_login.py -k 'conversation or keeps_personal_tools'
+      - name: Verify bounded event polling, replay and pool responsiveness
+        run: |
+          uv run --frozen --python 3.13 pytest -q tests/test_event_polling.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_event_polling.py
       - name: Verify PR summary reads leave other requests responsive
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_session_list_performance.py tests/test_pr_delivery.py -k 'slow_pr_summary or pr_summary_restores or empty_pr_summaries'
       - name: Verify editable skill template installation and upgrades
