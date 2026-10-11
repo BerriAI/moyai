@@ -36,6 +36,7 @@ def coding(workspace, monkeypatch):
 
 
 READ_CASES = [
+    ('github_capabilities', {}), ('github_publication_status', {'request_key': 'not-started'}),
     ('github_search', {'kind': 'issues', 'query': 'bug'}), ('github_issues', {}), ('github_issue', {'number': 10}),
     ('github_issue_comments', {'number': 10}), ('github_pull_requests', {}), ('github_branches', {}),
     ('github_commits', {}), ('github_commit', {'sha': COMMIT}), ('github_compare_commits', {'base_sha': COMMIT, 'head_sha': COMMIT}),
@@ -69,6 +70,7 @@ def test_read_catalog_dispatch_pagination_and_readonly_scopes(coding, name, args
 
 
 WRITE_CASES = [
+    ('github_close_pull_request', {}, 'PATCH', '/pulls/100'),
     ('github_create_issue', {'title': 'Bug'}, 'POST', '/issues'),
     ('github_update_issue', {'number': 10, 'state': 'closed'}, 'PATCH', '/issues/10'),
     ('github_comment_issue', {'number': 10, 'body': 'Fixed'}, 'POST', '/issues/10/comments'),

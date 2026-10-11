@@ -25,8 +25,8 @@ PAGE = '''<!doctype html><html lang="en"><meta charset="utf-8"><title>Moyai GitH
 body{background:#f6f5fa;color:#24202f;font:16px/1.55 system-ui;margin:0}main{max-width:1000px;margin:42px auto;padding:0 30px}.eyebrow{font-size:13px;letter-spacing:.14em;color:#6850ac;font-weight:700}h1{font-size:40px;letter-spacing:-1.2px;margin:10px 0}p{color:#655d71}button{font:600 15px system-ui;background:#6142b7;color:white;border:0;padding:13px 18px;border-radius:9px;cursor:pointer}button:disabled{opacity:.5}.cards{display:flex;gap:16px;margin:24px 0}.card{background:white;border:1px solid #e3deed;border-radius:12px;padding:16px 22px;flex:1}.card strong{display:block;font-size:28px}.card small{color:#6a6077}pre{background:#211b2c;color:#d9f1dd;padding:22px;border-radius:12px;font:14px/1.7 ui-monospace,monospace;white-space:pre-wrap;min-height:265px}.note{font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap}</style>
 <main><div class="eyebrow">MOYAI · GITHUB CONNECTOR VERIFICATION</div><h1>Complete the coding workflow.</h1>
 <p>Actual Moyai broker, permissions and local Git packager. GitHub responses are simulated.<br>No live repository writes or production deployment.</p>
-<div class="cards"><div class="card"><strong>28</strong><small>new coding tools</small></div><div class="card"><strong>.env.example</strong><small>accepted in both publishing layers</small></div><div class="card"><strong>No merge / approval</strong><small>comment-only reviews</small></div></div>
-<div class="actions"><button id="run">Run the coding workflow</button><button id="bounds">Verify the boundaries</button></div>
+<div class="cards"><div class="card"><strong>31</strong><small>new coding tools</small></div><div class="card"><strong>.env.example</strong><small>accepted in both publishing layers</small></div><div class="card"><strong>No merge / approval</strong><small>comment-only reviews</small></div></div>
+<div class="actions"><button id="run">Run the coding workflow</button><button id="audit">Run trace-audit additions</button><button id="bounds">Verify the boundaries</button></div>
 <pre id="result">Ready. Run actual requests and inspect the results here.</pre>
 <p class="note">Fixture scope: one selected repository, one confirmed workspace PR, current head and workflow attempt.</p></main>
 <script>
@@ -37,6 +37,7 @@ async function init(){csrf=(await(await fetch('/api/session')).json()).csrf}cons
 function pause(){return new Promise(resolve=>setTimeout(resolve,900))}
 async function step(label,operation){const data=await post('/demo/step',{operation});line(label+' · '+data.message);await pause()}
 document.querySelector('#run').onclick=async function(){this.disabled=true;out.textContent='';try{await ready;await step('PASS','template');await step('PASS','metadata');await step('PASS','review');await step('PASS','workflow');await step('PASS','receipt');line('Workflow complete. All calls ran through the real broker.')}catch(error){line('ERROR · '+error.message)}finally{this.disabled=false}};
+document.querySelector('#audit').onclick=async function(){this.disabled=true;out.textContent='';try{await ready;await step('PASS','capabilities');await step('PASS','publication');await step('PASS','close');line('Audit additions complete. No merge or approval capability.')}catch(error){line('ERROR · '+error.message)}finally{this.disabled=false}};
 document.querySelector('#bounds').onclick=async function(){this.disabled=true;out.textContent='';try{await ready;await step('PASS','secret');await step('PASS','merge');await step('PASS','approve');await step('PASS','head');line('No forbidden operation reached the provider.')}catch(error){line('ERROR · '+error.message)}finally{this.disabled=false}};
 </script></html>'''
 
@@ -120,6 +121,22 @@ def main():
                 except ValidationError:
                     return {'message': '.env.production remains blocked before publication'}
                 raise AssertionError('Secret path accepted')
+            if operation == 'capabilities':
+                _, result = await invoke('github_capabilities', {'repository_id': 101})
+                assert not any(t['missing_permissions'] for t in result['tools'])
+                return {'message': 'Registered tools and installed permissions checked; merge/approval prohibited'}
+            if operation == 'publication':
+                import hashlib
+                identity = hashlib.sha256(f'{run["id"]}:demo-publication-status'.encode()).hexdigest()
+                receipt = {'number': 100, 'repository_id': 101, 'repository': REPOSITORY['full_name']}
+                store.execute('''INSERT INTO github_publications
+                    (id,run_id,message_id,arguments_hash,branch,result,connection_version,created_at)
+                    VALUES(?,?,0,'fixture',?,?,?,'fixture') ON CONFLICT DO NOTHING''',
+                    (identity, run['id'], PR['head']['ref'], json.dumps(receipt), github.connection_version()))
+                before = len(provider.dispatches)
+                _, result = await invoke('github_publication_status', {'repository_id': 101, 'request_key': 'demo-publication-status'})
+                assert result['status'] == 'confirmed_receipt' and len(provider.dispatches) == before
+                return {'message': 'Publication receipt found; zero GitHub mutation requests'}
             if operation in {'merge', 'approve'}:
                 name = 'github_merge_pull_request' if operation == 'merge' else 'github_comment_review'
                 response, result = await invoke(name, {**args, 'request_key': key, **({'body': 'Review', 'event': 'APPROVE'} if operation == 'approve' else {})})
@@ -130,6 +147,7 @@ def main():
                 assert 'error' in result
                 return {'message': 'Stale PR head rejected before dispatch'}
             name, values, message = {
+                'close': ('github_close_pull_request', {}, 'Authorized PR closed with state=closed; no merge or branch deletion'),
                 'metadata': ('github_update_pull_request_details', {'title': 'Deep Agents + Temporal'}, 'PR title updated at the verified head'),
                 'review': ('github_comment_review', {'body': 'Verified the template migration'}, 'Review submitted with COMMENT; no approval'),
                 'workflow': ('github_workflow_action', {'run_id': 7, 'run_attempt': 2, 'action': 'rerun_failed'}, 'Failed CI jobs rerun only for this PR, head and attempt'),

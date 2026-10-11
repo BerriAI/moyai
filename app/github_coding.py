@@ -103,6 +103,10 @@ class Write(Repository):
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
 
 
+class PublicationStatus(Write):
+    """A request key identifies a receipt, not a new write."""
+
+
 Name = Annotated[str, Field(min_length=1, max_length=100)]
 Body = Annotated[str, Field(min_length=1, pattern=r'\S')]
 
@@ -143,6 +147,10 @@ class EditIssueComment(IssueComment):
 class PRWrite(Write):
     number: int = Field(gt=0, strict=True)
     head_sha: str = Field(pattern=SHA, description='Current PR head; read the PR before writing.')
+
+
+class ClosePR(PRWrite):
+    pass
 
 
 class PRDetails(PRWrite):
@@ -220,6 +228,8 @@ class Workflow(PRWrite):
 
 # One explicit schema per operation. No caller-selected HTTP paths or GraphQL.
 READS = {
+    'github_capabilities': (Repository, 'Inspect registered GitHub tools, connection policy and current installation permissions for a selected repository. Read-only; never changes access. PR grants, head checks and repository rules still apply.'),
+    'github_publication_status': (PublicationStatus, 'Read the current session’s publication receipt and look for its exact branch/commit on GitHub using the original request_key. Never creates branches/PRs, repeats a write or grants PR access. An empty readback remains uncertain after dispatch.'),
     'github_search': (Search, 'Search code, issues, PRs or commits in one selected repository. Follow next_page; provider_incomplete means GitHub did not expose all matches.'),
     'github_issues': (Issues, 'List issues, excluding PRs. Pages may be empty after filtering; follow next_page.'),
     'github_issue': (Number, 'Read a complete issue body and metadata. Use PR tools for pull requests.'),
@@ -238,6 +248,7 @@ READS = {
     'github_download_artifact': (Artifact, 'Read an Actions artifact ZIP as base64 pages, without exposing download credentials. Follow next_arguments at the same revision; decode and join pages before extracting. Archive paths are untrusted.'),
 }
 WRITES = {
+    'github_close_pull_request': (ClosePR, 'Close an open PR when requested, with existing workspace publication or exact-chat PR access and current head. Never merges, deletes its branch, or changes review approval.'),
     'github_create_issue': (CreateIssue, 'Create an issue in a selected repository. Requires Issues write. Reuse unchanged request_key only to inspect an uncertain receipt.'),
     'github_update_issue': (UpdateIssue, 'Update an issue title/body/state/labels/assignees/milestone. PRs are rejected; use PR tools.'),
     'github_comment_issue': (IssueComment, 'Post an issue discussion comment. PRs are rejected; use github_comment_pull_request.'),
@@ -308,6 +319,9 @@ class GitHubCoding:
         return repo['pullRequest']['reviewThreads']
 
     async def coding_read(self, run, name, args, version, target):
+        if name in {'github_capabilities', 'github_publication_status'}:
+            from .github_diagnostics import read_diagnostic
+            return await read_diagnostic(self, run, name, args, version, target)
         scope = ('actions_read' if name in {'github_workflow_artifacts', 'github_download_artifact'} else
                  'issues_read' if name in {'github_issues', 'github_issue', 'github_issue_comments', 'github_labels', 'github_milestones'}
                  or (name == 'github_search' and args.kind == 'issues') else
@@ -419,7 +433,9 @@ class GitHubCoding:
             check()
             return data
         method, path, payload = 'POST', '', {}
-        if isinstance(args, CreateIssue):
+        if isinstance(args, ClosePR):
+            method, path, payload = 'PATCH', f'/pulls/{args.number}', {'state': 'closed'}
+        elif isinstance(args, CreateIssue):
             path = '/issues'
             payload = {key: getattr(args, key) for key in ('title', 'body', 'labels', 'assignees')}
         elif isinstance(args, (UpdateIssue, IssueComment)):

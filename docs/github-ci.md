@@ -29,6 +29,12 @@ tool errors and do not disable existing code/PR access. These four inspection to
 tool can rerun/cancel an exact authorized PR workflow with Actions write; see
 [the coding-tool audit](github-tool-audit.md) for permissions and boundaries.
 
+Use `github_capabilities` before describing a CI failure as a missing tool. It
+reports registered tools, connection policy, and missing installation scopes
+without changing access. It also checks the separate Workflows write permission
+used to publish workflow files. A permitted, registered tool can still fail on
+repository rules, stale heads, expired access, or transport errors.
+
 GitHub's [commit-status endpoint](https://docs.github.com/en/rest/commits/statuses#list-commit-statuses-for-a-reference)
 requires the separate Commit statuses permission; Contents read does not grant it.
 

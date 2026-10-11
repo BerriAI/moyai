@@ -96,7 +96,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         github_pull_request github_pull_request_comments github_ci_checks github_workflow_runs github_workflow_jobs github_job_logs
         github_search github_issues github_issue github_issue_comments github_pull_requests github_branches github_commits
         github_commit github_compare_commits github_file github_labels github_milestones github_releases
-        github_review_threads github_workflow_artifacts github_download_artifact
+        github_review_threads github_workflow_artifacts github_download_artifact github_capabilities github_publication_status
         linear_my_issues linear_teams linear_search linear_issue
         slack_search slack_thread slack_channel slack_me notion_search notion_page media_list sessions_search sessions_read model_list
         workspace_diagnostics history_read bundled_skill_read artifacts_list artifact_read'''.split())
@@ -108,7 +108,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         automation_update automation_enable automation_pause automation_grant automation_self_update automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request
-        github_update_pull_request github_comment_pull_request
+        github_update_pull_request github_comment_pull_request github_close_pull_request
         github_create_issue github_update_issue github_comment_issue github_edit_issue_comment github_comment_review
         github_update_pull_request_details github_pull_request_reviewers github_reply_review_comment
         github_edit_pull_request_comment github_set_review_thread_resolved github_mark_pull_request_ready github_workflow_action

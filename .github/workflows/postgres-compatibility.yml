@@ -32,7 +32,7 @@ jobs:
               tests/test_initial_context.py tests/test_automations.py tests/test_automation_events.py
               tests/test_environments.py tests/test_infrastructure_costs.py
               tests/test_session_folders.py tests/test_spend.py
-              tests/test_github_write_access.py tests/test_github_coding.py tests/test_lens_feedback.py
+              tests/test_github_write_access.py tests/test_github_coding.py tests/test_github_diagnostics.py tests/test_lens_feedback.py
           - group: workers
             # admission_scaling and agents already run on Postgres in the
             # PR workflow's distributed job; do not run them a second time.

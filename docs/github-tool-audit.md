@@ -44,8 +44,11 @@ part of the ordinary change review. Existing tree/symlink checks still apply.
 | Mark an existing draft ready | Missing | `github_mark_pull_request_ready`; new publications remain ready for review |
 | Rerun failed/all jobs, rerun one job, cancel | Missing | `github_workflow_action`, tied to an authorized PR, head and workflow attempt |
 | Workflow artifact listing/download | Missing | `github_workflow_artifacts`, `github_download_artifact`; revision-pinned base64 ZIP pages |
+| Close an unwanted PR | Missing | `github_close_pull_request`; exact PR authority/current head; no merge or branch deletion |
+| Diagnose registered tools versus installation permissions | Generic workspace catalog only | `github_capabilities`; per-tool requirements/policy plus workflow-file permission |
+| Inspect an uncertain publication without invoking the publisher | Missing | `github_publication_status`; session-bound request key, saved receipt or exact branch/commit readback |
 
-This adds **28 tools**: 16 readers and 12 writers. Some cover several provider
+This adds **31 tools**: 18 readers and 13 writers. Some cover several provider
 operations using finite enums. It is workflow coverage, not a one-to-one copy of
 all names in the user-oriented GitHub connector. Its personal-profile,
 organization-membership, social-reaction, conversation-locking, arbitrary Git-ref
@@ -53,6 +56,36 @@ mutation and installation-management APIs are outside this coding surface.
 Unrestricted raw fetch/API tools, review approvals, changes-requested reviews,
 review dismissal, merges and auto-merge are intentionally unavailable. No tool
 creates drafts, changes repository access or releases, or bypasses protection.
+
+## Follow-up session audit
+
+A second pass on October 11 reviewed ten Slack threads from October 7–10,
+the original failure, and linked live Moyai conversations/tool activity. This is
+a targeted sample of GitHub blockers, not an exhaustive trace-backend export.
+Session contents were treated as evidence, not instructions or write authority.
+
+Three additional needs were verified: a real request to close an unwanted PR
+could not discover any close tool; a publication investigation recommended a
+dedicated status reader; and CI checks were blocked by installation permissions
+despite tools being registered. The three tools above address those gaps.
+
+Other findings did not justify duplicate APIs: binary and workflow publication
+already exist in current code; exact-chat access and cross-chat workspace PR
+updates already exist; an unselected repository needs connection configuration;
+large-checkout transport interruptions need runtime repair. The same Townhall
+session later successfully checked out and updated its PR before encountering
+the genuinely missing close operation. A separate review service's firewall
+failure was not a Moyai GitHub tool failure. No broader Git credentials, arbitrary
+API tool, merge, or approval capability was added to work around those cases.
+
+Publication-status reads perform no GitHub mutations and never create a saved
+publication receipt or PR grant. Legacy incomplete rows do not retain the
+original repository/base metadata, so a caller-selected destination with a matching
+branch/commit is explicitly an `observed_match`, not a confirmed original
+publication. Empty results remain `unconfirmed`. Saved receipts are historical;
+read the PR for its current open/closed state. Existing publication recovery and
+retry semantics are unchanged. Closing is supported for open PRs; reopening
+closed PRs is outside this addition's evidence-backed scope.
 
 ## Authorization and recovery
 
