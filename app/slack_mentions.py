@@ -26,30 +26,54 @@ class SlackMentions:
         if not re.fullmatch(r'T[A-Z0-9]{7,30}', team or ''):
             return
         users = list(dict.fromkeys(MENTION.findall(content)))[:MAX_MENTIONS]
+        SlackMentions.queue_users_in(conn, message_id, team, users)
+
+    @staticmethod
+    def queue_users_in(conn, message_id, team, users):
         conn.executemany('INSERT INTO slack_mention_names(team_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING',
                          [(team, user) for user in users])
         conn.executemany('INSERT INTO slack_message_mentions VALUES(?,?,?) ON CONFLICT DO NOTHING',
                          [(message_id, team, user) for user in users])
 
-    def decorate(self, messages):
+    def backfill(self, sources):
+        with self.store.connect() as conn:
+            for message_id, team, users in sources:
+                self.queue_users_in(conn, message_id, team, users)
+
+    def decorate(self, messages, *, connection=None):
         # Receipt-backed provenance only: never reinterpret web text or assistant
         # examples as Slack markup. This also discovers pre-upgrade history.
         sources = [(message, message.pop('slack_message_team')) for message in messages]
-        sources = [(message, team) for message, team in sources
-                   if team and message['role'] == 'user' and MENTION.search(message['content'])]
+        sources = [(message, team, tuple(dict.fromkeys(MENTION.findall(message['content'])))[:MAX_MENTIONS])
+                   for message, team in sources
+                   if re.fullmatch(r'T[A-Z0-9]{7,30}', team or '')
+                   and message['role'] == 'user' and MENTION.search(message['content'])]
         if not sources:
             return
         names = {}
-        with self.store.connect() as conn:
-            for message, team in sources:
-                self.queue_in(conn, message['id'], team, message['content'])
-                for row in conn.execute('''SELECT n.*,u.name AS sender_name,u.email AS sender_email
-                    FROM slack_message_mentions r JOIN slack_mention_names n USING(team_id,user_id)
-                    LEFT JOIN users u ON u.id='slack:'||n.team_id||':'||n.user_id
-                    WHERE r.message_id=? AND r.team_id=?''', (message['id'], team)):
+        pending = tuple((message['id'], team, users) for message, team, users in sources)
+
+        def read_names(conn):
+            for _message, team, users in sources:
+                targets = ','.join('(?)' for _ in users)
+                for row in conn.execute(f'''WITH targets(user_id) AS (VALUES {targets})
+                    SELECT targets.user_id,n.name,u.name AS sender_name,u.email AS sender_email
+                    FROM targets LEFT JOIN slack_mention_names n ON n.team_id=? AND n.user_id=targets.user_id
+                    LEFT JOIN users u ON u.id='slack:'||?||':'||targets.user_id''', (*users, team, team)):
                     names[team, row['user_id']] = (profile_name(row['sender_name'], row['user_id'])
                         or row['name'] or profile_name(row['sender_email'], row['user_id']))
-        for message, team in sources:
+
+        if connection is None:
+            with self.store.connect() as conn:
+                for message_id, team, users in pending:
+                    self.queue_users_in(conn, message_id, team, users)
+                read_names(conn)
+        else:
+            # Chat detail holds a read-only snapshot. Reuse its slot for names;
+            # Store.connect releases it before these legacy backfill writes run.
+            read_names(connection)
+            connection.commit_callbacks.append(lambda: self.backfill(pending))
+        for message, team, _users in sources:
             content = message.get('display_content', message['content'])
             displayed = MENTION.sub(lambda match: '@' + names[team, match[1]]
                 if names.get((team, match[1])) else match[0], content)
