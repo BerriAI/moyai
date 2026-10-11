@@ -1,16 +1,26 @@
 # Deploy production
 
-After the complete four-service handoff topology is activated, use
-`release_type: rolling` and follow [compatible rolling deployments](rolling-deploy.md).
-It replaces roles sequentially while active work continues and keeps schema,
-shared contracts and concurrency fixed.
+For the activated four-service handoff topology, use **GitHub → Actions →
+Deploy production → Run workflow → main → Run workflow**. Leave the default
+**release_type: rolling** selected and **preflight_only** unchecked. This single
+run selects main at button press, waits for its CI, verifies compatibility, and
+replaces roles sequentially while active work continues. Follow
+[compatible rolling deployments](rolling-deploy.md) for prerequisites and recovery.
 
-After dedicated API activation, use `release_type: api` and follow
-[compatible API deployments](api-deploy.md). The rest of this page describes
-`release_type: coordinated` for the original two/three-service topology.
+Every deployment includes preflight. Check **preflight_only** only when you want
+validation without deployment; a separate preflight run is optional. Incompatible
+schema, shared settings or runtime contracts stop the release before deployment
+and require a separately planned transition.
 
-Use **GitHub → Actions → Deploy production → Run workflow → main** after the
-one-time setup below. One button coordinates `moyai-private` and `moyai-worker`,
+The explicit **api** option remains for the narrower
+[compatible API deployment topology](api-deploy.md). The explicit **coordinated**
+option remains for the original two/three-service topology, described below.
+
+## Original coordinated topology
+
+Use **GitHub → Actions → Deploy production → Run workflow → main**, explicitly
+selecting **release_type: coordinated**, after the one-time setup below. One button
+coordinates `moyai-private` and `moyai-worker`,
 plus `moyai-broker` after the separate-broker topology is activated.
 It selects the main commit at button press, waits for its CI, and deploys that
 exact commit to every active role. Later pushes do not change the selected release.
@@ -39,11 +49,13 @@ Render's separate **Deploy latest commit** buttons while it is running.
    Never put either credential in workflow YAML, PR comments, artifacts, or logs.
    No separate GitHub token, database exposure, public management endpoint, or
    new paid service is needed for coordinated mode. Keep Render auto-deploy **off** for every service.
-4. Run the workflow on `main` with **Only check configuration (no deployment)**
-   checked. It verifies CI, all active Render services, SSH access, running build IDs,
-   local health, database ownership, and matching shared settings without writing
-   to Render or the database. Its receipt must say `preflight_passed`.
-5. Run it again with that option unchecked for the first coordinated deployment.
+4. Run the workflow on `main` with **release_type: coordinated** selected and
+   **preflight_only** checked. It verifies CI, all active Render services, SSH
+   access, running build IDs, local health, database ownership, and matching
+   shared settings without writing to Render or the database. Its receipt must
+   say `preflight_passed`.
+5. Keep **release_type: coordinated** selected and run it again with
+   **preflight_only** unchecked for the first coordinated deployment.
 
 The Render API key and SSH key are separate credentials. Merely merging this PR
 does not install them or enable deployments. The checked-in Oregon SSH host key
