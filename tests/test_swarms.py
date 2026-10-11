@@ -134,6 +134,8 @@ def test_initial_team_failure_rolls_back_mission_children_and_dispatch(durable, 
 
 async def test_initial_team_queues_under_capacity_then_resumes_coordinator_with_real_results(durable):
     manager, cloud, _ = durable
+    # This test exercises full-computer capacity, not independent agent startup.
+    manager.settings.independent_agent_runtime = False
     manager.settings.max_concurrent_runs = 1
     cloud.saving_before_answer = False
     run = bootstrap(manager)
