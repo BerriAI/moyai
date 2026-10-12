@@ -147,13 +147,13 @@ class Memory:
         return [{'id': entry['id'], 'url': Note.repository('https://github.com/' + entry['full_name'])}
                 for entry in self.github.repository_options()]
 
-    def owner(self, actor):
+    def owner(self, actor, conn=None):
         if self.security.local_preview() and actor == 'shared:local:admin':
             return actor
         if not actor or not self.security.settings.person_login_enabled():
             raise HTTPException(403, 'Sign in with your Google account to use personal memory.')
-        matches = [u for u in self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare')")
-                   if self.same_requester(u['id'], actor)]
+        matches = [user for user in self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare')", connection=conn)
+                   if self.same_requester(user['id'], actor, connection=conn)]
         if len(matches) != 1 or matches[0]['email'].rpartition('@')[2] not in self.security.settings.google_domains():
             raise HTTPException(403, 'Personal memory needs a verified Google account or a fresh matching Slack profile.')
         return matches[0]['id']
@@ -195,9 +195,9 @@ class Memory:
         return {**json.loads(self.security.decrypt(row['encrypted'])),
                 **{k: row[k] for k in ('id', 'revision', 'created_at', 'updated_at', 'expires_at')}}
 
-    def listing(self, owner):
+    def listing(self, owner, conn=None):
         return [self.unpack(r) for r in self.store.rows(
-            'SELECT * FROM personal_memories WHERE owner_id=? AND deleted=0 ORDER BY updated_at DESC,id', (owner,))]
+            'SELECT * FROM personal_memories WHERE owner_id=? AND deleted=0 ORDER BY updated_at DESC,id', (owner,), connection=conn)]
 
     def get(self, conn, owner, note_id):
         row = conn.execute('SELECT * FROM personal_memories WHERE id=? AND owner_id=?', (note_id, owner)).fetchone()

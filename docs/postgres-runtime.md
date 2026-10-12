@@ -56,6 +56,24 @@ budget and a thirty-second statement timeout. There is one additional connection
 for process ownership. Use a direct PostgreSQL connection or a session-preserving
 proxy; transaction-mode poolers cannot preserve the application ownership lock.
 
+Transaction helpers must reuse their caller's connection, including identity
+verification and memory/skill review validation. Borrowing a second connection
+while holding the schema writer lock can exhaust the pool: the other connections
+may already be waiting for that same writer to finish. Increasing the pool size
+does not remove this lock-ordering problem. Memory completion, review backfill,
+and review application pass the existing connection through their read helpers.
+
+Advisory key `726941` coordinates runtime writers: session-scoped transactions
+hold it in shared mode plus a per-session exclusive lock; unscoped transactions
+hold it exclusively. Ordinary reads do not acquire this lock. Multiple shared
+holders therefore indicate scoped writers, not read-only requests. A queued
+exclusive writer can also hold up subsequent shared writers.
+
+A pool-acquisition timeout identifies admission failure, not the original holder
+or proof of a migration problem. Correlate it with PostgreSQL wait/blocker data
+and deployment timing before attributing an incident. Ownership probes use the
+separate owner session; pool contention alone must not cancel live broker work.
+
 Application queries now use explicit IDs, conflict handling, typed JSON fields,
 and table inspection. Backend-specific schema handling is limited to Moyai's four
 declared column types and generated integer identities; triggers and views have
@@ -97,6 +115,7 @@ uv sync --frozen --extra postgres-migration
 uv run --frozen pytest -q tests/test_postgres_runtime.py tests/test_postgres_migration.py
 uv run --frozen pytest --postgres-backend -q tests/test_workspace.py tests/test_sessions.py \
   tests/test_attachments.py tests/test_message_queue.py tests/test_trace_outbox.py
+uv run --frozen pytest --postgres-backend -q tests/test_memory_review_pool.py
 uv run --frozen python scripts/postgres_runtime_smoke.py
 ```
 
