@@ -213,6 +213,9 @@ def test_private_model_http_flow_and_followup_stay_owner_only(private_app, monke
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     app.state.settings.modal_token_id = 'synthetic-modal-id'
     app.state.settings.modal_token_secret = 'synthetic-modal-secret'
+    # The default harness requires Temporal; this broker-only fixture suppresses
+    # execution and supplies the claimed capability below.
+    app.state.settings.temporal_enabled = True
     app.state.settings.agent_model = app.state.settings.resolve_model()
     assert not app.state.settings.missing_cloud('modal')
     # The HTTP creation fixture suppresses the sandbox launcher; establish its

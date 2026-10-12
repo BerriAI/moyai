@@ -49,7 +49,8 @@ def checks(case, answers, evaluator):
             return bool(match and evaluator.equal_json(json.loads(match[1]), {'ready': True}))
         if case['id'] == 'switch-to-prose':
             return (evaluator.equal_json(json.loads(answers[0]), evaluator.CASES['L06']['oracle']['values'][0])
-                    and all(term in answers[1] for term in ('Atlas', 'Mira', 'us-west', '2026-11-12'))
+                    and all(term in answers[1] for term in ('Atlas', 'Mira', 'us-west'))
+                    and any(date in answers[1] for date in ('2026-11-12', 'November 12, 2026', '12 November 2026'))
                     and not any(mark in answers[1] for mark in ('```', '{', '}')))
         return evaluator.verify(case, answers, {}, None)
     except json.JSONDecodeError:
