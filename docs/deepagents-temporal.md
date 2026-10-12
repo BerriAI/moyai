@@ -96,6 +96,15 @@ carry cancellation to workers. Already-dispatched external actions may still fin
 saved broker/computer receipts remain authoritative and uncertain writes require
 reconciliation.
 
+Broker tools claim a stable request identity in the same SQL write transaction as
+their input/capability check. The claim is the dispatch boundary, after connector
+validation and connection refresh. A pending or accepted correction that commits
+first cancels the unstarted call. Once a claim commits, steering stays responsive
+while the running call completes; its factual outcome is saved even after Stop.
+The existing event journal records dispatch/outcome metadata without raw tool
+payloads. Duplicate identities never replay an action, including after a lost
+response or broker replacement; uncertain outcomes require reconciliation.
+
 The full public journal is independent of working-context compaction and remains
 readable with `history_read`. Raw provider reasoning and private tool payloads are
 excluded. Typed history is reused only within the original turn/scope. After a

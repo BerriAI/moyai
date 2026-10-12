@@ -280,7 +280,7 @@ class DeepAgentsRuntime:
                     await asyncio.sleep(.1)
             else:
                 value = await self.broker(scope, '/tools/call', {'name': name, 'arguments': arguments,
-                    'input_id': scope.input_id or scope.message_id})
+                    'input_id': scope.input_id or scope.message_id, 'request_id': identity})
         except asyncio.CancelledError:
             raise
         except Exception:

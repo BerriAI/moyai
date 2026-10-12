@@ -137,6 +137,7 @@ class ToolCall(BaseModel):
     name: str = Field(max_length=80)
     arguments: dict
     input_id: int | None = Field(default=None, gt=0)
+    request_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
 
 
 class Login(BaseModel):
@@ -1455,15 +1456,31 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
-        if body.input_id is not None and run['harness'] == 'deepagents-temporal':
-            def accepts_input():
-                with store.connect() as conn:
-                    return message_queue.current_input(conn, run_id, run['active_message_id'], body.input_id)
-            if not await asyncio.to_thread(accepts_input):
-                return {'isError': True, 'outcome': 'cancelled', 'dispatched': False,
-                        'error': 'Cancelled before dispatch because the request changed.'}
+        from .tool_dispatch import ToolDispatch
+        dispatch = None
+        if run['harness'] == 'deepagents-temporal':
+            if body.input_id is None or body.request_id is None:
+                raise HTTPException(422, 'Durable tools require their input and stable request identities.')
+            dispatch = ToolDispatch(store, run, body)
+        try:
+            result = await execute_tool(run_id, request, run, body, dispatch)
+        except (Exception, asyncio.CancelledError) as exc:
+            if dispatch:
+                await database(dispatch.finish, outcome='rejected' if isinstance(exc, HTTPException)
+                               and 400 <= exc.status_code < 500 else 'unknown')
+            raise
+        # Confirmed outcomes must survive cancellation during receipt persistence.
+        if dispatch:
+            await database(dispatch.finish, result)
+        return result
+
+    async def execute_tool(run_id, request, run, body, dispatch):
         if not privacy.allow_tool(run, body.name, TOOLS.get(body.name, (None, False))[1]):
             privacy.require_no_export(run)
+        if dispatch and body.name not in TOOLS:
+            receipt = await database(dispatch.claim)
+            if receipt is not None:
+                return receipt
         if body.name == 'computer_handoff':
             try:
                 result = await asyncio.to_thread(request_handoff, store, run, body.arguments)
@@ -1636,13 +1653,17 @@ def _create_app(settings, store):
                 await connectors.github.ensure_connection()
             except ConnectorError as exc:
                 return ConnectorError(str(exc), code=exc.code, dispatched=False).receipt(write=write)
-            run = {**store.run(run_id), 'github_connection_version': connectors.github.connection_version()}
+            run = {**run, 'github_connection_version': connectors.github.connection_version()}
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)
         if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return ConnectorError('The organization connection changed. No action was sent.',
                                   code='access_changed', dispatched=False).receipt(write=write)
+        if dispatch:
+            receipt = await database(dispatch.claim)
+            if receipt is not None:
+                return receipt
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run, arguments) if body.name == 'linear_my_issues'
