@@ -1,5 +1,5 @@
 /* Deterministic, local-only UI fixture. Never contacts a gateway or cloud service.
- * node scripts/settings_ui_preview.cjs [--root /path/to/baseline/app/static] [--port 8841] [--delay-ms 300]
+ * node scripts/settings_ui_preview.cjs [--root /path/to/baseline/app/static] [--port 8841] [--delay-ms 300] [--production-csp]
  * /?fixture=empty, /?fixture=error, /?fixture=member exercise alternate states.
  * API responses are synthetic. This is visual evidence, not a backend integration test.
  */
@@ -7,6 +7,13 @@ const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
 const arg=(name,fallback)=>process.argv.includes(name)?process.argv[process.argv.indexOf(name)+1]:fallback;
 const root=path.resolve(arg('--root',path.join(__dirname,'../app/static'))),port=Number(arg('--port','8840'));
 const delayMs=Math.max(0,Number(arg('--delay-ms','0'))||0);
+// Read the actual app policy so security-sensitive UI checks cannot drift from production.
+let productionCsp;
+if(process.argv.includes('--production-csp')){
+ const source=fs.readFileSync(path.join(root,'../main.py'),'utf8');
+ productionCsp=source.match(/response\.headers\["Content-Security-Policy"\] = "([^"]+)"/)?.[1];
+ if(!productionCsp)throw new Error('Cannot find the production Content-Security-Policy in app/main.py');
+}
 const computerHandoff=require('./computer_handoff_preview.cjs').create(arg('--computer-frame',null));
 const stamp='2026-10-07T15:00:00Z';
 const agentSession=(number,prompt,status='idle',children=[])=>({id:number.toString(16).padStart(32,'0'),prompt,status,children,updated_at:stamp,created_at:stamp});
@@ -146,6 +153,7 @@ let sandboxConnection={provider:'modal',revision:0,public_key:'c3ludGhldGljLXByZ
 }};
 const json=(res,status,value)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
 const server=http.createServer(async(req,res)=>{
+ if(productionCsp){res.setHeader('Content-Security-Policy',productionCsp);res.setHeader('X-Content-Type-Options','nosniff');}
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
  if(p==='/'){
   const previousFixture=fixture;fixture=url.searchParams.get('fixture')||'populated';

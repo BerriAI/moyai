@@ -142,6 +142,19 @@ content. `/demo/panel-measurements` records the actual upstream request sequence
 Use `--source-root /path/to/baseline --port 8881` for an identical comparison,
 or `--github-delay-ms 0` to remove the injected delay.
 
+## Home sculpture and production security headers
+
+Use `npm run preview -- --production-csp --port 8840` to preview the home screen
+with the actual Content-Security-Policy from `app/main.py`. The optional mode
+also sends `X-Content-Type-Options: nosniff`; ordinary previews are unchanged.
+The sculpture uses a GLB with an internal geometry buffer, so loading it needs
+only a same-origin request. Embedded `data:` buffers in a JSON glTF require a
+separate fetch that the production `connect-src 'self'` policy blocks.
+
+`node --test tests/browser/moyai_sculpture.cjs` checks loading under that policy,
+visible keyboard/drag rotation, Home reset, navigation/remount, and the usable
+logo fallback when the asset request fails. It runs in `npm run test:ui` too.
+
 ## Rendering contract
 
 Feature controllers keep their existing API calls, revisions, access checks,
