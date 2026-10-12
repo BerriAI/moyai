@@ -21,7 +21,14 @@ def markers(connection, run_id, cursor):
 
 def projection(connection, run, messages):
     """Caller owns the read snapshot containing run and message status."""
-    cursor = connection.execute('SELECT coalesce(max(id),0) FROM events WHERE run_id=?', (run['id'],)).fetchone()[0]
+    # Fetch the cursor and latest handoff together without an extra per-chat
+    # round trip or materializing event bodies for the rest of the history.
+    head = connection.execute('''SELECT
+        (SELECT coalesce(max(id),0) FROM events WHERE run_id=?) AS activity_cursor, e.*
+        FROM (SELECT 1) AS anchor LEFT JOIN events e ON e.id=(
+            SELECT id FROM events WHERE run_id=? AND kind='computer' ORDER BY id DESC LIMIT 1)
+        ''', (run['id'], run['id'])).fetchone()
+    cursor = head['activity_cursor']
     receipts = markers(connection, run['id'], cursor)
     roots = {str(message['id']) for message in messages
              if message['role'] == 'user' and not message.get('steering_parent_id')}
@@ -48,10 +55,8 @@ def projection(connection, run, messages):
     events = {event['id']: event for event in receipts}
     # A sign-in handoff remains actionable after its successful answer has moved
     # into deferred history. Keep one small receipt in the initial projection.
-    handoff = connection.execute("SELECT * FROM events WHERE run_id=? AND id<=? AND kind='computer' ORDER BY id DESC LIMIT 1",
-                                 (run['id'], cursor)).fetchone()
-    if handoff:
-        handoff = dict(handoff)
+    if head['id'] is not None:
+        handoff = {key: head[key] for key in head.keys() if key != 'activity_cursor'}
         handoff['data'] = json.loads(handoff['data'])
         events[handoff['id']] = handoff
     # Failed or unfinished work retains its commentary until a successful

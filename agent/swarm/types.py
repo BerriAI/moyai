@@ -12,6 +12,7 @@ class Harness(StrEnum):
     CODEX = 'codex'
     OPENCODE = 'opencode'
     DEEPAGENTS = 'deepagents'
+    DEEPAGENTS_TEMPORAL = 'deepagents-temporal'
     TOOL_LOOP = 'tool-loop'
     PI = 'pi'
 
