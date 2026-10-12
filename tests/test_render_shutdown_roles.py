@@ -10,6 +10,7 @@ import pytest
 import uvicorn
 
 from app.context_budget import ModelContextLimits
+from app.db import database
 from app.main import create_app
 from app.security import digest
 from render_start import RenderOverlapServer
@@ -178,10 +179,26 @@ async def test_broker_listener_grace_preserves_admitted_model_stream_and_owner(v
             await asyncio.gather(running, return_exceptions=True)
 
 
-async def test_coordinator_grace_retains_leader_and_standby_signed_hook_admission(handoff_settings, monkeypatch):
+@pytest.mark.parametrize('paused_inbox', [False, True])
+async def test_coordinator_grace_retains_leader_and_standby_signed_hook_admission(handoff_settings, monkeypatch, paused_inbox):
     first = create_app(handoff_settings)
     second = create_app(handoff_settings.model_copy(update={'moyai_build_sha': 'b' * 40}))
     calls = []
+    pause_inbox, inbox_waiting = asyncio.Event(), asyncio.Event()
+    if paused_inbox:
+        drain_one = first.state.hook_inbox.drain_one
+        async def defer_consumption():
+            if pause_inbox.is_set():
+                # Closing cancels this wait; pending receipts must survive it.
+                inbox_waiting.set()
+                await asyncio.Event().wait()
+            return await drain_one()
+        monkeypatch.setattr(first.state.hook_inbox, 'drain_one', defer_consumption)
+
+    async def receipt_statuses():
+        rows = await database(second.state.store.rows, 'SELECT id,status FROM coordinator_hooks')
+        return {row['id']: row['status'] for row in rows}
+
     for app, name in [(first, 'first'), (second, 'second')]:
         async def handle(payload, missing, owner=name):
             calls.append((owner, payload['event_id']))
@@ -202,23 +219,59 @@ async def test_coordinator_grace_retains_leader_and_standby_signed_hook_admissio
         try:
             await wait_until(lambda: first.state.coordinator_handoff.status == 'leader')
             assert second.state.coordinator_handoff.status == 'standby'
+            # Prove the original leader consumes work before shutdown, then
+            # retry the same signed event during listener grace to check dedup.
+            assert (await old_client.post('/hooks/slack/events', **signed(event('EvBeforeGrace')))).status_code == 200
+            await wait_until(lambda: calls == [('first', 'EvBeforeGrace')])
+            async with asyncio.timeout(5):
+                while (await receipt_statuses()).get('event:T12345678:EvBeforeGrace') != 'done':
+                    await asyncio.sleep(.01)
+            if paused_inbox:
+                pause_inbox.set()
+                first.state.hook_inbox.wake.set()
+                await asyncio.wait_for(inbox_waiting.wait(), 5)
             old.handle_exit(signal.SIGTERM, None)
+            assert (await old_client.post('/hooks/slack/events', **signed(event('EvBeforeGrace')))).status_code == 200
             assert (await old_client.post('/hooks/slack/events', **signed(event('EvOldGrace')))).status_code == 200
             assert (await new_client.post('/hooks/slack/events', **signed(event('EvStandbyGrace')))).status_code == 200
-            await wait_until(lambda: len(calls) == 2)
-            assert all(owner == 'first' for owner, _ in calls)
             await asyncio.wait_for(closing.wait(), 5)
             assert not old.servers[0].is_serving()
             assert not old_task.done()
+            assert first.state.hook_inbox.task.done()
+            assert first.state.store.database.coordinator_owner
             assert second.state.coordinator_handoff.status == 'standby'
             second.state.slack.recover.assert_not_called()
+            # The 200 response means durable admission. A standby only wakes
+            # its own inbox; the leader's poll can outlive the listener grace.
+            # Either old-owner completion or a pending handoff is valid here.
+            receipts = await receipt_statuses()
+            assert receipts['event:T12345678:EvBeforeGrace'] == 'done'
+            grace_ids = {'event:T12345678:EvOldGrace', 'event:T12345678:EvStandbyGrace'}
+            assert set(receipts) == {'event:T12345678:EvBeforeGrace'} | grace_ids
+            assert all(receipts[event_id] in {'pending', 'done'} for event_id in grace_ids)
+            assert all(owner == 'first' for owner, _ in calls)
+            if paused_inbox:
+                assert calls == [('first', 'EvBeforeGrace')]
+                assert all(receipts[event_id] == 'pending' for event_id in grace_ids)
+            before_cleanup = list(calls)
             assert (await new_client.post('/hooks/slack/events', **signed(event('EvDuringCleanup')))).status_code == 200
-            assert len(calls) == 2
+            assert calls == before_cleanup
+            pending = await receipt_statuses()
+            assert pending == {**receipts, 'event:T12345678:EvDuringCleanup': 'pending'}
+            assert second.state.hook_inbox.task is None
+            second.state.slack.recover.assert_not_called()
+            assert first.state.store.database.coordinator_owner
             release.set()
             await wait_until(lambda: second.state.coordinator_handoff.status == 'leader')
-            await wait_until(lambda: len(calls) == 3)
+            await wait_until(lambda: len(calls) >= 4)
+            async with asyncio.timeout(5):
+                while await receipt_statuses() != dict.fromkeys(pending, 'done'):
+                    await asyncio.sleep(.01)
             assert calls[-1] == ('second', 'EvDuringCleanup')
-            assert len({event_id for _, event_id in calls}) == 3
+            assert len(calls) == 4
+            assert {event_id for _, event_id in calls} == {'EvBeforeGrace', 'EvOldGrace', 'EvStandbyGrace', 'EvDuringCleanup'}
+            if paused_inbox:
+                assert all(owner == 'second' for owner, _ in calls[1:])
             second.state.slack.recover.assert_called_once()
         finally:
             release.set()
