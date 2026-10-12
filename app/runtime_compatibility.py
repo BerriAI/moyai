@@ -24,15 +24,17 @@ from .schema_migrations import SCHEMA_COMPATIBILITY_REVISION
 # Publishing workflow files uses explicit per-operation Workflows permission.
 # Snapshotless workers wait for shared preparation; restored services are verified.
 # GitHub coding capabilities and shared environment-template publication policy.
+# The default Deep Agents engine, separate activity queues and encrypted payload
+# codec require a coordinated upgrade beyond the native protocol-17 release.
 # Independent control guests can now be warm. Older workers would resume these
 # as full workspace computers, so adoption/rollback requires matching roles.
-API_PROTOCOL_REVISION = 17
+API_PROTOCOL_REVISION = 18
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 17
-BROKER_PROTOCOL_REVISION = 17
-COORDINATOR_PROTOCOL_REVISION = 17
+WORKER_PROTOCOL_REVISION = 18
+BROKER_PROTOCOL_REVISION = 18
+COORDINATOR_PROTOCOL_REVISION = 18
 
 
 def api_fingerprint(settings):

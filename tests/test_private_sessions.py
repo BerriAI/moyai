@@ -102,10 +102,12 @@ def test_shared_login_cannot_create_private(users_app, monkeypatch):
                                   'agents_fanout', 'media_share'])
 def test_broker_private_exports_denied_before_dispatch(private_app, name):
     app, client, run = private_app
+    message = app.state.store.claim_message(run['id'])
     app.state.store.execute("UPDATE runs SET mode='modal',status='running',token_hash=? WHERE id=?",
                             (digest('private-capability'), run['id']))
     response = client.post('/broker/' + run['id'] + '/tools/call',
-                           headers={'Authorization': 'Bearer private-capability'}, json={'name': name, 'arguments': {}})
+                           headers={'Authorization': 'Bearer private-capability'},
+                           json={'name': name, 'arguments': {}, 'input_id': message['id'], 'request_id': 'a' * 32})
     assert response.status_code == 403, response.text
 
 
@@ -149,6 +151,7 @@ def test_search_tool_does_not_export_owner_private_history_into_shared_run(priva
 
 def test_broker_discovery_and_execution_pass_server_run(private_app, monkeypatch):
     app, client, run = private_app
+    message = app.state.store.claim_message(run['id'])
     seen = []
 
     def allowed(name, context):
@@ -171,7 +174,8 @@ def test_broker_discovery_and_execution_pass_server_run(private_app, monkeypatch
     assert 'slack_search' in names
     assert not names.intersection({'slack_send', 'media_share', 'skills_save', 'memory_save', 'credentials_request', 'agents_fanout'})
     response = client.post('/broker/' + run['id'] + '/tools/call', headers=headers,
-                           json={'name': 'slack_search', 'arguments': {'query': 'personal channel'}})
+                           json={'name': 'slack_search', 'arguments': {'query': 'personal channel'},
+                                 'input_id': message['id'], 'request_id': 'a' * 32})
     assert response.status_code == 200
     assert response.json() == {'selected_owner': 'google:maya', 'query': 'personal channel'}
     assert seen.count('slack_search') == 3  # discovery, admission, pre-execution recheck
@@ -183,12 +187,13 @@ def test_broker_search_is_scoped_to_private_owner(private_app):
     app, client, alice = private_app
     sign_as(app, client, 'tin@berri.ai')
     bob = client.post('/api/runs', json={'prompt': 'Bob private current', 'private_session': True}).json()
-    message = app.state.store.messages(bob['id'])[0]
+    message = app.state.store.claim_message(bob['id'])
     app.state.store.execute("UPDATE runs SET mode='modal',status='running',token_hash=?,active_message_id=? WHERE id=?",
                             (digest('bob-capability'), message['id'], bob['id']))
     response = client.post('/broker/' + bob['id'] + '/tools/call',
                            headers={'Authorization': 'Bearer bob-capability'},
-                           json={'name': 'sessions_search', 'arguments': {'query': 'orchid'}})
+                           json={'name': 'sessions_search', 'arguments': {'query': 'orchid'},
+                                 'input_id': message['id'], 'request_id': 'a' * 32})
     assert response.status_code == 200, response.text
     assert response.json()['sessions'] == []
     assert alice['id'] not in response.text
@@ -213,6 +218,9 @@ def test_private_model_http_flow_and_followup_stay_owner_only(private_app, monke
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     app.state.settings.modal_token_id = 'synthetic-modal-id'
     app.state.settings.modal_token_secret = 'synthetic-modal-secret'
+    # The default harness requires Temporal; this broker-only fixture suppresses
+    # execution and supplies the claimed capability below.
+    app.state.settings.temporal_enabled = True
     app.state.settings.agent_model = app.state.settings.resolve_model()
     assert not app.state.settings.missing_cloud('modal')
     # The HTTP creation fixture suppresses the sandbox launcher; establish its

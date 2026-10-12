@@ -26,6 +26,7 @@ from .config import Settings
 from .static_assets import versioned_index
 from .connectors import Connectors, ConnectorError, TOOLS, RETRY_SAFE_READS
 from .db import Store, now, database
+from .tool_dispatch import ToolDispatch, ToolRejected
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
@@ -136,6 +137,8 @@ class Decision(BaseModel):
 class ToolCall(BaseModel):
     name: str = Field(max_length=80)
     arguments: dict
+    input_id: int | None = Field(default=None, gt=0)
+    request_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
 
 
 class Login(BaseModel):
@@ -1454,18 +1457,59 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        dispatch = None
+        if run['harness'] == 'deepagents-temporal':
+            if body.input_id is None or body.request_id is None:
+                raise HTTPException(422, 'Durable tools require their input and stable request identities.')
+            dispatch = ToolDispatch(store, run, body)
+        try:
+            result = await execute_tool(run_id, request, run, body, dispatch)
+        except (Exception, asyncio.CancelledError) as exc:
+            if dispatch:
+                # A status code alone cannot prove no action happened: handlers
+                # can recheck scope after committing an internal write.
+                rejected = isinstance(exc, ToolRejected)
+                await database(dispatch.finish, {'dispatched': False} if rejected else None,
+                               outcome='rejected' if rejected else 'unknown')
+            raise
+        # Confirmed outcomes must survive cancellation during receipt persistence.
+        if dispatch:
+            await database(dispatch.finish, result)
+        return result
+
+    async def execute_tool(run_id, request, run, body, dispatch):
+        def rejected_result(error, **fields):
+            return {'error': error, **fields, **({'outcome': 'rejected', 'dispatched': False} if dispatch else {})}
+
         if not privacy.allow_tool(run, body.name, TOOLS.get(body.name, (None, False))[1]):
             privacy.require_no_export(run)
+        if body.name in CREDENTIAL_TOOLS and not credentials.tools(run):
+            raise HTTPException(403, 'Credential requests require a durable chat session.')
+        if body.name in AGENT_TOOLS and not coordinator.available(run):
+            raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
+        if body.name == 'computer_operation_read' and computer_operations is None:
+            raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
+        spec = CREDENTIAL_TOOLS.get(body.name) or AGENT_TOOLS.get(body.name)
+        if spec:
+            try:
+                spec[0].model_validate(body.arguments)
+            except ValidationError:
+                return rejected_result('Invalid credential tool arguments.' if body.name in CREDENTIAL_TOOLS
+                                       else 'Invalid agent arguments.')
+        if dispatch and body.name not in TOOLS:
+            receipt = await database(dispatch.claim)
+            if receipt is not None:
+                return receipt
         if body.name == 'computer_handoff':
             try:
                 result = await asyncio.to_thread(request_handoff, store, run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Supply a short handoff reason without credentials.') from None
+                raise ToolRejected(422, 'Supply a short handoff reason without credentials.') from None
+            except HTTPException as exc:
+                raise ToolRejected(exc.status_code, exc.detail, exc.headers) from None
             await checkpoints.flush()
             return result
         if body.name == 'computer_operation_read':
-            if computer_operations is None:
-                raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
             return await asyncio.to_thread(computer_operations.read, run, body.arguments)
         if body.name in ARTIFACT_SPECS:
             try:
@@ -1508,17 +1552,19 @@ def _create_app(settings, store):
             try:
                 DiagnosticArgs.model_validate(body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Workspace diagnostics takes no arguments and only reads the current session.') from None
+                raise ToolRejected(422, 'Workspace diagnostics takes no arguments and only reads the current session.') from None
             return inspect_workspace(store, connectors, run, workspace_catalog(run))
         if body.name in MEDIA_TOOLS:
             try:
                 result = await asyncio.to_thread(media_shares.call, run, body.name, body.arguments)
             except ValidationError:
-                result = {'error': 'Invalid media arguments. Use media_list and the current tool schema.', 'status_code': 422}
+                result = rejected_result('Invalid media arguments. Use media_list and the current tool schema.', status_code=422)
             except HTTPException as exc:
                 if exc.status_code == 401:
                     raise
-                result = {'error': exc.detail, 'status_code': exc.status_code}
+                result = {'error': exc.detail, 'status_code': exc.status_code,
+                          **({'outcome': 'rejected' if 400 <= exc.status_code < 500 else 'unknown',
+                             'dispatched': not 400 <= exc.status_code < 500} if dispatch else {})}
             await checkpoints.flush()
             return result
         if body.name == 'sessions_read':
@@ -1526,19 +1572,21 @@ def _create_app(settings, store):
             try:
                 return await asyncio.to_thread(read_session, session_lifecycle, run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Use a session ID or URL, nonnegative cursors, and a positive page size.') from None
+                raise ToolRejected(422, 'Use a session ID or URL, nonnegative cursors, and a positive page size.') from None
         if body.name == 'sessions_search':
             try:
                 return session_lifecycle.search(run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Enter session search keywords (1-200 characters) and a limit from 1 to 20.') from None
+                raise ToolRejected(422, 'Enter session search keywords (1-200 characters) and a limit from 1 to 20.') from None
         if body.name in MODEL_TOOLS:
             try:
                 result = model_tools.call(run, body.name, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Invalid model arguments. Use model_list and the current tool schema.') from None
+                raise ToolRejected(422, 'Invalid model arguments. Use model_list and the current tool schema.') from None
+            except HTTPException as exc:
+                raise ToolRejected(exc.status_code, exc.detail, exc.headers) from None
             except ValueError as exc:
-                raise HTTPException(422, str(exc)) from None
+                raise ToolRejected(422, str(exc)) from None
             await checkpoints.flush()
             return result
         if body.name in AUTOMATION_TOOLS:
@@ -1552,58 +1600,56 @@ def _create_app(settings, store):
             try:
                 result = memory.call(run, body.name, body.arguments)
             except ValidationError:
-                result = {'error': 'Invalid memory arguments. Check the current turn, text limits and tool schema.', 'status_code': 422}
+                result = rejected_result('Invalid memory arguments. Check the current turn, text limits and tool schema.', status_code=422)
             except HTTPException as exc:
                 if exc.status_code not in {403, 404, 409, 422}:
                     raise
                 # A definite rejection is a tool receipt, not an uncertain
                 # transport failure that prevents the runtime from continuing.
-                result = {'error': exc.detail, 'status_code': exc.status_code}
+                result = rejected_result(exc.detail, status_code=exc.status_code)
             await checkpoints.flush()
             return result
         if body.name == 'automation_claim_item':
             try:
                 result = automations.claim(run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Invalid item key.') from None
+                raise ToolRejected(422, 'Invalid item key.') from None
             await checkpoints.flush()
             return result
         if body.name in SKILL_TOOLS:
             try:
                 result = await asyncio.to_thread(skills.call, run, body.name, body.arguments)
             except ValidationError:
-                result = {'error': 'Invalid skill arguments. Check the tool schema, text limits and relative file paths.', 'status_code': 422}
+                result = rejected_result('Invalid skill arguments. Check the tool schema, text limits and relative file paths.', status_code=422)
             except HTTPException as exc:
                 if exc.status_code not in {403, 404, 409, 413, 422}:
                     raise
                 # Definite skill rejections are recoverable tool receipts.
                 # A missing skill or revision conflict must not abort a sync.
-                result = {'error': exc.detail, 'status_code': exc.status_code}
+                result = rejected_result(exc.detail, status_code=exc.status_code)
             await checkpoints.flush()
             return result
         if body.name in CREDENTIAL_TOOLS:
-            if not credentials.tools(run):
-                raise HTTPException(403,'Credential requests require a durable chat session.')
             try:
                 result = await credentials.call(run, body.name, body.arguments)
-                await checkpoints.flush()
-                return result
             except ValidationError:
-                return {'error':'Invalid credential tool arguments.'}
+                return {'error': 'Saved credential state could not be validated.', 'outcome': 'unknown'}
             except ValueError as exc:
-                return {'error':str(exc)}
+                return {'error': str(exc), 'outcome': 'unknown'}
+            await checkpoints.flush()
+            return result
         if body.name in AGENT_TOOLS:
-            if not coordinator.available(run):
-                raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
             try:
                 result = await coordinator.call(run_id, body.name, body.arguments, caller=run)
-                await checkpoints.flush()
-                return result
-            except (ValueError, ValidationError) as exc:
-                # Do not include validation payloads or private provider errors.
-                return {'error': 'Invalid agent arguments.' if isinstance(exc, ValidationError) else str(exc)}
+            except ValidationError:
+                return {'error': 'Saved agent state could not be validated.', 'outcome': 'unknown'}
+            except ValueError as exc:
+                # A group may already have been saved before snapshot/queue failure.
+                return {'error': str(exc), 'outcome': 'unknown'}
+            await checkpoints.flush()
+            return result
         if body.name not in TOOLS or TOOLS[body.name][0] not in run["plugins"]:
-            raise HTTPException(403, "This tool is not enabled for this task.")
+            raise ToolRejected(403, "This tool is not enabled for this task.")
         provider, write, schema, _ = TOOLS[body.name]
         try:
             arguments = schema.model_validate(body.arguments).model_dump()
@@ -1628,13 +1674,17 @@ def _create_app(settings, store):
                 await connectors.github.ensure_connection()
             except ConnectorError as exc:
                 return ConnectorError(str(exc), code=exc.code, dispatched=False).receipt(write=write)
-            run = {**store.run(run_id), 'github_connection_version': connectors.github.connection_version()}
+            run = {**run, 'github_connection_version': connectors.github.connection_version()}
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)
         if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return ConnectorError('The organization connection changed. No action was sent.',
                                   code='access_changed', dispatched=False).receipt(write=write)
+        if dispatch:
+            receipt = await database(dispatch.claim)
+            if receipt is not None:
+                return receipt
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run, arguments) if body.name == 'linear_my_issues'

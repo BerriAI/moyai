@@ -250,7 +250,7 @@ async def test_startup_authorization_reads_do_not_block_other_requests(users_app
     fallback = Timer(2, release.set)
     fallback.start()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=str(client.base_url),
-                                cookies=client.cookies, headers=client.headers) as reader:
+                                cookies=client.cookies.jar, headers=client.headers) as reader:
         request = (reader.post('/api/runs', json={'prompt': 'Create a session', 'mode': 'demo'})
                    if operation == 'create' else reader.get('/api/runs/' + run['id']))
         pending = asyncio.create_task(request)

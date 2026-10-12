@@ -57,13 +57,20 @@ def key():
     return value, base64.b64encode(value.private_bytes_raw()).decode()
 
 
-def test_readiness_only_requires_selected_provider(tmp_path):
+@pytest.mark.parametrize('harness,temporal,missing', [
+    ('claude-agent-sdk', False, []),
+    ('codex', False, []),
+    ('deepagents-temporal', True, []),
+    ('deepagents-temporal', False, ['TEMPORAL_ENABLED']),
+])
+def test_readiness_only_requires_selected_provider(tmp_path, harness, temporal, missing):
     _, signing = key()
     settings = Settings(_env_file=None, data_dir=tmp_path, sandbox_provider='substrate',
                         substrate_api_url='https://api.example.com', substrate_router_url='https://router.example.com',
                         substrate_api_token='api-token', substrate_signing_key=signing,
-                        litellm_api_base='https://llm.example.com', litellm_api_key='llm-key', agent_model='test')
-    assert settings.missing_cloud() == []
+                        litellm_api_base='https://llm.example.com', litellm_api_key='llm-key', agent_model='test',
+                        agent_harness=harness, temporal_enabled=temporal)
+    assert settings.missing_cloud() == missing
     assert settings.missing_sandbox('modal') == ['MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET']
 
 

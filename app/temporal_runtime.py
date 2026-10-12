@@ -9,6 +9,11 @@ from uuid import uuid4
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
+from temporalio.converter import DataConverter, DefaultFailureConverterWithEncodedAttributes
+from .deepagents_context import deepagents_plugin
+from .deepagents_execution import DeepAgentsExecution
+from .deepagents_runtime import DeepAgentsRuntime
+from .temporal_payloads import PrivatePayloads, PrivatePayloadCodec
 
 from .db import database
 from .durable_runner import DurableRunner
@@ -22,9 +27,14 @@ log = logging.getLogger(__name__)
 class TemporalRunManager(DurableRunner):
     def __init__(self, store, settings):
         super().__init__(store, settings)
+        self.payloads = PrivatePayloads(store, settings)
+        self.deepagents_runtime = DeepAgentsRuntime(self, self.payloads)
+        self.deepagents_execution = DeepAgentsExecution(self, self.payloads)
         self.temporal = None
         self.worker = None
         self.worker_task = None
+        self.agent_worker = None
+        self.agent_worker_task = None
         self.dispatch_task = None
         self.diagnostics_task = None
         self.prepared_task = None
@@ -92,6 +102,8 @@ class TemporalRunManager(DurableRunner):
         self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
         self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
         self.submit(self.store.run(run_id))
+        if state.get('deepagents_workflow_id') and self.temporal:
+            await self.deepagents_execution.cancel(state)
         if self.coordinator:
             await self.coordinator.cancel_children(run_id)
 
@@ -135,7 +147,9 @@ class TemporalRunManager(DurableRunner):
         return await Client.connect(
             self.settings.temporal_address, namespace=self.settings.temporal_namespace,
             api_key=self.settings.temporal_api_key or None, tls=self.settings.temporal_tls,
-            identity=self.identity,
+            identity=self.identity, plugins=[deepagents_plugin()],
+            data_converter=DataConverter(payload_codec=PrivatePayloadCodec(self.payloads),
+                failure_converter_class=DefaultFailureConverterWithEncodedAttributes),
         )
 
     async def wait_ready(self):
@@ -153,10 +167,18 @@ class TemporalRunManager(DurableRunner):
 
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
-                      workflows=[SessionWorkflow, AutomationWorkflow], activities=[self.advance_session, self.launch_automation, self.automation_finished],
+                      workflows=[SessionWorkflow, AutomationWorkflow],
+                      activities=[self.advance_session, self.launch_automation, self.automation_finished],
                       max_concurrent_activities=self.settings.temporal_worker_activities,
                       max_cached_workflows=self.settings.temporal_workflow_cache_size,
                       graceful_shutdown_timeout=timedelta(seconds=1))
+
+    def make_agent_worker(self, client):
+        from .deepagents_workers import agent_workers
+        return agent_workers(client, self.deepagents_runtime, self.settings.temporal_task_queue + '-agents-v1',
+            max_concurrent_activities=self.settings.temporal_worker_activities,
+            max_cached_workflows=self.settings.temporal_workflow_cache_size,
+            graceful_shutdown_timeout=timedelta(seconds=1))
 
     async def serve(self):
         self.dispatch_loop = asyncio.get_running_loop()
@@ -179,6 +201,8 @@ class TemporalRunManager(DurableRunner):
                 if self.settings.moyai_runtime_role in {'standalone', 'worker'}:
                     self.worker = self.make_worker(self.temporal)
                     self.worker_task = asyncio.create_task(self.worker.run())
+                    self.agent_worker = self.make_agent_worker(self.temporal)
+                    self.agent_worker_task = asyncio.create_task(self.agent_worker.run())
                     # The SDK validates the namespace asynchronously in run().
                     # A scheduled task alone does not prove the poller started.
                     # Its public is_running flag is set after that validation.
@@ -187,7 +211,10 @@ class TemporalRunManager(DurableRunner):
                         if self.worker_task.done():
                             await self.worker_task
                             raise RuntimeError('Temporal worker stopped during startup')
-                        if self.worker.is_running:
+                        if self.agent_worker_task.done():
+                            await self.agent_worker_task
+                            raise RuntimeError('Agent worker stopped during startup')
+                        if self.worker.is_running and self.agent_worker.is_running:
                             break
                 self.ready.set()
                 while not self.closing:
@@ -197,6 +224,9 @@ class TemporalRunManager(DurableRunner):
                     if self.worker_task and self.worker_task.done():
                         await self.worker_task
                         raise RuntimeError('Temporal worker stopped')
+                    if self.agent_worker_task and self.agent_worker_task.done():
+                        await self.agent_worker_task
+                        raise RuntimeError('Agent worker stopped')
                     # A lost database fence must stop activities, including
                     # when the task queue currently has no work to deliver.
                     await database(self.store.rows, 'SELECT 1')
@@ -239,6 +269,7 @@ class TemporalRunManager(DurableRunner):
                     task_queue=self.settings.temporal_task_queue, start_signal='wake',
                     rpc_timeout=timedelta(seconds=10),
                 )
+                await self.deepagents_execution.steer(row['run_id'])
                 await database(self.store.execute,
                     'UPDATE durable_sessions SET delivered=greatest(delivered,?) WHERE run_id=?',
                     (row['revision'], row['run_id']), write_scope=row['run_id'])
@@ -327,15 +358,15 @@ class TemporalRunManager(DurableRunner):
             raise ApplicationError('Automation status temporarily unavailable', type=type(exc).__name__) from None
 
     async def stop_worker(self):
-        if self.worker and self.worker_task:
-            if not self.worker_task.done():
-                if self.worker.is_running:
-                    await self.worker.shutdown()
-                else:
-                    # shutdown() waits for run() to finish. Before namespace
-                    # validation completes it cannot stop a stalled startup.
-                    self.worker_task.cancel()
-            await asyncio.gather(self.worker_task, return_exceptions=True)
+        async def stop(worker, task):
+            if worker and task:
+                if not task.done():
+                    if worker.is_running:
+                        await worker.shutdown()
+                    else:
+                        task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(stop(self.worker, self.worker_task), stop(self.agent_worker, self.agent_worker_task))
 
     async def shutdown(self):
         self.closing = True

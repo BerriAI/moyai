@@ -395,7 +395,7 @@ def test_authenticated_revocation_during_inflight_write(external):
         result = await original(method, path, **kwargs)
         if method == 'POST' and path.endswith('/git/commits'):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=app.state.settings.public_url,
-                                         cookies=client.cookies, headers=dict(client.headers)) as browser:
+                                         cookies=client.cookies.jar, headers=dict(client.headers)) as browser:
                 response = await browser.post(f"/api/runs/{rid}/pr-write-access/{row['id']}", json={'decision': 'revoke'})
                 assert response.status_code == 200, response.text
         return result

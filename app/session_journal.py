@@ -65,16 +65,20 @@ class SessionJournal:
             initialize_schema(store)
 
     def exchange(self, caller, body):
-        if not isinstance(body, dict):
-            raise HTTPException(422, 'Expected a conversation request object.')
         with self.store.connect(write_scope=caller['id']) as conn:
             conn.begin_write()
-            current = conn.execute('SELECT * FROM runs WHERE id=?', (caller['id'],)).fetchone()
-            if (not current or current['deleted_at'] or current['deletion_requested_at'] or
-                    current['status'] not in {'running', 'reconnecting', 'awaiting_approval'} or
-                    any(current[key] != caller[key] for key in ('token_hash', 'active_message_id', 'active_user_id'))):
-                raise HTTPException(409, 'The execution owner changed. Reload the active conversation.')
-            return self._exchange(conn, caller['id'], body)
+            return self.exchange_in(conn, caller, body)
+
+    def exchange_in(self, conn, caller, body):
+        """Use an existing write transaction to couple publication to its receipt."""
+        if not isinstance(body, dict):
+            raise HTTPException(422, 'Expected a conversation request object.')
+        current = conn.execute('SELECT * FROM runs WHERE id=?', (caller['id'],)).fetchone()
+        if (not current or current['deleted_at'] or current['deletion_requested_at'] or
+                current['status'] not in {'running', 'reconnecting', 'awaiting_approval'} or
+                any(current[key] != caller[key] for key in ('token_hash', 'active_message_id', 'active_user_id'))):
+            raise HTTPException(409, 'The execution owner changed. Reload the active conversation.')
+        return self._exchange(conn, caller['id'], body)
 
     def _exchange(self, conn, run_id, body):
         action = body.get('action')

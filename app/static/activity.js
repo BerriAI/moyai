@@ -83,8 +83,16 @@
   function groups(run){
     const {steering}=messageIndex(run);
     const turns=new Map((run.messages||[]).filter(m=>m.role==='user'&&!m.steering_parent_id).map(m=>[String(m.id),{id:String(m.id),message:m,events:[],start:0,end:0}]));
-    let current=null;const seen=new Set();
-    for(const event of visibleEvents(run.events||[])){
+    let current=null;const seen=new Set(),snapshots=new Map();
+    for(const event of run.events||[]){
+      if(event.kind==='message'&&event.data?.activity_id&&['streaming','commentary'].includes(event.data.phase))
+        snapshots.set(event.data.activity_id,event);
+    }
+    for(let event of visibleEvents(run.events||[])){
+      if(event.kind==='message'&&snapshots.has(event.data?.activity_id)){
+        const latest=snapshots.get(event.data.activity_id);
+        event={...latest,created_at:event.created_at};
+      }
       const data=event.data||{},key=data.activity_id||event.id;
       if(key!=null&&seen.has(key))continue;if(key!=null)seen.add(key);
       if(event.kind==='chat'){

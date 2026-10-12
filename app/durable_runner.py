@@ -57,8 +57,8 @@ class DurableRunner(RunManager):
         from .independent_runtime import IndependentRuntime
         self.agent_runtime = IndependentRuntime(self)
 
-    def state(self, run_id):
-        rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,))
+    def state(self, run_id, *, connection=None):
+        rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,), connection=connection)
         return json.loads(rows[0]['state']) if rows else {}
 
     def save(self, run_id, state):
@@ -258,7 +258,9 @@ class DurableRunner(RunManager):
             return True
 
     async def advance(self, run_id):
-        async with self.session_guard(run_id):
+        async with self.session_guard(run_id, wait=False) as acquired:
+            if not acquired:
+                return {'retry_seconds': .25}
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
                 await database(self.credentials.reconcile_resolutions, run_id)
             row = await database(self.store.run, run_id)
@@ -804,6 +806,10 @@ class DurableRunner(RunManager):
     async def _step(self, run_id, state):
         phase = state['phase']
         run = await database(self.store.run, run_id)
+        if run['harness'] == 'deepagents-temporal' and phase in {'provision', 'install', 'launch', 'monitor'}:
+            if not hasattr(self, 'deepagents_execution'):
+                raise ValueError('Deep Agents requires Temporal execution.')
+            return await self.deepagents_execution.step(run_id, state)
         if phase in {'waiting_children', 'waiting_credential'}:
             if state.get('independent_runtime') and state.get('sandbox_id'):
                 # A queued turn can enter a child wait before using its retained
@@ -1110,7 +1116,9 @@ class DurableRunner(RunManager):
                                  {'group_id': state['wait_group']})
                 await database(self.save, run_id, state)
             elif continuing:
-                if time.time() - state['machine_started'] >= self.rotation_seconds(state):
+                if run['harness'] == 'deepagents-temporal':
+                    state['phase'] = 'provision'
+                elif time.time() - state['machine_started'] >= self.rotation_seconds(state):
                     await self.cleanup(state, run_id)
                     state.update(sandbox_id='', phase='provision')
                 else:
@@ -1219,6 +1227,8 @@ class DurableRunner(RunManager):
 
     async def cleanup(self, state, run_id, *, save=None):
         if state.get('independent_runtime'):
+            if state.get('deepagents_workflow_id'):
+                await self.deepagents_execution.cancel(state)
             return await self.agent_runtime.cleanup(run_id, state)
         save = save or self.save
         name = state.get('sandbox_name')

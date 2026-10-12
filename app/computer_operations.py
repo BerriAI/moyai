@@ -11,6 +11,9 @@ from fastapi import HTTPException
 from agent.tools.remote_computer import LOCAL_TOOLS
 from agent.tools.mcp_bridge import BROWSER_TOOLS
 
+from .db import now
+from .tool_dispatch import ToolRejected
+
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
@@ -57,7 +60,7 @@ class ComputerOperations:
                 'result': json.loads(row['result'])}
 
     def exchange(self, caller, body):
-        if not isinstance(body, dict) or set(body) != {'action', 'request_id', 'name', 'arguments'}:
+        if not isinstance(body, dict) or set(body) - {'input_id'} != {'action', 'request_id', 'name', 'arguments'}:
             raise HTTPException(422, 'Supply a computer_call with its stable request identity, tool name and arguments.')
         identity, name, arguments = body['request_id'], body['name'], body['arguments']
         allowed = LOCAL_TOOLS | {tool['name'] for tool in BROWSER_TOOLS}
@@ -85,8 +88,27 @@ class ComputerOperations:
             conn.execute('''INSERT INTO computer_operations
                 (run_id,request_id,turn_id,actor_id,capability,name,arguments) VALUES(?,?,?,?,?,?,?)''',
                 (run['id'], identity, run['active_message_id'], run['active_user_id'], run['token_hash'], name, request))
+            if 'input_id' in body:
+                from .message_queue import MessageQueue
+                if not MessageQueue.current_input(conn, run['id'], run['active_message_id'], body['input_id']):
+                    result = {'isError': True, 'error': 'Cancelled before dispatch because the request changed.'}
+                    conn.execute("UPDATE computer_operations SET status='cancelled',result=? WHERE run_id=? AND request_id=?",
+                                 (encoded(result), run['id'], identity))
+                    return {'request_id': identity, 'status': 'cancelled', 'result': result}
+                # Keep the originating input for nested broker calls after a
+                # worker replacement. Never adopt a later correction's scope.
+                conn.execute("""INSERT INTO events(run_id,kind,message,data,created_at)
+                    VALUES(?,'computer_input','Computer input scope saved.',?,?)""",
+                    (run['id'], encoded({'request_id': identity, 'input_id': body['input_id']}), now()))
             self.submit(conn, run)
             return {'request_id': identity, 'status': 'queued', 'result': {}}
+
+    def input_id(self, run_id, request_id):
+        rows = self.store.rows("""SELECT data FROM events WHERE run_id=? AND kind='computer_input'
+            AND json_text(data,'request_id')=? LIMIT 1""", (run_id, request_id))
+        if not rows:
+            raise HTTPException(409, 'The computer input scope is unavailable. No nested action was sent.')
+        return json.loads(rows[0]['data'])['input_id']
 
     def pending(self, run_id):
         rows = self.store.rows("SELECT * FROM computer_operations WHERE run_id=? AND status IN ('queued','dispatched') ORDER BY seq LIMIT 1", (run_id,))
@@ -103,11 +125,14 @@ class ComputerOperations:
             if not row or (row['turn_id'], row['actor_id'], row['capability']) != (
                     caller['active_message_id'], caller['active_user_id'], caller['token_hash']):
                 raise HTTPException(409, 'The computer operation owner changed.')
+            if row['status'] == 'cancelled':
+                return False
             if row['status'] == 'queued':
                 conn.execute("UPDATE computer_operations SET status='dispatched',machine_id=? WHERE seq=?",
                              (machine_id, row['seq']))
             elif row['status'] != 'dispatched' or row['machine_id'] != machine_id:
                 raise HTTPException(409, 'This operation cannot be dispatched to another computer.')
+            return True
 
     def settle(self, operation, status, result):
         if status not in {'completed', 'unknown', 'cancelled', 'rejected'}:
@@ -120,18 +145,25 @@ class ComputerOperations:
 
     def read(self, caller, arguments):
         if not isinstance(arguments, dict) or set(arguments) - {'request_id', 'after', 'limit'}:
-            raise HTTPException(422, 'Use request_id or after/limit to read computer receipts.')
+            raise ToolRejected(422, 'Use request_id or after/limit to read computer receipts.')
         after, limit = arguments.get('after', 0), arguments.get('limit', 20)
         if type(after) is not int or after < 0 or type(limit) is not int or limit < 1:
-            raise HTTPException(422, 'Supply a nonnegative cursor and a positive page size.')
+            raise ToolRejected(422, 'Supply a nonnegative cursor and a positive page size.')
+        if 'request_id' in arguments and (not isinstance(arguments['request_id'], str) or not arguments['request_id']):
+            raise ToolRejected(422, 'Supply a nonempty request identity.')
         with self.store.connect() as conn:
             conn.begin_read()
-            self.current(conn, caller)
+            try:
+                self.current(conn, caller)
+            except HTTPException as exc:
+                # The owner check precedes the read. Storage failures below
+                # still propagate without being labeled known local rejections.
+                raise ToolRejected(exc.status_code, exc.detail, exc.headers) from None
             if 'request_id' in arguments:
                 row = conn.execute('SELECT * FROM computer_operations WHERE run_id=? AND request_id=?',
                                    (caller['id'], arguments['request_id'])).fetchone()
                 if not row:
-                    raise HTTPException(404, 'No computer operation has this identity.')
+                    raise ToolRejected(404, 'No computer operation has this identity.')
                 return self.result(row)
             rows = conn.execute('SELECT * FROM computer_operations WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?',
                                 (caller['id'], after, limit+1)).fetchall()

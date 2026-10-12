@@ -1,23 +1,16 @@
 # Agent harnesses
 
-New web sessions, Slack threads and saved automations choose a default from the
-resolved model ID's provider prefix: **Codex SDK** (`codex`) for `openai/` and
-**Claude Agent SDK** (`claude-agent-sdk`) for `anthropic/`. This includes GPT-6 Astra,
-GPT-6.1 Sol and future models added to the catalog or configured as `AGENT_MODEL`;
-no version-specific routing entry is needed. Model aliases and display names are
-resolved before choosing the SDK. Other provider prefixes and unqualified gateway
-aliases retain the Claude SDK fallback. An explicitly configured `AGENT_HARNESS`
-overrides these model defaults; remove an old `AGENT_HARNESS=claude-agent-sdk` setting
-to enable automatic pairing. The new-session picker shows the effective automatic
-choice and supports an explicit override. Explicitly
-selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents,
-Tool Loop and Pi. Regular model choices remain selectable with every harness.
-**GPT-6 Astra Ultrafast** is an opt-in processing mode that requires Codex and
-automatically selects it, including when `AGENT_HARNESS` sets another default.
-An explicit incompatible harness selection is rejected. The configured
-`AGENT_MODEL` is preserved, including GPT-6 Astra. The gateway must support the
-selected model and tool calls through the runtime's native API (Responses for
-Codex, Messages for Claude); selecting it does not establish provider compatibility.
+New web sessions, Slack threads and saved automations default to **Deep Agents +
+Temporal** (`deepagents-temporal`) for every model. See [the durable engine contract](deepagents-temporal.md)
+for architecture, recovery guarantees and release requirements. Skills still load
+on demand through the existing broker. Claude and OpenAI remain model choices;
+the default path no longer launches their native agent SDKs.
+
+Persisted native harness IDs remain supported for existing sessions and explicit
+legacy configurations. Their implementation details below describe those paths.
+GPT-6 Astra Ultrafast is supported by the new engine's Responses adapter; explicit
+legacy configurations still select Codex for that processing mode. A model must
+support the selected API and tool calls on the configured LiteLLM gateway.
 
 Delegated groups can mix harnesses and models. `agents_fanout` accepts shared
 `harness` and `model` defaults, and each explicit task can override either field.
@@ -341,8 +334,8 @@ reserved inside that limit. Missing/invalid limits pause inference with a
 configuration error. Configure verified limits for private model aliases; model
 names such as Astra and GLM do not imply Claude's context window.
 
-Moyai's gateway owns background model-input compaction for Codex, Claude Agent
-SDK, Hermes, OpenCode, Deep Agents, Tool Loop and Pi. At 75% of the verified input
+Moyai's gateway owns background model-input compaction for Deep Agents, Codex, Claude
+Agent SDK, Hermes, OpenCode, Deep Agents, Tool Loop and Pi. At 75% of the verified input
 budget it snapshots an older, closed prefix and starts tool-free summarization.
 Fitting model requests continue using the existing history while that summary
 runs. A later request uses the completed summary plus every item appended after

@@ -140,6 +140,8 @@ def prepare_workspace(spec, relay):
                     if relay.startup_failure and relay.startup_failure.stage == 'repository_metadata':
                         raise relay.startup_failure from None
                     raise
+            from sandbox.broker_transport import scoped_tools
+            broker = scoped_tools(broker, spec.get('broker_tool_scope'))
             emit('tool', 'Preparing the shared GitHub repository')
             relay.repository_startup = True
             try:

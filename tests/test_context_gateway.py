@@ -107,7 +107,8 @@ def summary_response(text, finish='stop'):
         'usage': {'prompt_tokens': 100, 'completion_tokens': 3552, 'total_tokens': 3652}})
 
 
-def test_live_http_pressure_wait_survives_idle_sweep_and_preserves_new_tail(workspace, monkeypatch):
+@pytest.mark.parametrize('harness', ['hermes', 'deepagents-temporal'])
+def test_live_http_pressure_wait_survives_idle_sweep_and_preserves_new_tail(workspace, monkeypatch, harness):
     import asyncio
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -171,7 +172,7 @@ def test_live_http_pressure_wait_survives_idle_sweep_and_preserves_new_tail(work
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
     db = app.state.store
-    run = db.create_run('task', '', 'modal', [], model='openai/gpt-6-astra', chat_enabled=True)
+    run = db.create_run('task', '', 'modal', [], model='openai/gpt-6-astra', chat_enabled=True, harness=harness)
     message = db.claim_message(run['id'])
     db.update_run(run['id'], status='running', token_hash=digest('cap'))
     route = '/v1/responses'

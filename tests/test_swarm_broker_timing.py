@@ -230,6 +230,7 @@ def test_parent_agent_guidance_cannot_extend_the_human_work_window(broker_family
     before = mission(app, root)
     child = app.state.store.run(runs['child'])
     response = client.post(f'/broker/{root}/tools/call', headers=headers['root'], json={
+        'input_id': app.state.store.run(root)['active_message_id'], 'request_id': 'a' * 32,
         'name': 'agents_send', 'arguments': {'group_id': child['agent_group_id'],
             'child_id': child['id'], 'request_key': 'parent-guidance', 'message': 'add three days'},
     })

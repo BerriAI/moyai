@@ -141,6 +141,16 @@ class Cloud:
 
 
 @pytest.fixture
+def sandbox_harness_catalog(monkeypatch):
+    # Cloud below simulates sandbox subprocesses, not Temporal agent workflows.
+    # Preserve coverage for saved mixed-harness teams; the real workflow path
+    # has its own controller/child/recovery tests in test_deepagents_runtime.
+    from app import harnesses
+    catalog = [item for item in harnesses.choices() if item['id'] != 'deepagents-temporal']
+    monkeypatch.setattr(harnesses, 'choices', lambda: catalog)
+
+
+@pytest.fixture
 def durable(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, data_dir=tmp_path, session_secret='stable-test-key', agent_model='test-model', sandbox_idle_seconds=0)
     store = Store(tmp_path)

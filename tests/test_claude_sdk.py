@@ -30,8 +30,8 @@ def make_agent(monkeypatch, tmp_path, step=lambda: None, **spec):
     return agent, events
 
 
-def test_default_selects_sdk_without_changing_the_configured_model():
-    settings = Settings(_env_file=None, agent_model='openai/gpt-6-astra')
+def test_explicit_sdk_preserves_the_configured_model():
+    settings = Settings(_env_file=None, agent_model='openai/gpt-6-astra', agent_harness='claude-agent-sdk')
     assert settings.agent_harness == 'claude-agent-sdk'
     assert settings.harness_model(settings.agent_harness) == 'openai/gpt-6-astra'
     assert settings.harness_model(settings.agent_harness, 'astra') == 'openai/gpt-6-astra'
