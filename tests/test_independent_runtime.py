@@ -289,7 +289,8 @@ def test_remote_commands_activate_project_without_restarting_services(tmp_path, 
     monkeypatch.setenv('MOYAI_CREDENTIAL_PROXY_URL', '')
     monkeypatch.setenv('MOYAI_WORKSPACE', '')
     monkeypatch.chdir(tmp_path)
-    def execute(params, _):
+    def execute(params, _, *, relay):
+        assert relay.url == 'http://relay'
         assert os.getcwd() == str(root)
         assert str(root/'.venv/bin') in os.environ['PATH'].split(os.pathsep)
         assert os.environ['MOYAI_CREDENTIAL_PROXY_URL'] == 'http://relay/credentials'

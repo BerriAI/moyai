@@ -44,7 +44,7 @@ def run(spec):
             activate_project(spec)
             os.chdir(spec['workspace'])
             prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'])
-            result = call_tool({'name': spec['name'], 'arguments': spec['arguments']}, None)
+            result = call_tool({'name': spec['name'], 'arguments': spec['arguments']}, None, relay=relay)
         print('WORKSPACE_EVENT '+json.dumps({'kind': 'final', 'message': '', 'tool_result': result}), flush=True)
         return 0
     finally:

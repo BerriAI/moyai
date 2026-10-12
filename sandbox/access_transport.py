@@ -34,8 +34,12 @@ def open_broker(request, **kwargs):
 
 
 def git_environment(remote: str, token: str) -> dict[str, str]:
-    headers = broker_headers(remote, token)
-    env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': str(len(headers) + 1)}
+    return _git_environment(remote, broker_headers(remote, token))
+
+
+def _git_environment(remote: str, headers: dict[str, str]) -> dict[str, str]:
+    env = {name: value for name, value in os.environ.items() if not name.startswith('WORKSPACE_ACCESS_')}
+    env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_COUNT=str(len(headers) + 1))
     for index, (name, value) in enumerate(headers.items()):
         env[f'GIT_CONFIG_KEY_{index}'] = 'http.' + remote.rstrip('/') + '/.extraHeader'
         env[f'GIT_CONFIG_VALUE_{index}'] = name + ': ' + value

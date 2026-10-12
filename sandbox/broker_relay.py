@@ -17,12 +17,12 @@ from collections import Counter
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal, send_payload
-    from .access_transport import broker_headers, open_broker
+    from .access_transport import broker_headers, open_broker, _git_environment
     from .broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from .startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal, send_payload
-    from access_transport import broker_headers, open_broker
+    from access_transport import broker_headers, open_broker, _git_environment
     from broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 
@@ -432,6 +432,9 @@ class BrokerRelay:
     def start(self):
         self.thread.start()
         return self
+
+    def git_environment(self):
+        return _git_environment(self.url, {'Authorization': 'Bearer ' + self.token})
 
     def control(self, body=None):
         request = urllib.request.Request(self.remote.rstrip('/') + '/control',

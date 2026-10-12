@@ -239,14 +239,52 @@ def test_advertised_update_packages_local_files():
     assert 'number' in updated['github_checkout']['inputSchema']['properties']
 
 
-def test_successful_publication_is_preserved_when_base_sync_fails(checkout, monkeypatch):
+@pytest.mark.parametrize('failure', [OSError, ValueError, local.GitHubToolError])
+@pytest.mark.parametrize('operation', ['github_create_pull_request', 'github_update_pull_request'])
+def test_successful_publication_is_preserved_when_base_sync_fails(checkout, monkeypatch, failure, operation):
     repo, _, _, _, _ = checkout
     (repo / 'new.py').write_text('new = True\n')
     receipt = {'repository': 'BerriAI/litellm', 'number': 100, 'commit': 'c' * 40,
                'url': 'https://github.com/BerriAI/litellm/pull/100'}
     def sync(*args):
-        raise OSError('disk unavailable')
+        raise failure('synthetic secret must not appear in the receipt')
     monkeypatch.setattr(local, 'sync_publication', sync)
-    result = local.call('github_create_pull_request', {'directory': str(repo), 'title': 'Publish change',
-        'body': 'A change', 'request_key': 'sync-failure'}, lambda *args: receipt, '', '')
+    calls = []
+    def publish(*args):
+        calls.append(args)
+        return receipt
+    result = local.call(operation, {'directory': str(repo), 'title': 'Publish change',
+        'body': 'A change', 'number': 100, 'request_key': 'sync-failure'}, publish, '', '')
     assert result['url'] == receipt['url'] and 'succeeded' in result['checkout_warning']
+    assert len(calls) == 1 and result['commit'] == receipt['commit']
+    assert 'synthetic secret' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('operation', ['github_create_pull_request', 'github_update_pull_request'])
+@pytest.mark.parametrize('outcome', ['relay_failure', 'broker_failure', 'rejected', 'missing_commit', 'commit_error'])
+def test_unconfirmed_publication_never_becomes_a_success_warning(checkout, monkeypatch, operation, outcome):
+    from types import SimpleNamespace
+    repo, _, _, _, _ = checkout
+    (repo / 'new.py').write_text('new = True\n')
+    calls = []
+    receipt = {'error': 'denied'} if outcome in {'rejected', 'commit_error'} else {'status': 'pending'}
+    if outcome == 'commit_error':
+        receipt['commit'] = 'c' * 40
+    def fail_environment():
+        raise ValueError('environment failed before publication')
+    def publish(*args):
+        calls.append(args)
+        if outcome == 'broker_failure':
+            raise ValueError('publication not confirmed')
+        return receipt
+    monkeypatch.setattr(local, 'sync_publication', lambda *args, **kwargs: pytest.fail('Unconfirmed receipt was synchronized'))
+    options = {'relay': SimpleNamespace(url='http://127.0.0.1:1234', token='test-run',
+                                       git_environment=fail_environment)} if outcome == 'relay_failure' else {}
+    arguments = {'directory': str(repo), 'title': 'Publish change', 'body': 'A change',
+                 'number': 100, 'request_key': 'unconfirmed-publication'}
+    if outcome in {'relay_failure', 'broker_failure'}:
+        with pytest.raises(ValueError):
+            local.call(operation, arguments, publish, '', '', **options)
+    else:
+        assert local.call(operation, arguments, publish, '', '', **options) == receipt
+    assert len(calls) == (0 if outcome == 'relay_failure' else 1)

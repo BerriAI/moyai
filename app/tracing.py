@@ -314,7 +314,7 @@ class AgentTracing:
                 'agent.source.title': self.content(' '.join(title.split()))[:200]}
 
     @best_effort
-    def tool(self, run_id, data):
+    def tool(self, run_id, data, *, message_id=None):
         run = self.store.run(run_id)
         if run and run.get('private_owner_id'):
             return
@@ -324,14 +324,18 @@ class AgentTracing:
         start, end = int(data['start_ns']), int(data['end_ns'])
         if not (0 < start <= end <= now + 60_000_000_000):
             return
-        name = str(data['tool'])[:120]
+        name = self.content(data['tool'])[:120]
         omit = private_tool(name) and self.preferences.for_run(run)['omit_private_tool_payloads']
-        self.emit(run, run.get('active_message_id'), name, str(data['call_id']), start, end,
+        failed = data.get('status') in {'error', 'cancelled'}
+        error_type = safe_error({'exception_type': data.get('error_type')}).get(
+            'exception_type', 'ToolError' if 'error_type' in data else 'OperationError')
+        self.emit(run, run.get('active_message_id') if message_id is None else message_id, name, str(data['call_id']), start, end,
                   {'gen_ai.operation.name': 'execute_tool', 'openinference.span.kind': 'TOOL',
                    'gen_ai.tool.name': name, 'gen_ai.tool.call.id': str(data['call_id']),
                    'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if omit else data.get('input')),
                    'output.value': self.content('[private tool payload omitted]' if omit else data.get('output')),
-                   'moyai.status': str(data.get('status', 'completed'))}, failed=data.get('status') == 'error')
+                   'moyai.status': str(data.get('status', 'completed')),
+                   **({'error.type': self.content(error_type)} if failed else {})}, failed=failed)
 
     @best_effort
     def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = '', error=None):
