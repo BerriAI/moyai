@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from sandbox import agent as lifecycle
-from sandbox.context_store import ContextStore, ContextUnavailable, open_context
-from sandbox.harness_agent import TurnJournal
+from agent.context_store import ContextStore, ContextUnavailable, open_context
+from agent.harnesses.harness_agent import TurnJournal
 from test_runner import runner
 
 
@@ -54,7 +54,7 @@ def test_native_plaintext_is_removed_before_attachments_and_project_start(tmp_pa
 async def test_real_sdk_resume_temporary_is_owned_and_removed_on_lifecycle_failure(tmp_path, monkeypatch):
     from claude_agent_sdk import ClaudeAgentOptions
     from claude_agent_sdk._internal.session_resume import materialize_resume_session
-    from sandbox.native_session import NativeSession, native_storage
+    from agent.harnesses.native_session import NativeSession, native_storage
     from uuid import uuid4
     root = tmp_path / 'session/.native-sdk'
     session_id = str(uuid4())
@@ -114,7 +114,7 @@ def test_missing_checkpoint_context_stops_instead_of_forgetting_history(tmp_path
 
 @pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 def test_durable_harness_starts_new_turn_with_unknown_tool_outcome(tmp_path, monkeypatch, harness):
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_registry import create_agent
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'assistant', 'tool_calls': [{'id': 'old', 'function': {'name': 'Edit'}}]}])
     agent = create_agent(harness, spec={}, relay=SimpleNamespace(compact=lambda *_: 'Summary'),
@@ -125,7 +125,11 @@ def test_durable_harness_starts_new_turn_with_unknown_tool_outcome(tmp_path, mon
     monkeypatch.setattr(agent, '_run', respond)
     try:
         prompt = agent.run_conversation('What happened?', conversation_history=[], system_message='Investigate')
-        assert 'UNRESOLVED TOOL OUTCOMES' in prompt and 'CURRENT REQUEST:\nWhat happened?' in prompt
+        if getattr(agent, 'typed_replay', False):
+            assert prompt == 'What happened?'
+            assert 'UNRESOLVED TOOL OUTCOMES' in json.dumps(agent.replay_history)
+        else:
+            assert 'UNRESOLVED TOOL OUTCOMES' in prompt and 'CURRENT REQUEST:\nWhat happened?' in prompt
         assert store.pending == {'old'} and not agent.journal.pending
     finally:
         agent.close()
@@ -149,8 +153,8 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
         def listen(self, *a): pass
         def close(self): pass
         def can_continue(self, *a): return False
-    monkeypatch.setattr(lifecycle, 'ActiveTurnSteering', Steering)
-    monkeypatch.setattr('sandbox.continuation.AgentSteer', Steering)
+    monkeypatch.setattr('agent.agent.ActiveTurnSteering', Steering)
+    monkeypatch.setattr('agent.agent.AgentSteer', Steering)
     events, prompts, actions = [], [], []
     monkeypatch.setattr(lifecycle, 'emit', lambda kind, message, data=None, **kw: events.append((kind, message, data, kw)))
     maintenance = []
@@ -180,7 +184,7 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
             journal.tool_finished(f'call{number}', f'receipt-{number}')
             journal.finish('Done')
             return {'completed': True, 'messages': journal.messages, 'final_response': 'Done'}
-    monkeypatch.setattr('sandbox.harness_registry.create_agent', lambda *a, **kw: Adapter(kw['context_store'], kw['activity']))
+    monkeypatch.setattr('agent.agent.create_agent', lambda *a, **kw: Adapter(kw['context_store'], kw['activity']))
     session = tmp_path / 'session'
     session.mkdir()
     legacy = [{'role': 'user', 'content': 'Keep Escape support; do not deploy.'},
@@ -217,9 +221,10 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
 @pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('outage', [False, True])
 def test_every_durable_harness_answers_with_full_tail_while_maintenance_pending(tmp_path, monkeypatch, harness, outage):
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_registry import create_agent
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
-    store.initialize([{'role': 'assistant', 'content': f'receipt-{i:03d} ' + 'log ' * 500} for i in range(60)])
+    original = [{'role': 'assistant', 'content': f'receipt-{i:03d} ' + 'log ' * 500} for i in range(60)]
+    store.initialize(original)
     submitted = []
     def maintain(snapshot, ack):
         submitted.append(snapshot)
@@ -232,14 +237,24 @@ def test_every_durable_harness_answers_with_full_tail_while_maintenance_pending(
                          step=lambda: None, cwd=str(tmp_path), context_store=store)
     monkeypatch.setattr(agent, 'validate', lambda: None)
     async def respond(prompt, system_message):
-        assert 'receipt-000' in prompt and 'receipt-059' in prompt
+        from test_context_views import saved
+        view = agent.replay_history
+        assert 'PUBLIC HISTORY VIEW' in view[0]['content']
+        assert [json.loads(line) for line in saved(view).read_text().splitlines()] == original
+        assert 'receipt-059' in json.dumps(view)
+        if getattr(agent, 'typed_replay', False):
+            assert prompt == 'tldr'
+        else:
+            assert str(saved(view)) in prompt and 'CURRENT REQUEST:\ntldr' in prompt
+        assert store.history()[:len(original)] == original
         agent.journal.finish('Quick TLDR')
         return {'completed': True, 'final_response': 'Quick TLDR'}
     monkeypatch.setattr(agent, '_run', respond)
     try:
         result = agent.run_conversation('tldr', conversation_history=[], system_message='Answer')
         assert result['completed'] and len(submitted) == 1 and submitted[0]
-        assert store.state()['cursor'] == 0 and 'Quick TLDR' in store.history()[0]['content']
+        assert store.state()['cursor'] == 0 and store.history()[:len(original)] == original
+        assert store.history()[-1]['content'] == 'Quick TLDR'
     finally:
         agent.close()
         store.close()

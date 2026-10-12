@@ -25,8 +25,8 @@ from app.config import Settings
 from app.main import create_app
 from app.security import digest
 from sandbox.broker_relay import BrokerRelay
-from sandbox.claude_harness import ClaudeAgent
-from sandbox.context_store import ContextStore
+from agent.harnesses.claude_harness import ClaudeAgent
+from agent.context_store import ContextStore
 
 
 def main():

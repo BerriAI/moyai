@@ -9,9 +9,6 @@ from fastapi import HTTPException
 from sandbox.broker_transport import CONTENT_TYPE
 
 
-MAX_STATE_BYTES = 2 * 1024 * 1024
-
-
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
@@ -37,6 +34,9 @@ class NativeSessions:
         self.checkpoints, self.require_run, self.read_body = checkpoints, require_run, read_body
 
     def scope(self, run):
+        private_owner = dict(run).get('private_owner_id', '')
+        if private_owner and private_owner != run['active_user_id']:
+            raise HTTPException(404, 'Session not found.')
         settings = self.settings
         policy = {'base': settings.litellm_api_base.rstrip('/'),
             'credential': hashlib.sha256(settings.litellm_api_key.encode()).hexdigest(),
@@ -47,6 +47,7 @@ class NativeSessions:
         except ValueError:
             raise HTTPException(409, 'The selected model is no longer available.') from None
         return {'run': run['id'], 'actor': run['active_user_id'], 'model': model,
+            **({'private_owner_id': private_owner} if private_owner else {}),
             'harness': run['harness'], 'gateway': hashlib.sha256(encoded(policy).encode()).hexdigest()}
 
     def observe_scope(self, run):
@@ -95,11 +96,9 @@ class NativeSessions:
             if not isinstance(body['state'], dict):
                 raise HTTPException(422, 'Native state must be an opaque JSON object.')
             try:
-                size = len(encoded(body).encode())
+                encoded(body)
             except (TypeError, ValueError, RecursionError):
                 raise HTTPException(422, 'Invalid native state JSON.') from None
-            if size > MAX_STATE_BYTES:
-                raise HTTPException(413, 'Native state exceeds its storage limit.')
 
     def restored(self, conn, row, run, scope, body):
         if run['checkpoint_error']:

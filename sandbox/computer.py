@@ -24,6 +24,10 @@ import urllib.request
 from urllib.parse import urlparse
 from uuid import uuid4
 
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from sandbox.browser_documents import BrowserDocuments, workspace_file
+
 PORT = 18765
 DISPLAY_SOCKET = Path('/tmp/.X11-unix/X99')
 DISPLAY_LOCK = Path('/tmp/.X99-lock')
@@ -186,7 +190,8 @@ def input_commands(events):
 
 
 class Computer:
-    def __init__(self):
+    def __init__(self, workspace='/workspace', artifacts='/artifacts'):
+        self.workspace, self.artifacts = Path(workspace).resolve(), Path(artifacts)
         self.page = self.context = self.browser = self.playwright = None
         self.display = None
         self.desktop = None
@@ -215,6 +220,7 @@ class Computer:
         self.saved_pages = {}
         self.browser_partial = False
         self.browser_blocked = False
+        self.documents = BrowserDocuments()
 
     async def ensure_desktop(self):
         # Restored snapshots have refreshed Python but retain old OS packages.
@@ -876,33 +882,66 @@ class Computer:
             else:
                 await self.open()
                 page = self.page
+                if action == 'tabs':
+                    return await self.documents.tabs(self.context, page)
+                if action == 'select_tab':
+                    self.page = page = self.documents.page(self.context, args['page_id'])
+                    await page.bring_to_front()
+                elif action == 'open' and args.get('new_tab'):
+                    self.page = page = await self.context.new_page()
+                    await page.bring_to_front()
             if tab:
                 await self.begin_review_foreground(tab)
                 await self.show_review_page(page)
             self.foreground_tab = tab
+            frame = self.documents.frame(page, args['frame']) if args.get('frame') else page
             if action == 'input':
                 await self.browser_input(page, args['events'])
             elif action == 'open':
                 if args.get('url'):
                     await page.goto(valid_url(args['url']), wait_until='domcontentloaded')
             elif action == 'click':
-                if 'role' in args:
-                    await page.get_by_role(args['role'], name=args['name'], exact=True).click()
+                if args.get('target'):
+                    await (await self.documents.target(page, args['target'])).click()
+                elif 'role' in args:
+                    await frame.get_by_role(args['role'], name=args['name'], exact=True).click()
                 else:
                     await page.mouse.click(max(0, min(WIDTH-1, float(args['x']))), max(0, min(HEIGHT-1, float(args['y']))))
             elif action == 'fill':
-                await page.get_by_label(args['label'], exact=True).fill(args['value'])
+                element = await self.documents.target(page, args['target']) if args.get('target') else frame.get_by_label(args['label'], exact=True)
+                await element.fill(args['value'])
+            elif action == 'select':
+                await (await self.documents.target(page, args['target'])).select_option(args['values'])
+            elif action == 'upload':
+                files = [workspace_file(path, self.workspace) for path in args['paths']]
+                await (await self.documents.target(page, args['target'])).set_input_files(files)
+            elif action == 'download':
+                element = await self.documents.target(page, args['target'])
+                async with page.expect_download() as pending:
+                    await element.click()
+                download = await pending.value
+                directory = self.workspace / 'moyai-downloads' / uuid4().hex
+                if not directory.resolve().is_relative_to(self.workspace):
+                    raise ValueError('The download directory must stay inside the workspace.')
+                directory.mkdir(parents=True)
+                name = Path(download.suggested_filename).name
+                path = directory / (name if name not in {'', '.', '..'} else 'download')
+                await download.save_as(path)
+                return {'path': str(path), 'name': path.name, 'bytes': path.stat().st_size,
+                        'instruction': 'The file is saved in the workspace. Publish an artifact to deliver it.'}
             elif action == 'type':
-                await page.keyboard.insert_text(str(args['text'])[:10000])
+                await page.keyboard.insert_text(str(args['text']))
             elif action == 'key':
                 key = args['key']
-                if key not in {'Enter', 'Tab', 'Shift+Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Control+a', 'Meta+a', 'Space'}:
-                    raise ValueError('Unsupported browser key.')
                 await page.keyboard.press(key)
             elif action == 'scroll':
-                await page.mouse.wheel(0, max(-1800, min(1800, int(args['dy']))))
+                await page.mouse.wheel(int(args.get('dx', 0)), int(args['dy']))
             elif action == 'back':
                 await page.go_back(wait_until='domcontentloaded')
+            elif action == 'forward':
+                await page.go_forward(wait_until='domcontentloaded')
+            elif action == 'reload':
+                await page.reload(wait_until='domcontentloaded')
             elif action == 'screenshot':
                 available = self.budget()
                 path = CAPTURES / capture_name(args.get('name'), 'png')
@@ -930,19 +969,15 @@ class Computer:
                     result = await self.stop_recording()
                     return result
                 return {'recording': True, 'name': path.with_suffix('.webm').name, 'path': str(path.with_suffix('.webm')), 'max_seconds': 600}
-            elif action != 'read':
+            elif action not in {'read', 'select_tab'}:
                 raise ValueError('Unknown computer action.')
             await self.refresh_frame(tab)
             if actor != 'agent':
                 return await self.state(tab)
             if not tab:
-                Path('/artifacts').mkdir(exist_ok=True)
-                await page.screenshot(path='/artifacts/browser.png')
-            return {'url': page.url, 'title': await page.title(),
-                    'text': (await page.locator('body').inner_text())[:24000],
-                    'elements': await page.locator('a,button,input,select,textarea').evaluate_all(
-                        "els => els.slice(0,80).map(e => ({tag:e.tagName,role:e.getAttribute('role'),name:e.innerText||e.getAttribute('aria-label')||e.getAttribute('placeholder'),type:e.type}))"),
-                    'screenshot': 'The Computer panel shows the browser. Use browser_screenshot for a named saved capture.'}
+                self.artifacts.mkdir(exist_ok=True)
+                await page.screenshot(path=str(self.artifacts / 'browser.png'))
+            return await self.documents.read(page, args if action == 'read' else {})
 
 
 async def serve(desktop=None):

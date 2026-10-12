@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from sandbox import credential_tools
+from agent.tools import credential_tools
 
 REQUEST = 'a' * 32
 SECRET = 'synthetic-credential-for-execution'

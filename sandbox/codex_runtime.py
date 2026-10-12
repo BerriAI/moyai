@@ -18,6 +18,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 
 
+# The lease supervisor is also launched directly in a clean environment.
+if __package__ in {None, ''}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 ROOT = Path('/run/moyai-codex')
 STARTUP_SECONDS = 15
 MAX_CONTROL_BYTES = 16384
@@ -56,7 +60,7 @@ def write_message(stream, value):
 def revision(binary):
     info = Path(binary).stat()
     return hashlib.sha256(json.dumps([str(binary), info.st_size, info.st_mtime_ns,
-        Path(__file__).read_text(), Path(__file__).with_name('codex_catalog.py').read_text()]).encode()).hexdigest()
+        Path(__file__).read_text(), (Path(__file__).resolve().parents[1] / 'agent/harnesses/codex_catalog.py').read_text()]).encode()).hexdigest()
 
 
 class RuntimeLease:
@@ -197,10 +201,7 @@ def serve(root, binary):
                                     env=env, capture_output=True, text=True, check=True, timeout=10)
                                 catalog = home / 'bundled-models.json'
                                 catalog.write_text(json.dumps(json.loads(result.stdout)))
-                                try:
-                                    from .codex_catalog import search_catalog
-                                except ImportError:
-                                    from codex_catalog import search_catalog
+                                from agent.harnesses.codex_catalog import search_catalog
                                 selected = search_catalog(binary, home, request['model'], env, cached=catalog)
                                 # No broker URL, capability, project config or model turn
                                 # belongs in this process's initial environment/config.

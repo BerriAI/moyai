@@ -179,7 +179,9 @@ def test_agent_org_skill_writes_follow_current_user_role(users_app):
     run = active(app, 'google:ishaan')
     sign_as(app, client, 'tin@berri.ai')
     assert change(client, 'ishaan@berri.ai', 'member').status_code == 200
-    assert call(client, run, **form(scope='organization')).status_code == 403
+    denied = call(client, run, **form(scope='organization'))
+    assert denied.status_code == 200 and denied.json()['status_code'] == 403
+    assert denied.json()['error']
     assert call(client, run, **form(scope='personal')).status_code == 200
     assert change(client, 'ishaan@berri.ai', 'admin', 1).status_code == 200
     assert call(client, run, **form(scope='organization', request_id='promoted-org-save')).status_code == 200

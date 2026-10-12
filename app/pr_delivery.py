@@ -1,4 +1,5 @@
 """Select confirmed PRs and explicitly referenced captures for a Slack handoff."""
+from .private_sinks import private_run
 import hashlib
 import html
 import re
@@ -34,6 +35,9 @@ class Capture(BaseModel):
 
 def select_prs(conn: Connection, run_id: str, answer: str) -> list[PullRequest]:
     # A URL selects an existing receipt; it cannot establish a publication.
+    run = conn.execute('SELECT private_owner_id FROM runs WHERE id=?', (run_id,)).fetchone()
+    if run and run['private_owner_id']:
+        return []
     urls = {url.rstrip('.,;!?') for url in re.findall(r'https://[^\s<>`"\)\]\|]+', answer)}
     result = []
     seen = set()
@@ -52,6 +56,8 @@ def select_prs(conn: Connection, run_id: str, answer: str) -> list[PullRequest]:
 
 def select_captures(settings: Settings, run_id: str, answer: str, *, store,
                     conn: Connection | None = None) -> list[Capture]:
+    if private_run(store, run_id, conn):
+        return []
     tokens = TOKENS.findall(answer)
     names = [match[1] for token in tokens if (match := CAPTURE_PATH.fullmatch(token))]
     result = []

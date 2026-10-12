@@ -151,7 +151,7 @@ const settleCaptures=()=>new Promise(setImmediate);
 
 test('captures read saved media without a live computer and discover newly completed captures',async()=>{
   const f=capturePanel();f.tab.activate();
-  assert.equal(f.requests.length,1);assert.equal(f.requests[0].path,'/api/runs/session/files');assert.equal(f.requests[0].options,undefined);
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].path,'/api/runs/session/files?view=media');assert.equal(f.requests[0].options.timeoutMs,30000);
   f.requests[0].resolve({files:[]});await settleCaptures();
   assert.match(f.node('[data-captures]').innerHTML,/No saved captures yet/);
   assert.equal([...f.timers.values()][0].delay,3000);
@@ -164,7 +164,7 @@ test('captures read saved media without a live computer and discover newly compl
   const writes=f.node('[data-captures]').writes;await f.poll();
   f.requests[2].resolve({files:[captured(),captured('flow.webm','video')]});await settleCaptures();
   assert.equal(f.node('[data-captures]').writes,writes,'Unchanged catalog refresh must not restart video playback');
-  assert.ok(f.requests.every(request=>request.path.endsWith('/files')&&!request.options));
+  assert.ok(f.requests.every(request=>request.path.endsWith('/files?view=media')&&request.options.timeoutMs===30000));
   f.dispose();
 });
 test('capture previews open the saved file while downloads and modified clicks stay native',async()=>{
@@ -408,7 +408,7 @@ test('native diffs show source line numbers, missing patches and truncation with
   const f=await initialPR({...details,files_truncated:true,files:[{...details.files[0],filename:'<script>.js',patch:'+<img onerror=x>',patch_truncated:true},details.files[1]]});
   assert.match(f.node('[data-content]').textContent,/<script>\.js/);assert.match(f.node('.pr-diff').textContent,/<img onerror=x>/);
   assert.equal(f.node('img'),null);assert.equal(f.node('script'),null);
-  assert.match(f.node('[data-content]').textContent,/first 100 files/);assert.match(f.node('[data-content]').textContent,/diff is truncated/);
+  assert.match(f.node('[data-content]').textContent,/files loaded/);assert.match(f.node('[data-content]').textContent,/diff is truncated/);
   toggleFile(f,1,true);assert.match(f.node('[data-content]').textContent,/did not provide a text diff/);
 });
 test('native PR refresh keeps prior data on temporary failure and retries successfully',async()=>{
@@ -497,10 +497,11 @@ function agentToolbox(){
   const card=host(),pullsSection=host(),agentsSection=host(),agentTab=host(),classes=new Set(),toggle={hidden:true};
   const ctx={disposed:false,run:{id:'parent'},agents:[],agentSignature:'',pullRequests:[],card,pullsSection,agentsSection,
     tabs:new Map([['agents',{kind:'agents',element:agentTab}]]),
-    document:{activeElement:null,querySelector:()=>toggle},ico:()=>'',
+    document:{activeElement:null,querySelector:()=>toggle,querySelectorAll:()=>[]},ico:()=>'',
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
     layout:{classList:{toggle:(key,value)=>value?classes.add(key):classes.delete(key)}}};
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('app/static/icons.js','utf8'),ctx);
   const app=fs.readFileSync('app/static/app.js','utf8');
   vm.runInContext(app.slice(app.indexOf('function sessionStatus('),app.indexOf('function sessionRepository(')),ctx);
   ctx.statusFor=ctx.sessionStatus;

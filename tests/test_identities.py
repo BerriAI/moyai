@@ -67,9 +67,13 @@ def sync(app):
     asyncio.run(app.state.identities.sync_due())
 
 
-def refresh(app):
+def refresh(app, client=None):
     app.state.store.execute('UPDATE users SET profile_next_check=0')
-    sync(app)
+    if client is None:
+        sync(app)
+    else:
+        # A live app's background watcher owns the identity lock's event loop.
+        client.portal.call(app.state.identities.sync_due)
 
 
 @pytest.mark.parametrize('google_first', [False, True])
@@ -238,7 +242,7 @@ def test_admin_override_survives_refresh_and_existing_links_migrate(profiles):
         response = client.post('/api/admin/spend/link-slack', json={'slack_user_id': actor, 'google_user_id': 'google:bob'})
         assert response.status_code == 200
         assert account(app)['link_method'] == 'manual'
-        refresh(app)
+        refresh(app, client)
         assert account(app)['linked_user_id'] == 'google:bob'
         assert account(app)['link_status'] == 'manual'
         app.state.store.execute("UPDATE users SET link_method='',link_status='' WHERE id=?", (actor,))
@@ -246,6 +250,45 @@ def test_admin_override_survives_refresh_and_existing_links_migrate(profiles):
         assert account(app)['link_method'] == 'manual'
         audit = app.state.store.rows("SELECT * FROM identity_audit WHERE reason='admin_override'")
         assert len(audit) == 1 and audit[0]['actor_id'] == 'google:alice'
+
+
+def test_refresh_waits_for_busy_profile_watcher_on_the_live_app_loop(profiles, monkeypatch):
+    app, _ = profiles
+    identities = app.state.identities
+    with TestClient(app, base_url=app.state.settings.public_url) as client:
+        client.portal.call(identities.close)
+        google(app.state.store)
+        sender(app.state.store)
+        owner_loop = client.portal.call(asyncio.get_running_loop)
+        background_started, refresh_started = Event(), asyncio.Event()
+        original_sync, original_profiles = identities.sync_due, identities.sync_profiles_due
+
+        async def busy_profiles():
+            if asyncio.current_task() is identities.worker:
+                background_started.set()
+                await asyncio.wait_for(refresh_started.wait(), timeout=3)
+            await original_profiles()
+
+        async def checked_sync():
+            # Fail before lock acquisition if the helper regresses to a second
+            # loop; otherwise this regression would hang the test process.
+            assert asyncio.get_running_loop() is owner_loop
+            if asyncio.current_task() is not identities.worker:
+                assert identities.lock.locked()
+                refresh_started.set()
+            async with asyncio.timeout(3):
+                await original_sync()
+
+        monkeypatch.setattr(identities, 'sync_profiles_due', busy_profiles)
+        monkeypatch.setattr(identities, 'sync_due', checked_sync)
+        client.portal.call(identities.start)
+        try:
+            assert background_started.wait(3)
+            refresh(app, client)
+            assert account(app)['linked_user_id'] == 'google:alice'
+            assert account(app)['link_status'] == 'linked'
+        finally:
+            client.portal.call(identities.close)
 
 
 def test_admin_routes_require_login_role_and_csrf_but_slack_never_grants_login(profiles):
@@ -362,7 +405,7 @@ def memory_profiles(profiles, monkeypatch):
     actor = sender(app.state.store)
     run = app.state.store.run(app.state.store.rows('SELECT id FROM runs')[0]['id'])
     sync(app)
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
     app.state.memory.save('google:alice', Note(key='response-style', title='Response style',
         content='Use a 25-word TLDR.', request_id='response-style-demo'))
     return app, control, clock, actor, run
@@ -372,9 +415,9 @@ def test_automatic_refresh_keeps_memory_available_across_hours(memory_profiles):
     app, control, clock, actor, run = memory_profiles
     for _ in range(4):
         clock[0] += 31 * 60
-        assert len(app.state.memory.tools(run)) == 3  # Refresh happens before expiry.
+        assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}  # Refresh happens before expiry.
         sync(app)
-        assert len(app.state.memory.tools(run)) == 3
+        assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
         assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
         assert '25-word TLDR' in app.state.memory.context(run)
         calls = len(control['calls'])
@@ -394,7 +437,7 @@ def test_old_daily_timer_recovers_expired_memory_automatically(memory_profiles):
     assert not app.state.memory.tools(run)
     sync(app)
     assert control['calls'] == [USER, USER]
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
     assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
 
 
@@ -414,7 +457,7 @@ def test_refresh_failure_blocks_memory_and_recovers_after_retry(memory_profiles)
     clock[0] += 2
     sync(app)
     assert len(control['calls']) == calls + 1
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
 
 
 @pytest.mark.parametrize('change', ['deleted', 'email'])

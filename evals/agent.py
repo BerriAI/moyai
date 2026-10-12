@@ -60,11 +60,11 @@ def runtime_selection(environ: Mapping[str, str]) -> tuple[str, str]:
 
 def source_revision(root: Path) -> str:
     unchanged = subprocess.run(
-        ['git', '-C', str(root), 'diff', '--quiet', 'HEAD', '--', 'app', 'sandbox'],
+        ['git', '-C', str(root), 'diff', '--quiet', 'HEAD', '--', 'agent', 'app', 'sandbox'],
         capture_output=True, timeout=10,
     )
     if unchanged.returncode:
-        raise ValueError('Commit changes to app/ and sandbox/ before attributing a Lens evaluation.')
+        raise ValueError('Commit changes to agent/, app/ and sandbox/ before attributing a Lens evaluation.')
     result = subprocess.run(
         ['git', '-C', str(root), 'rev-parse', 'HEAD'],
         capture_output=True, text=True, check=True, timeout=10,

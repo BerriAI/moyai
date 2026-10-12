@@ -3,7 +3,6 @@ import json
 
 from fastapi import HTTPException
 
-from sandbox.context_store import SUMMARY_BYTES, BATCH_BYTES, BATCH_ROWS
 from sandbox.broker_transport import MAX_BODY
 
 
@@ -16,10 +15,8 @@ Distinguish attempts, successful receipts, failures and unknown outcomes. Never 
 into evidence of success or permission to repeat an action. Retain important older facts from the previous
 summary. Later user corrections supersede earlier requests. Excerpts may omit text: preserve references
 to original journal records when detail needs retrieval. Do not invent facts or include private reasoning.
-Use concise plain text. Aim for 6000 UTF-8 bytes (roughly 800 English words), with a hard
-saved-summary limit of 12000 UTF-8 bytes. Merge repeated facts; reference journal records instead
-of copying logs, long lists or tool output. Leave room for future updates. This is a working
-summary, not a transcript. Finish the summary completely.'''
+Use concise plain text. Merge repeated facts; reference journal records instead of copying logs,
+long lists or tool output. This is a working summary, not a transcript. Finish it completely.'''
 
 SUMMARY_ATTEMPTS = 3
 
@@ -49,9 +46,8 @@ def compaction_payload(body, model, attempt=0):
     if not isinstance(body, dict) or not isinstance(body.get('summary'), str):
         raise HTTPException(422, 'Expected summary text and journal entries.')
     entries = body.get('entries')
-    if (len(body['summary'].encode()) > SUMMARY_BYTES or not isinstance(entries, list)
-            or not 1 <= len(entries) <= BATCH_ROWS):
-        raise HTTPException(422, 'Context compaction input exceeded its limit.')
+    if not isinstance(entries, list) or not entries:
+        raise HTTPException(422, 'Context compaction needs journal entries.')
     previous = 0
     for entry in entries:
         if (not isinstance(entry, dict) or set(entry) != {'seq', 'excerpt'}
@@ -59,18 +55,18 @@ def compaction_payload(body, model, attempt=0):
                 or not isinstance(entry['excerpt'], str)):
             raise HTTPException(422, 'Invalid journal entry.')
         previous = entry['seq']
-    if len(json.dumps(entries, ensure_ascii=False).encode()) > BATCH_BYTES + 2:
-        raise HTTPException(422, 'Context compaction batch exceeded its limit.')
+    if len(json.dumps(body, ensure_ascii=False).encode()) > MAX_BODY:
+        raise HTTPException(413, 'Page the conversation to fit the broker transport envelope.')
     # No caller-supplied model, tools, system messages, keys or routing fields.
     instructions = INSTRUCTIONS
-    budget = body.get('summary_bytes', SUMMARY_BYTES)
-    if type(budget) is not int or not 512 <= budget <= SUMMARY_BYTES:
+    budget = body.get('summary_bytes')
+    if budget is not None and (type(budget) is not int or budget < 1):
         raise HTTPException(422, 'Invalid saved-summary budget.')
-    if budget < SUMMARY_BYTES:
+    if budget:
         instructions += f'\nFor this update, the saved summary must fit {budget} UTF-8 bytes. Aim for half that size.'
     if attempt:
         instructions += (f'\nRecovery attempt {attempt}: the previous generation was not accepted. '
-                         f'Rewrite from these original records in at most {min(400 // attempt, budget // 12)} words, within {budget} UTF-8 bytes. '
+                         f'Rewrite from these original records more concisely within the supplied model allocation. '
                          'Prioritize the goal, constraints, action receipts and next step; use journal '
                          'references for detail. Do not continue or copy a partial earlier generation.')
     # Generation limits belong to the selected model/gateway. The saved working
@@ -85,7 +81,7 @@ def private_compaction_payload(history: list[str], model: str, summary_bytes: in
     """A complete private prefix, never a durable journal excerpt or partial cursor."""
     if not isinstance(history, list) or not history or not all(isinstance(item, str) for item in history):
         raise HTTPException(422, 'Expected a complete private history prefix.')
-    if type(summary_bytes) is not int or not 512 <= summary_bytes <= SUMMARY_BYTES:
+    if type(summary_bytes) is not int or summary_bytes < 1:
         raise HTTPException(422, 'Invalid private-summary budget.')
     try:
         content = json.dumps(history, ensure_ascii=False)
@@ -96,13 +92,13 @@ def private_compaction_payload(history: list[str], model: str, summary_bytes: in
     instructions = PRIVATE_INSTRUCTIONS + f'\nFit {summary_bytes} UTF-8 bytes. Aim for half that size.'
     if attempt:
         instructions += (f'\nRecovery attempt {attempt}: the previous generation was not accepted. '
-                         f'Rewrite the entire original prefix in at most {min(400 // attempt, summary_bytes // 12)} words. '
+                         'Rewrite the entire original prefix more concisely. '
                          'Do not continue or copy a partial earlier generation.')
     return {'model': model, 'stream': False, 'messages': [
         {'role': 'system', 'content': instructions}, {'role': 'user', 'content': content}]}
 
 
-def compaction_result(raw, limit=SUMMARY_BYTES):
+def compaction_result(raw, limit=None):
     try:
         choice = json.loads(raw)['choices'][0]
         message = choice['message']
@@ -126,6 +122,6 @@ def compaction_result(raw, limit=SUMMARY_BYTES):
         size = len(summary.encode())
     except UnicodeEncodeError:
         raise SummaryFailure('invalid_response') from None
-    if size > limit:
+    if limit and size > limit:
         raise SummaryFailure('summary_too_large', summary_bytes=size)
     return {'summary': summary}

@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import now
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
 from .environment_templates import TEMPLATES
 from .connector_errors import ConnectorError
 
@@ -27,12 +28,12 @@ class Recipe(BaseModel):
     ref: str = Field(default='main', min_length=1, max_length=200, pattern=r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
     clone_access: Literal['public', 'github'] = 'public'
     setup_mode: Literal['manual', 'detect'] = 'manual'
-    apt_packages: list[str] = Field(default_factory=list, max_length=40)
-    setup: str = Field(default='', max_length=24000)
-    startup: str = Field(default='', max_length=12000)
-    verify: str = Field(min_length=1, max_length=12000)
-    shutdown: str = Field(default='', max_length=6000)
-    instructions: str = Field(default='', max_length=12000)
+    apt_packages: list[str] = Field(default_factory=list)
+    setup: str = ''
+    startup: str = ''
+    verify: str = Field(min_length=1)
+    shutdown: str = ''
+    instructions: str = ''
 
 
 class SaveRecipe(BaseModel):
@@ -93,6 +94,34 @@ class Environments:
                     VALUES(?,?,1,1,?,?) ON CONFLICT DO NOTHING''', (identity, recipe.model_dump_json(), 'Repository discovery', now()))
 
     async def prepare(self, run_id):
+        """Prepare one shared ancestor before a snapshotless worker can start.
+
+        Initial swarm workers are admitted before their coordinator provisions.
+        Follow that durable dependency rather than binding each worker to an
+        empty environment. Ordinary fan-out already carries a pinned build or
+        a workspace snapshot. The existing build journal coalesces concurrent
+        callers; each child keeps the ancestor's exact version after it is ready.
+        """
+        lineage, seen = [], set()
+        current = self.store.run(run_id)
+        while True:
+            if not current or current['id'] in seen:
+                raise HTTPException(409, 'The shared environment parent is missing or cyclic.')
+            seen.add(current['id'])
+            lineage.append(current['id'])
+            if (current.get('environment_build_id') or current.get('snapshot_id')
+                    or current.get('environment_id') == 'none' or not current.get('parent_run_id')):
+                break
+            current = self.store.run(current['parent_run_id'])
+        for identity in reversed(lineage):
+            if identity != lineage[-1]:
+                self.store.execute('''UPDATE runs SET environment_build_id=(
+                    SELECT environment_build_id FROM runs AS parent WHERE parent.id=runs.parent_run_id)
+                    WHERE id=? AND environment_build_id='' ''', (identity,))
+            project = await self._prepare(identity)
+        return project
+
+    async def _prepare(self, run_id):
         run = self.store.run(run_id)
         if run.get('repo_url') and self.connectors:
             try:
@@ -294,7 +323,8 @@ class Environments:
         return {**recipe, 'build_id': identity, 'snapshot_id': build['snapshot_id'], 'commit_sha': build['commit_sha']}
 
     async def rpc(self, sandbox, action, *, token=''):
-        proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/environment_build.py', action,
+        proc = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                      RUNTIME_ROOT, 'environment_build.py', action,
                                       timeout=30, env={'MOYAI_CLONE_TOKEN': token} if token else {})
         output, _ = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
         if await proc.wait.aio() != 0:
@@ -341,7 +371,7 @@ class Environments:
             if not self.progress(identity, phase='building'):
                 return
         report = await self.rpc(sandbox, 'status')
-        self.update(identity, log=str(report.get('log', ''))[-48000:])
+        self.update(identity, log=str(report.get('log', '')))
         if not report.get('done'):
             return
         if not report.get('success'):

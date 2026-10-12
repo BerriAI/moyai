@@ -14,6 +14,30 @@ function loadSkillText(context){
   for(const file of ['icons','skill-icons','skill-composer'])vm.runInContext(readFileSync(`app/static/${file}.js`,'utf8'),context);
 }
 
+test('long histories associate steering and answers without rescanning every message for each turn',()=>{
+  const data={status:'idle',messages:[],events:[]};let reads=0;
+  for(let i=0;i<500;i++){
+    const root=i*3+1,steering=root+1;
+    for(const message of [{id:root,role:'user',status:'completed'},{id:steering,role:'user',status:'completed'},{id:root+2,role:'assistant',status:'completed'}]){
+      Object.defineProperty(message,'steering_parent_id',{get(){reads++;return message.id===steering?root:null;}});
+      data.messages.push(message);
+    }
+    data.events.push(event(i*4+1,'chat','Response started',{message_id:root}),
+      event(i*4+2,'status','Follow-up delivered',{turn_id:root,phase:'steering',message_id:steering}),
+      event(i*4+3,'message',`Reply to ${steering}`,{turn_id:root,input_id:steering}),
+      event(i*4+4,'chat','Response saved',{message_id:root}));
+  }
+  const turns=groups(data),items=timeline(data,turns),histories=MoyaiActivity.completedHistory(data,turns);
+  assert.equal(turns.size,500);assert.equal(histories.size,1000);
+  for(let i=0;i<500;i++){
+    const steering=String(i*3+2);
+    assert.equal(turns.get(String(i*3+1)).input,steering);
+    assert.equal(items.get(steering).at(-1).content,`Reply to ${steering}`);
+    assert.match(histories.get(steering),/^Worked for /);
+  }
+  assert.ok(reads<data.messages.length*20,`history lookup made ${reads} message reads`);
+});
+
 test('queued follow-ups never capture work from the current response; restored turns retain history',()=>{
   const data=run();data.events.push(event(2,'chat','Message queued',{message_id:2}),tool(3,'a','started'),tool(4,'a','completed'),event(5,'chat','Response saved',{message_id:1}),event(6,'chat','Response started',{message_id:2}),event(7,'message','Now inspecting the follow-up',{turn_id:2}));
   data.active_message_id=2;data.messages[0].status='completed';data.messages[1].status='running';

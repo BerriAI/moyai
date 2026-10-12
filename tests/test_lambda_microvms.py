@@ -18,7 +18,7 @@ from app.config import Settings
 from app.sandboxes import provider, provider_for_id, ProvisioningTerminated
 from app.sandboxes.lambda_microvm import LambdaProvider, Sandbox, MAX_ARCHIVE, TransientEndpointError
 from sandbox import lambda_checkpoint as checkpoint
-from sandbox.continuation import RotationDeadline
+from agent.continuation import RotationDeadline
 
 
 @pytest.fixture

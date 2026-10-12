@@ -10,8 +10,8 @@ import shutil
 import tempfile
 import time
 
-from sandbox.context_store import ContextStore, ContextUnavailable, read_records
-from sandbox.harness_agent import TurnJournal
+from agent.context_store import ContextStore, ContextUnavailable, read_records
+from agent.harnesses.harness_agent import TurnJournal
 
 
 FACTS = ['Keep Escape support', 'Do not deploy', 'PR #127 already created']

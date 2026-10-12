@@ -30,7 +30,7 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>PR access loca
 <link rel="stylesheet" href="/static/style.css"></head><body><main style="padding:32px;max-width:700px">
 <h1>PR access: controlled local demo</h1>
 <p>This uses the real chat UI, authenticated consent endpoint, message queue and broker. GitHub and task execution are controlled fixtures. No external PR is written.</p>
-<p>Start a chat, allow access, then select Continue in chat and send the message. The fixture runner calls the real update and comment tools and displays their responses. Revoke access and send another message to observe refusal.</p>
+<p>Start a chat and select Approve. The card disappears and work continues automatically. Start another chat and select Not Approve to exercise denial. The fixture runner calls the real update and comment tools and displays their responses.</p>
 <button id="start">Start demo chat</button><p id="error" role="alert"></p></main><script src="/demo.js"></script></body></html>'''
 SCRIPT = '''document.querySelector('#start').onclick=async()=>{try{
  const session=await (await fetch('/api/session')).json();
@@ -73,9 +73,9 @@ def demo(directory, port=8794):
             update = await broker(rid, 'github_update_pull_request', args)
             comment = await broker(rid, 'github_comment_pull_request', {
                 **comment_args().model_dump(), 'request_key': 'demo-comment-' + str(message['id'])})
-            result = f"Controlled GitHub results through actual broker routes:\n\nUpdate: `{update}`\n\nComment: `{comment}`\n\nNo external service was contacted. You can now revoke access and send another message."
+            result = f"Controlled GitHub results through actual broker routes:\n\nUpdate: `{update}`\n\nComment: `{comment}`\n\nNo external service was contacted. Access remains approved for this PR in this session."
         else:
-            result = f"PR write access is **{status.get('status', 'unavailable')}**. No write attempted.\n\nUse the PR access panel below. Approval applies only to this chat and requester; select Continue in chat and send to resume."
+            result = f"PR write access is **{status.get('status', 'unavailable')}**. No write attempted.\n\nUse the PR access panel below. Approval applies only to this chat and requester; select Approve to continue automatically or Not Approve to deny access."
         store.finish_message(rid, message['id'], result)
         store.execute("UPDATE runs SET mode='demo',status='completed',token_hash='' WHERE id=?", (rid,))
 

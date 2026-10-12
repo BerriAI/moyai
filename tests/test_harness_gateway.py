@@ -84,7 +84,7 @@ def test_gateway_rejection_only_publishes_known_structured_reasons(raw: bytes, r
 @pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
 def test_policy_rejection_reaches_relay_without_false_transport_recovery(workspace, monkeypatch, route):
     from http.server import BaseHTTPRequestHandler
-    from sandbox.transport_recovery import retryable_failure
+    from agent.transport_recovery import retryable_failure
     from test_broker_transport import diagnostic_relay
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'

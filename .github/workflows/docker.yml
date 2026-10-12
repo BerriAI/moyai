@@ -6,55 +6,100 @@ on:
 permissions:
   contents: read
 jobs:
-  docker:
+  regression:
+    name: Regression (${{ matrix.group }})
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        group: [security, sessions, interfaces, agent, recovery]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Test startup and migration guards
+        if: matrix.group == 'security'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_docker_start.py tests/test_render.py tests/test_workspace_image.py tests/test_persistence.py
       - name: Test secure access recovery and broker transport
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_credentials.py tests/test_credential_discovery.py tests/test_credential_tools.py tests/test_broker_transport.py tests/test_mcp_bridge.py tests/test_mcp_concurrency.py tests/test_github_refresh.py tests/test_workspace.py::test_every_broker_tool_has_an_audited_replay_classification tests/test_github_identity.py::test_repeatable_broker_metadata_preserves_selection_and_never_publishes
+        if: matrix.group == 'security'
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_credentials.py tests/test_credential_discovery.py tests/test_credential_tools.py tests/test_broker_transport.py tests/test_mcp_bridge.py tests/test_mcp_concurrency.py tests/test_github_refresh.py tests/test_github_coding.py tests/test_github_diagnostics.py tests/test_workspace.py::test_every_broker_tool_has_an_audited_replay_classification tests/test_github_identity.py::test_repeatable_broker_metadata_preserves_selection_and_never_publishes
+      - name: Test personal Slack and owner-only sessions
+        if: matrix.group == 'security'
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_personal_slack.py tests/test_private_sessions.py tests/test_private_sinks.py tests/test_slack_secrets.py tests/test_private_integrations.py
       - name: Test Cloudflare identity gate and sandbox transport
+        if: matrix.group == 'security'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py
       - name: Test personal memory ownership, capture and privacy
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py
+        if: matrix.group == 'interfaces'
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py tests/test_skill_learning.py tests/test_initial_context.py tests/test_skills.py tests/test_bundled_skills.py
       - name: Test Slack requester identity and DM delivery
+        if: matrix.group == 'interfaces'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_slack_sender.py tests/test_identities.py
       - name: Test instant session metadata and chat routing
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
+        if: matrix.group == 'sessions'
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_conversation_responsiveness.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
       - name: Test private storage, migration and legacy file compatibility
+        if: matrix.group == 'sessions'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_blob_storage.py tests/test_storage_maintenance.py tests/test_attachments.py tests/test_audio.py tests/test_slack_files.py tests/test_skill_saving.py tests/test_artifact_files.py tests/test_agents.py tests/test_persistence.py tests/test_capture_release.py
       - uses: actions/setup-node@v4
+        if: contains(fromJSON('["interfaces", "agent", "recovery"]'), matrix.group)
         with:
           node-version: '22'
       - name: Test account preferences and settings interactions
+        if: matrix.group == 'interfaces'
         run: |
           uv run --python 3.13 pytest -q --tb=line tests/test_user_preferences.py
           node --test tests/test_settings.cjs tests/test_users.cjs
       - name: Test session search and sidebar interactions
+        if: matrix.group == 'interfaces'
         run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs tests/test_session_actions.cjs tests/test_activity.cjs tests/test_harness_picker.cjs tests/test_automation_editor.cjs
       - name: Test saved source citations and archive access
+        if: matrix.group == 'interfaces'
         run: |
           node --test tests/test_saved_files.cjs tests/test_file_tree.cjs tests/test_slack_file_links.cjs
           uv run --python 3.13 pytest -q --tb=line tests/test_artifacts.py tests/test_artifact_files.py tests/test_slack_file_links.py tests/test_google_sso.py
       - name: Test PR correlation and leaderboard
+        if: matrix.group == 'interfaces'
         run: |
-          uv run --python 3.13 pytest -q --tb=line tests/test_pr_analytics.py tests/test_pr_delivery.py tests/test_personal_spend.py
+          uv run --python 3.13 pytest -q --tb=line tests/test_pr_analytics.py tests/test_pr_delivery.py tests/test_pr_milestones.py tests/test_github_ci.py tests/test_personal_spend.py
           node --test tests/test_spend.cjs
       - name: Test native Codex runtime and model defaults
+        if: matrix.group == 'agent'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transport.py tests/test_codex_tool_readiness.py tests/test_codex_catalog.py tests/test_codex_tool_search.py tests/test_codex_runtime.py tests/test_tool_schema_cache.py tests/test_workspace_diagnostics.py tests/test_config.py tests/test_models.py tests/test_claude_sdk.py
       - name: Test active input delivery and queue ownership
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_steering_latency.py tests/test_active_steering.py tests/test_message_queue.py tests/test_send_now_interrupt.py
+        if: matrix.group == 'agent'
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_performance.py tests/test_steering_latency.py tests/test_active_steering.py tests/test_message_queue.py tests/test_send_now_interrupt.py
+      - name: Test independent agent startup and warm runtime reuse
+        if: matrix.group == 'agent'
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_independent_runtime.py tests/test_independent_runtime_warm.py tests/test_independent_runtime_sdk.py
       - name: Test saved model choices and opt-in processing tiers
+        if: matrix.group == 'agent'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_astra_ultrafast.py tests/test_model_preferences.py tests/test_model_tools.py
       - name: Test model trace content and parallel exports
+        if: matrix.group == 'agent'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_tracing.py tests/test_trace_outbox.py tests/test_lens_feedback.py tests/test_parallel_tracing.py
       - name: Test persistent context and real SDK continuation
+        if: matrix.group == 'agent'
         run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_budget.py tests/test_context_recovery.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_claude_message_buffer.py tests/test_claude_native_compaction.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py tests/test_goals.py tests/test_continuation.py
       - name: Test cloud diagnostics and durable recovery
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_broker_transport.py tests/test_startup_recovery.py tests/test_durable.py tests/test_temporal_integration.py tests/test_redeploy_recovery.py tests/test_scheduling_diagnostics.py
+        if: matrix.group == 'recovery'
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_broker_transport.py tests/test_startup_recovery.py tests/test_startup_overlap.py tests/test_durable.py tests/test_temporal_integration.py tests/test_redeploy_recovery.py tests/test_scheduling_diagnostics.py
+      - name: Test durable swarm mode and mixed-harness delegation
+        if: matrix.group == 'recovery'
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_execution_deadline.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py tests/test_swarm_timing.py tests/test_swarm_time_controls.py tests/test_swarm_time_runtime.py tests/test_swarm_broker_timing.py tests/test_swarm_chat.py
+  docker:
+    # Keep one explicit success gate for every matrix result and the real image.
+    needs: regression
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Require every regression group to pass
+        env:
+          REGRESSION_RESULT: ${{ needs.regression.result }}
+        run: test "$REGRESSION_RESULT" = success
+      - uses: actions/checkout@v4
       - name: Build production image
         run: docker build -t moyai-docker-smoke .
       - name: Exercise mounted disk migration and restart

@@ -4,8 +4,9 @@ The agent trace includes body-free `runtime.*` child spans for durable controlle
 steps. These use the same run and turn identity as model/tool spans:
 
 - `runtime.activity_queue`: Temporal's current-attempt scheduled-to-start time.
-- `runtime.prepare`: source context preparation.
-- `runtime.provision`: workspace provisioning or environment preparation.
+- `runtime.prepare`: startup preparation; source context for warm, pool and demo turns.
+- `runtime.provision`: workspace provisioning or environment preparation. On cold
+  turns this now overlaps source context loading and waits for both branches.
 - `runtime.install`: runtime refresh, browser restore, and launch-spec preparation.
 - `runtime.launch`: starting the sandbox supervisor.
 - `runtime.monitor`: observing the sandbox process, including intentional polling.
@@ -31,3 +32,7 @@ follow-ups. Compare the root span, model spans, runtime intervals, and schedulin
 logs to locate the uncovered time before changing startup or persistence.
 Root duration does not measure Slack delivery. Historical traces cannot gain
 these new spans retroactively; instrumentation alone establishes no speedup.
+An interrupted cold acquisition can leave pending source reads for
+`runtime.install`; that recovery interval includes those reads. A shorter
+`runtime.prepare` alone is not evidence of faster model output: compare submission
+through the first actual model span and delivery using the same task/settings.

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import zipfile
 import zlib
@@ -172,9 +173,11 @@ async def test_snapshot_refresh_includes_runtime_fixes_without_touching_user_fil
     path, data = next(iter(written.items()))
     assert path.startswith('/tmp/moyai-runtime-') and path.endswith('.bundle')
     files = json.loads(zlib.decompress(base64.b64decode(data)))
-    assert 'hermes_compat.py' in files and 'hermes-steering.patch' in files and 'hermes-stop-reason.patch' in files
-    assert 'apply_hermes_patches()' in files['agent.py']
-    assert all('/' not in name and (name.endswith('.py') or name.startswith('hermes-')) for name in files)
+    assert {'sandbox/hermes_compat.py', 'sandbox/hermes-steering.patch', 'sandbox/hermes-stop-reason.patch'} <= files.keys()
+    assert 'apply_hermes_patches()' in files['sandbox/agent.py']
+    assert {'agent/__init__.py', 'agent/agent.py', 'agent/prompts/system.md', 'agent/tools/mcp_bridge.py'} <= files.keys()
+    assert any(name.startswith('agent/skills/') for name in files)
+    assert all(name.startswith(('agent/', 'sandbox/')) and name.endswith(('.py', '.md', '.patch')) for name in files)
 
 
 def ready_runtime(changed=()):
@@ -207,7 +210,9 @@ class FakeSandbox:
             archive.writestr("result.md", "Test result")
         self.archive = buffer.getvalue()
         self.completed = completed
-        self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read))
+        self.runtime_verified = False
+        self.filesystem = SimpleNamespace(write_text=aio(self.write), stat=aio(self.stat), read_bytes=aio(self.read),
+                                          copy_to_local=aio(self.copy_to_local))
         self.terminate = aio(self.terminate_sandbox)
         self.wait = aio(self.wait_sandbox)
         self.exec = aio(self.execute)
@@ -222,6 +227,10 @@ class FakeSandbox:
     async def read(self, path):
         return self.archive
 
+    async def copy_to_local(self, source, destination):
+        assert source == '/artifacts/result.zip'
+        Path(destination).write_bytes(self.archive)
+
     async def terminate_sandbox(self):
         self.terminated = True
 
@@ -232,7 +241,9 @@ class FakeSandbox:
 
     async def execute(self, *command, timeout=None, bufsize=-1, env=None):
         if command[:3] == ('/usr/local/bin/python', '-I', '-c'):
+            self.runtime_verified = True
             return ready_runtime()  # This lifecycle fixture has the baked runtime.
+        assert self.runtime_verified
         assert command[0] == "/opt/hermes-env/bin/python"
         async def wait():
             return 0 if self.completed else 1

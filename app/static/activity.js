@@ -68,7 +68,20 @@
     const seconds=Math.max(0,Math.floor((Number(end)-Number(start))/1000))||0;
     return seconds<60?`${seconds}s`:seconds<3600?`${Math.floor(seconds/60)}m ${seconds%60}s`:`${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`;
   }
+  function messageIndex(run){
+    const messages=new Map(),steering=new Map();
+    for(const message of run.messages||[]){
+      messages.set(String(message.id),message);
+      if(message.steering_parent_id){
+        const parent=String(message.steering_parent_id);
+        if(!steering.has(parent))steering.set(parent,[]);
+        steering.get(parent).push(message);
+      }
+    }
+    return {messages,steering};
+  }
   function groups(run){
+    const {steering}=messageIndex(run);
     const turns=new Map((run.messages||[]).filter(m=>m.role==='user'&&!m.steering_parent_id).map(m=>[String(m.id),{id:String(m.id),message:m,events:[],start:0,end:0}]));
     let current=null;const seen=new Set();
     for(const event of visibleEvents(run.events||[])){
@@ -97,7 +110,7 @@
       // Match the server's delivered-input owner: an offered, locked child,
       // otherwise the latest receipt. Enqueue order is not delivery order.
       const receipts=turn.events.filter(event=>event.kind==='status'&&event.data?.phase==='steering'&&event.data.message_id);
-      const offered=(run.messages||[]).find(message=>String(message.steering_parent_id)===turn.id&&message.status==='queued'&&message.queue_locked&&
+      const offered=(steering.get(turn.id)||[]).find(message=>message.status==='queued'&&message.queue_locked&&
         !receipts.some(event=>String(event.data.message_id)===String(message.id)));
       turn.input=String(offered?.id||receipts.at(-1)?.data.message_id||turn.id);
       const focus=isCurrent&&run.status==='running'?turn.events.findLast(event=>isFocus(event)&&event.data.live_status===true&&event.data.activity_version===1&&
@@ -127,15 +140,15 @@
     }
     return turns;
   }
-  function current(run){
-    const turns=groups(run),turn=turns.get(String(run.active_message_id));
+  function current(run,turns=groups(run)){
+    const turn=turns.get(String(run.active_message_id));
     return turn?.start?turn:{headline:labels[run.status]||'',input:run.active_message_id,pulse:false};
   }
   function timeline(run,turns=groups(run)){
-    const result=new Map();
+    const result=new Map(),{messages,steering}=messageIndex(run);
     for(const turn of turns.values()){
       const rows=new Map(turn.rows.map(row=>[row.eventId,row]));
-      const allowedInputs=new Set([turn.id,...(run.messages||[]).filter(m=>String(m.steering_parent_id)===turn.id).map(m=>String(m.id)),
+      const allowedInputs=new Set([turn.id,...(steering.get(turn.id)||[]).map(m=>String(m.id)),
         ...turn.events.filter(e=>e.data?.phase==='steering'&&e.data.message_id).map(e=>String(e.data.message_id))]);
       const inputs=new Map();let delivered=turn.id;
       function input(id){
@@ -172,7 +185,7 @@
         }
       }
       const latest=input(delivered);
-      if((turn.live||turn.responseComplete&&!latest.entries.length)&&!latest.block)work(latest,delivered,Date.parse(run.messages?.find(m=>String(m.id)===delivered)?.started_at)||turn.start,'pending');
+      if((turn.live||turn.responseComplete&&!latest.entries.length)&&!latest.block)work(latest,delivered,Date.parse(messages.get(delivered)?.started_at)||turn.start,'pending');
       for(const [id,bucket] of inputs){
         for(const item of bucket.entries){
           if(item.type!=='work')continue;
@@ -195,7 +208,7 @@
     return new Map([...timeline(run,turns)].map(([id,items])=>[id,items.filter(item=>item.type==='update').map(({id,content})=>({id,content}))]).filter(([,items])=>items.length));
   }
   function completedHistory(run,turns=groups(run)){
-    const histories=new Map(),answered=new Set(),pending=[];
+    const histories=new Map(),answered=new Set(),pending=[],{steering}=messageIndex(run);
     // The API orders messages by delivery, not enqueue time. Match each
     // answer to its delivered root input, skipping queues and steering.
     // A stack also handles an inline session-ID exchange during live work.
@@ -212,7 +225,7 @@
       // commentary visible until its successful answer is in the transcript:
       // streamed save/idle events can arrive before the fresh message list.
       if(!['completed','idle'].includes(turn.status)||!answered.has(turn.id))continue;
-      const ids=new Set([turn.id,...(run.messages||[]).filter(message=>String(message.steering_parent_id)===turn.id).map(message=>String(message.id)),
+      const ids=new Set([turn.id,...(steering.get(turn.id)||[]).map(message=>String(message.id)),
         ...turn.events.filter(event=>event.data?.phase==='steering'&&event.data.message_id).map(event=>String(event.data.message_id))]);
       for(const id of ids)histories.set(id,id===turn.input?(turn.start?`Worked for ${duration(turn.start,turn.end)}`:'Work history'):'Earlier activity');
     }
@@ -307,11 +320,12 @@
   function sync(container,run,options={}){
     if(!container)return;
     const nearBottom=container.scrollHeight-container.scrollTop-container.clientHeight<100;
-    const turns=groups(run),byInput=timeline(run,turns),histories=completedHistory(run,turns);
+    const turns=groups(run),byInput=timeline(run,turns),histories=completedHistory(run,turns),{messages}=messageIndex(run);
+    const deferredTurns=new Set(run.deferred_activity||[]),loadedTurns=new Set(run.loaded_activity||[]);
     container.querySelectorAll('[data-activity-slot]').forEach(slot=>{
-      const message=(run.messages||[]).find(item=>String(item.id)===slot.dataset.activitySlot);
+      const message=messages.get(slot.dataset.activitySlot);
       const turnId=String(message?.steering_parent_id||slot.dataset.activitySlot);
-      const deferred=options.loadActivity&&run.deferred_activity?.includes(turnId)&&!run.loaded_activity?.includes(turnId);
+      const deferred=options.loadActivity&&deferredTurns.has(turnId)&&!loadedTurns.has(turnId);
       let placeholder=slot.querySelector?.(':scope > [data-deferred-activity]');
       if(deferred){
         if(!placeholder){

@@ -4,11 +4,11 @@ import json
 import httpx
 import pytest
 
-from app.attachments import MAX_FILE, attachment_context, inspect_file
+from app.attachments import attachment_context, inspect_file
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.security import digest
-from sandbox.agent import conversation_prompt
+from agent.agent import conversation_prompt
 from test_attachments import png
 from test_audio import gateway, grant_files, slack_download
 from test_slack import event, signed, slack_app
@@ -154,10 +154,9 @@ def test_context_recovers_mention_files_and_only_imports_prior_files_from_invoke
 
 
 @pytest.mark.parametrize('metadata,raw,status,error', [
-    ({'size': MAX_FILE + 1}, None, 200, '10 MB'),
+    ({'size': 2**50}, None, 200, 'storage budget'),
     ({'is_external': True}, None, 200, 'unavailable'),
     ({'url_private_download': 'https://evil.example/image.png'}, None, 200, 'unsupported file location'),
-    ({}, b'not an image', 200, 'could not be opened'),
     ({}, None, 302, 'Could not read'),
     ({}, None, 403, 'Could not read'),
 ])
@@ -177,8 +176,7 @@ def test_failed_slack_images_are_explicit_and_never_become_model_images(slack_ap
 def test_slack_image_actual_download_limit_and_connection_changes(slack_app, monkeypatch):
     app, client, *_ = slack_app
     provider(app, monkeypatch, raw=b'x' * 32, metadata={'size': 1})
-    monkeypatch.setattr('app.slack_files.MAX_FILE', 16)
-    with pytest.raises(ValueError, match='download limit'):
+    with pytest.raises(ValueError, match='declared size'):
         client.portal.call(app.state.slack.files.read, FILE['id'], 'T12345678')
     with pytest.raises(ValueError, match='access changed'):
         client.portal.call(app.state.slack.files.read, FILE['id'], 'T87654321')
@@ -273,7 +271,7 @@ def test_live_file_scope_check_preserves_connection_guards(slack_app, monkeypatc
 
 @pytest.mark.parametrize('from_context', [False, True])
 @pytest.mark.parametrize('remote', [False, True])
-def test_slack_eight_file_budget_keeps_mention_priority_and_deduplicates(slack_app, monkeypatch, from_context, remote):
+def test_slack_complete_files_keep_mention_priority_and_deduplicate(slack_app, monkeypatch, from_context, remote):
     app, client, runs, _ = slack_app
     if remote:
         app.state.store.objects = MemoryObjects()
@@ -291,8 +289,8 @@ def test_slack_eight_file_budget_keeps_mention_priority_and_deduplicates(slack_a
     # Connector locks are shared with live Slack pollers on the app loop.
     client.portal.call(app.state.slack.prepare, run_id)
     assert app.state.store.slack_source(run_id)['context_status'] == 'ready'
-    assert calls == [files[-1]['id'], *[file['id'] for file in files[:7]]]
-    assert len(app.state.store.messages(run_id)[0]['attachments']) == 8
+    assert calls == [files[-1]['id'], *[file['id'] for file in files[:-1]]]
+    assert len(app.state.store.messages(run_id)[0]['attachments']) == len(files)
 
 @pytest.mark.parametrize('change', ['paused', 'team_changed'])
 @pytest.mark.parametrize('recovered', [False, True])
@@ -330,4 +328,3 @@ def test_slack_scope_is_rechecked_when_publishing_remote_uploads(slack_app, monk
     assert not message['attachments']
     assert 'Slack access changed' in message['content']
     assert all(row['message_id'] is None for row in store.rows('SELECT message_id FROM attachments'))
-

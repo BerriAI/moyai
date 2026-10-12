@@ -1,45 +1,97 @@
-"""Authenticated, bounded access to individual files in saved result archives.
+"""Authenticated, streamed access to individual files in saved result archives.
 
 Never extract agent-controlled paths onto the server. A revision pins previews
 and downloads to the archive the user selected, rather than a later overwrite.
 """
-from collections import Counter
+from collections import Counter, OrderedDict
+from concurrent.futures import Future, TimeoutError
 from contextlib import contextmanager
-from io import BytesIO
+import json
 from pathlib import PurePosixPath
 import re
 import stat
+import threading
+from typing import Literal
 from urllib.parse import quote, urlencode
 import zipfile
 import zlib
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from . import captures
-from .attachments import inspect_file
+from .attachments import inspect_file, IMAGE_PREVIEW_BYTES
+from .published_artifacts import text_page
+from .private_sinks import require_owner, require_request_owner
 
-MAX_ARCHIVE = 20 * 1024 * 1024
-MAX_TOTAL = 32 * 1024 * 1024
-MAX_FILE = 2 * 1024 * 1024
-MAX_PREVIEW = 128 * 1024
-MAX_ENTRIES = 10000
-MAX_LIST = 1000
+PREVIEW_PAGE = 128 * 1024
+
+
+class ArchiveCatalog:
+    """Bounded, per-app metadata cache; never retains private archive bytes.
+
+    A current manifest lookup and authorization precede every use. Revisions
+    pin entries, and concurrent readers share one verified archive download.
+    Each process owns its cache; no cross-worker coordination is implied.
+    """
+
+    def __init__(self, max_bytes=8 * 1024 * 1024, max_entries=32):
+        self.max_bytes, self.max_entries = max_bytes, max_entries
+        self.entries, self.pending = OrderedDict(), {}
+        self.size = 0
+        self.lock = threading.Lock()
+
+    def read(self, key, load):
+        with self.lock:
+            if key in self.entries:
+                encoded = self.entries[key]
+                self.entries.move_to_end(key)
+                return json.loads(encoded)
+            future = self.pending.get(key)
+            owner = future is None
+            if owner:
+                if len(self.pending) >= 16:
+                    raise HTTPException(503, 'Saved files are busy. Retry in a moment.')
+                future = self.pending[key] = Future()
+        if not owner:
+            try:
+                return json.loads(future.result(timeout=30))
+            except TimeoutError:
+                raise HTTPException(503, 'The saved workspace is still loading. Retry in a moment.') from None
+        try:
+            value = load()
+            encoded = json.dumps(value).encode()
+            with self.lock:
+                if len(encoded) <= self.max_bytes:
+                    self.entries[key] = encoded
+                    self.size += len(encoded)
+                    while len(self.entries) > self.max_entries or self.size > self.max_bytes:
+                        _, removed = self.entries.popitem(last=False)
+                        self.size -= len(removed)
+            future.set_result(encoded)
+            return value
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with self.lock:
+                self.pending.pop(key, None)
 
 
 def safe_member(info):
     name = info.filename
     mode = stat.S_IFMT(info.external_attr >> 16)
-    return (bool(name) and len(name) <= 1024 and not info.is_dir()
+    return (bool(name) and not info.is_dir()
             and not name.startswith('/') and '\\' not in name and ':' not in name
             and all(ord(c) >= 32 and ord(c) != 127 for c in name)
             and all(part not in {'', '.', '..'} for part in name.split('/'))
             and mode in {0, stat.S_IFREG} and not info.flag_bits & 1
             and info.compress_type in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
-            and 0 <= info.file_size <= MAX_FILE)
+            and info.file_size >= 0)
 
 
 @contextmanager
-def saved_archive(settings, store, run_id, revision=None):
+def saved_archive(settings, store, run_id, revision=None, *, actor=""):
+    require_owner(store, run_id, actor)
     if not re.fullmatch(r'[0-9a-f]{32}', run_id) or not store.run(run_id):
         raise HTTPException(404, 'Session not found.')
     name = run_id + '.zip'
@@ -47,18 +99,14 @@ def saved_archive(settings, store, run_id, revision=None):
         info = store.artifacts.info(name)
         if info is None:
             raise FileNotFoundError(name)
-        if info['size'] > MAX_ARCHIVE:
-            raise HTTPException(413, 'This archive is too large to browse.')
         current = info['revision']
         if revision is not None and revision != current:
             raise HTTPException(409, 'The saved files changed. Close and reopen Files to view the latest version.')
-        raw = store.artifacts.read(name, MAX_ARCHIVE, revision=current)
-        with zipfile.ZipFile(BytesIO(raw)) as archive:
+        with store.artifacts.open(name, revision=current) as source, zipfile.ZipFile(source) as archive:
             entries = archive.infolist()
-            if len(entries) > MAX_ENTRIES or sum(i.file_size for i in entries) > MAX_TOTAL:
-                raise HTTPException(413, 'This archive exceeds the file browser limits. Download the ZIP instead.')
             counts = Counter(i.filename for i in entries)
             files = {i.filename: i for i in entries if safe_member(i) and counts[i.filename] == 1}
+            require_owner(store, run_id, actor)
             yield archive, files, current, len(entries) - len(files)
     except FileNotFoundError:
         raise HTTPException(404, 'No saved files are available yet.') from None
@@ -76,37 +124,61 @@ def file_info(run_id, info, revision):
             **({'kind': 'image', 'inline_url': url + '&inline=true'} if image else {})}
 
 
-def routes(settings, store, security):
+def routes(settings, store, security, published=None):
     router = APIRouter()
+    catalogs = ArchiveCatalog()
 
     @router.get('/api/runs/{run_id}/files')
-    def list_files(run_id: str, request: Request):
-        security.require(request)
-        media = captures.listing(settings, run_id, store=store) if store.run(run_id) else []
-        if media and store.artifacts.info(run_id + '.zip') is None:
-            return {'revision': 'captures', 'files': media, 'limited': False, 'note': 'Saved browser captures.'}
-        with saved_archive(settings, store, run_id) as (_, files, revision, skipped):
-            # Source inventories must not crowd recovery artifacts out of the capped catalog.
-            ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
-            return {'revision': revision, 'files': media + [file_info(run_id, i, revision) for i in ordered[:MAX_LIST]],
-                    'limited': len(ordered) > MAX_LIST or bool(skipped),
-                    'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}
+    def list_files(run_id: str, request: Request, view: Literal['all', 'media'] = 'all'):
+        actor = require_request_owner(store, security, request, run_id)
+        if not re.fullmatch(r'[0-9a-f]{32}', run_id):
+            raise HTTPException(404, 'Session not found.')
+        media = captures.listing(settings, run_id, store=store, actor=actor)
+        outputs = published.listing(run_id) if published else []
+        media = outputs + media
+        info = store.artifacts.info(run_id + '.zip')
+        require_owner(store, run_id, actor)
+        if view == 'media':
+            # Captures and explicitly published outputs have their own manifests;
+            # listing them must never open the potentially multi-GB recovery ZIP.
+            return {'revision': 'published', 'files': media, 'limited': False,
+                    'archive_pending': info is not None,
+                    'archive_revision': info['revision'] if info else None,
+                    'note': 'Published files and saved captures.'}
+        if media and info is None:
+            return {'revision': 'published', 'files': media, 'limited': False, 'note': 'Verified artifact versions and saved browser captures.'}
+        if info is None:
+            raise HTTPException(404, 'No saved files are available yet.')
+
+        def scan():
+            with saved_archive(settings, store, run_id, info['revision'], actor=actor) as (_, files, revision, skipped):
+                ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
+                return {'revision': revision, 'files': [file_info(run_id, i, revision) for i in ordered],
+                        'limited': bool(skipped)}
+
+        catalog = catalogs.read((run_id, info['revision'], info['reference']), scan)
+        # Cache hits and readers waiting on another scan must recheck the run
+        # before releasing filenames, including deletion during that wait.
+        require_owner(store, run_id, actor)
+        explicit_paths = {item['workspace_path'] for item in outputs}
+        return {**catalog, 'files': media + [item for item in catalog['files'] if item['workspace_path'] not in explicit_paths],
+                'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}
 
     @router.get('/api/runs/{run_id}/files/content')
-    def content(run_id: str, request: Request, path: str = Query(max_length=1024),
-                revision: str | None = Query(default=None, max_length=64), preview: bool = False, inline: bool = False):
-        security.require(request)
-        with saved_archive(settings, store, run_id, revision) as (archive, files, _, __):
+    def content(run_id: str, request: Request, path: str,
+                revision: str | None = Query(default=None, max_length=64), preview: bool = False, inline: bool = False, offset: int = 0, length: int = PREVIEW_PAGE):
+        actor = require_request_owner(store, security, request, run_id)
+        with saved_archive(settings, store, run_id, revision, actor=actor) as (archive, files, pinned, __):
             info = files.get(path)
             if info is None:
                 raise HTTPException(404, 'This file is not available in the saved archive.')
-            # Read through ZipExtFile with a hard cap, even if metadata lies.
-            limit = MAX_PREVIEW if preview and not inline else MAX_FILE
-            with archive.open(info) as stream:
-                raw = stream.read(limit + 1)
+            if offset < 0 or length < 1:
+                raise HTTPException(422, 'Use a nonnegative byte offset and positive length.')
             if inline:
-                if len(raw) > MAX_FILE:
-                    raise HTTPException(413, 'This file exceeds the preview size limit.')
+                if info.file_size > IMAGE_PREVIEW_BYTES:
+                    raise HTTPException(415, 'Download this image to view it at its original size.')
+                with archive.open(info) as stream:
+                    raw = stream.read()
                 try:
                     _, image, _ = inspect_file(raw)
                 except ValueError:
@@ -119,25 +191,21 @@ def routes(settings, store, security):
                     'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
                 })
             if preview:
-                truncated = len(raw) > limit
-                try:
-                    text = raw[:limit].decode('utf-8', errors='strict')
-                except UnicodeDecodeError as exc:
-                    # A preview boundary may bisect a UTF-8 character.
-                    if truncated and exc.reason == 'unexpected end of data':
-                        text = raw[:exc.start].decode('utf-8')
-                    else:
-                        text = None
-                if text is not None and any(ord(c) < 32 and c not in '\n\r\t' for c in text):
-                    text = None
-                return {'text': text, 'truncated': truncated,
-                        'format': 'markdown' if PurePosixPath(path).suffix.lower() in {'.md', '.markdown'} else 'text'}
-            if len(raw) > MAX_FILE:
-                raise HTTPException(413, 'This file exceeds the download size limit.')
+                with archive.open(info) as stream:
+                    def read(start, count):
+                        stream.seek(start)
+                        return stream.read(count)
+                    result = text_page(read, offset, length, info.file_size)
+                return {**result, 'format': 'markdown' if PurePosixPath(path).suffix.lower() in {'.md', '.markdown'} else 'text'}
             name = quote(PurePosixPath(path).name, safe='')
-            return Response(raw, media_type='application/octet-stream', headers={
-                'Content-Disposition': "attachment; filename*=UTF-8''" + name,
-                'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
-            })
+        # The response owns its archive context for the entire stream.
+        def chunks():
+            with saved_archive(settings, store, run_id, pinned, actor=actor) as (archive, files, _, __):
+                with archive.open(files[path]) as stream:
+                    yield from iter(lambda: stream.read(1024 * 1024), b'')
+        return StreamingResponse(chunks(), media_type='application/octet-stream', headers={
+            'Content-Disposition': "attachment; filename*=UTF-8''" + name,
+            'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
+        })
 
     return router

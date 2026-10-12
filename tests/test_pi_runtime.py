@@ -40,8 +40,8 @@ def worker():
     from types import SimpleNamespace
     import litellm
     from sandbox.broker_relay import BrokerRelay
-    from sandbox.context_store import ContextStore
-    from sandbox.harness_registry import create_agent
+    from agent.context_store import ContextStore
+    from agent.harnesses.harness_registry import create_agent
     job = json.load(sys.stdin)
     os.environ['WORKSPACE_RUN_TOKEN'] = job['capability']
     directory = Path(job['directory'])
@@ -58,7 +58,7 @@ def worker():
     agent = create_agent(job.get('harness', 'pi'), spec={'model': job['model'], 'timeout': job.get('timeout', 40),
         'max_iterations': job.get('max_iterations', 20)}, relay=relay,
         config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': job['capability']}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(['start', *args]),
             complete=lambda *args: events.append(['complete', *args]), commentary=lambda text: None),

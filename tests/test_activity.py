@@ -6,8 +6,25 @@ import pytest
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.progress import active_input, current_focus
-from sandbox.activity import ActivityReporter, public_text, result_status
+from agent.activity import ActivityReporter, public_text, result_status
 from test_durable import durable, drive  # noqa: F401
+
+
+@pytest.mark.parametrize('kind', [{'type': 'string'}, ['string', 'null'], None])
+def test_schema_type_values_are_data_and_private_content_is_still_redacted(kind):
+    from agent.trace_content import trace_content
+    result = trace_content({'type': kind, 'password': 'private-schema-secret',
+                            'content': [{'type': 'reasoning', 'text': 'private-reasoning'}]})
+    assert 'private-schema-secret' not in result and 'private-reasoning' not in result
+    assert '[redacted]' in result
+
+
+def test_formatting_fallback_does_not_swallow_durable_emission_errors(monkeypatch):
+    def fail(*args):
+        raise OSError('persistence unavailable')
+    reporter = ActivityReporter(fail)
+    with pytest.raises(OSError, match='persistence unavailable'):
+        reporter.start('x', 'tool_search', {})
 
 
 def test_parallel_tools_pair_by_id_and_do_not_publish_private_bodies():
@@ -59,7 +76,7 @@ def test_connector_details_are_bounded_and_private_payloads_stay_omitted():
 
 def test_view_image_keeps_a_snapshot_and_rejects_outside_paths(tmp_path, monkeypatch):
     from PIL import Image
-    from sandbox import tool_images
+    from agent.tools import tool_images
     monkeypatch.setattr(tool_images, 'WORKSPACE', tmp_path)
     source = tmp_path / 'image.png'
     Image.new('RGB', (4, 4), 'red').save(source)
@@ -141,13 +158,13 @@ async def test_durable_journal_preserves_structured_activity_and_redacts_secrets
     assert event['data']['turn_id'] == manager.store.messages(run_id)[0]['id']
     assert event['data']['phase'] == 'completed'
     assert [e['message'] for e in manager.store.events(run_id) if e['kind'] == 'message'] == [
-        'Public milestone 0', 'Public milestone 1']
+        'Public milestone 0', 'Public milestone 1', 'Public milestone 2']
     assert [(e['message'], e['data']['input_id']) for e in manager.store.events(run_id)
             if e['data'].get('live_status')] == [('Verifying the fix', event['data']['turn_id'])]
 
 
 @pytest.mark.parametrize('chat_enabled', [False, True])
-def test_public_update_budget_is_atomic_durable_and_scoped(tmp_path, chat_enabled):
+def test_complete_public_updates_are_atomic_durable_and_scoped(tmp_path, chat_enabled):
     store = Store(tmp_path)
     run_id = store.create_run('Long task', '', 'demo', [], chat_enabled=chat_enabled)['id']
     turn_id = store.claim_message(run_id)['id'] if chat_enabled else 0
@@ -167,8 +184,9 @@ def test_public_update_budget_is_atomic_durable_and_scoped(tmp_path, chat_enable
     store.event(run_id, 'message', 'Replayed opening', data)
     store.event(run_id, 'message', 'Extra narration after restart')
     selected = [e for e in store.events(run_id) if e['kind'] == 'message']
-    assert len(selected) == 2 and selected[0]['message'] == 'Opening update'
-    assert selected[1]['message'].startswith('Milestone ')
+    assert len(selected) == 14 and selected[0]['message'] == 'Opening update'
+    assert {e['message'] for e in selected[1:-1]} == {f'Milestone {i}' for i in range(12)}
+    assert selected[-1]['message'] == 'Extra narration after restart'
     assert all(e['data']['turn_id'] == turn_id and e['data']['public_update'] for e in selected)
     assert not any(e['data'].get('public_reply_to') for e in selected)
     if chat_enabled:
@@ -178,16 +196,16 @@ def test_public_update_budget_is_atomic_durable_and_scoped(tmp_path, chat_enable
         following = store.claim_message(run_id)
         store.event(run_id, 'message', 'New opening')
         assert store.events(run_id)[-1]['data']['turn_id'] == following['id']
-        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 3
+        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 15
     else:
         store.update_run(run_id, status='completed')
         store.event(run_id, 'message', 'Late completed-run update')
-        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 2
+        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 14
 
 
 @pytest.mark.parametrize('acknowledge_before_reply', [False, True])
 @pytest.mark.parametrize('routine_before_question', [1, 2])
-def test_public_reply_uses_actual_steering_handshake_without_renewing_budget(tmp_path, acknowledge_before_reply, routine_before_question):
+def test_public_reply_uses_actual_steering_handshake_without_forged_attribution(tmp_path, acknowledge_before_reply, routine_before_question):
     store = Store(tmp_path)
     run_id = store.create_run('Long task', '', 'demo', [], chat_enabled=True)['id']
     turn = store.claim_message(run_id)
@@ -212,7 +230,7 @@ def test_public_reply_uses_actual_steering_handshake_without_renewing_budget(tmp
     store.event(run_id, 'message', 'Forged reply', {'input_id': 999, 'public_reply_to': 999})
     selected = [e for e in store.events(run_id) if e['kind'] == 'message']
     expected = ['Opening', 'Milestone', 'Yes, all tests pass'] if routine_before_question == 2 else ['Opening', 'Yes, all tests pass', 'Milestone']
-    assert [e['message'] for e in selected] == expected
+    assert [e['message'] for e in selected] == expected + ['More routine narration']
     assert next(e for e in selected if e['message'] == 'Yes, all tests pass')['data']['public_reply_to'] == question['id']
 
 
@@ -257,7 +275,7 @@ def test_focus_replaces_status_without_spending_chat_budget_and_replay_cannot_re
         assert current_focus(conn, run_id) == 'Verifying the fix'
     saved = store.events(run_id)
     assert len([e for e in saved if e['data'].get('live_status')]) == 4
-    assert [e['message'] for e in saved if e['kind'] == 'message'] == ['Opening update', 'One useful milestone']
+    assert [e['message'] for e in saved if e['kind'] == 'message'] == ['Opening update', 'One useful milestone', 'Extra narration']
     assert all(e['data']['turn_id'] == turn['id'] for e in saved if e['data'].get('live_status'))
     store.finish_message(run_id, turn['id'], 'Done')
     store.event(run_id, 'status', 'Late update', {'phase': 'focus', 'activity_id': 'late', 'input_id': turn['id']})
@@ -331,7 +349,7 @@ def test_focus_envelope_is_bounded_and_never_becomes_a_chat_update():
 
 def test_unknown_native_fields_and_messages_do_not_enter_diagnostics():
     from types import SimpleNamespace
-    from sandbox.sdk_failure import exception_details, codex_details, claude_details
+    from agent.harnesses.sdk_failure import exception_details, codex_details, claude_details
     assert codex_details({'codexErrorInfo': {'private-payload': {'httpStatusCode': 'secret'}},
                           'message': 'secret'}) == {'source': 'native_error'}
     assert claude_details(SimpleNamespace(subtype='private-subtype', is_error=True,
@@ -350,8 +368,8 @@ async def test_claude_hooks_hide_intermediate_failures_and_collapse_completed_pr
     import shutil
     import subprocess
     from types import SimpleNamespace
-    from sandbox.claude_harness import ClaudeAgent
-    from sandbox.harness_agent import TurnJournal
+    from agent.harnesses.claude_harness import ClaudeAgent
+    from agent.harnesses.harness_agent import TurnJournal
 
     node = shutil.which('node')
     if not node:

@@ -172,7 +172,7 @@ def test_new_automation_default_persists_across_edits_and_launches(workspace, mo
     assert legacy.json()['definition']['harness'] == 'hermes'
 
 def test_journal_retains_completed_tool_receipts():
-    from sandbox.harness_agent import TurnJournal
+    from agent.harnesses.harness_agent import TurnJournal
     journal = TurnJournal([], 'request')
     journal.tool_started('one', 'Write', {'path': 'proof.py'})
     assert journal.pending == {'one'}
@@ -219,12 +219,12 @@ def test_sdk_wire_uses_existing_sealed_model_broker():
 
 def test_claude_boundary_preserves_receipts_without_recursive_history():
     from types import SimpleNamespace
-    from sandbox.litellm_harness import LiteLLMAgent
-    from sandbox.harness_registry import resolve
-    from sandbox.continuation import RotationDeadline
+    from agent.harnesses.litellm_harness import LiteLLMAgent
+    from agent.harnesses.harness_registry import resolve
+    from agent.continuation import RotationDeadline
     relay = SimpleNamespace(before_model=None)
     agent = LiteLLMAgent(spec={}, relay=relay, config={}, activity=None, step=lambda: None, cwd='/workspace', definition=resolve('claude-agent-sdk'))
-    from sandbox.harness_agent import TurnJournal, HarnessContext
+    from agent.harnesses.harness_agent import TurnJournal, HarnessContext
     agent.journal = TurnJournal([{'role': 'user', 'content': 'previous'}, {'role': 'assistant', 'content': 'done'}], 'followup')
     agent.context = HarnessContext({}, relay, {}, None, agent.interrupt, '/workspace')
     agent.journal.tool_started('write1', 'Write', {})
@@ -243,8 +243,8 @@ def test_claude_boundary_preserves_receipts_without_recursive_history():
 @pytest.mark.parametrize('second_stops', [False, True])
 def test_overlapping_model_requests_keep_their_own_boundary_outcomes(tmp_path, second_stops):
     from concurrent.futures import ThreadPoolExecutor
-    from sandbox.harness_agent import HarnessInputs, TurnJournal
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_agent import HarnessInputs, TurnJournal
+    from agent.harnesses.harness_registry import create_agent
     first_fenced, second_entered, release_second = (threading.Event() for _ in range(3))
     steps = []
     def step():
@@ -289,8 +289,8 @@ def test_overlapping_model_requests_keep_their_own_boundary_outcomes(tmp_path, s
 
 
 def test_claude_private_tool_prefixes_are_scrubbed():
-    from sandbox.memory_history import scrub_memory_history
-    from sandbox.activity import ActivityReporter
+    from agent.memory_history import scrub_memory_history
+    from agent.activity import ActivityReporter
     messages = [{'role': 'assistant', 'tool_calls': [{'id': 'm', 'function': {
         'name': 'mcp__moyai__memory_save', 'arguments': '{"content":"private note"}'}}]}]
     assert 'private note' not in json.dumps(scrub_memory_history(messages))
@@ -313,7 +313,8 @@ def test_native_images_are_not_translated():
 def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, monkeypatch, transport_failure):
     from types import SimpleNamespace
     from threading import Event
-    from sandbox import agent, claude_harness
+    from sandbox import agent
+    from agent.harnesses import claude_harness
     events = []
     relay = SimpleNamespace(url='http://test', control=lambda body=None: {}, last_error='',
                             wait_group='', wait_credential='', before_model=None, compact=lambda *a: 'Summary')
@@ -325,7 +326,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
             self.stopped = Event()
             self.transport_attempt = 2
         def run_conversation(self, prompt, **kwargs):
-            from sandbox.harness_agent import TurnJournal
+            from agent.harnesses.harness_agent import TurnJournal
             journal = self.journal = TurnJournal([], prompt, self.context_store)
             if transport_failure:
                 journal.tool_started('write-once', 'Write', {})
@@ -363,29 +364,37 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
         else:
             assert 'transport_retry' not in final
             assert next(e[1] for e in events if e[0] == 'final') == relay.last_error
-        from sandbox.context_store import ContextStore
+        from agent.context_store import ContextStore
         saved = ContextStore(tmp_path / 'session/context.sqlite3', 'harness-test')
         if transport_failure == 502:
             assert saved.checkpoint() == final['transport_retry']['checkpoint']
-        assert 'Saved receipt' in saved.history()[0]['content'] and not saved.pending
+        assert 'Saved receipt' in json.dumps(saved.history()) and not saved.pending
         saved.close()
         return
     assert next(e for e in events if e[0] == 'final')[1:] == ('SDK result', {
         'completed': True, 'continuation': False, 'wait_group': '', 'wait_credential': '',
         'steer_message_id': None, 'steering_applied': [], 'transport_attempt': 2})
-    from sandbox.context_store import read_records
+    from agent.context_store import read_records
     assert json.loads(read_records(tmp_path / 'session/context.sqlite3')[-1]['text'])['content'] == 'SDK result'
 
 
-@pytest.mark.parametrize('boundary', ['rotation', 'agents', 'credentials'])
+@pytest.mark.parametrize('boundary', ['rotation', 'agents', 'swarm', 'credentials'])
 def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypatch, recovery_catalog, boundary):
     """Real relay/journal/final emitter; only the model invocation is scripted."""
     from sandbox import agent
-    from sandbox.codex_harness import CodexAgent
-    from sandbox.context_store import ContextStore
+    from agent.harnesses.codex_harness import CodexAgent
+    from agent.context_store import ContextStore
     from test_broker_transport import diagnostic_relay
     events, reads = [], []
     handle = 'a' * 32
+    from app.db import Store
+    from app.session_journal import SessionJournal
+    durable = Store(tmp_path / 'journal-server')
+    record = durable.create_run('Inspect repositories', '', 'demo', [], chat_enabled=True, user_id='owner')
+    durable.claim_message(record['id'])
+    durable.update_run(record['id'], status='running', token_hash='fixture')
+    journal_run = durable.run(record['id'])
+    journal = SessionJournal(durable)
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def reply(self, body, status=200):
@@ -400,12 +409,14 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
         def do_POST(self):
             body = json.loads(unseal('private-capability', self.path,
                 self.rfile.read(int(self.headers['Content-Length']))))
+            if self.path == '/context/journal':
+                return self.reply(journal.exchange(journal_run, body))
             if self.path != '/tools/call':
                 return self.reply({})
             if body['name'] == 'github_repositories':
                 reads.append(body)
                 return self.reply({'repositories': []}, 524 if len(reads) == 1 else 200)
-            self.reply({'moyai_wait_group' if boundary == 'agents' else 'moyai_wait_credential': handle})
+            self.reply({'moyai_wait_group' if boundary in {'agents', 'swarm'} else 'moyai_wait_credential': handle})
     async def invoke(runtime, prompt, system_message):
         with httpx.Client(base_url=runtime.context.relay.url,
                           headers={'Authorization': 'Bearer private-capability'}, timeout=5) as client:
@@ -420,7 +431,7 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
                 runtime.journal.tool_finished('read-retry', response.text)
             assert response.status_code == 200
             if boundary != 'rotation':
-                name = 'agents_fanout' if boundary == 'agents' else 'credentials_request'
+                name = {'agents': 'agents_fanout', 'swarm': 'swarm_start', 'credentials': 'credentials_request'}[boundary]
                 runtime.journal.tool_started('wait', name, {})
                 response = client.post('/tools/call', json={'name': name, 'arguments': {}})
                 assert response.status_code == 200
@@ -445,7 +456,7 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
         assert len(reads) == 2 and not diagnostics and not relay.last_error and not relay.uncertain_tool
     final = next(extra for kind, _, extra in events if kind == 'final')
     assert final['continuation'] and not final['completed']
-    assert final['wait_group'] == (handle if boundary == 'agents' else '')
+    assert final['wait_group'] == (handle if boundary in {'agents', 'swarm'} else '')
     assert final['wait_credential'] == (handle if boundary == 'credentials' else '')
     assert 'transport_retry' not in final and 'transport_failure' not in final
     store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
@@ -456,8 +467,8 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
 
 
 def test_registry_extension_reaches_api_without_changing_entrypoint(workspace, monkeypatch):
-    from sandbox.harness_registry import HARNESSES, HarnessDefinition, create_agent
-    from sandbox import litellm_harness
+    from agent.harnesses.harness_registry import HARNESSES, HarnessDefinition, create_agent
+    from agent.harnesses import litellm_harness
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     definition = HarnessDefinition('test-adapter', 'Test adapter', 'litellm_harness', 'LiteLLMAgent',
@@ -474,8 +485,8 @@ def test_registry_extension_reaches_api_without_changing_entrypoint(workspace, m
 
 def test_unregistered_litellm_binding_fails_before_startup():
     from types import SimpleNamespace
-    from sandbox.harness_registry import HarnessDefinition
-    from sandbox.litellm_harness import LiteLLMAgent
+    from agent.harnesses.harness_registry import HarnessDefinition
+    from agent.harnesses.litellm_harness import LiteLLMAgent
     definition = HarnessDefinition('unsupported', 'Unsupported', 'litellm_harness', 'LiteLLMAgent', litellm_harness='CODEX')
     agent = LiteLLMAgent(spec={}, relay=SimpleNamespace(), config={}, activity=None, step=lambda: None,
                         cwd='/workspace', definition=definition)
@@ -513,7 +524,7 @@ def installed_litellm_runtime(monkeypatch):
 @pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
 def test_ready_litellm_harness_does_not_require_codex(installed_litellm_runtime, monkeypatch, harness):
     from types import SimpleNamespace
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_registry import create_agent
     def unavailable_codex():
         raise RuntimeError('Codex is unavailable')
     monkeypatch.setattr(installed_litellm_runtime, 'prepare_codex', unavailable_codex)
@@ -532,7 +543,7 @@ def test_native_validation_and_image_entrypoint_require_codex(installed_litellm_
     import runpy
     import subprocess
     from types import SimpleNamespace
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_registry import create_agent
     dependencies, calls = installed_litellm_runtime, []
     installed_version = importlib.metadata.version
     def version(package):
@@ -584,13 +595,13 @@ def test_all_litellm_harnesses_can_be_selected(workspace, monkeypatch, harness, 
 
 def test_catalog_covers_upstream_harness_enum():
     litellm = pytest.importorskip('litellm.harness')
-    from sandbox.harness_registry import HARNESSES
+    from agent.harnesses.harness_registry import HARNESSES
     assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} | {'CLAUDE_CODE', 'CODEX'} == {h.name for h in litellm.Harness}
 
 
 def test_native_compaction_controls_keep_other_runtime_settings():
     pytest.importorskip('litellm.harness')
-    from sandbox.harness_bindings import opencode_options, pi_options, tool_loop_options
+    from agent.harnesses.harness_bindings import opencode_options, pi_options, tool_loop_options
     server = {'command': '/prepared/python', 'args': ['bridge.py'], 'env': {'FIXTURE': '1'}}
     config = {'mcp_servers': {'workspace': server}}
     assert 'compaction' not in opencode_options(config).config
@@ -619,7 +630,7 @@ from langchain_litellm import ChatLiteLLM
 import deepagents
 import deepagents.graph
 import deepagents.middleware.subagents
-from sandbox.harness_bindings import deepagents_options
+from agent.harnesses.harness_bindings import deepagents_options
 middleware = []
 def capture(original):
     def build(*args, **kwargs):
@@ -674,9 +685,9 @@ def background_litellm_worker():
     import sys
     from types import SimpleNamespace
     import litellm
-    from sandbox import litellm_harness
-    from sandbox.context_store import ContextStore
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses import litellm_harness
+    from agent.context_store import ContextStore
+    from agent.harnesses.harness_registry import create_agent
     job = json.load(sys.stdin)
     directory = Path(job['directory'])
     os.environ['WORKSPACE_RUN_TOKEN'] = job['capability']
@@ -702,7 +713,7 @@ def background_litellm_worker():
     store.initialize([])
     agent = create_agent(job['harness'], spec={'model': job['model'], 'timeout': 90, 'max_iterations': 50},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': job['capability']}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args[0])),
             complete=lambda *args: events.append(('complete', args[0])), commentary=lambda text: None),
@@ -808,10 +819,10 @@ def test_real_litellm_first_request_fence_retains_each_prompt(tmp_path, monkeypa
     import subprocess
     from types import SimpleNamespace
     import litellm
-    from sandbox import litellm_harness
-    from sandbox.context_store import ContextStore
+    from agent.harnesses import litellm_harness
+    from agent.context_store import ContextStore
     from sandbox.harness_dependencies import LITELLM_REVISION, runtime_version
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses.harness_registry import create_agent
     revision = subprocess.run(['git', '-C', str(Path(litellm.__file__).parent.parent), 'rev-parse', 'HEAD'],
         capture_output=True, text=True, check=True).stdout.strip()
     assert revision == LITELLM_REVISION
@@ -935,8 +946,8 @@ def test_responses_input_is_not_translated():
 
 @pytest.mark.parametrize('name', ['moyai_memory_save', 'mcp__moyai__memory_save', 'workspace_call'])
 def test_all_harnesses_scrub_private_tool_aliases(name):
-    from sandbox.memory_history import scrub_memory_history
-    from sandbox.activity import ActivityReporter
+    from agent.memory_history import scrub_memory_history
+    from agent.activity import ActivityReporter
     message = {'role': 'assistant', 'tool_calls': [{'function': {'name': name, 'arguments': 'private note'}}]}
     assert 'private note' not in json.dumps(scrub_memory_history([message]))
     events = []
@@ -952,9 +963,9 @@ def native_cli_runtime(tmp_path, monkeypatch):
     import sys
     from types import SimpleNamespace
     from app.native_sessions import NativeSessions
-    from sandbox import litellm_harness
-    from sandbox.context_store import ContextStore
-    from sandbox.harness_registry import create_agent
+    from agent.harnesses import litellm_harness
+    from agent.context_store import ContextStore
+    from agent.harnesses.harness_registry import create_agent
 
     calls, host, requests = [], {}, []
     class State(SimpleNamespace):
@@ -1098,7 +1109,7 @@ def test_litellm_later_model_request_cannot_erase_stream_input_fence(native_cli_
 
 def test_litellm_delayed_model_request_cannot_fence_replacement_stream(native_cli_runtime):
     from dataclasses import replace
-    from sandbox.harness_agent import HarnessInputs, TurnJournal
+    from agent.harnesses.harness_agent import HarnessInputs, TurnJournal
     agent = native_cli_runtime.create('tool-loop')
     agent.journal = TurnJournal([], 'task')
     agent.inputs = HarnessInputs(agent.journal)
@@ -1116,7 +1127,7 @@ def test_litellm_delayed_model_request_cannot_fence_replacement_stream(native_cl
 @pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('correction', [False, True])
 def test_litellm_completed_answer_survives_expired_rotation(native_cli_runtime, harness, correction):
-    from sandbox.continuation import RotationDeadline
+    from agent.continuation import RotationDeadline
     runtime = native_cli_runtime
     agent = runtime.create(harness)
     now = [0]
@@ -1293,7 +1304,7 @@ def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_c
 @pytest.mark.parametrize('compaction_fails', [False, True])
 @pytest.mark.parametrize('kind', ['opencode', 'pi'])
 def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtime, kind, compaction_fails):
-    from sandbox.context_store import ContextUnavailable
+    from agent.context_store import ContextUnavailable
     runtime = native_cli_runtime
     first = runtime.create(kind)
     first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
@@ -1433,7 +1444,7 @@ def test_process_only_harnesses_keep_public_journal_recovery(native_cli_runtime,
 async def test_native_cli_storage_is_scoped_for_setup_launch_and_temporary_files(tmp_path, monkeypatch):
     import sys
     from types import SimpleNamespace
-    from sandbox.harness_bindings import local_sandbox
+    from agent.harnesses.harness_bindings import local_sandbox
     class LocalSandbox:
         def __init__(self, cwd):
             self._tempdirs, self.workdir = [], cwd
@@ -1473,7 +1484,7 @@ def test_native_cli_version_comes_from_installed_binary_and_failure_disables_res
 
 @pytest.mark.parametrize('pending', [False, True])
 def test_litellm_deadline_fences_requests_during_native_teardown(native_cli_runtime, pending):
-    from sandbox.harness_agent import TurnJournal
+    from agent.harnesses.harness_agent import TurnJournal
     agent = native_cli_runtime.create('pi')
     agent.context_started_at = 0
     agent.journal = TurnJournal([], 'task')

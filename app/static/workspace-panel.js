@@ -107,6 +107,7 @@
     function outside(e){if(!panel.contains(e.target))menu(false);}document.addEventListener('pointerdown',outside);
     panel.addEventListener('keydown',e=>{if(e.key==='Escape'&&!q('.panel-menu').hidden){menu(false);q('[data-add]').focus();}});
     function make(kind,data={}){
+      if(run.private_owner_id && kind==='chat'){toast('Side chats are unavailable for private sessions. Start a separate private web chat from Settings.');return null;}
       if(kind==='pr'){
         const receipt=pullRequests.find(pr=>pr.url.toLowerCase()===String(data.url).toLowerCase());
         if(!receipt)return null;
@@ -148,9 +149,9 @@
       t.element.remove();tabs.delete(id);reconcile();
     }
     function good(t){return !disposed&&tabs.get(t.id)===t;}
-    function error(t,e){if(good(t))MoyaiUI.render(t.element, `<div class="panel-empty" role="alert">${esc(e.message)}<p><button type="button" data-retry>Retry</button></p></div>`);t.element.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t));}
+    function error(t,e){if(good(t))MoyaiUI.render(t.element, `<div class="panel-empty" role="alert">${esc(e.message)}<p><button type="button" data-retry>Retry</button></p></div>`);t.element.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t,true));}
     function loading(t){MoyaiUI.render(t.element, '<div class="panel-empty" role="status">Loading…</div>');}
-    async function mount(t){
+    async function mount(t,refresh=false){
       const epoch=t.epoch=(t.epoch||0)+1;const current=()=>good(t)&&epoch===t.epoch;
       if(t.kind==='pulls'){renderPulls(t.element);return;}
       if(t.kind==='agents'){renderAgents(t.element);return;}
@@ -161,7 +162,7 @@
             const previous=MoyaiPullRequest.presentation(t.prStatus).state;t.prStatus=data;
             if(MoyaiPullRequest.presentation(data).state!==previous)draw();
           },
-          load:({refresh=false}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`,{recent:!refresh})}));return;
+          load:({refresh=false,page,head_sha,base_sha}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}${page?`&page=${page}&head_sha=${encodeURIComponent(head_sha||'')}&base_sha=${encodeURIComponent(base_sha||'')}`:''}`,{recent:!refresh})}));return;
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}
@@ -175,9 +176,9 @@
       if(t.kind==='chat'){mountChat(t);return;}
       t.renderPreview=null;loading(t);
       try{
-        const catalog=await api(`/api/runs/${run.id}/files`);if(!current())return;
         if(t.kind==='files'){
-          MoyaiUI.render(t.element, '<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><p class="panel-footnote">Latest saved version · Select a file to open it in a tab.</p>');
+          let catalog={files:[]};
+          MoyaiUI.render(t.element, '<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><div class="panel-footnote" data-file-status role="status">Loading saved files…</div>');
           t.expandedFolders??=new Set();
           const input=t.element.querySelector('input');input.value=t.fileSearch||'';
           function list(){
@@ -188,13 +189,24 @@
               if(term||!folder.isConnected)return;
               if(folder.open)t.expandedFolders.add(folder.dataset.folder);else t.expandedFolders.delete(folder.dataset.folder);
             });
-            t.element.querySelectorAll('[data-file]').forEach(b=>b.onclick=()=>openFile(files[Number(b.dataset.file)]));
+            t.element.querySelectorAll('[data-file]').forEach(b=>b.addEventListener('click',()=>openFile(files[Number(b.dataset.file)])));
           }
-          t.element.querySelector('input').oninput=list;t.element.querySelector('[data-refresh]').onclick=()=>mount(t);list();return;
+          input.oninput=list;
+          t.element.querySelector('[data-refresh]').addEventListener('click',()=>mount(t,true));
+          await MoyaiFiles.loadCatalog(api,run.id,{refresh,onUpdate:data=>{
+            if(!current())return;
+            catalog=data;list();
+            const status=t.element.querySelector('[data-file-status]');
+            MoyaiUI.render(status, data.error?`${esc(data.error)} <button type="button" data-retry>Retry workspace files</button>`:
+              data.archive_pending?'Loading remaining workspace files…':'Latest saved version · Select a file to open it in a tab.');
+            status.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t,true));
+          }});
+          return;
         }
-        const file=catalog.files.find(f=>f.archive_path===t.path);if(!file)throw new Error('This file is no longer in the latest saved workspace. Open Files to choose another.');
+        const catalog=await MoyaiFiles.loadCatalog(api,run.id,{refresh,filePath:t.path});if(!current())return;
+        const file=catalog.files.find(f=>f.archive_path===t.path);if(!file&&catalog.error)throw new Error(catalog.error);if(!file)throw new Error('This file is no longer in the latest saved workspace. Open Files to choose another.');
         t.title=file.name;draw();MoyaiUI.render(t.element, `<header class="panel-file-heading"><div><strong>${esc(file.name)}</strong><small>${esc(file.path)}</small></div><a href="${esc(file.url)}" download="${esc(file.name)}">↓ Download</a><button type="button" data-refresh aria-label="Refresh file">↻</button></header><div class="panel-file-content"></div>`);
-        const content=t.element.querySelector('.panel-file-content');t.element.querySelector('[data-refresh]').onclick=()=>mount(t);
+        const content=t.element.querySelector('.panel-file-content');t.element.querySelector('[data-refresh]').addEventListener('click',()=>mount(t,true));
         if(file.inline_url&&['image','video'].includes(file.kind)){content.classList.add('panel-media');MoyaiUI.render(content, file.kind==='video'?`<video controls preload="metadata" src="${esc(file.inline_url)}"></video>`:`<img src="${esc(file.inline_url)}" alt="${esc(file.name)}">`);}
         else{
           const result=await api(file.preview_url);if(!current()||!content.isConnected)return;
@@ -218,7 +230,7 @@
         clearTimeout(timer);const v=++version;
         if(!viewActive||document.hidden||!good(t))return;
         try{
-          const catalog=await api(`/api/runs/${run.id}/files`).catch(e=>{if(e.status===404)return {files:[]};throw e;});
+          const catalog=await api(`/api/runs/${run.id}/files?view=media`,{timeoutMs:30000}).catch(e=>{if(e.status===404)return {files:[]};throw e;});
           if(v!==version||!viewActive||!good(t))return;
           files=catalog.files.filter(file=>file.archive_path.startsWith('capture:'));
           const next=JSON.stringify(files);
@@ -254,7 +266,7 @@
     function renderAgents(host){
       const focused=host.contains(document.activeElement)?document.activeElement?.getAttribute('data-agent-id'):null;
       const ready=agents.filter(child=>['idle','completed'].includes(child.status)).length;
-      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`);
+      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}">${globalThis.MoyaiAgentIcon(child.id)}<span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`);
       if(focused)host.querySelector(`[data-agent-id="${focused}"]`)?.focus({preventScroll:true});
     }
     function syncAgents(data){
@@ -321,7 +333,7 @@
       element.querySelectorAll('.copy-code').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText(b.closest('.code-block').querySelector('code').textContent);b.textContent='Copied';}catch{b.textContent='Select to copy';}});
     }
     function mountChat(t){
-      MoyaiUI.render(t.element, `<div class="side-chat-note"><span>Separate conversation · Main task keeps running</span><a data-full hidden target="_blank" rel="noopener">Open session ↗</a></div><div class="side-chat-messages" role="log" aria-label="Side conversation"></div><form class="side-chat-form"><p data-status role="status"></p><label class="sr-only" for="side-input-${t.uid}">Message side chat</label><textarea id="side-input-${t.uid}" placeholder="Ask about this session…" rows="3" maxlength="16000" required></textarea><div><select aria-label="Side chat model">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===(t.model||run.model)?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" data-stop hidden>Stop</button><button type="submit" aria-label="Send side chat message">↑</button></div><small>Starts with a snapshot of this conversation. Files and computer are separate.</small></form>`);
+      MoyaiUI.render(t.element, `<div class="side-chat-note"><span>Separate conversation · Main task keeps running</span><a data-full hidden target="_blank" rel="noopener">Open session ↗</a></div><div class="side-chat-messages" role="log" aria-label="Side conversation"></div><form class="side-chat-form"><p data-status role="status"></p><label class="sr-only" for="side-input-${t.uid}">Message side chat</label><textarea id="side-input-${t.uid}" placeholder="Ask about this session…" rows="3" required></textarea><div><select aria-label="Side chat model">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===(t.model||run.model)?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" data-stop hidden>Stop</button><button type="submit" aria-label="Send side chat message">↑</button></div><small>Starts with a snapshot of this conversation. Files and computer are separate.</small></form>`);
       const form=t.element.querySelector('form'),input=form.querySelector('textarea'),log=t.element.querySelector('[role="log"]'),status=form.querySelector('[data-status]'),model=form.querySelector('select'),send=form.querySelector('[type="submit"]'),stop=form.querySelector('[data-stop]'),link=t.element.querySelector('[data-full]');
       let timer,inFlight=false,enabled=false,unavailable=false,deleting=false,deletionError='',sending=false,stopping=false,signature='';
       function syncControls(){
@@ -340,12 +352,15 @@
         syncControls();stop.hidden=link.hidden=true;
       }
       function drawChat(data){
+        if(!t.model&&data.model)model.value=data.model;
+        if(data.parent_run_id){t.element.querySelector('.side-chat-note span').textContent='Agent conversation · Results return to the coordinator';form.querySelector('small').textContent='Messages go directly to this agent. Results already returned to the coordinator stay saved.';input.placeholder='Message this agent directly…';}
+
         if(data.status==='deleting')deletionError=data.deletion_error||deletionError;
         deleting=deleting||data.status==='deleting';if(deleting)data={...data,status:'deleting'};
         syncTitles([data]);const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify([transcript,transcript.map(m=>MoyaiActivity.failureDetails(data,m))]);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
         if(signature!==next){
           signature=next;const slots=new Map([...log.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-          MoyaiUI.render(log, transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):markdown(m.content)}</div>${MoyaiActivity.failureDetails(data,m)}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join(''), { preserve: slots.values() });
+          MoyaiUI.render(log, transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?(m.source==='swarm'||String(m.client_id||'').startsWith('swarm:')?'Swarm continuation':'You'):'Moyai'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):markdown(m.content)}</div>${MoyaiActivity.failureDetails(data,m)}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join(''), { preserve: slots.values() });
           log.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=slots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
         }
         MoyaiActivity.sync(log,data,{markdown,copy:async(text)=>{try{await navigator.clipboard.writeText(text);}catch{toast('Select the text to copy.');}}});MoyaiActivity.tick(log);if(bottom)log.scrollTop=log.scrollHeight;
@@ -381,7 +396,7 @@
     }
     function menuItems(search){
       // Search both the saved original request and its display title.
-      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Review this session’s PR details and changes'},{kind:'agents',title:'Subagents',detail:'Follow the agents assigned to this session'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Review this session’s PR details and changes'},{kind:'agents',title:'Subagents',detail:'Follow the agents assigned to this session'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>(!run.private_owner_id||i.kind!=='chat')&&(i.chatId||i.title.toLowerCase().includes(search)));
     }
     function syncTitles(rows){
       // Do not replace chat tabs or drafts when a background title arrives.
@@ -399,7 +414,7 @@
     initial.tabs.forEach(t=>{if(t.kind!=='computer'||run.mode==='modal')make(t.kind,t);});
     if(initial.visible&&tabs.size)select(tabs.has(initial.active)?initial.active:tabs.keys().next().value);else{active=initial.active;draw();}
     restoring=false;save();
-    api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
+    if(!run.private_owner_id)api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
     return {open,openFile,openPullRequest,syncPullRequests,syncSession,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabHost.removeEventListener('click',tabClick);toolHost.removeEventListener('click',toolClick);tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-session-tools');}};
   }
   return {create,restore,fileTree,renderFileTree,prUrl};

@@ -1,4 +1,5 @@
 """Durable Slack thread routing and a bounded, non-replaying reply outbox."""
+from .private_sinks import private_run
 import asyncio
 import html
 import json
@@ -26,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 USER_MENTION = re.compile(r'<@([UW][A-Z0-9]{7,30})(?:\|[^>\n]*)?>')
+
+
+def explicit_control(text):
+    """Syntactic product controls bypass participation judgment."""
+    value = text.strip().lower().lstrip('/')
+    return (value in COMMANDS or value.split(maxsplit=1)[:1] in [['model'], ['harness'], ['goal']] or
+            is_session_id_request(text))
 
 
 def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
@@ -94,6 +102,7 @@ class SlackChat:
         self.last_post = {}
         self.delivering: set[int] = set()
         self.delivery_claim = asyncio.Lock()
+        self.closing = False
         self.activity = SlackActivity(owner)
 
 
@@ -101,7 +110,8 @@ class SlackChat:
         return f"<{self.settings.public_url.rstrip('/')}/#run={run_id}|Open session>"
 
     def mirroring(self, run_id):
-        rows = self.store.rows('SELECT paused,team_id FROM slack_threads WHERE run_id=?', (run_id,))
+        rows = self.store.rows('''SELECT t.paused,t.team_id FROM slack_threads t
+            JOIN runs r ON r.id=t.run_id WHERE t.run_id=? AND r.private_owner_id='' ''', (run_id,))
         if not rows or not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']:
             return None
         if rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id'):
@@ -109,6 +119,8 @@ class SlackChat:
         return 'paused' if rows[0]['paused'] else 'active'
 
     def queue(self, conn, run_id, key, kind, text, metadata=None, *, status='pending'):
+        if private_run(self.store, run_id, conn):
+            return
         conn.execute('INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata,status) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {}), status))
 
@@ -130,7 +142,7 @@ class SlackChat:
                 # before saving a possible instant answer to this new input.
                 self.collect_answers_in(conn, binding, allowed)
                 self.collect_progress_in(conn, binding, allowed)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, restore_archived=not metadata_request)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, human_control=True, restore_archived=not metadata_request)
             if created and binding:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
@@ -388,22 +400,26 @@ class SlackChat:
         return frozenset(found - {self.owner.connectors.slack_installation().get('user_id')})
 
     def collect_progress_in(self, conn, binding, allowed):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         turn_id = self.progress_turn_in(conn, run_id)
         # Completed-turn progress is obsolete; its final answer is authoritative.
         conn.execute("""UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='progress'
             AND status='pending' AND json_number(metadata,'turn_id') IS DISTINCT FROM ?""", (run_id, turn_id))
         events = conn.execute("""SELECT id,message FROM events WHERE run_id=? AND kind='message'
-            AND json_number(data,'public_update')=1 AND json_number(data,'public_reply_to') IS NOT NULL
+            AND json_number(data,'public_update')=1
             AND json_number(data,'turn_id')=? ORDER BY id""",
                               (run_id, turn_id)).fetchall()
         for event in events:
-            key = f"progress:{event['id']}"
             text = slack_text(self.scrub(event['message']))
-            self.queue(conn, run_id, key, 'progress', text + '\n\n' + self.link(run_id),
-                       {'event_id': event['id'], 'turn_id': turn_id})
-            if not allowed or binding['paused']:
-                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
+            chunks = split_reply(text)
+            for index, chunk in enumerate(chunks):
+                key = f"progress:{event['id']}" + (f':part:{index}' if index else '')
+                self.queue(conn, run_id, key, 'progress', chunk + ('\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''),
+                           {'event_id': event['id'], 'turn_id': turn_id})
+                if not allowed or binding['paused']:
+                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
 
     def progress_turn_in(self, conn, run_id):
         turn_id = active_turn(conn, run_id)
@@ -412,16 +428,29 @@ class SlackChat:
             return None  # A received answer supersedes progress while files save.
         return turn_id
 
+    def settle_public_in(self, conn, run_id):
+        """Commit saved public text and its existing delivery intent together."""
+        binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+        if binding:
+            allowed = (self.settings.slack_thread_chat_enabled and self.owner.status()['enabled'] and
+                       binding['team_id'] == self.owner.connectors.slack_installation().get('team_id'))
+            self.collect_answers_in(conn, binding, allowed)
+            self.collect_progress_in(conn, binding, allowed)
+
     def collect_answers_in(self, conn, binding, allowed):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
         for message in messages:
-            if allowed and not binding['paused'] and message['status'] != 'steered':
+            policy = conn.execute('SELECT input_kind,reply_policy FROM messages WHERE id=? AND run_id=?',
+                                  (message['response_to_id'], run_id)).fetchone()
+            direct = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND steering_parent_id=? AND input_kind='user' AND status!='deleted'", (run_id, message['response_to_id'])).fetchone()
+            silent = policy and policy['input_kind'] == 'observation' and policy['reply_policy'] == 'silent' and not direct
+            if allowed and not binding['paused'] and message['status'] != 'steered' and not silent:
                 value = self.scrub(message['content'])
                 if message['status'] in {'failed', 'cancelled', 'interrupted'}:
                     value = 'Response ' + message['status'] + ':\n\n' + value
-                if len(value) > 32000:
-                    value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
                 prs = select_prs(conn, run_id, value)
                 for pr in prs:
                     pr.title = self.scrub(pr.title)
@@ -467,6 +496,8 @@ class SlackChat:
 
     def collect_settlements_in(self, conn, binding, allowed):
         """Settle an already-published answer without replaying its text."""
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         if not allowed or binding['paused']:
             conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='answer_settlement' AND status='waiting'", (run_id,))
@@ -499,36 +530,50 @@ class SlackChat:
             self.queue(conn, run_id, f'answer:{message_id}:{index}', 'answer', chunk + suffix, metadata)
 
     def collect(self):
-        enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
-        team = self.owner.connectors.slack_installation().get('team_id')
+        # Each thread has its own cursor and deduplicated outbox. Release the
+        # global write lock between threads so historical Slack conversations
+        # cannot hold up every API, broker and worker write for the whole scan.
+        for row in self.store.rows('SELECT run_id FROM slack_threads ORDER BY run_id'):
+            self.collect_thread(row['run_id'])
+
+    def collect_thread(self, run_id):
+        if private_run(self.store, run_id):
+            self.store.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
+            return
         with self.store.connect() as conn:
             conn.begin_write()
-            for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at,r.deletion_requested_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
-                run_id = binding['run_id']
-                allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
-                if not allowed:
-                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
-                self.collect_answers_in(conn, binding, allowed)
-                self.collect_progress_in(conn, binding, allowed)
-                if not allowed or binding['paused']:
-                    continue
-                for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
-                    self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
-                               'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
-                # A child can ask while the Slack-linked parent waits for it.
-                if 'credential_requests' in conn.table_names():
-                    self.owner.access.collect_in(conn, binding)
-                if binding['status'] == 'interrupted':
-                    # An injected input belongs to its parent's answer, while
-                    # an unstarted follow-up still needs its own stop notice.
-                    source = conn.execute("""SELECT m.id,a.id AS answer_id FROM messages m
-                        LEFT JOIN messages a ON a.run_id=m.run_id AND a.response_to_id=m.id
-                        WHERE m.run_id=? AND m.role='user'
-                        AND (m.steering_parent_id IS NULL OR m.started_at='')
-                        ORDER BY m.id DESC LIMIT 1""", (run_id,)).fetchone()
-                    key = (f"answer:{source['answer_id']}:outcome" if source and source['answer_id'] else
-                           f"interrupted:{run_id}:{source['id'] if source else binding['updated_at']}")
-                    self.queue(conn, run_id, key, 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
+            # Re-read the binding and policy after acquiring the lock: it may
+            # have been removed, paused or disabled since the candidate scan.
+            binding = conn.execute("""SELECT t.*,r.status,r.updated_at,r.deleted_at,r.deletion_requested_at
+                FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?""", (run_id,)).fetchone()
+            if not binding:
+                return
+            enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
+            team = self.owner.connectors.slack_installation().get('team_id')
+            allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
+            if not allowed:
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
+            self.collect_answers_in(conn, binding, allowed)
+            self.collect_progress_in(conn, binding, allowed)
+            if not allowed or binding['paused']:
+                return
+            for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
+                self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
+                           'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
+            # A child can ask while the Slack-linked parent waits for it.
+            if 'credential_requests' in conn.table_names():
+                self.owner.access.collect_in(conn, binding)
+            if binding['status'] == 'interrupted':
+                # An injected input belongs to its parent's answer, while
+                # an unstarted follow-up still needs its own stop notice.
+                source = conn.execute("""SELECT m.id,a.id AS answer_id FROM messages m
+                    LEFT JOIN messages a ON a.run_id=m.run_id AND a.response_to_id=m.id
+                    WHERE m.run_id=? AND m.role='user'
+                    AND (m.steering_parent_id IS NULL OR m.started_at='')
+                    ORDER BY m.id DESC LIMIT 1""", (run_id,)).fetchone()
+                key = (f"answer:{source['answer_id']}:outcome" if source and source['answer_id'] else
+                       f"interrupted:{run_id}:{source['id'] if source else binding['updated_at']}")
+                self.queue(conn, run_id, key, 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
 
     def reconcile_sending(self) -> None:
         # The supported single process owns every live send. A lost receipt
@@ -540,6 +585,9 @@ class SlackChat:
     def next_delivery(self, *, media=None):
         """Inspect durable candidates while the caller holds delivery_claim."""
         self.reconcile_sending()
+        self.store.execute("""UPDATE slack_outbox SET status='skipped',text='',metadata='{}'
+            WHERE run_id IN (SELECT id FROM runs WHERE COALESCE(private_owner_id,'')<>'')
+            AND status IN ('pending','waiting','uncertain','skipped')""")
         lane = (" AND o.dedupe_key LIKE 'answer:%:media'" if media else
                 " AND o.dedupe_key NOT LIKE 'answer:%:media'") if media is not None else ''
         for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending'" + lane + " ORDER BY o.id LIMIT 100"):
@@ -564,6 +612,8 @@ class SlackChat:
         # Offloading adds yield points. Serialize both lanes until the durable
         # claim has an in-memory owner, before either can reconcile or send it.
         async with self.delivery_claim:
+            if self.closing:
+                return None
             row = await database(self.next_delivery, media=media)
             if row is None:
                 return None
@@ -597,6 +647,9 @@ class SlackChat:
             # Persist before external side effects. Ambiguous sends are
             # marked uncertain and never replayed automatically.
             await self.owner.checkpoints.flush()
+            if await database(private_run, self.store, row['run_id']):
+                await database(self.store.execute, "UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE id=?", (row['id'],))
+                return
             if await database(self.skip_stale_progress, row):
                 return
             if row['kind'] == 'reaction':
@@ -671,10 +724,10 @@ class SlackChat:
         with self.store.connect() as conn:
             current = self.progress_turn_in(conn, row['run_id'])
             metadata = json.loads(row['metadata'])
-            # Also retire routine posts queued by an older release. Eligibility
-            # comes from the saved server-owned event, not outbox metadata alone.
+            # Eligibility comes from the saved server-owned event, not outbox
+            # metadata alone. Every public update uses the same turn fence.
             reply = conn.execute("""SELECT 1 FROM events WHERE run_id=? AND id=? AND kind='message'
-                AND json_number(data,'public_update')=1 AND json_number(data,'public_reply_to') IS NOT NULL
+                AND json_number(data,'public_update')=1
                 AND json_number(data,'turn_id')=?""", (row['run_id'], metadata.get('event_id'), current)).fetchone()
             if current is not None and metadata.get('turn_id') == current and reply:
                 return False
@@ -683,7 +736,7 @@ class SlackChat:
 
     async def watch(self, *, media=False):
         wake = self.media_wake if media else self.wake
-        while True:
+        while not self.closing:
             try:
                 wake.clear()
                 if not media:
@@ -693,7 +746,7 @@ class SlackChat:
                     await database(self.collect)
                     self.media_wake.set()
                 await self.deliver_one(media=media)
-                if not media:
+                if not media and not self.closing:
                     await self.activity.sync()
                 await self.owner.checkpoints.flush()
             except asyncio.CancelledError:
@@ -721,8 +774,18 @@ class SlackChat:
         if not self.media_watcher or self.media_watcher.done():
             self.media_watcher = asyncio.create_task(self.watch(media=True))
 
-    async def shutdown(self):
+    def begin_drain(self):
+        self.closing = True
+        self.wake.set()
+        self.media_wake.set()
+
+    async def shutdown(self, *, graceful=False):
         tasks = [task for task in (self.watcher, self.media_watcher) if task]
-        for task in tasks:
-            task.cancel()
+        if graceful:
+            # Planned ownership transfer must preserve an admitted external
+            # send and its durable receipt before the successor recovers.
+            self.begin_drain()
+        else:
+            for task in tasks:
+                task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

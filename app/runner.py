@@ -1,4 +1,6 @@
+from .private_sinks import private_run
 import asyncio
+import contextlib
 import json
 import re
 import secrets
@@ -20,7 +22,7 @@ from .model_selection import gateway_model
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 CAPTURE_RELEASE_TIMEOUT = 35
 RETAINED_RELEASES = 128
-SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
+RUNTIME_FILES = Path(__file__).parent.parent
 SAVE_WARNING = ("Your answer is saved, but the latest workspace files could not be saved. "
                 "The previous workspace checkpoint is unchanged. Download the recovered files before continuing; "
                 "they may be incomplete. Queued follow-ups were stopped, and no actions were replayed.")
@@ -58,7 +60,7 @@ def response_status(run: dict[str, object]) -> str:
 
 async def refresh_sandbox_files(sandbox):
     """Refresh our adapter and runtime patches, preserving workspace/history."""
-    await sync_runtime(sandbox, SANDBOX_FILES)
+    await sync_runtime(sandbox, RUNTIME_FILES)
 
 
 def safe_error_detail(exc, secrets_to_hide=()):
@@ -81,7 +83,8 @@ class RunManager:
         self.jobs = {}
         self.sandboxes = {}
         self.releases = {}
-        self.slots = asyncio.Semaphore(settings.max_concurrent_runs)
+        self.slots = (asyncio.Semaphore(settings.max_concurrent_runs) if settings.max_concurrent_runs
+                      else contextlib.nullcontext())
         self.closing = False
         self.prepare_context = None
         self.environments = None
@@ -421,12 +424,20 @@ class RunManager:
         from .workspace_image import workspace_image
         return workspace_image(self.settings)
 
-    def is_active(self, run_id):
+    def is_active(self, run_id, *, run=None):
         return run_id in self.jobs
 
     def spec(self, run):
         from .attachments import attachment_context
-        from sandbox.harness_registry import resolve
+        from agent.harnesses.harness_registry import resolve
+        from agent.inputs import attributed_input
+        def history_content(message):
+            content = message['content'] + attachment_context(by_message.get(message['id'], []))
+            if message['role'] == 'user' and message['input_kind'] != 'user':
+                content = attributed_input(content, message['input_kind'], json.loads(message['source_json']))
+            if message['role'] == 'user' and message['status'] != 'completed':
+                content = f"[Prior {message['status']} message; context only, do not replay] " + content
+            return content
         run_id = run["id"]
         fresh_child = bool(run.get('parent_run_id')) and not run.get('continuation') and not self.store.rows(
             "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
@@ -439,7 +450,9 @@ class RunManager:
         from .progress import active_input
         with self.store.connect() as conn:
             activity_input_id = active_input(conn, run_id, run.get('message_id') or 0)
-        spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
+        inputs = self.store.rows('SELECT input_kind,source_json FROM messages WHERE id=? AND run_id=?', (run.get('message_id'), run_id))
+        source_input = inputs[0] if inputs else {'input_kind': 'user', 'source_json': '{}'}
+        spec = {'input_kind': source_input['input_kind'], 'input_source': json.loads(source_input['source_json']), "run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
                 "attachments": uploads, "harness": run.get('harness', 'hermes'),
                 "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
                 "github_repository_id": run.get("github_repository_id"),
@@ -451,7 +464,7 @@ class RunManager:
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
                 "activity_input_id": activity_input_id,
-                "tracing_enabled": bool(self.store.tracing and self.store.tracing.enabled),
+                "tracing_enabled": bool(not private_run(self.store, run_id) and self.store.tracing and self.store.tracing.enabled),
                 "omit_private_tool_payloads": bool(self.store.tracing and
                     self.store.tracing.preferences.for_run(run)['omit_private_tool_payloads']),
                 "is_child_agent": bool(run.get('parent_run_id')),
@@ -462,7 +475,7 @@ class RunManager:
                 "side_chat_context": run.get('side_chat_context', ''),
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
-                "history_fallback": [] if context_checkpoint else [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
+                "history_fallback": [] if context_checkpoint else [{"role": m["role"], "content": history_content(m)} for m in self.store.messages(run_id)
                                      if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "saving", "deleted"}]}
         if self.environments:
             spec["project_environment"] = self.environments.context(run)
@@ -513,10 +526,9 @@ class RunManager:
         spec = self.spec(run)
         if backend.name == 'lambda':
             spec["rotation_at"] = sandbox.started_at + self.settings.sandbox_rotation_for('lambda')
-        # Restored snapshots can contain an older adapter; refresh only our own
-        # runner files, preserving all user workspace files and agent history.
-        if snapshot_id:
-            await refresh_sandbox_files(sandbox)
+        # Both restored checkpoints and pinned provider images may predate the
+        # controller. Refresh only our own runtime before launching the agent.
+        await refresh_sandbox_files(sandbox)
         if getattr(self, 'computer', None):
             await self.computer.restore(sandbox, run_id, required=False)
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
@@ -525,7 +537,7 @@ class RunManager:
         self.store.event(run_id, "status", f"Sandbox ready. Starting {resolve(run['harness']).name}.")
         # Modal streams arbitrary chunks by default. Protocol events are JSON
         # lines and must be framed before decoding, including parallel tools.
-        process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/agent.py", "/tmp/task.json",
+        process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/sandbox/agent.py", "/tmp/task.json",
                                          timeout=self.settings.run_timeout_seconds or None, bufsize=1,
                                          env=self.settings.broker_environment(token))
         result = None
@@ -617,14 +629,12 @@ class RunManager:
         if getattr(self, 'computer', None):
             await self.computer.save_captures(sandbox, run_id, releasing=False)
         try:
-            info = await sandbox.filesystem.stat.aio("/artifacts/result.zip")
-            if info.size > 20 * 1024 * 1024:
-                self.store.event(run_id, "error", "Artifact archive exceeds the 20 MB limit and was not downloaded.")
-                return
-            data = await sandbox.filesystem.read_bytes.aio("/artifacts/result.zip")
-            if len(data) > 20 * 1024 * 1024:
-                return
-            await asyncio.to_thread(self.store.artifacts.save, f"{run_id}.zip", data)
+            import tempfile
+            from pathlib import Path
+            with tempfile.TemporaryDirectory(prefix='moyai-recovery-') as directory:
+                path = Path(directory) / 'result.zip'
+                await sandbox.filesystem.copy_to_local.aio('/artifacts/result.zip', str(path))
+                await asyncio.to_thread(self.store.artifacts.save_file, f"{run_id}.zip", path)
             self.store.event(run_id, "artifact", "Result archive saved", {"download": f"/api/runs/{run_id}/artifact"})
         except Exception:
             self.store.event(run_id, "error", "No result archive was recovered from this run.")

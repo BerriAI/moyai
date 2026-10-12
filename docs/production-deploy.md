@@ -1,7 +1,35 @@
-# Deploy the production app, worker and broker
+# Deploy production
 
-Use **GitHub → Actions → Deploy production → Run workflow → main** after the
-one-time setup below. One button coordinates `moyai-private` and `moyai-worker`,
+For the activated four-service handoff topology, use **GitHub → Actions →
+Deploy production → Run workflow → main → Run workflow**. Leave the default
+**release_type: rolling** selected and **preflight_only** unchecked. This single
+run selects main at button press, waits for its CI, verifies compatibility, and
+applies any reviewed additive schema plan before replacing roles sequentially
+while active work continues. Online schema plans require the migration bridge
+already installed on every role; same-schema updates can install that bridge. Follow
+[compatible rolling deployments](rolling-deploy.md) for prerequisites and recovery.
+
+Every deployment includes preflight. Check **preflight_only** only when you want
+validation without deployment; a separate preflight run is optional. Incompatible
+schema, shared settings or runtime contracts stop the release before deployment
+and require a separately planned transition. An undeclared schema bump is not an
+online migration; see [schema migrations](schema-migrations.md) for the reviewed
+operations, initial activation and breaking-change procedure.
+
+The explicit **api** option remains for the narrower
+[compatible API deployment topology](api-deploy.md). The explicit **coordinated**
+option remains for the original two/three-service topology, described below.
+
+Rolling mode uses the existing SSH credential for read-only runtime checks and,
+when required, one explicit migration request to the coordinator's installed
+engine. Database credentials stay on that private service. No public database
+access, schema credentials in GitHub, or extra workflow input is needed.
+
+## Original coordinated topology
+
+Use **GitHub → Actions → Deploy production → Run workflow → main**, explicitly
+selecting **release_type: coordinated**, after the one-time setup below. One button
+coordinates `moyai-private` and `moyai-worker`,
 plus `moyai-broker` after the separate-broker topology is activated.
 It selects the main commit at button press, waits for its CI, and deploys that
 exact commit to every active role. Later pushes do not change the selected release.
@@ -29,12 +57,14 @@ Render's separate **Deploy latest commit** buttons while it is running.
 
    Never put either credential in workflow YAML, PR comments, artifacts, or logs.
    No separate GitHub token, database exposure, public management endpoint, or
-   new paid service is needed for the button. Keep Render auto-deploy **off** for every service.
-4. Run the workflow on `main` with **Only check configuration (no deployment)**
-   checked. It verifies CI, all active Render services, SSH access, running build IDs,
-   local health, database ownership, and matching shared settings without writing
-   to Render or the database. Its receipt must say `preflight_passed`.
-5. Run it again with that option unchecked for the first coordinated deployment.
+   new paid service is needed for coordinated mode. Keep Render auto-deploy **off** for every service.
+4. Run the workflow on `main` with **release_type: coordinated** selected and
+   **preflight_only** checked. It verifies CI, all active Render services, SSH
+   access, running build IDs, local health, database ownership, and matching
+   shared settings without writing to Render or the database. Its receipt must
+   say `preflight_passed`.
+5. Keep **release_type: coordinated** selected and run it again with
+   **preflight_only** unchecked for the first coordinated deployment.
 
 The Render API key and SSH key are separate credentials. Merely merging this PR
 does not install them or enable deployments. The checked-in Oregon SSH host key
@@ -56,9 +86,13 @@ host key stops the workflow and must be verified against Render before updating.
    not cancel sessions.
 3. Deploy the new worker in maintenance staging. It serves a health response but
    does not run jobs. Confirm no execution worker still owns the database and
-   model requests and execution leases have cleared. A Stop request accepted
-   after draining stays saved for the replacement worker; the ownership check
-   does not wait for a paused worker to process it.
+   model requests and execution leases have cleared. Persisted session phases
+   must still be at saved boundaries: worker shutdown can leave a sandbox
+   running between broker requests. Executing, unknown, and active legacy
+   sessions block broker/coordinator replacement even after worker ownership
+   clears. A Stop request accepted at a saved boundary after draining stays
+   saved for the replacement worker; the check does not wait for a paused
+   worker to process it.
 4. Deploy the app/coordinator at the selected commit and verify its runtime.
 5. Activate the worker at the same commit, clear its drain flag, and verify both
    services and database ownership before declaring success.
@@ -87,7 +121,8 @@ settings, and concurrency limits. Each mutation and deploy ID goes into the
 nonsecret **production-release** artifact. No-op releases still verify the
 running services.
 
-This is coordinated deployment, not yet seamless deployment. There are four
+This mode is coordinated deployment. Compatible API updates can use the
+[API-only path](api-deploy.md) after its separate topology activation. There are four
 Render deployments in the combined topology and six with a separate broker,
 so builds and safe draining can take several minutes. New
 execution pauses, and the app still restarts. The separate work on broker

@@ -1,4 +1,7 @@
+import json
+import shutil
 import subprocess
+import sys
 import venv
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,7 +61,7 @@ async def test_deploy_prebuild_waits_for_the_same_workspace_image_and_closes_cli
     monkeypatch, failure: str | None
 ) -> None:
     settings = Settings(
-        _env_file=None, modal_token_id="test-id", modal_token_secret="test-secret"
+        _env_file=None, modal_token_id="test-id", modal_token_secret="test-secret", independent_agent_runtime=False
     )
     connection = SimpleNamespace(__aexit__=AsyncMock())
     client = AsyncMock(return_value=connection)
@@ -101,3 +104,89 @@ async def test_prebuild_requires_complete_credentials() -> None:
         await build_workspace_image(
             Settings(_env_file=None, modal_token_id="", modal_token_secret="")
         )
+
+
+async def test_independent_prebuild_joins_cancelled_build_before_closing_client(monkeypatch):
+    import asyncio
+    entered, stopped = asyncio.Event(), asyncio.Event()
+    async def slow(*args):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopped.set()
+    async def failed(*args):
+        await entered.wait()
+        raise RuntimeError('runtime build failed')
+    class Clients:
+        async def get(self, settings):
+            return 'client'
+        async def close(self):
+            assert stopped.is_set()
+    monkeypatch.setattr('build_workspace_image.ModalClients', Clients)
+    monkeypatch.setattr('build_workspace_image.modal.App.lookup', SimpleNamespace(aio=AsyncMock(return_value='app')))
+    monkeypatch.setattr('build_workspace_image.workspace_image', lambda settings: SimpleNamespace(build=SimpleNamespace(aio=slow)))
+    monkeypatch.setattr('build_workspace_image.agent_runtime_image', lambda: SimpleNamespace(build=SimpleNamespace(aio=failed)))
+    with pytest.raises(RuntimeError, match='runtime build failed'):
+        await build_workspace_image(Settings(_env_file=None, modal_token_id='id', modal_token_secret='secret', independent_agent_runtime=True))
+
+
+@pytest.mark.parametrize('entrypoint', ['sandbox/agent.py', 'agent/tools/mcp_bridge.py'])
+def test_packaged_entrypoints_bootstrap_without_controller_or_working_directory(tmp_path, entrypoint):
+    source = Path(__file__).resolve().parents[1]
+    runtime = tmp_path / 'workspace-runner'
+    for package in ('agent', 'sandbox'):
+        shutil.copytree(source / package, runtime / package,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    # Old checkpoints still contain this file; the package must take precedence.
+    (runtime / 'agent.py').write_text('raise RuntimeError("stale entrypoint imported")')
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', 'import runpy, sys; runpy.run_path(sys.argv[1])',
+         str(runtime / entrypoint)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('independent_runtime', [False, True])
+def test_packaged_mcp_initializes_with_the_agent_interpreter(tmp_path, monkeypatch, independent_runtime):
+    from sandbox.agent import hermes_config
+
+    source = Path(__file__).resolve().parents[1]
+    runtime = tmp_path / 'workspace-runner'
+    for package in ('agent', 'sandbox'):
+        shutil.copytree(source / package, runtime / package,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    bridge = runtime / 'agent/tools/mcp_bridge.py'
+    # The base workspace Python has no bridge dependencies; the agent's
+    # interpreter does. Reproduce the missing dependency without an install.
+    missing = subprocess.run([sys.executable, '-S', str(bridge)], cwd=tmp_path,
+                             capture_output=True, text=True, timeout=15)
+    assert missing.returncode != 0 and "No module named 'cryptography'" in missing.stderr
+
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'packaging-test-capability')
+    server = hermes_config({'model': 'test-model', 'independent_runtime': independent_runtime},
+                           'http://127.0.0.1:1', tmp_path)['mcp_servers']['workspace']
+    assert server['command'] == sys.executable
+    # Relocate only the image's absolute package path, keeping its selected
+    # interpreter and environment. initialize requires no broker/model call.
+    result = subprocess.run([server['command'], str(bridge)], cwd=tmp_path,
+        env=server['env'], input=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+                                           'params': {'protocolVersion': '2025-03-26'}}) + '\n',
+        capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response['id'] == 1 and response['result']['protocolVersion'] == '2025-03-26'
+    assert response['result']['serverInfo']['name'] == 'hermes-workspace'
+
+
+@pytest.mark.parametrize('name', ['agent.py', '../computer.py', '/tmp/computer.py'])
+def test_runtime_command_rejects_unowned_entrypoints(tmp_path, name):
+    from app.runtime_files import RUNTIME_COMMAND
+
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', RUNTIME_COMMAND, str(tmp_path), name],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode != 0
+    assert 'Invalid runtime command' in result.stderr

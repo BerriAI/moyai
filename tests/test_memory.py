@@ -7,10 +7,10 @@ import pytest
 from fastapi import HTTPException
 
 from app.db import Store, now
-from app.memory import Memory, Note, MAX_CONTEXT
+from app.memory import Memory, Note
 from app.security import Security
-from sandbox.activity import ActivityReporter
-from sandbox.memory_history import scrub_memory_history
+from agent.activity import ActivityReporter
+from agent.memory_history import scrub_memory_history
 from test_spend import active, sign_in
 from test_workspace import workspace
 
@@ -137,7 +137,7 @@ def test_identity_isolation_including_administrator_and_requester_switch(workspa
     sign_in(app, client)
     note_id = create(client).json()['id']
     run = active(app)
-    assert MARKER not in app.state.memory.context(run)
+    assert MARKER in app.state.memory.context(run)  # Automatic authorized recall.
     assert call(client, run, 'memory_search', query='response preferences').json()['loaded'] == 1
     assert MARKER in app.state.memory.context(run)
     sign_in(app, client, 'bob', 'bob@berri.ai')
@@ -150,7 +150,10 @@ def test_identity_isolation_including_administrator_and_requester_switch(workspa
     assert client.request('DELETE','/api/memory/'+bob_id, json={'revision': 1}).status_code == 404
     # Keep the original run object: authority must still be refreshed.
     app.state.store.execute("UPDATE runs SET active_user_id='google:bob' WHERE id=?", (run['id'],))
-    assert MARKER not in app.state.memory.context(run)
+    assert app.state.memory.context(run) == ''  # An old execution capability cannot select the next actor's context.
+    notes = json.loads(app.state.memory.context(app.state.store.run(run['id'])).split('\n', 1)[1])['notes']
+    assert note_id not in {note['id'] for note in notes}
+    assert bob_id in {note['id'] for note in notes}
     assert call(client, run, 'memory_search', query='response preferences').json()['loaded'] == 1
     assert app.state.store.rows('SELECT owner_id FROM memory_selections')[0]['owner_id'] == 'google:bob'
 
@@ -195,7 +198,7 @@ def test_pause_and_manual_mode_apply_to_running_agents(workspace):
     assert len(client.get('/api/memory').json()['memories']) == 1
     assert client.put('/api/memory/preferences',json={'enabled':True,'auto_save':True,'revision':0}).status_code == 409
     assert client.put('/api/memory/preferences',json={'enabled':True,'auto_save':True,'revision':2}).status_code == 200
-    assert MARKER not in app.state.memory.context(run)  # Must recall again after resume.
+    assert MARKER in app.state.memory.context(run)  # Re-enabling permits automatic recall.
     assert app.state.store.rows('SELECT tainted FROM native_sessions WHERE run_id=?', (run['id'],))[0]['tainted'] == 1
 
 
@@ -231,7 +234,7 @@ def test_source_messages_accept_steering_but_not_other_users_or_subagents(worksp
     assert call(client,run,'memory_search',query='benchmark').status_code == 200
     note=client.get('/api/memory').json()['memories'][0]
     assert_rejected(call(client,run,'memory_forget',id=note['id'],revision=note['revision']), 403)
-    assert [t['name'] for t in app.state.memory.tools(run)]==['memory_search']
+    assert [t['name'] for t in app.state.memory.tools(run)]==['memory_search', 'memory_read']
 
 
 def test_fresh_slack_email_match_is_required_not_accounting_links(workspace):
@@ -278,7 +281,7 @@ def test_personal_scope_and_repository_context_follow_server_selection(workspace
     assert next(n for n in notes if n['source']['type'] == 'observation')['repo_url'] == selected
     fresh = active(app)
     app.state.store.execute("UPDATE runs SET repo_url='https://github.com/BerriAI/other' WHERE id=?", (fresh['id'],))
-    recalled = call(client, fresh, 'memory_search', query='uncertainty reports').json()
+    recalled = call(client, fresh, 'memory_search', query='uncertainty reports', repo_url='https://github.com/BerriAI/other').json()
     assert [n['id'] for n in recalled['matches']] == [personal['id']]
     context = json.loads(app.state.memory.context(fresh).split('\n', 1)[1])
     assert context['selected_repository_url'] == 'https://github.com/berriai/other'
@@ -304,7 +307,7 @@ def test_memory_broker_keeps_authentication_and_server_failures_fatal(workspace,
     assert response.status_code == status and 'status_code' not in response.json()
 
 
-def test_retrieval_bounds_expiration_repository_and_new_session(workspace):
+def test_retrieval_preserves_all_matches_expiration_and_repository_labels(workspace):
     app,client=workspace
     sign_in(app,client)
     for i in range(8):
@@ -314,18 +317,42 @@ def test_retrieval_bounds_expiration_repository_and_new_session(workspace):
     app.state.store.execute('UPDATE personal_memories SET expires_at=? WHERE id=?',((datetime.now(timezone.utc)-timedelta(days=1)).isoformat(),expired))
     run=active(app)
     result=call(client,run,'memory_search',query='benchmark preferences').json()
-    assert len(result['matches'])<=5
+    assert len(result['matches'])==9 and result['next'] is None
     context=json.loads(app.state.memory.context(run).split('\n',1)[1])
-    assert len(json.dumps(context['notes'],ensure_ascii=False))-2 <= MAX_CONTEXT+10
-    assert scoped not in [n['id'] for n in context['notes']] and expired not in [n['id'] for n in context['notes']]
+    assert expired not in {n['id'] for n in context['notes']}
+    assert next(n for n in context['notes'] if n['id']==scoped)['repo_url']=='https://github.com/berriai/litellm'
     next_run=active(app)
-    assert not json.loads(app.state.memory.context(next_run).split('\n',1)[1])['notes']
-    app.state.store.execute("UPDATE runs SET repo_url='https://github.com/BerriAI/litellm' WHERE id=?",(next_run['id'],))
-    call(client,next_run,'memory_search',query='quartz')
-    assert scoped in [n['id'] for n in json.loads(app.state.memory.context(next_run).split('\n',1)[1])['notes']]
-    # Changing a repository rechecks loaded notes, too.
-    app.state.store.execute("UPDATE runs SET repo_url='https://github.com/BerriAI/moyai' WHERE id=?",(next_run['id'],))
-    assert MARKER not in app.state.memory.context(next_run)
+    automatic=json.loads(app.state.memory.context(next_run).split('\n',1)[1])['notes']
+    assert len(automatic)==8
+    assert scoped not in {n['id'] for n in automatic}
+
+
+@pytest.mark.parametrize('padding', ['x', '界', '"'])
+def test_large_note_is_complete_and_private_range_retrieval_is_recoverable(workspace, padding):
+    from app.library_views import fit_context
+    app, client = workspace
+    sign_in(app, client)
+    content='Private preference '+padding*30000+' final requirement'
+    saved=create(client,content=content).json()
+    run=active(app)
+    data=call(client,run,'memory_search',query='').json()
+    assert data['loaded']==1
+    context=fit_context(app.state.memory.context(run), 5000)
+    note=json.loads(context.split('\n',1)[1])['notes'][0]
+    assert note['content_omitted'] and note['characters']==len(content)
+    chunks=[]
+    offset=0
+    while True:
+        result=call(client,run,'memory_read',id=saved['id'],revision=1,offset=offset,characters=1000).json()
+        assert 'Private preference' not in json.dumps(result)
+        current=json.loads(app.state.memory.context(run).split('\n',1)[1])['notes'][0]
+        chunks.append(current['content'])
+        if result['next_offset'] is None:
+            break
+        offset=result['next_offset']
+    assert ''.join(chunks)==content
+    app.state.store.execute("UPDATE runs SET active_user_id='google:ishaan' WHERE id=?", (run['id'],))
+    assert 'Private preference' not in app.state.memory.context(app.state.store.run(run['id']))
 
 
 def test_restart_preserves_encrypted_notes_and_settings(workspace):
@@ -354,7 +381,7 @@ def test_api_requires_authentication_csrf_and_rejects_spoofed_ownership(workspac
     app,client=workspace
     sign_in(app,client)
     assert create(client,owner_id='google:bob').status_code==422
-    assert create(client,content='x'*1201).status_code==422
+    assert create(client,content='x'*1201,request_id='large-content').status_code==201
     client.headers['X-CSRF-Token']='wrong'
     assert create(client).status_code==403
     assert client.put('/api/memory/preferences',json={'enabled':False}).status_code==403

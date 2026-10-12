@@ -1,4 +1,5 @@
 """Encrypted task credentials, their authorization, and durable access requests."""
+from . import slack_secrets
 import asyncio
 import hmac
 import json
@@ -236,11 +237,35 @@ class UpdateSecret(Arguments):
         return self
 
 
+# Loaded with credentials_run instead of occupying every task's system prompt.
+ONEPASSWORD_GUIDANCE = (
+    'Before asking for a provider key, inspect credential_sources from credentials_list for saved generic '
+    '1password-shared access, even when the provider-specific credentials list is empty. If authorized Shared access '
+    'exists, request it with provider=generic, name=1password-shared, format=env and input_fields=[{name: '
+    'OP_SERVICE_ACCOUNT_TOKEN, label: Service account token}]. Use credentials_run for all op commands; the token is '
+    'injected into that subprocess only and authenticates the CLI automatically, without interactive sign-in. If Shared '
+    'access has not been connected, offer the secure Settings > Secrets > Connect 1Password flow; never claim to have '
+    'checked the vault. Verify op whoami and op vault list first, then op item list --vault Shared. Scope all item '
+    'operations and secret references to Shared. Account permissions are enforced by 1Password, not by the vault name in '
+    'these instructions. Prefer a dedicated service account with Shared read_items/write_items only and no '
+    'vault-creation permission. Keep vault values out of all tool output and chat. To use a provider key, set only a '
+    'nonsecret op://Shared/<item>/credential reference in the command environment and use op run -- <process>, keeping '
+    'its output masking enabled. Never use --no-masking. For other reads, capture op read directly in memory inside the '
+    'same credentials_run command and pass it straight to the intended process; never print it. The generic executor '
+    'redacts the service-account token but cannot automatically redact newly read vault values. Before adding a key, '
+    'search Shared for an existing matching item and edit it; if matches are ambiguous, clarify the intended item. Only '
+    'create or edit vault items when the task authorizes it. Feed secret JSON templates to op item create/edit through '
+    'standard input, never arguments or on-disk templates. Capture their output in memory and report only nonsecret item '
+    'metadata. Do not copy a token from another agent or broaden vault permissions. An administrator supplies or rotates '
+    'the token through the secure credential form. '
+)
+
 TOOLS = {
+    **slack_secrets.TOOLS,
     'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
     'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
-    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
+    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication. ' + ONEPASSWORD_GUIDANCE),
     'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication tries alternative saved access, then requires checking available credential_sources before opening a replacement form. No failed operation is replayed. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
     'credentials_http_request': (Invoke, 'Use an authorized inference-key request for a non-streaming inference or model-list API call. The server supplies authentication to fixed provider origins and paths. Responses contain no key. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
 }
@@ -250,7 +275,9 @@ class Credentials:
     def __init__(self, store, security, settings, manager, checkpoints):
         self.store, self.security, self.settings = store, security, settings
         self.manager, self.checkpoints = manager, checkpoints
-        self.slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
+        self.personal_slack = None
+        from .model_slots import ModelSlots
+        self.slots = ModelSlots(settings.max_concurrent_model_requests)
         if store.schema_updates:
             initialize_schema(store)
 
@@ -386,7 +413,8 @@ class Credentials:
             return []
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
                  'annotations': {'readOnlyHint': name == 'credentials_list', 'idempotentHint': name == 'credentials_list'}}
-                for name, (schema, description) in TOOLS.items()]
+                for name, (schema, description) in TOOLS.items()
+                if name not in slack_secrets.TOOLS or slack_secrets.enabled(self, run)]
 
     def setup(self, row):
         return {'setup_url': PROVIDERS[row['provider']]['setup'] or row['setup_url'],
@@ -538,8 +566,19 @@ class Credentials:
         return dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (row['id'],)).fetchone())
 
     def request(self, run, args):
+        from .private_sinks import deny_export, private_run
+        private_slack = (private_run(self.store, run['id']) and isinstance(args, CredentialRequest)
+                         and (args.provider, args.name, args.format) == ('generic', 'slack-personal', 'env'))
+        if private_slack:
+            slack_secrets.private_context(self, run)
+        else:
+            deny_export(self.store, run['id'])
         with self.store.connect() as conn:
             conn.begin_write()
+            if private_slack:
+                saved = self.saved_choice(conn, run, args.model_dump(), args.secret_id)
+                if not saved or saved['scope'] != 'personal':
+                    raise HTTPException(403, 'Save a personal slack-personal secret in Settings > Secrets first, then request it by secret_id.')
             actor = run['active_user_id']
             if not actor or not run['active_message_id']:
                 raise ValueError('Start an authenticated chat session before requesting access.')
@@ -656,9 +695,7 @@ class Credentials:
                     self.enqueue_resolution_in(conn, run, row)
                 except ValueError as exc:
                     conn.execute('ROLLBACK TO credential_delivery')
-                    count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-                    detail = ('This session reached its 100-turn limit. Start a new session to continue.'
-                              if count >= 100 else str(exc))
+                    detail = str(exc)
                     if detail != row['resolution_error']:
                         conn.execute('UPDATE credential_requests SET resolution_error=? WHERE id=?', (detail, row['id']))
                         conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'credential',?,?,?)",
@@ -675,7 +712,9 @@ class Credentials:
         return {**self.ready(row), 'generation': row['generation']}
 
     def pending(self, run, user_id, admin):
+        from .private_sinks import require_owner
         with self.store.connect() as conn:
+            require_owner(self.store, run['id'], user_id, conn)
             rows = self.pending_rows(conn, run['id'])
         return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure', 'preferred_scope', 'scope_revision')},
                  'input_fields': json.loads(row['input_fields']),
@@ -790,6 +829,8 @@ class Credentials:
             accepted = []
             for request_id in args.request_ids:
                 row, secret = self.authorized_request(conn, run, request_id)
+                if row['provider'] == 'generic' and row['name'] == 'slack-personal':
+                    raise HTTPException(403, 'Use the server-side personal Slack tools; this token cannot be exported to a command.')
                 if row['provider'] != 'generic':
                     raise HTTPException(422, 'Use the inference proxy for provider keys.')
                 if row['status'] == 'pending':
@@ -847,6 +888,8 @@ class Credentials:
 
     async def call(self, run, name, arguments):
         args = TOOLS[name][0].model_validate(arguments)
+        if name in slack_secrets.TOOLS:
+            return await slack_secrets.call(self, run, name, args)
         if name == 'credentials_list':
             return self.inventory(run, args)
         if name == 'credentials_request':
@@ -881,7 +924,7 @@ class Credentials:
             raise HTTPException(422, 'Only supported inference and model-list routes are allowed.')
         if args.body.get('stream') or args.body.get('background'):
             raise HTTPException(422, 'Use non-streaming, foreground requests through the credential proxy.')
-        if self.slots.locked():
+        if await self.slots.is_full():
             raise HTTPException(429, 'Provider request capacity is busy. No provider call was made.')
         async with self.slots:
             self.acknowledge(run['id'], run['active_message_id'], request['id'], request['generation'])

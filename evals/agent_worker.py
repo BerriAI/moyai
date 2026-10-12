@@ -14,10 +14,8 @@ import uvicorn
 from app.config import Settings
 from app.main import create_app
 from app.security import digest
-from sandbox.activity import ActivityReporter
+from agent.agent import run as run_agent
 from sandbox.broker_relay import BrokerRelay
-from sandbox.context_store import ContextStore
-from sandbox.harness_registry import create_agent
 
 from .agent import AgentRunError, source_revision
 
@@ -55,7 +53,7 @@ def execute(payload):
     app.state.tracing.processor = captured
     server = uvicorn.Server(uvicorn.Config(app, log_level='error', access_log=False))
     thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
-    relay = context = agent = None
+    relay = None
     run = message = None
     finished = False
     tool_calls = 0
@@ -80,33 +78,30 @@ def execute(payload):
         trace_id = format(tracing.identity(store.run(run['id']), message['id'])[0], '032x')
         relay = BrokerRelay(f'{broker_url}/broker/{run["id"]}', token).start()
 
-        def emit(kind, _message, data=None):
+        def emit(kind, _message, data=None, **_extra):
             nonlocal tool_calls
             if kind == 'trace':
                 tracing.tool(run['id'], data)
                 tool_calls += 1
 
-        activity = ActivityReporter(emit, tracing=True, omit_private_tool_payloads=True)
-        context = ContextStore(state / 'context.sqlite3', run['id'])
-        context.initialize([])
-        agent = create_agent(
-            payload['harness'], spec={'model': payload['model'], 'max_iterations': payload['max_iterations'],
-                                     'timeout': payload['timeout'], 'transport_recovery_seconds': 30},
+        outcome = run_agent(
+            {'run_id': run['id'], 'prompt': payload['input'], 'harness': payload['harness'],
+             'model': payload['model'], 'max_iterations': payload['max_iterations'],
+             'timeout': payload['timeout'], 'transport_recovery_seconds': 30,
+             'chat_enabled': True, 'tracing_enabled': True, 'omit_private_tool_payloads': True},
+            workspace=workspace, session=state, emit=emit,
             relay=relay, config={'mcp_servers': {'workspace': {
-                'command': sys.executable, 'args': [str(root / 'sandbox' / 'mcp_bridge.py')],
+                'command': sys.executable, 'args': [str(root / 'agent' / 'tools' / 'mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': token},
-            }}}, activity=activity, step=lambda: None, cwd=str(workspace), context_store=context,
+            }}},
         )
-        result = agent.run_conversation(
-            payload['input'], conversation_history=[],
-            system_message=('You are Moyai, an engineering agent. Complete the requested coding task using '
-                            'your real file and terminal tools. Work only in ' + str(workspace) + '. '
-                            'Run the requested checks before answering. Do not start detached work.'),
-        )
-        if not result.get('completed') or result.get('failed') or result.get('interrupted') or context.pending:
+        result = outcome['result']
+        if (outcome['exit_code'] or not result.get('completed') or result.get('failed')
+                or result.get('interrupted') or result.get('partial') or outcome['context_pending']):
             raise AgentRunError('Moyai stopped before completing the task or settling all tool calls.')
-        output = result.get('final_response')
-        if not isinstance(output, str) or not output.strip():
+        raw_output, output = result.get('final_response'), outcome['summary']
+        if (not isinstance(raw_output, str) or not raw_output.strip()
+                or not isinstance(output, str) or not output.strip()):
             raise AgentRunError('Moyai completed without an output.')
         model_calls = store.run(run['id'])['model_calls']
         if model_calls < 1 or tool_calls < 1:
@@ -128,10 +123,6 @@ def execute(payload):
             cleanup.callback(shutdown_server)
             if relay:
                 cleanup.callback(relay.close)
-            if context:
-                cleanup.callback(context.close)
-            if agent:
-                cleanup.callback(agent.close)
             if run and message and not finished:
                 app.state.store.finish_message(run['id'], message['id'], 'Evaluation execution failed.', 'failed')
                 app.state.store.update_run(run['id'], status='failed', error='Evaluation execution failed.')

@@ -277,6 +277,7 @@
 .settings-view [data-slot="dialog-content"] :is(.credential-actions,.role-actions,.environment-dialog-actions) { gap: 12px; margin-block-start: 24px; padding-block-start: 20px; border-top: 1px solid var(--settings-line); }
 .settings-view [data-slot="dialog-content"] [type=submit] { background: var(--settings-accent); color: var(--settings-accent-foreground); border-color: var(--settings-accent); }
 .settings-view [data-slot="dialog-content"] .field :is(input,select,textarea) { width: 100%; }
+.settings-view [data-slot="dialog-content"] :is(.memory-editor,.skill-editor) textarea { max-height: 40dvh; overflow-y: auto; }
 .settings-view .settings-load-error { max-width: 65ch !important; }
 .settings-view .settings-load-error>div { margin-block: 24px; }
 @media (hover:hover) {
@@ -605,3 +606,60 @@
   .automation-connection-search input { flex-basis: 100%; }
   .settings-view [data-slot="dialog-content"] :is(input,textarea,select) { font-size: 16px; }
 }
+
+/* Learned drafts share the Skills rows and Settings controls. */
+.settings-view #skill-learning { display: grid; gap: 16px; margin-block: 24px; min-width: 0; }
+.settings-view #skill-learning .memory-controls { margin: 0; border-radius: var(--settings-radius); }
+.settings-view #skill-learning .memory-controls > label { display: flex; align-items: center; gap: 8px; flex-shrink: 0; min-height: 44px; }
+.settings-view #skill-learning .section-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.settings-view #skill-learning .section-header h2 { margin: 0; }
+.settings-view #skill-learning .skill-card { padding: 16px; }
+.settings-view #skill-learning-error:empty { display: none; }
+.settings-view #skill-learning-error { color: var(--ui-danger); }
+[data-dialog-id="skill-dialog"] .settings-hint { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .settings-view #skill-learning .memory-controls { flex-direction: column; }
+}
+
+/* Admin performance dashboard: shared Settings surfaces and controls. */
+.settings-view .performance-view {display:grid;gap:24px;min-width:0}
+.settings-view .performance-view .page-heading {margin-bottom:0}
+.settings-view .performance-filters {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+.settings-view .performance-filters label {display:grid;gap:8px;min-width:0}
+.settings-view #performance-results {display:grid;gap:24px;min-width:0}
+.settings-view .performance-metrics {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.settings-view .performance-card {min-width:0;display:flex;flex-direction:column}
+.settings-view .performance-card h2 {font-size:16px;margin:0 0 8px}
+.settings-view .performance-card .subtext {margin:0;min-height:40px}
+.settings-view .performance-average {font-size:36px;font-weight:500;line-height:1.3;font-variant-numeric:tabular-nums;margin:16px 0}
+.settings-view .performance-average span {font-size:13px;margin-inline-start:8px;color:var(--muted)}
+.settings-view .performance-percentiles {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 16px}
+.settings-view .performance-percentiles dt {font-size:13px;color:var(--muted)}
+.settings-view .performance-percentiles dd {margin:4px 0 0;font-variant-numeric:tabular-nums;font-size:16px}
+.settings-view .performance-coverage,.settings-view .performance-missing {font-size:13px;margin:4px 0 0;color:var(--muted)}
+.settings-view .performance-section-heading,.settings-view .performance-chart-range {display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.settings-view .performance-legend {display:flex;gap:20px;flex-wrap:wrap;font-size:13px;margin:12px 0}
+.settings-view .performance-legend .startup:before,.settings-view .performance-legend .send_now:before {content:'';display:inline-block;width:16px;height:3px;margin:0 6px 3px 0;background:currentColor}
+.settings-view .performance-trend svg {width:100%;height:auto;min-height:140px;overflow:visible}
+.settings-view .performance-trend .startup {color:var(--accent);stroke:var(--accent)}
+.settings-view .performance-trend .send_now {color:var(--text);stroke:var(--text)}
+.settings-view .performance-line {fill:none;stroke-width:2;vector-effect:non-scaling-stroke}
+.settings-view .performance-line.send_now {stroke-dasharray:5 4}
+.settings-view .performance-point {fill:currentColor}
+.settings-view .performance-axis {stroke:var(--border)}
+.settings-view .performance-chart-range {font-size:12px;color:var(--muted);margin:8px 0 16px}
+.settings-view .performance-table {overflow:auto;max-width:100%;margin-top:16px}
+.settings-view .performance-table table {width:100%;font-variant-numeric:tabular-nums}
+.settings-view .performance-table th,.settings-view .performance-table td {text-align:end;white-space:nowrap}
+.settings-view .performance-table th:first-child,.settings-view .performance-table td:first-child {text-align:start}
+.settings-view .performance-table td {max-width:320px;overflow-wrap:anywhere}
+.settings-view .performance-auto {display:block;font-size:12px;color:var(--muted)}
+.settings-view .performance-method summary {cursor:pointer;font-weight:500}
+.settings-view .performance-method p,.settings-view .performance-empty p {max-width:75ch;line-height:1.6}
+@media(max-width:780px){.settings-view .performance-filters {grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:480px){.settings-view .performance-filters,.settings-view .performance-metrics {grid-template-columns:minmax(0,1fr)}.settings-view .performance-average {font-size:32px}}
+
+.settings-view .personal-slack-page > .card { margin-block:0 24px; }
+.settings-view .personal-slack-page .connection-facts dd { overflow-wrap:anywhere; }
+.settings-view #personal-slack-error { color:var(--settings-danger); }
+.settings-view .personal-slack-page .connection-state.needs-attention { color:var(--settings-warning); background:var(--settings-warning-bg); }

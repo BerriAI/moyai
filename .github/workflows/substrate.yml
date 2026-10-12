@@ -4,6 +4,7 @@ on:
     paths:
       - 'app/**'
       - 'sandbox/**'
+      - 'agent/**'
       - 'scripts/substrate*'
       - 'Dockerfile.sandbox'
       - '.github/workflows/substrate.yml'

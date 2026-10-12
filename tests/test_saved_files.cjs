@@ -1,8 +1,76 @@
 const assert=require('node:assert/strict');
 require('./helpers/ui-vm.cjs');
 const {test}=require('node:test');
-const {reference,resolve,decorate,preview,reveal,create}=require('../app/static/saved-files.js');
+const {reference,resolve,decorate,preview,reveal,loadCatalog,create}=require('../app/static/saved-files.js');
 const file=path=>({path,workspace_path:path,name:path.split('/').at(-1),archive_path:'new-files/'+path,url:'/download/'+encodeURIComponent(path)});
+
+test('captures arrive before a held archive and opening one never waits for that archive',async()=>{
+  const capture={...file('moyai-captures/demo.webm'),archive_path:'capture:demo.webm'};
+  const media={files:[capture],archive_pending:true},updates=[],requests=[];
+  let finish;const archive=new Promise(resolve=>{finish=resolve;});
+  const api=(url,options)=>{requests.push({url,options});return url.endsWith('?view=media')?Promise.resolve(media):archive;};
+  const pending=loadCatalog(api,'session',{onUpdate:value=>updates.push(value)});
+  await new Promise(setImmediate);
+  assert.deepEqual(updates,[media]);
+  const opened=await loadCatalog(api,'session',{filePath:capture.archive_path});
+  assert.equal(opened.files[0],capture);
+  assert.equal(requests.filter(r=>!r.url.endsWith('?view=media')).length,1);
+  assert(requests.every(r=>r.options.recent&&r.options.timeoutMs===30000));
+  finish({files:[capture,file('report.md')]});
+  assert.equal((await pending).files.length,2);
+  assert.equal(updates.length,2);
+});
+
+test('an archive timeout retains captures with a retryable state, but access errors propagate',async()=>{
+  const media={files:[file('demo.webm')],archive_pending:true};
+  let error=Object.assign(Error('timed out'),{name:'TimeoutError'});
+  const api=async url=>{if(url.endsWith('?view=media'))return media;throw error;};
+  const result=await loadCatalog(api,'session');
+  assert.equal(result.files,media.files);assert.equal(result.archive_pending,false);
+  assert.equal(result.archive_error,true);assert.match(result.error,/Retry/);
+  for(const status of [401,403,404,409]){
+    error=Object.assign(Error('unavailable'),{status});
+    await assert.rejects(loadCatalog(api,'session'),err=>err.status===status);
+  }
+});
+
+test('chat hydration and Files share both in-flight catalog requests; explicit refresh fetches again',async()=>{
+  const vm=require('./helpers/ui-vm.cjs'),{readFileSync}=require('node:fs');
+  const context={structuredClone};vm.createContext(context);
+  vm.runInContext(readFileSync('app/static/navigation-cache.js','utf8'),context);
+  const cache=context.MoyaiNavigationCache.create(),calls=[];
+  let finish;const full=new Promise(resolve=>{finish=resolve;});
+  const api=(url,options)=>cache.read(url,()=>{calls.push(url);return url.endsWith('?view=media')?Promise.resolve({files:[],archive_pending:true}):full;},options);
+  const id='a'.repeat(32),chat=loadCatalog(api,id),panel=loadCatalog(api,id);
+  await new Promise(setImmediate);assert.equal(calls.length,2);
+  finish({files:[file('report.md')]});await Promise.all([chat,panel]);
+  await loadCatalog(api,id);assert.equal(calls.length,2);
+  await loadCatalog(api,id,{refresh:true});assert.equal(calls.length,4);
+});
+
+test('a changed checkpoint bypasses a recently cached archive index',async()=>{
+  const requests=[];
+  const api=async(url,options)=>{
+    requests.push(options);
+    if(url.endsWith('?view=media'))return {files:[],archive_pending:true,archive_revision:'new'};
+    return options.recent?{files:[file('old.md')],revision:'old'}:{files:[file('new.md')],revision:'new'};
+  };
+  const result=await loadCatalog(api,'session');
+  assert.equal(result.files[0].path,'new.md');assert.equal(requests.length,3);
+  assert.equal(requests[2].recent,undefined);
+});
+
+test('a cached full catalog cannot hide a newly published capture',async()=>{
+  const capture={...file('moyai-captures/new.png'),archive_path:'capture:new.png'},requests=[];
+  const api=async(url,options)=>{
+    requests.push(url);
+    if(url.endsWith('?view=media'))return {files:[capture],archive_pending:true,archive_revision:'same'};
+    return {files:options.recent?[file('report.md')]:[capture,file('report.md')],revision:'same'};
+  };
+  const updates=[],result=await loadCatalog(api,'session',{onUpdate:value=>updates.push(value)});
+  assert.equal(requests.length,3);assert.equal(result.files[0],capture);
+  assert(updates.every(value=>value.files.includes(capture)));
+});
 
 test('local file references resolve only to the exact saved workspace file',()=>{
   const root=file('design.md'),nested=file('repo/design.md'),files=[root,nested,file('repo/other.txt')];
@@ -154,4 +222,13 @@ test('source links retain their requested line when saved files arrive or disapp
   assert.equal(view.link.href,undefined);assert.equal(view.link.onclick,null);
   assert.equal(view.link.classList.contains('saved-file-link'),false);
   assert.equal(view.link['aria-disabled'],'true');
+});
+
+test('a parent file catalog cannot decorate another agent’s message references',()=>{
+  const view=linkFixture('design.md',false);
+  view.link.closest=selector=>selector==='[data-message-run]'?{dataset:{messageRun:'child'}}:null;
+  decorate(view.container,[file('design.md')],{runId:'parent'});
+  assert.equal(view.link.href,undefined);
+  decorate(view.container,[file('design.md')],{runId:'child'});
+  assert.equal(view.link.href,'/download/design.md');
 });

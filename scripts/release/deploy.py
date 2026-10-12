@@ -23,13 +23,22 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from scripts.release.errors import ReleaseError
+from scripts.release.ssh_diagnostics import failure as ssh_failure
+from scripts.release.ssh_connections import ConnectionFailure, SSHConnections
+
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = 'BerriAI/moyai'
 COORDINATOR = 'srv-db41eiqj9qps73fpuan0'
 WORKER = 'srv-db4s0b142hec73epgpt0'
 BROKER = 'srv-db4tlsajnfac738gigb0'
-SERVICE_NAMES = {'coordinator': 'moyai-private', 'worker': 'moyai-worker', 'broker': 'moyai-broker'}
+SERVICE_NAMES = {'coordinator': 'moyai-private', 'worker': 'moyai-worker', 'broker': 'moyai-broker', 'api': 'moyai-api'}
 MUTABLE = {'MOYAI_BUILD_SHA', 'MAINTENANCE_DRAIN', 'RENDER_MIGRATION_STAGE'}
+TRANSIENT_PROBE_FAILURES = {'ssh_timeout', 'ssh_connection_lost', 'database_unavailable'}
+PROBE_FAILURES = TRANSIENT_PROBE_FAILURES | {
+    'probe_request_invalid', 'ssh_failed', 'probe_output_invalid', 'probe_output_interrupted', 'database_error',
+    'health_unavailable', 'runtime_validation_failed'}
+PROBE_VALIDATION_STAGES = {'environment', 'configuration', 'snapshot', 'contracts', 'health_identity'}
 ACTIVE_DEPLOYS = {'created', 'queued', 'build_in_progress', 'pre_deploy_in_progress', 'update_in_progress'}
 FAILED_DEPLOYS = {'build_failed', 'pre_deploy_failed', 'update_failed', 'canceled', 'deactivated'}
 SHARED_KEYS = ('MOYAI_DATABASE_URL', 'MOYAI_DATABASE_SCHEMA', 'SESSION_SECRET', 'ENCRYPTION_KEY',
@@ -38,10 +47,6 @@ SHARED_KEYS = ('MOYAI_DATABASE_URL', 'MOYAI_DATABASE_SCHEMA', 'SESSION_SECRET', 
                'MAX_CONCURRENT_RUNS', 'MAX_PENDING_RUNS', 'MAX_CONCURRENT_MODEL_REQUESTS',
                'SANDBOX_PREPARED_POOL_SIZE', 'SANDBOX_PREPARED_IDLE_SECONDS')
 SHARED_DEFAULTS = {'SANDBOX_PREPARED_POOL_SIZE': '0', 'SANDBOX_PREPARED_IDLE_SECONDS': '300'}
-
-
-class ReleaseError(RuntimeError):
-    """Only fixed, credential-free messages may be used here."""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -160,6 +165,24 @@ class GitHub:
             ready = ready and statuses['state'] == 'success'
         return ready
 
+    def rolling_ready(self, sha: str) -> bool:
+        if not self.ready(sha):
+            return False
+        # Rolling admission needs its actual protocol/controller suites on the
+        # selected commit, not merely an unrelated green Docker build.
+        for workflow in ('postgres-runtime.yml', 'production-release-tests.yml'):
+            runs = self.api.call('GET', self.prefix + '/actions/workflows/' + workflow + '/runs?' +
+                urllib.parse.urlencode({'head_sha': sha, 'event': 'push', 'per_page': 100}))['workflow_runs']
+            matching = [run for run in runs if run.get('head_sha') == sha
+                        and run.get('head_branch') == 'main' and run.get('event') == 'push'
+                        and run.get('path') == '.github/workflows/' + workflow]
+            latest = max(matching, key=lambda run: run['id'], default=None)
+            if not latest or latest['status'] != 'completed':
+                return False
+            if latest['conclusion'] != 'success':
+                raise ReleaseError('Required rolling runtime or release-controller CI failed for the selected commit.')
+        return True
+
 
 @dataclass
 class Service:
@@ -180,31 +203,63 @@ class Service:
 
 
 class SSHProbe:
-    def __init__(self, key: Path):
-        self.key = key
+    def __init__(self, key: Path, *, source: Path = ROOT / 'probe.py', connections=None):
+        self.key, self.source, self.connections = key, source, connections
+
+    def invalidate(self, service):
+        if self.connections is not None:
+            self.connections.invalidate(service)
 
     def __call__(self, service: Service):
-        options = json.dumps(service.probe_options(), separators=(',', ':'))
+        return self.run(service, service.probe_options(), marker='MOYAI_RELEASE_PROBE=', read_only=True)
+
+    def run(self, service: Service, options, *, marker, timeout=50, source=None, read_only=False):
+        options = json.dumps(options, separators=(',', ':'))
+        if len(options.encode()) > 65536:
+            return {'ok': False, 'reason': 'probe_request_invalid'}
         # Both possible container UIDs retain the existing environment. Never
         # create a root-owned SQLite file or import app.main in this probe.
         command = ('cd /app && if [ "$(id -u)" = 0 ]; then exec runuser -u workspace -- '
                    '/app/.venv/bin/python - ' + shlex.quote(options) +
                    '; else exec /app/.venv/bin/python - ' + shlex.quote(options) + '; fi')
-        args = ['ssh', '-T', '-i', str(self.key), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+        # Capture verbose milestones privately. Only fixed categories and booleans
+        # leave this transport; raw SSH diagnostics can contain command arguments.
+        args = ['ssh', '-F', '/dev/null', '-v', '-T', '-i', str(self.key), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
                 '-o', 'StrictHostKeyChecking=yes', '-o', 'GlobalKnownHostsFile=/dev/null',
                 '-o', 'UserKnownHostsFile=' + str(ROOT / 'render-known-hosts'), '-o', 'ConnectTimeout=10',
                 '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
                 service.id + '@ssh.oregon.render.com', command]
+        started = time.monotonic()
+        def failed(stdout, stderr, returncode=None, kind=None):
+            return ssh_failure(stdout=stdout, stderr=stderr, returncode=returncode, marker=marker,
+                               elapsed_ms=round((time.monotonic() - started) * 1000), kind=kind)
         try:
-            result = subprocess.run(args, input=(ROOT / 'probe.py').read_text(), text=True,
-                                    capture_output=True, timeout=50)
+            body = self.source.read_text() if source is None else source
+            if read_only and self.connections is not None:
+                result = self.connections.run(service, args, input=body, timeout=timeout)
+            else:
+                # Migration commands deliberately never share or reconnect an
+                # observational connection. Ambiguous writes stay single-shot.
+                direct = [*args[:-2], '-o', 'ControlMaster=no', '-o', 'ControlPath=none', *args[-2:]]
+                result = subprocess.run(direct, input=body, text=True, capture_output=True, timeout=timeout)
             if result.returncode:
-                return {'ok': False}
-            lines = [line.removeprefix('MOYAI_RELEASE_PROBE=') for line in result.stdout.splitlines()
-                     if line.startswith('MOYAI_RELEASE_PROBE=')]
-            return json.loads(lines[-1]) if len(lines) == 1 else {'ok': False}
-        except (subprocess.TimeoutExpired, ValueError, OSError):
-            return {'ok': False}
+                return failed(result.stdout, getattr(result, 'stderr', ''), result.returncode)
+            lines = [line.removeprefix(marker) for line in result.stdout.splitlines()
+                     if line.startswith(marker)]
+            value = json.loads(lines[0]) if len(lines) == 1 else None
+            if isinstance(value, dict):
+                return value
+            self.invalidate(service)
+            return {'ok': False, 'reason': 'probe_output_invalid'}
+        except subprocess.TimeoutExpired as exc:
+            return failed(exc.stdout, exc.stderr, kind='command_timeout')
+        except ConnectionFailure as exc:
+            return exc.result
+        except ValueError:
+            self.invalidate(service)
+            return {'ok': False, 'reason': 'probe_output_invalid'}
+        except OSError:
+            return failed(None, None, kind='local_os_error')
 
 
 class Release:
@@ -341,7 +396,8 @@ class Release:
 
     @staticmethod
     def settled(state, owners, *, drained=False, brokers=None):
-        keys = ('owners', 'coordinators', 'brokers', 'unsafe_sessions', 'legacy_active_sessions', 'model_requests', 'live_leases')
+        keys = ('owners', 'coordinators', 'brokers', 'unsafe_sessions', 'executing_sessions',
+                'legacy_active_sessions', 'model_requests', 'live_leases')
         if not state.get('ok') or any(type(state.get(key)) is not int for key in keys):
             return False
         # Legacy combined builds predate the broker lock. New combined builds
@@ -352,11 +408,13 @@ class Release:
 
     @classmethod
     def execution_stopped(cls, state, *, brokers=None):
-        # Drain session state while workers can still complete it. After staging,
-        # a new Stop request needs the replacement worker to finish; it must not
-        # block the ownership handoff. Still fence actual workers and execution.
-        return (cls.settled(state, 1 + (brokers or 0), brokers=brokers) and state['model_requests'] == 0
-                and state['live_leases'] == 0)
+        # Worker shutdown only detaches observation; the sandbox can keep using
+        # the broker between requests without a worker owner or execution lease.
+        # Require its persisted phase to be a saved boundary too. A late Stop
+        # at such a boundary can still wait for the replacement worker.
+        return (cls.settled(state, 1 + (brokers or 0), brokers=brokers)
+                and all(state[key] == 0 for key in ('executing_sessions', 'legacy_active_sessions',
+                                                   'model_requests', 'live_leases')))
 
     def run(self):
         try:
@@ -445,11 +503,14 @@ class Release:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, default=Path('release-receipt.json'))
+    parser.add_argument('--release-type', choices=['coordinated', 'api', 'rolling'], default='coordinated')
     parser.add_argument('--preflight', action='store_true', default=os.environ.get('PREFLIGHT_ONLY') == 'true',
                         help='Check CI, credentials and the current topology without changing production.')
     args = parser.parse_args()
     if os.environ.get('GITHUB_REPOSITORY') != REPOSITORY or os.environ.get('GITHUB_REF') != 'refs/heads/main':
         raise ReleaseError('Production deployment may only run from main in BerriAI/moyai.')
+    if args.release_type == 'coordinated' and os.environ.get('MOYAI_API_SERVICE_ID'):
+        raise ReleaseError('The dedicated API topology requires API releases or a separately planned maintenance transition. No changes made.')
     key = os.environ.pop('RENDER_DEPLOY_SSH_KEY', '')
     if not key:
         raise ReleaseError('RENDER_DEPLOY_SSH_KEY is missing; no production changes made.')
@@ -457,14 +518,27 @@ def main():
         raise ReleaseError('Release cancelled. Inspect the receipt; paused or staged execution was not automatically resumed.')
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
-    with tempfile.TemporaryDirectory(prefix='moyai-deploy-') as directory:
+    with tempfile.TemporaryDirectory(prefix='moyai-deploy-') as directory, SSHConnections() as connections:
         key_path = Path(directory) / 'key'
         key_path.write_text(key.rstrip() + '\n')
         key_path.chmod(0o600)
         render = API('https://api.render.com/v1', os.environ.pop('RENDER_DEPLOY_API_KEY', ''))
         github = GitHub(API('https://api.github.com', os.environ.pop('GH_TOKEN', '')),
                         os.environ['GITHUB_RUN_ID'], os.environ.get('GITHUB_SHA', ''))
-        release = Release(render, github, SSHProbe(key_path), args.receipt, preflight_only=args.preflight)
+        if args.release_type == 'rolling':
+            from scripts.release.rolling_deploy import RollingRelease
+            from scripts.release.online_migration import SSHMigration
+            release = RollingRelease(render, github, SSHProbe(key_path, source=ROOT / 'rolling_probe.py', connections=connections),
+                                     args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
+                                     migrate=SSHMigration(key_path),
+                                     preflight_only=args.preflight)
+        elif args.release_type == 'api':
+            from scripts.release.api_deploy import APIRelease
+            release = APIRelease(render, github, SSHProbe(key_path, source=ROOT / 'api_probe.py'),
+                                 args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
+                                 preflight_only=args.preflight)
+        else:
+            release = Release(render, github, SSHProbe(key_path), args.receipt, preflight_only=args.preflight)
         try:
             release.run()
         finally:
@@ -475,7 +549,7 @@ def main():
                     if 'commit' in release.record:
                         output.write(f"Commit: `{release.record['commit']}`\n\n")
                     if release.record['status'] not in {'success', 'preflight_passed'}:
-                        output.write('Inspect the release-receipt artifact and Render before retrying. Do not deploy only one service or resume mismatched builds.\n')
+                        output.write('Inspect the release-receipt artifact and Render before retrying. Follow docs/production-deploy.md for this release type.\n')
 
 
 if __name__ == '__main__':

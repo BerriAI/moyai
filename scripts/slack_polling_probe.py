@@ -47,6 +47,8 @@ async def probe(directory: Path, *, hold_seconds: float = 1, contention: str = '
     store.finish_message(run['id'], message['id'], 'Local probe answer saved once.')
     store.update_run(run['id'], status='idle')
     if lane == 'media':
+        # This probe exercises only the media lane; its preceding text is settled.
+        store.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=?", (run['id'],))
         with store.connect() as conn:
             chat.queue(conn, run['id'], 'answer:probe:media', 'answer', 'Local media-lane reply.')
     if lane == 'activity':

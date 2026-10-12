@@ -1,4 +1,5 @@
 """Private Modal exec proxy. No exposed CDP/VNC endpoint or browser tokens."""
+from .private_sinks import require_owner, require_request_owner
 import asyncio
 import base64
 import hashlib
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from . import captures
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
 from sandbox.computer import browser_state, PRIVATE_BODY_LIMIT
 
 
@@ -59,8 +61,8 @@ class DesktopConnection:
                 if native:
                     return await native(body)
                 if self.process is None:
-                    self.process = await self.sandbox.exec.aio('/usr/local/bin/python',
-                        '/opt/workspace-runner/computer.py', 'bridge', timeout=3600, bufsize=1)
+                    self.process = await self.sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                        RUNTIME_ROOT, 'computer.py', 'bridge', timeout=3600, bufsize=1)
                     self.reader = self.process.stdout.__aiter__()
                 self.process.stdin.write((json.dumps(body)+'\n').encode())
                 await self.process.stdin.drain.aio()
@@ -194,6 +196,7 @@ class Computer:
         if not run or run.get('deleted_at') or run['mode'] != 'modal':
             raise HTTPException(404, 'Cloud session not found.')
         actor = self.store.identity(self.security.session_info(request))
+        require_owner(self.store, run_id, actor)
         if self.security.role(request) != 'admin' and not any(
             self.same_requester(actor, owner) for owner in (run.get('owner_id'), run.get('active_user_id')) if owner
         ):
@@ -259,7 +262,8 @@ class Computer:
 
     async def execute(self, sandbox, *args, timeout=45):
         async with self.slots:
-            proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/computer.py', *args, timeout=timeout)
+            proc = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                          RUNTIME_ROOT, 'computer.py', *args, timeout=timeout)
             stdout, _ = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
             if await proc.wait.aio() != 0:
                 raise HTTPException(503, 'Computer is not ready in this workspace. Start a new response to update it.')
@@ -358,13 +362,14 @@ class Computer:
                 shutting_down = self.shutting_down(run_id, run.get('sandbox_id'), lifecycle)
                 can_wake = (lifecycle.get('can_wake', False) and value.get('has_sandbox') is False
                             and not shutting_down)
+                self.authorize(request, run_id)
                 return {**value, 'has_sandbox': value.get('has_sandbox', False), 'actor': actor,
                         'shutting_down': shutting_down,
                         'waking': lifecycle.get('waking', False), 'starting': lifecycle.get('starting', False),
                         'wake_error': lifecycle.get('wake_error', ''), 'wake_notice': lifecycle.get('wake_notice', ''),
                         'can_wake': can_wake,
                         'wake_supported': hasattr(self.manager, 'wake_computer'),
-                        'captures': captures.listing(self.settings, run_id, store=self.store)}
+                        'captures': captures.listing(self.settings, run_id, store=self.store, actor=actor)}
 
         @router.post('/api/runs/{run_id}/computer')
         async def command(run_id: str, body: Command, request: Request):
@@ -388,11 +393,11 @@ class Computer:
                         if lifecycle.get('phase') != 'warm':
                             return {'ok': True, 'available': False, 'has_sandbox': False, 'waking': True,
                                     'wake_supported': True, 'actor': actor, 'tab': body.tab,
-                                    'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                    'captures': captures.listing(self.settings, run_id, store=self.store, actor=actor)}
                     async with self.connection(run) as connection:
                         if not connection:
                             if closing:
-                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store, actor=actor)}
                             raise HTTPException(409, 'This workspace is asleep. Wake it up to see it live.')
                         if body.tab:
                             probe = {'action': 'state', 'tab': body.tab, 'actor': actor}
@@ -410,10 +415,10 @@ class Computer:
                                 if closing and 'tab' not in scope and 'error' not in scope and all(
                                     isinstance(scope.get(field), bool) for field in ('available', 'recording')
                                 ):
-                                    return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                    return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store, actor=actor)}
                                 raise HTTPException(503, TAB_UPDATE_NOTICE)
                             if closing and scope.get('available') is False and scope.get('recording') is False:
-                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store, actor=actor)}
                         if self.shutting_down(run_id, run.get('sandbox_id')):
                             raise HTTPException(409, 'This workspace is shutting down. Saved captures remain available in Files.')
                         result = await connection.request({**body.model_dump(), 'actor': actor})
@@ -429,9 +434,10 @@ class Computer:
                             self.store.execute('INSERT INTO computer_activity VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET touched=excluded.touched', (run_id, time.time()))
                         if body.action in {'screenshot', 'record_stop'}:
                             await self.sync(connection.sandbox, run_id)
+                        self.authorize(request, run_id, mutation=True)
                         return {**result, 'ok': True, 'actor': actor, 'tab': body.tab, 'has_sandbox': True,
                                 'shutting_down': self.shutting_down(run_id, run.get('sandbox_id')),
-                                'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                'captures': captures.listing(self.settings, run_id, store=self.store, actor=actor)}
                 finally:
                     for key in list(self.cache):
                         if key[0] == run_id:
@@ -440,10 +446,10 @@ class Computer:
         @router.get('/api/runs/{run_id}/computer/captures/{name}')
         def content(run_id: str, name: str, request: Request, download: bool = False):
             # Completed captures follow the same shared-session visibility as saved files.
-            self.security.require(request)
+            actor = require_request_owner(self.store, self.security, request, run_id)
             if not self.store.run(run_id) or not captures.valid_name(name):
                 raise HTTPException(404, 'Capture not found.')
-            return captures.response(captures.directory(self.settings, run_id) / name, request, download, store=self.store)
+            return captures.response(captures.directory(self.settings, run_id) / name, request, download, store=self.store, actor=actor)
 
         return router
 

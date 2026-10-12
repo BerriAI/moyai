@@ -1,4 +1,4 @@
-"""Provider event vocabularies, scoped filters, and bounded agent context."""
+"""Provider event vocabularies, scoped filters, and complete attributed agent context."""
 import json
 import re
 from typing import Literal
@@ -32,8 +32,8 @@ def obj(value):
     return value if isinstance(value, dict) else {}
 
 
-def text(value, limit=4000):
-    return value[:limit] if isinstance(value, str) else ''
+def text(value):
+    return value if isinstance(value, str) else ''
 
 
 def scalar(value):
@@ -121,10 +121,11 @@ def normalize(t, payload, event_header=''):
         event = text(p.get('event'))
         title, body, url = 'Session message', p.get('body'), p.get('url')
         item = scalar(p.get('session_id')) + ':' + scalar(p.get('message_id'))
-        extra = {'session_id':text(p.get('session_id'),32), 'message_id':p.get('message_id'),
-                 'user_id':text(p.get('user_id'),200),
-                 'conversation':[{'role':text(obj(m).get('role'),20), 'content':text(obj(m).get('content'),1000)}
-                                 for m in items(p.get('conversation'))[:10]],
+        extra = {'session_id':text(p.get('session_id')), 'message_id':p.get('message_id'),
+                 'user_id':text(p.get('user_id')),
+                 'conversation':[{**{key:obj(m)[key] for key in ('id','user_id','created_at','input_kind','source','response_to_id') if key in obj(m)},
+                                  'role':text(obj(m).get('role')), 'content':text(obj(m).get('content'))}
+                                 for m in items(p.get('conversation'))],
                  'context_truncated':bool(p.get('context_truncated'))}
     elif t.provider == 'github':
         if t.repository_id is None or type(obj(p.get('repository')).get('id')) is not int or obj(p.get('repository'))['id'] != t.repository_id:
@@ -158,7 +159,7 @@ def normalize(t, payload, event_header=''):
         body = detail.get('body') or data.get('body') or obj(p.get('head_commit')).get('message') or obj(data.get('output')).get('summary')
         url = detail.get('html_url') or data.get('html_url') or data.get('details_url') or p.get('compare')
         item = str(t.repository_id) + ':' + scalar(data.get('number') or data.get('id') or p.get('after'))
-        extra = {'repository_id':t.repository_id,'repository':text(obj(p.get('repository')).get('full_name')), 'sha':text(data.get('head_sha') or p.get('after'),80)}
+        extra = {'repository_id':t.repository_id,'repository':text(obj(p.get('repository')).get('full_name')), 'sha':text(data.get('head_sha') or p.get('after'))}
         if '.' in t.event:
             event += '.' + action
     elif t.provider == 'gitlab':
@@ -174,7 +175,7 @@ def normalize(t, payload, event_header=''):
         title = data.get('title') or obj(p.get('merge_request') or p.get('issue')).get('title') or (event + ' · ' + branch)
         body, url = data.get('note') or data.get('description'), data.get('url')
         item = t.repository + ':' + scalar(data.get('iid') or data.get('id') or p.get('after'))
-        extra = {'repository':t.repository,'sha':text(data.get('sha') or p.get('after'),80)}
+        extra = {'repository':t.repository,'sha':text(data.get('sha') or p.get('after'))}
         bot = bool(obj(p.get('user')).get('bot'))
     elif t.provider == 'linear':
         data, previous = obj(p.get('data')), obj(p.get('updatedFrom'))
@@ -263,8 +264,8 @@ def normalize(t, payload, event_header=''):
             event, body, ts = 'message.posted', text(data.get('text')), data.get('ts')
         if not isinstance(ts,str) or not re.fullmatch(r'\d{10,16}\.\d{1,9}',ts):return None
         bot = bool(data.get('bot_id') or data.get('bot_profile') or data.get('subtype') == 'bot_message')
-        title, item = 'Slack event in ' + channel, channel + ':' + text(ts,30)
-        extra = {'channel':channel,'message_ts':text(ts,30),'user':text(data.get('user'),40)}
+        title, item = 'Slack event in ' + channel, channel + ':' + text(ts)
+        extra = {'channel':channel,'message_ts':text(ts),'user':text(data.get('user'))}
     else:
         event = text(p.get('event')) if t.event != '*' else '*'
         title, body, url, item = p.get('title') or 'Webhook event', p.get('body'), p.get('url'), p.get('id')
@@ -277,8 +278,8 @@ def normalize(t, payload, event_header=''):
     content = text(body)
     if t.text_contains and t.text_contains.casefold() not in content.casefold():return None
     if t.text_starts_with and not content.lstrip().startswith(t.text_starts_with):return None
-    return {'provider':t.provider,'event':event,'action':action,'item':text(item,200),
-            'title':text(title,300),'body':content,'url':text(url,1000),'status':status,'conclusion':conclusion,'branch':branch,**extra}
+    return {'provider':t.provider,'event':event,'action':action,'item':text(item),
+            'title':text(title),'body':content,'url':text(url),'status':status,'conclusion':conclusion,'branch':branch,**extra}
 
 
 def example(t):

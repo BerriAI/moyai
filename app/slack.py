@@ -13,10 +13,12 @@ from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat, USER_MENTION
+from .slack_notifications import SlackNotifications
 from .slack_files import SlackFiles, file_ids as slack_file_ids
 from .slack_credentials import SlackCredentials
 from .slack_feedback import SlackFeedback
 from .slack_references import attachment_reference
+from .slack_origin import is_self
 
 
 # Literal examples are context, not recipients. Preserve them in the prompt.
@@ -49,7 +51,12 @@ class SlackSessions:
         self.automation_events = None
         self.session_titles = None
         self.files = SlackFiles(self)
+        from .slack_sources import SlackSources
+        self.sources = SlackSources(self.store, owner=self)
+        self.store.slack_sources = self.sources
         self.chat = SlackChat(self)
+        self.notifications = SlackNotifications(self)
+        self.store.public_delivery = self.chat.settle_public_in
         self.access = SlackCredentials(self)
         self.feedback = SlackFeedback(self, lens_feedback)
         self.agentchat, self.channel = connect_agentchat(self)
@@ -92,26 +99,50 @@ class SlackSessions:
             raise HTTPException(400, "Invalid Slack event.")
         if not isinstance(payload, dict):
             raise HTTPException(400, "Invalid Slack event.")
+        return await self.receive_payload(payload, missing_cloud)
+
+    async def receive_payload(self, payload, missing_cloud):
+        """Process a signature-verified event (direct request or durable inbox)."""
         if payload.get("type") == "url_verification":
             return {"challenge": payload.get("challenge", "")}
         if payload.get("type") != "event_callback" or not self.status()["enabled"]:
             return {"ok": True}
         event = payload.get("event", {})
-        if (not isinstance(event, dict) or event.get("type") not in {"app_mention", "message", "reaction_added"}
+        if (not isinstance(event, dict) or event.get("type") not in {"app_mention", "message", "reaction_added", "reaction_removed"}
                 or payload.get("is_ext_shared_channel") or event.get("is_ext_shared_channel")):
             return {"ok": True}
         bot = self.connectors.slack_installation()
         allowed_users = {x.strip() for x in self.settings.slack_session_users.split(",")}
-        if payload.get("team_id") != bot.get("team_id") or ("*" not in allowed_users and event.get("user") not in allowed_users):
-            return {"ok": True}
-        if event.get("user") == bot.get("user_id"):
+        if payload.get("team_id") != bot.get("team_id"):
             return {"ok": True}
         event_id = payload.get('event_id', '')
         if not isinstance(event_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', event_id):
             raise HTTPException(400, 'Invalid Slack event identifier.')
+        observed_channel = event.get('channel') or (event.get('item') or {}).get('channel', '')
+        if observed_channel.startswith('D') and not self.settings.slack_dm_enabled:
+            return {'ok': True}
+        authored = event.get('text', '')
+        if not isinstance(authored, str):
+            raise HTTPException(400, 'Invalid Slack message text.')
+        visible_source, authored_prompt = routing_text(authored, f"<@{bot.get('user_id')}>")
+        from .slack_chat import explicit_control
+        control = explicit_control(authored_prompt)
+        aside = bool(re.match(r'^\s*(?:!aside|\(aside\))(?:\s|$)', authored_prompt, re.I))
+        direct = (control or event.get('type') == 'app_mention' or f"<@{bot.get('user_id')}>" in visible_source or
+                  (event.get('channel_type') == 'im' and event.get('subtype') not in {'message_changed', 'message_deleted'}))
+        direct = direct and event.get('subtype') in {None, 'file_share'} and event.get('type') in {'message', 'app_mention'} and not (event.get('bot_id') or event.get('bot_profile')) and ('*' in allowed_users or event.get('user') in allowed_users)
+        source_run = self.sources.observe(bot['team_id'], event_id, event, bot.get('user_id'),
+            wake=self.settings.slack_thread_chat_enabled and not direct and not aside)
+        await self.checkpoints.flush()
+        if source_run:
+            self.manager.submit(self.store.run(source_run))
+        if is_self(self.connectors, event, observed_channel):
+            return {'ok': True}
+        if '*' not in allowed_users and event.get('user') not in allowed_users:
+            return {'ok': True}
         if self.automation_events:
             await self.automation_events.slack(payload)
-        if (event.get('type') == 'reaction_added' or event.get('bot_id') or event.get('bot_profile')
+        if (event.get('type') in {'reaction_added', 'reaction_removed'} or event.get('bot_id') or event.get('bot_profile')
                 or event.get('subtype') not in {None, 'file_share'}):
             return {'ok': True}
         event_id, channel, user = payload.get("event_id", ""), event.get("channel", ""), event.get("user", "")
@@ -132,18 +163,8 @@ class SlackSessions:
         bound_thread = (not channel.startswith('D') and self.settings.slack_thread_chat_enabled
                         and self.store.rows('SELECT 1 FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
                                             (bot['team_id'], channel, thread_ts)))
-        if bound_thread:
-            # Existing conversations accept ordinary replies. Tagging another
-            # person opts out unless Moyai is also mentioned in authored text.
-            if mention not in visible and USER_MENTION.search(visible):
-                return {'ok': True}
-        else:
-            # New conversations still need an invitation, not a mention used
-            # as the subject of a question addressed to somebody else.
-            addressed = re.match(r'^\s*(?:(?i:hey|hi|hello)[,:]?\s+)?((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)',
-                                 visible.translate(str.maketrans('', '', '*_~')))
-            if addressed and mention not in addressed[1]:
-                return {'ok': True}
+        if bound_thread and not direct:
+            return {'ok': True}  # Stored observation, coalesced wake; no invented user request.
         file_ids = slack_file_ids(event.get('files'))
         reference, _ = attachment_reference(event)
         if not prompt and reference:
@@ -152,8 +173,6 @@ class SlackSessions:
             return {"ok": True}
         if file_ids and not prompt:
             prompt = 'Please respond to the attached files.'
-        if len(prompt) > 16000:
-            raise HTTPException(400, "Slack task is too long.")
         direct_message = event.get('type') == 'message' and event.get('channel_type') == 'im' and channel.startswith('D')
         if channel.startswith('D') and (not direct_message or not self.settings.slack_dm_enabled or not self.settings.slack_thread_chat_enabled):
             return {'ok': True}
@@ -206,11 +225,10 @@ class SlackSessions:
     async def prepare_source(self, run_id):
         """Runs in the session job, never on Slack's acknowledgement path.
 
-        Reads can safely be retried after an interruption, but source messages
-        are frozen at the mention timestamp and agent work is never replayed.
+        Reads synchronize live source versions; retrying never repeats agent work.
         """
         source = self.store.slack_source(run_id)
-        if not source or source["context_status"] not in {"pending", "fetching"}:
+        if not source:
             return
         self.store.execute("UPDATE slack_events SET context_status='fetching' WHERE run_id=?", (run_id,))
         self.store.event(run_id, "context", "Reading the Slack conversation behind your request")
@@ -222,28 +240,28 @@ class SlackSessions:
             # the shared search account, which may belong to another teammate.
             context.update(kind='dm', messages=[{'ts': source['mention_ts'], 'user': source['user_id'],
                            'text': self.store.run(run_id)['prompt']}])
+            context.update(self.sources.snapshot(run_id))
             self.store.execute("UPDATE slack_events SET context_status='ready',context_json=? WHERE run_id=?", (json.dumps(context), run_id))
             self.store.event(run_id, 'context', 'Using the direct message and saved conversation')
             await self.checkpoints.flush()
             return
         try:
-            async with asyncio.timeout(25):
-                if not self.connectors.allowed("slack_thread"):
-                    raise ConnectorError("Slack is unavailable.")
-                headers = self.connectors.headers("slack", await self.connectors.credentials("slack"))
-                context.update(await self.read_context(source, headers))
-                if not self.connectors.allowed("slack_thread"):
-                    raise ConnectorError("Slack access was paused.")
-                # A permalink is helpful but must not discard successfully read context.
-                try:
-                    async with asyncio.timeout(3):
-                        link = await self.connectors.request("GET", "https://slack.com/api/chat.getPermalink", headers=headers,
-                                                             params={"channel": source["channel"], "message_ts": source["mention_ts"]})
-                        url = link.get("permalink", "")
-                        if re.fullmatch(r"https://[A-Za-z0-9-]+\.slack\.com/archives/[A-Z0-9]+/p\d+(?:\?[^\s]*)?", url):
-                            context["permalink"] = url
-                except (ConnectorError, TimeoutError):
-                    pass
+            selection = await self.connectors.personal_slack.select(self.store.run(run_id), 'slack_thread')
+            headers = self.connectors.headers("slack", selection.credentials)
+            context.update(await self.read_context(source, headers))
+            context.update(self.sources.snapshot(run_id))
+            self.connectors.personal_slack.recheck(selection)
+            # A permalink is helpful but must not discard successfully read context.
+            try:
+                async with asyncio.timeout(3):
+                    link = await self.connectors.request("GET", "https://slack.com/api/chat.getPermalink", headers=headers,
+                                                         params={"channel": source["channel"], "message_ts": source["mention_ts"]})
+                    url = link.get("permalink", "")
+                    if re.fullmatch(r"https://[A-Za-z0-9-]+\.slack\.com/archives/[A-Z0-9]+/p\d+(?:\?[^\s]*)?", url):
+                        context["permalink"] = url
+            except (ConnectorError, TimeoutError):
+                pass
+            self.connectors.personal_slack.recheck(selection)
             status = "ready"
             message = f"Read {len(context['messages'])} Slack messages from the {context['kind']}"
             if context["truncated"]:
@@ -251,10 +269,15 @@ class SlackSessions:
         except asyncio.CancelledError:
             self.store.execute("UPDATE slack_events SET context_status='pending' WHERE run_id=?", (run_id,))
             raise
-        except Exception:
+        except Exception as exc:
             status = "unavailable"
-            context["messages"] = []
-            context["warning"] = "Could not read the Slack conversation with the shared connection. Use the request itself, or ask for the missing context; do not guess what the discussion said."
+            installation = self.connectors.slack_installation()
+            self.store.execute("UPDATE slack_source_coverage SET status='incomplete',updated_at=? WHERE team_id=? AND channel=? AND thread_ts=?",
+                (now(), installation.get('team_id'), source['channel'], source['thread_ts']))
+            context.update(self.sources.snapshot(run_id))
+            context["warning"] = "Live Slack synchronization is unavailable. Saved observations are retained; use slack_context for their versions and coverage. Do not assume the source is complete."
+            if isinstance(exc, ConnectorError) and "private web chat" in str(exc):
+                context["warning"] = str(exc)
             message = "Slack conversation could not be read; the agent will be told context is missing"
         self.store.execute("UPDATE slack_events SET context_status=?,context_json=? WHERE run_id=?", (status, json.dumps(context), run_id))
         self.store.event(run_id, "context", message)
@@ -263,65 +286,51 @@ class SlackSessions:
     async def read_context(self, source, headers):
         # Every channel mention belongs to one thread, including a new root.
         # Channel history would import unrelated neighboring tasks.
-        params = {"channel": source["channel"], "ts": source["thread_ts"],
-                  "latest": source["mention_ts"], "inclusive": True, "limit": 50}
-        messages, truncated, cursor = {}, False, ""
-        for _ in range(3):
+        params = {"channel": source["channel"], "ts": source["thread_ts"], "inclusive": True, "limit": 100, "include_all_metadata": True}
+        messages, cursor, seen = {}, '', set()
+        installation = self.connectors.slack_installation()
+        scope = (installation['team_id'], source['channel'], source['thread_ts'])
+        while True:
             if cursor:
-                params["cursor"] = cursor
-            data = await self.connectors.request("GET", "https://slack.com/api/conversations.replies", headers=headers, params=params)
-            if not isinstance(data.get("messages"), list):
-                raise ConnectorError("Slack returned no message list.")
-            for item in data["messages"]:
-                if not isinstance(item, dict):
+                params['cursor'] = cursor
+            data = await self.connectors.request('GET', 'https://slack.com/api/conversations.replies', headers=headers, params=params)
+            if self.connectors.slack_installation().get('team_id') != installation.get('team_id') or not self.status()['enabled']:
+                raise ConnectorError('Slack source access changed during synchronization.')
+            if not isinstance(data.get('messages'), list):
+                raise ConnectorError('Slack returned no message list.')
+            for item in data['messages']:
+                if not isinstance(item, dict) or not isinstance(item.get('ts'), str):
                     continue
-                ts = item.get("ts", "")
-                try:
-                    valid = (bool(re.fullmatch(r"\d{10,16}\.\d{1,9}", ts))
-                             and Decimal(source["thread_ts"]) <= Decimal(ts) <= Decimal(source["mention_ts"]))
-                except (TypeError, InvalidOperation):
-                    valid = False
-                if not valid or item.get("user") == self.connectors.slack_installation().get("user_id"):
+                ts = item['ts']
+                if not re.fullmatch(r'\d{10,16}\.\d{1,9}', ts) or Decimal(ts) < Decimal(source['thread_ts']):
                     continue
-                if ts != source["thread_ts"] and item.get("thread_ts") != source["thread_ts"]:
+                if ts != source['thread_ts'] and item.get('thread_ts') != source['thread_ts']:
                     continue
-                text = item.get("text")
-                text = text if isinstance(text, str) else ""
-                reference, clipped = attachment_reference(item)
-                text = text + reference or "[Message has no text]"
-                clipped = clipped or len(text) > 3000
-                messages[ts] = {"ts": ts, "user": item.get("user") or item.get("bot_id") or "unknown",
-                                "text": text[:3000], "text_truncated": clipped,
-                                "has_attachments": bool(item.get("files") or item.get("attachments")),
-                                "file_ids": slack_file_ids(item.get('files'))}
-            cursor = data.get("response_metadata", {}).get("next_cursor", "")
-            truncated = bool(data.get("has_more") or cursor)
+                version = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
+                self.sources.observe(scope[0], 'backfill:' + source['channel'] + ':' + ts + ':' + version,
+                                     {**item, 'type': 'message', 'channel': source['channel']}, installation.get('user_id'))
+                reference, _ = attachment_reference(item)
+                messages[ts] = {'ts': ts, 'user': item.get('user') or item.get('bot_id') or 'unknown',
+                    'author_kind': 'self' if item.get('user') == installation.get('user_id') else 'bot' if item.get('bot_id') else 'human',
+                    'text': (item.get('text') or '') + reference, 'text_truncated': False,
+                    'has_attachments': bool(item.get('files') or item.get('attachments')), 'file_ids': slack_file_ids(item.get('files'))}
+            cursor = data.get('response_metadata', {}).get('next_cursor', '')
+            incomplete = bool(data.get('has_more')) and not cursor
+            if cursor in seen:
+                incomplete, cursor = True, ''
+            self.store.execute("""INSERT INTO slack_source_coverage(team_id,channel,thread_ts,status,cursor,updated_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(team_id,channel,thread_ts) DO UPDATE SET status=excluded.status,cursor=excluded.cursor,updated_at=excluded.updated_at""",
+                (*scope, 'fetching' if cursor else 'incomplete' if incomplete else 'synchronized', cursor, now()))
             if not cursor:
                 break
-        if not messages:
-            raise ConnectorError("No Slack messages could be read.")
-        ordered = sorted(messages.values(), key=lambda item: Decimal(item["ts"]))
-        # Keep the root and closest available messages within a bounded text budget.
-        root = messages.get(source["thread_ts"])
-        selected, budget = ([root] if root else []), 24000 - (len(root["text"]) if root else 0)
-        for item in reversed(ordered):
-            if item is root:
-                continue
-            if len(selected) >= 50 or len(item["text"]) > budget:
-                truncated = True
-                break
-            selected.append(item)
-            budget -= len(item["text"])
-        selected.sort(key=lambda item: Decimal(item["ts"]))
-        truncated = truncated or any(m["text_truncated"] for m in selected)
-        warnings = []
-        if truncated:
-            warnings.append("Only a bounded excerpt is included; more messages or text may exist.")
-        if not root:
-            warnings.append("The thread's root message was not returned.")
-        if any(m["has_attachments"] for m in selected):
-            warnings.append("Attached files are available only when listed under USER ATTACHMENTS; embedded attachment text is quoted when available; attachment media and linked source messages were not fetched.")
-        return {"messages": selected, "truncated": truncated, "warning": " ".join(warnings)}
+            seen.add(cursor)
+        ordered = sorted(messages.values(), key=lambda item: Decimal(item['ts']))
+        warning = 'Slack did not supply a usable continuation cursor; coverage is incomplete.' if incomplete else ''
+        if source['thread_ts'] not in messages:
+            warning += ' The thread root was not returned.'
+        return {'messages': ordered, 'truncated': incomplete, 'warning': warning,
+                'coverage': 'incomplete' if incomplete else 'synchronized',
+                'retrieval_tool': 'slack_context', 'captured_at': now()}
 
     def submit_reply(self, run_id):
         job = asyncio.create_task(self.reply(run_id))
@@ -362,11 +371,14 @@ class SlackSessions:
         for row in self.store.rows("SELECT run_id FROM slack_events WHERE reply_status='pending' AND run_id NOT IN (SELECT run_id FROM slack_threads)"):
             self.submit_reply(row["run_id"])
         self.chat.recover()
+        self.notifications.recover()
 
-    async def shutdown(self):
-        await self.chat.shutdown()
+    async def shutdown(self, *, graceful=False):
+        await self.notifications.shutdown(graceful=graceful)
+        await self.chat.shutdown(graceful=graceful)
         jobs = list(self.jobs)
-        for job in jobs:
-            job.cancel()
+        if not graceful:
+            for job in jobs:
+                job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
         await self.agentchat.close()

@@ -19,7 +19,7 @@ def definition(**changes):
 
 
 def call(client, run, name, **arguments):
-    if name not in {'automation_list', 'automation_webhook_info', 'automation_environments'}:
+    if name not in {'automation_list', 'automation_webhook_info', 'automation_environments', 'automation_history', 'automation_self_read'}:
         arguments.setdefault('turn_id', run['active_message_id'])
     return client.post(f"/broker/{run['id']}/tools/call", headers={'Authorization': 'Bearer capability'},
                        json={'name': name, 'arguments': arguments})
@@ -131,7 +131,7 @@ def test_automation_and_delegated_runs_cannot_create_recursive_schedules(workspa
     saved = create(client, run)
     app.state.store.execute("INSERT INTO automation_runs VALUES(?,?,1,?,'started','',?)", ('tick', saved['id'], run['id'], now()))
     assert call(client, run, 'automation_create', request_key='recursive-create', definition=definition()).status_code == 403
-    assert not app.state.automation_tools.tools(run)
+    assert [tool['name'] for tool in app.state.automation_tools.tools(run)] == ['automation_history']
     assert app.state.automations.tools(run)[0]['name'] == 'automation_claim_item'
 
 
@@ -200,7 +200,7 @@ def test_requester_or_cancellation_during_access_check_prevents_write(workspace,
         app.state.store.execute("UPDATE runs SET active_user_id='unverified' WHERE id=?", (run['id'],))
         return result
     monkeypatch.setattr(app.state.automation_tools, 'result', switch)
-    assert call(client, run, 'automation_list', automation_id=saved['id']).status_code == 403
+    assert call(client, run, 'automation_list', automation_id=saved['id']).status_code == 409
 
 
 def test_environment_discovery_exposes_reusable_build_not_setup_scripts(workspace):
@@ -548,8 +548,7 @@ def test_argument_errors_identify_fields_without_rejected_values_and_allow_corre
     assert errors['definition.name']['type'] == 'string_too_short'
     assert 'definition.triggers.0.schedule.time' in errors
     assert 'definition.triggers.0.schedule.timezone' in errors
-    assert errors['definition.metadata.bootstrap_source']['type'] == 'string_too_long'
-    assert '16384 characters' in errors['definition.metadata.bootstrap_source']['message']
+    assert 'definition.metadata.bootstrap_source' not in errors
     assert 'IANA timezone' in errors['definition.triggers.0.schedule.timezone']['message']
     assert 'private-' not in rejected.text
     assert all(set(error) == {'field', 'type', 'message'} for error in errors.values())

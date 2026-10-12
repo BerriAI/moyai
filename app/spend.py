@@ -180,12 +180,20 @@ class Spend:
     def gateway_scope(self) -> str:
         return gateway_scope(self.settings.litellm_api_base)
 
-    def begin(self, run, model):
+    def begin(self, run, model, *, startup=False):
         request_id = str(uuid4())
         user_id = run['active_user_id'] if run['chat_enabled'] else run['owner_id']
         retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
-        self.store.execute('INSERT INTO model_requests(id,key_hash,run_id,message_id,user_id,model,created_at,gateway_scope,cost_next_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)',
-                           (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, now(), self.gateway_scope, retry_at))
+        with self.store.connect() as conn:
+            conn.begin_write()
+            started_at = now()
+            conn.execute('INSERT INTO model_requests(id,key_hash,run_id,message_id,user_id,model,created_at,gateway_scope,cost_next_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                         (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, started_at, self.gateway_scope, retry_at))
+            if startup:
+                from .performance import model_started_in
+                model_started_in(conn, run['active_message_id'], started_at)
+            if owner := getattr(self.store, 'broker_work', None):
+                owner.claim_in(conn, 'model', request_id)
         return request_id
 
     def headers(self, request_id, upstream, streaming) -> str:
@@ -203,9 +211,12 @@ class Spend:
             value = usage.get(field)
             return value if type(value) is int and value >= 0 else None
         cost = capture.cost if capture else None
-        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=?,cache_read_input_tokens=?,cache_creation_input_tokens=? WHERE id=?',
-                           (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'),
-                            tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id))
+        with self.store.connect() as conn:
+            conn.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=?,cache_read_input_tokens=?,cache_creation_input_tokens=? WHERE id=?',
+                         (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'),
+                          tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id))
+            if owner := getattr(self.store, 'broker_work', None):
+                owner.release_in(conn, 'model', request_id)
 
     def settle_receipt(self, request_id: str, key_hash: str, gateway_scope: str,
                        receipt_id: str, cost: str) -> bool:
@@ -280,8 +291,11 @@ class Spend:
             return {**bucket, 'spend': str(bucket['spend']), 'sessions': len(bucket['sessions'])}
         def identity(user_id):
             return users.get(user_id, {'id': 'unattributed', 'name': 'Unattributed / earlier usage', 'email': '', 'kind': 'unattributed'})
+        from .private_sinks import private_run
+        private_ids = {run_id for run_id in {row['run_id'] for row in rows}
+                       if run_id and private_run(self.store, run_id)}
         titles = {r['id']: r['prompt'].split('\n')[0][:150] for r in self.store.rows(
-            'SELECT id,prompt FROM runs WHERE id IN (SELECT run_id FROM model_requests WHERE ' + predicate + ')', params)}
+            'SELECT id,prompt FROM runs WHERE id IN (SELECT run_id FROM model_requests WHERE ' + predicate + ')', params) if r['id'] not in private_ids}
         result = {'scope': 'personal' if user_id is not None else 'organization',
                 'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
                 'priced_requests': sum(row['cost'] is not None for row in rows),
@@ -290,9 +304,9 @@ class Spend:
                                       for model, bucket in daily_models[day].items()]}
                           for day, value in daily.items()],
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
-                'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
+                'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True) if run not in private_ids],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],
-                'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_status','cost_source','cost_recovery_error','prompt_tokens','completion_tokens','total_tokens','cache_read_input_tokens','cache_creation_input_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500]],
+                'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_status','cost_source','cost_recovery_error','prompt_tokens','completion_tokens','total_tokens','cache_read_input_tokens','cache_creation_input_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500] if row['run_id'] not in private_ids],
                 'identities': list(users.values()), 'tracked_since': tracked_since}
 
         if user_id is not None:

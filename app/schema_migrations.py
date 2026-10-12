@@ -11,15 +11,22 @@ import json
 
 from .database import DatabaseError, identifier
 
-SCHEMA_REVISION = 2
+SCHEMA_REVISION = 19
+# Physical additive expansions can keep this contract after a reviewed online
+# manifest step. Incompatible changes advance it and require maintenance.
+SCHEMA_COMPATIBILITY_REVISION = 19
 # Dependency order; optional features are prepared even when disabled at runtime.
 COMPONENTS = (
-    'user_roles', 'sandbox_settings', 'github_repositories', 'github_write_access',
-    'github', 'session_pull_requests', 'durable_runner', 'prepared_sandboxes',
+    'session_privacy', 'personal_slack', 'user_roles', 'sandbox_settings', 'github_repositories', 'github_write_access',
+    'github', 'repository_context', 'session_pull_requests', 'durable_runner', 'prepared_sandboxes',
     'user_preferences', 'environments', 'infrastructure_costs', 'spend', 'agents',
-    'tracing', 'credentials', 'skills', 'memory', 'memory_review', 'lens_feedback',
-    'session_titles', 'automations', 'automation_events', 'automation_tools',
-    'model_tools', 'session_folders', 'media_shares', 'computer', 'github_setup',
+    'tracing', 'credentials', 'skills', 'memory', 'memory_review', 'skill_learning', 'lens_feedback',
+    'session_titles', 'automations', 'automation_events', 'automation_tools', 'automation_permissions',
+    'model_tools', 'session_folders', 'media_shares', 'computer', 'github_setup', 'swarms', 'swarm_collaboration', 'swarm_chat',
+    'coordinator_handoff',
+    'broker_ownership', 'performance',
+    'session_journal', 'goals', 'slack_sources', 'published_artifacts', 'computer_operations', 'broker_payloads',
+    'session_events', 'slack_notifications',
 )
 
 
@@ -32,7 +39,8 @@ def prepare_schema(owner, schema, mode):
             raise DatabaseError('This schema uses explicit migrations. Set MOYAI_SCHEMA_MODE=verify.')
         return
     if mode == 'verify':
-        if state != (SCHEMA_REVISION, 0):
+        from .online_migrations import schema_is_compatible
+        if not schema_is_compatible(owner, schema, SCHEMA_REVISION, SCHEMA_COMPATIBILITY_REVISION):
             raise DatabaseError('Schema is missing, incomplete, or incompatible. Run the offline migration command before starting Moyai.')
         return
     if state and state[0] > SCHEMA_REVISION:

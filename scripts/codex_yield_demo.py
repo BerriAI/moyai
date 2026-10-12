@@ -6,21 +6,19 @@ import subprocess
 import sys
 import tempfile
 import time
-from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'tests')]
 
 from pytest import MonkeyPatch
-from sandbox.codex_harness import CodexAgent
+from scripts.harness_baseline import load_codex_baseline
+from agent.harnesses.codex_harness import CodexAgent
 from test_codex_sdk_transport import native_yield_case
 
 
 def demonstrate(baseline_ref, output, *, settlement=False, context=False, pause=0):
     output.mkdir(parents=True, exist_ok=True)
-    source = subprocess.check_output(['git', 'show', baseline_ref + ':sandbox/codex_harness.py'], cwd=ROOT)
-    baseline = ModuleType('sandbox._yield_baseline')
-    exec(compile(source, 'baseline_codex_harness.py', 'exec'), baseline.__dict__)
+    baseline = load_codex_baseline(ROOT, baseline_ref)
     started = time.monotonic()
     rows = []
     with (output / 'codex-yield.cast').open('w') as recording:

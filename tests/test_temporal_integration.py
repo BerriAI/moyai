@@ -11,6 +11,7 @@ from temporalio.testing import ActivityEnvironment
 
 from app.agents import AgentCoordinator, Fanout
 from app.db import Store
+from app.security import Security
 from app.session_lifecycle import SessionLifecycle
 from app.session_workflow import SessionWorkflow
 from app.temporal_runtime import TemporalRunManager
@@ -298,14 +299,14 @@ async def test_real_temporal_restart_recovers_confirmed_delete_before_cleanup_st
             await manager.shutdown()
             # The process disappears after persisting confirmation, before
             # scheduling cleanup. Startup must reconstruct that operation.
-            SessionLifecycle(manager.store, None, manager, checkpoints).request_delete(run_id, '', True)
+            SessionLifecycle(manager.store, Security(manager.settings), manager, checkpoints).request_delete(run_id, '', True)
             if restart_state == 'injected':
                 manager.store.update_run(run_id, status='cancelled')
             assert manager.store.run(run_id)['deletion_requested_at']
             assert not manager.store.run(run_id)['deleted_at']
             successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
             successor.connect_temporal = connect
-            lifecycle = SessionLifecycle(successor.store, None, successor, checkpoints)
+            lifecycle = SessionLifecycle(successor.store, Security(successor.settings), successor, checkpoints)
             await successor.recover()
             lifecycle.start()
             await eventually(lambda: bool(successor.store.run(run_id)['deleted_at']), seconds=25)
@@ -411,7 +412,7 @@ async def test_real_temporal_model_recovery_timer_survives_worker_replacement(
         durable, tmp_path, monkeypatch, recovery_catalog, read_name, read_status):
     from http.server import BaseHTTPRequestHandler
     from sandbox.startup import _read_with_reconnect
-    from sandbox.transport_recovery import recovery_marker
+    from agent.transport_recovery import recovery_marker
     from test_broker_transport import diagnostic_relay
     from test_context_recovery import runtime
     from test_durable import transport_failure_report

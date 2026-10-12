@@ -1,5 +1,5 @@
 """Session-level runtime selection; never silently fall back to another harness."""
-from sandbox.harness_registry import HARNESSES, resolve
+from agent.harnesses.harness_registry import HARNESSES, resolve
 from .model_selection import ASTRA_ULTRAFAST
 
 

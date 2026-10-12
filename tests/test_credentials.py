@@ -13,7 +13,7 @@ from app.db import Store, now
 from app.security import Security
 from app.session_lifecycle import SessionLifecycle
 from app.temporal_runtime import TemporalRunManager
-from sandbox.continuation import AgentWait
+from agent.continuation import AgentWait
 from test_durable import Cloud, durable, drive
 from test_spend import active, sign_in
 from test_workspace import workspace
@@ -675,18 +675,23 @@ def test_metadata_edits_keep_values_and_enforce_personal_org_and_session_bounds(
 
 
 def test_legacy_session_scope_migrates_once_and_remains_root_bound(workspace):
+    from app.session_events import initialize_schema
     app,client=workspace
     sign_in(app,client)
     identity=save(client).json()['id']
     run=active(app)
     app.state.store.execute("UPDATE provider_secrets SET scope='session',root_id=? WHERE id=?",(run['id'],identity))
     with app.state.store.connect() as conn:
+        # The legacy schema predates the lifecycle trigger on generation.
+        suffix = ' ON credential_requests' if app.state.store.database else ''
+        conn.execute('DROP TRIGGER session_event_credential_requests_update' + suffix)
         for field in ('name','format','env_var','lifetime','expires_at','invalid_reason','revision'):
             conn.execute('ALTER TABLE provider_secrets DROP COLUMN '+field)
         for field in ('name','format','env_var','generation','failure','revision','secret_revision'):
             conn.execute('ALTER TABLE credential_requests DROP COLUMN '+field)
     for attempt in range(2):
         vault=Credentials(app.state.store,app.state.security,app.state.settings,app.state.manager,SimpleNamespace(flush=None))
+        initialize_schema(app.state.store)
         secret=app.state.store.rows('SELECT * FROM provider_secrets WHERE id=?',(identity,))[0]
         assert secret['scope']=='personal' and secret['lifetime']=='session'
         assert vault.permitted(secret,run,'google:alice')
@@ -808,7 +813,7 @@ def test_historical_form_keeps_requester_and_admin_permissions(workspace,monkeyp
         assert queued==[{'user_id':'google:bob'}]
 
 
-@pytest.mark.parametrize('blocked',['stopping','cancelled','interrupted','failed','deleted','full'])
+@pytest.mark.parametrize('blocked',['stopping','cancelled','interrupted','failed','deleted'])
 def test_historical_resolution_failure_does_not_save_or_queue(workspace,blocked):
     app,client=workspace
     sign_in(app,client)
@@ -816,10 +821,7 @@ def test_historical_resolution_failure_does_not_save_or_queue(workspace,blocked)
     request=access_request(app.state.credentials,run)
     run=access_followup(app,run)
     store=app.state.store
-    if blocked=='full':
-        for index in range(5):
-            store.enqueue_message(run['id'],'Queued follow-up','full-'+str(index),user_id='google:bob')
-    elif blocked=='deleted':
+    if blocked=='deleted':
         store.execute('UPDATE runs SET deleted_at=? WHERE id=?',(now(),run['id']))
     else:
         store.update_run(run['id'],status=blocked)
@@ -829,7 +831,7 @@ def test_historical_resolution_failure_does_not_save_or_queue(workspace,blocked)
     assert response.status_code==(404 if blocked=='deleted' else 409)
     assert not store.rows('SELECT * FROM provider_secrets') and store.messages(run['id'])==before
     assert app.state.credentials.row(request['request_id'])['status']=='pending'
-    if blocked not in {'deleted','full'}:
+    if blocked != 'deleted':
         assert client.get('/api/runs/'+run['id']).json()['credential_requests']==[]
 
 
@@ -1165,7 +1167,7 @@ async def test_rejected_usage_does_not_acknowledge_resolution(durable):
     assert len(continuations(manager, run_id)) == 1
 
 
-async def test_full_queue_defers_without_failing_other_messages_then_retries_after_claim(durable):
+async def test_credential_resolution_joins_a_large_queue_without_dropping_messages(durable):
     manager, cloud, run_id = durable
     vault, request, _ = await waiting(durable)
     resolve(vault, request)
@@ -1174,20 +1176,20 @@ async def test_full_queue_defers_without_failing_other_messages_then_retries_aft
         manager.store.enqueue_message(run_id, 'Queued task', 'task-' + str(index), user_id='google:bob')
     await drive(manager, run_id)
     assert manager.store.run(run_id)['status'] == 'queued'
-    assert vault.row(request['request_id'])['resolution_pending'] == 1
-    assert not continuations(manager, run_id)
-    assert len([m for m in manager.store.messages(run_id) if m['status'] == 'queued']) == 5
+    assert vault.row(request['request_id'])['resolution_pending'] == 0
+    assert len(continuations(manager, run_id)) == 1
+    assert len([m for m in manager.store.messages(run_id) if m['status'] == 'queued']) == 6
     successor = restart(manager, cloud)
-    await successor.advance(run_id)  # Claims the handoff and frees one queue slot.
+    await successor.advance(run_id)  # Claims the original handoff in order.
     assert successor.state(run_id)['message_id'] == target['id']
-    await successor.advance(run_id)  # Reconciliation now admits the continuation.
+    await successor.advance(run_id)  # Reconciliation must not duplicate the continuation.
     assert len(continuations(successor, run_id)) == 1
     assert not [m for m in successor.store.messages(run_id) if m['status'] in {'cancelled', 'failed'}]
     notices = [e for e in successor.store.events(run_id) if 'automatic continuation could not be queued' in e['message']]
-    assert len(notices) == 1
+    assert not notices
 
 
-async def test_hundred_turn_limit_is_visible_without_exceeding_cap_or_cancelling_work(durable):
+async def test_credential_continuation_survives_more_than_a_hundred_turns(durable):
     manager, cloud, run_id = durable
     vault, request, _ = await waiting(durable)
     resolve(vault, request)
@@ -1198,12 +1200,12 @@ async def test_hundred_turn_limit_is_visible_without_exceeding_cap_or_cancelling
                          (run_id, 'prior-' + str(index), now()))
     await drive(manager, run_id)
     vault.reconcile_resolutions(run_id)
-    assert not continuations(manager, run_id)
-    assert '100-turn limit' in vault.row(request['request_id'])['resolution_error']
-    assert len([m for m in manager.store.messages(run_id) if m['role'] == 'user']) == 100
+    assert continuations(manager, run_id)
+    assert not vault.row(request['request_id'])['resolution_error']
+    assert len([m for m in manager.store.messages(run_id) if m['role'] == 'user']) == 101
     assert manager.store.rows('SELECT status FROM messages WHERE id=?', (target['id'],))[0]['status'] == 'queued'
     notices = [e for e in manager.store.events(run_id) if 'Start a new session' in e['message']]
-    assert len(notices) == 1
+    assert not notices
 
 
 @pytest.mark.parametrize('terminal', ['cancelled', 'failed', 'interrupted'])
@@ -1250,7 +1252,7 @@ async def test_ordinary_queued_same_actor_message_does_not_replace_same_turn_res
     assert not continuations(manager, run_id)
 
 
-@pytest.mark.parametrize('blocked', ['parent_stop', 'queue_cap'])
+@pytest.mark.parametrize('blocked', ['parent_stop', 'long_history'])
 async def test_deferred_child_delivery_retains_parent_admission_and_snapshot_transaction(durable, blocked):
     from test_agents import launch, pause_parent
 
@@ -1277,14 +1279,16 @@ async def test_deferred_child_delivery_retains_parent_admission_and_snapshot_tra
                 conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,user_id) VALUES(?,'user','Prior task','completed',?,?,'google:tin')",
                              (child, 'prior-' + str(index), now()))
     vault.reconcile_resolutions(child)
-    assert vault.row(request['request_id'])['resolution_pending'] == 1
-    assert not continuations(manager, child)
-    assert not coordinator.group(root, result['group_id'])['result_snapshot']
-    assert lifecycle.archives(actor) == {root}
     if blocked == 'parent_stop':
+        assert vault.row(request['request_id'])['resolution_pending'] == 1
+        assert not continuations(manager, child)
+        assert not coordinator.group(root, result['group_id'])['result_snapshot']
         manager.store.update_run(root, status='idle')
     else:
-        manager.store.execute("UPDATE messages SET status='deleted' WHERE run_id=? AND client_id='prior-0'", (child,))
+        assert vault.row(request['request_id'])['resolution_pending'] == 0
+        assert len(continuations(manager, child)) == 1
+        assert coordinator.group(root, result['group_id'])['result_snapshot']
+    assert lifecycle.archives(actor) == {root}
     vault.reconcile_resolutions(child)
     vault.reconcile_resolutions(child)
     queued = continuations(manager, child)

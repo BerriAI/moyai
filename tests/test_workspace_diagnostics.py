@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from sandbox import mcp_bridge
-from sandbox.tool_guidance import tool_guidance
+from agent.tools import mcp_bridge
+from agent.tools.tool_guidance import tool_guidance
 from app.security import digest
 from test_workspace import cloud_capability, workspace  # noqa: F401
 
@@ -71,7 +71,8 @@ def test_mcp_diagnostics_distinguishes_last_catalog_from_current_broker(monkeypa
     reply = json.loads(capsys.readouterr().out.splitlines()[-1])['result']
     data = json.loads(reply['content'][0]['text'])
     assert data['broker_catalog']['names'] == ['new_tool']
-    assert data['mcp_catalog']['names'] == (sorted(['old_tool', *[tool['name'] for tool in mcp_bridge.BROWSER_TOOLS]]) if list_first else None)
+    local = [*mcp_bridge.BROWSER_TOOLS, mcp_bridge.GUIDANCE_TOOL, *mcp_bridge.computer_tools.TOOLS]
+    assert data['mcp_catalog']['names'] == (sorted(['old_tool', *[tool['name'] for tool in local]]) if list_first else None)
     assert 'not the model request catalog' in data['mcp_catalog']['scope']
 
 

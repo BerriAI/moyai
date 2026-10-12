@@ -8,7 +8,7 @@ import sys
 from threading import Event, Lock, Thread
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from sandbox import mcp_bridge
+from agent.tools import mcp_bridge
 
 
 def message(identity, name):
@@ -35,7 +35,7 @@ def test_slow_github_http_does_not_block_skills_memory_or_ping_and_eof_drains():
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    script = Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py'
+    script = Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py'
     process = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, env={'PATH': os.environ['PATH'],
         'WORKSPACE_BROKER_URL': f'http://127.0.0.1:{server.server_port}', 'WORKSPACE_RUN_TOKEN': 'fixture-capability'})
@@ -156,7 +156,11 @@ def test_read_capacity_is_bounded_and_busy_requests_never_run(monkeypatch, capsy
 
 def test_concurrent_allowlist_excludes_local_and_context_side_effects():
     from app.connectors import RETRY_SAFE_READS
-    assert mcp_bridge.CONCURRENT_READS <= RETRY_SAFE_READS
-    assert 'github_checkout' not in mcp_bridge.CONCURRENT_READS
+    from app.published_artifacts import TOOLS
+    artifact_reads = {tool['name'] for tool in TOOLS
+                      if tool['annotations']['readOnlyHint'] and tool['annotations']['idempotentHint']}
+    assert {'artifacts_list', 'artifact_read'} <= artifact_reads <= mcp_bridge.CONCURRENT_READS
+    assert mcp_bridge.CONCURRENT_READS <= RETRY_SAFE_READS | artifact_reads
+    assert not {'github_checkout', 'artifact_publish', 'artifact_fetch'} & mcp_bridge.CONCURRENT_READS
     assert not any(name.startswith(('browser_', 'skills_', 'memory_', 'credentials_'))
                    for name in mcp_bridge.CONCURRENT_READS)

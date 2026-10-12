@@ -13,7 +13,7 @@ from app.agents import AgentCoordinator
 from app.config import Settings
 from app.db import Store
 from app.tracing import AgentTracing
-from sandbox.trace_content import trace_content
+from agent.trace_content import trace_content
 
 
 def setup(tmp_path):

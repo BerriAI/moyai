@@ -129,7 +129,8 @@ class GitHubRepositories:
         credentials['account_id'] = installed['account']['id']
         token = await self.metadata_token(installation_id)
         ids = []
-        for page in range(1, 101):
+        page = 1
+        while True:
             data = await self.request('GET', '/installation/repositories', token=token,
                                       params={'per_page': 100, 'page': page})
             repositories = data.get('repositories', [])
@@ -137,8 +138,7 @@ class GitHubRepositories:
                 ids.append(self.remember_repository(repo, credentials))
             if len(repositories) < 100:
                 break
-        else:
-            raise ConnectorError('Too many repositories to list completely. Narrow the GitHub App installation.')
+            page += 1
         credentials['repository_ids'] = list(dict.fromkeys(ids))
         return credentials
 

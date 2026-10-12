@@ -38,6 +38,8 @@
     if(!container)return;
     container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code,.work-image [data-file-ref]').forEach(node=>{
       if(node.closest('pre')||(!node.matches('[data-file-ref]')&&(node.closest('a')||node.children.length)))return;
+      const messageRun=node.closest('[data-message-run]')?.dataset.messageRun;
+      if(messageRun&&messageRun!==runId)return;
       const ref=node.dataset.fileRef||node.textContent,file=resolve(ref,files);
       if(!file){
         if(node.dataset.savedFile){
@@ -78,7 +80,7 @@
   }
   function preview(result,ref,{escape:esc,markdown}){
     if(result.text===null)return '<p class="saved-file-empty">Preview isn’t available for this file type. Use Download to open it.</p>';
-    const location=reference(ref),notice=result.truncated?'<p class="saved-file-notice">Showing the first 128 KB. Use Download for the complete file.</p>':'';
+    const location=reference(ref),notice=result.truncated?'<p class="saved-file-notice">Showing part of this file. Load more below or use Download for the complete file.</p>':'';
     if(!location?.line)return notice+(result.format==='markdown'?`<div class="markdown">${markdown(result.text)}</div>`:`<pre class="saved-file-text">${esc(result.text)}</pre>`);
     const lines=result.text.split('\n'),{line,endLine}=location,available=lines.length-(result.truncated?1:0);
     const label=line===endLine?'Line '+line:'Lines '+line+'–'+endLine;
@@ -89,6 +91,31 @@
   function reveal(container){
     const target=container.querySelector('[data-source-line]');
     if(target){target.focus({preventScroll:true});target.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});}
+  }
+  async function loadCatalog(api,runId,{refresh=false,onUpdate=()=>{},filePath=null,fileRef=null}={}){
+    const path=`/api/runs/${runId}/files`;
+    const read=url=>api(url,{recent:!refresh,timeoutMs:30000});
+    const initial=await read(path+'?view=media');
+    onUpdate(initial);
+    if(!initial.archive_pending||initial.files.some(file=>file.archive_path===filePath)||(fileRef&&resolve(fileRef,initial.files)))return initial;
+    let result;
+    try{
+      result=await read(path);
+      // A newer media manifest can arrive while the tab still has a recent
+      // full catalog. Revalidate changed checkpoints and independent outputs.
+      const media=result.files.filter(file=>/^(capture|published):/.test(file.archive_path));
+      if((initial.archive_revision&&result.revision!==initial.archive_revision)||JSON.stringify(media)!==JSON.stringify(initial.files)){
+        result=await api(path,{timeoutMs:30000});
+      }
+    }
+    catch(error){
+      // An archive outage must not hide independent captures. Access failures
+      // still invalidate the complete view, including the initial response.
+      if([401,403,404,409].includes(error.status))throw error;
+      result={...initial,archive_pending:false,archive_error:true,error:['TimeoutError','AbortError'].includes(error.name)?
+        'Workspace files are taking longer than expected. Retry to load them.':error.message};
+    }
+    onUpdate(result);return result;
   }
   function create({api,markdown,escape:esc,size,onOpen}){
     let run=null,catalog=null,key='',loading=null,requestId=0,previewId=0,viewId=0,selected=null,dialog=null;
@@ -102,22 +129,23 @@
     }
     function update(){
       const button=query('#files-button');
-      if(button){button.hidden=!(run?.has_artifact||run?.has_captures);button.textContent='Files'+(catalog?' · '+catalog.files.length:'');button.onclick=()=>open();}
+      if(button){button.hidden=!(run?.has_artifact||run?.has_captures||run?.has_published_artifacts);button.textContent='Files'+(catalog?' · '+catalog.files.length:'');button.onclick=()=>open();}
       const area=query('#artifact-area');
-      if(area)MoyaiUI.render(area, (run?.has_artifact||run?.has_captures)?`<button type="button" class="quiet browse-files">Browse saved files${catalog?' · '+catalog.files.length:''}</button>${run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download workspace ZIP</a>`:''}`:'');
+      if(area)MoyaiUI.render(area, (run?.has_artifact||run?.has_captures||run?.has_published_artifacts)?`<button type="button" class="quiet browse-files">Browse saved files${catalog?' · '+catalog.files.length:''}</button>${run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download workspace ZIP</a>`:''}`:'');
       if(area?.querySelector('.browse-files'))area.querySelector('.browse-files').onclick=()=>open();
       decorate(query('#conversation'));
     }
     async function load(force=false){
-      if(!(run?.has_artifact||run?.has_captures))return;
+      if(!(run?.has_artifact||run?.has_captures||run?.has_published_artifacts))return;
       const next=run.id+':'+(run.events||[]).filter(e=>e.kind==='artifact').at(-1)?.id;
       if(!force&&key===next)return loading;
+      const refresh=force||!!key;
       key=next;const id=++requestId,rid=run.id;
       loading=(async()=>{
         try{
-          const data=await api(`/api/runs/${rid}/files`);
+          const data=await loadCatalog(api,rid,{refresh,onUpdate:data=>{if(id===requestId){catalog=data;update();}}});
           if(id!==requestId)return;
-          catalog=data;update();
+          catalog=data;if(data.error)key='';update();
         }catch(error){if(id!==requestId)return;catalog={files:[],error:error.message};key='';update();}
       })();
       return loading;
@@ -146,16 +174,33 @@
         return;
       }
       try{
-        const result=await api(file.preview_url);if(id!==previewId||!dialog.open)return;
+        let result=await api(file.preview_url);if(id!==previewId||!dialog.open)return;
         const target=query('#saved-file-preview');
         MoyaiUI.render(target, preview(result,ref,{escape:esc,markdown}));
-        target.scrollTop=0;decorate(target);reveal(target);
+        function continuation(){
+          if(result.next_offset==null||result.text==null)return;
+          MoyaiUI.insert(target,'beforeend','<button type="button" class="quiet saved-file-more">Load more</button>');
+          const button=target.querySelector('.saved-file-more');
+          button.onclick=async()=>{
+            button.disabled=true;button.textContent='Loading…';
+            try{
+              const page=await api(file.preview_url+'&offset='+result.next_offset);
+              if(id!==previewId||!dialog.open)return;
+              if(page.text==null)throw new Error('This part cannot be previewed. Download the complete file.');
+              const scroll=target.scrollTop;
+              result={...page,text:result.text+page.text};
+              MoyaiUI.render(target,preview(result,ref,{escape:esc,markdown}));
+              decorate(target);continuation();target.scrollTop=scroll;
+            }catch(error){if(id===previewId&&dialog.open){button.disabled=false;button.textContent='Retry loading more';button.title=error.message;}}
+          };
+        }
+        continuation();target.scrollTop=0;decorate(target);reveal(target);
         target.querySelectorAll('.copy-code').forEach(button=>button.onclick=async()=>{try{await navigator.clipboard.writeText(button.closest('.code-block').querySelector('code').textContent);button.textContent='Copied';}catch{button.textContent='Select text to copy';}});
       }catch(error){if(id===previewId&&dialog.open)MoyaiUI.render(query('#saved-file-preview'), `<p class="saved-file-empty" role="alert">${esc(error.message)}</p>`);}
     }
     async function open(file=null,ref=null){
       if(onOpen?.(file,ref))return;
-      if(!(run?.has_artifact||run?.has_captures))return;
+      if(!(run?.has_artifact||run?.has_captures||run?.has_published_artifacts))return;
       if(!dialog){dialog=MoyaiUI.createDialog();dialog.id='saved-files-dialog';dialog.setAttribute('aria-labelledby','saved-files-heading');doc.body.append(dialog);dialog.addEventListener('close',()=>{previewId++;viewId++;dialog.querySelectorAll('video').forEach(video=>video.pause());});}
       const rid=run.id,viewing=++viewId;
       MoyaiUI.render(dialog, `<header class="saved-files-heading"><div><h2 id="saved-files-heading">Saved files</h2><p>Latest saved version of this workspace</p></div><button type="button" class="icon-button" aria-label="Close saved files">×</button></header><div class="saved-files-loading" role="status">Loading saved files…</div>`);
@@ -175,5 +220,5 @@
     });
     return {sync,decorate,reset,open};
   }
-  return {reference,resolve,sessionLink,decorate:decorateReferences,preview,reveal,create};
+  return {reference,resolve,sessionLink,decorate:decorateReferences,preview,reveal,loadCatalog,create};
 });

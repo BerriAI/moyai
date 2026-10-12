@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Settings
-from sandbox.claude_harness import ClaudeAgent
-from sandbox.harness_agent import TurnJournal
+from agent.harnesses.claude_harness import ClaudeAgent
+from agent.harnesses.harness_agent import TurnJournal
 from test_workspace import workspace
 from test_slack import slack_app, event, signed
 
@@ -94,7 +94,7 @@ def test_old_snapshots_prepare_only_the_pinned_sdk(monkeypatch, tmp_path, instal
             raise PackageNotFoundError(package)
         return installed
     monkeypatch.setattr('importlib.metadata.version', version)
-    monkeypatch.setattr('sandbox.claude_harness.subprocess.run', lambda args, **kwargs: installs.append(args))
+    monkeypatch.setattr('agent.harnesses.claude_harness.subprocess.run', lambda args, **kwargs: installs.append(args))
     agent.validate()
     assert len(installs) == (installed != '0.2.163')
     if installs:
@@ -222,7 +222,7 @@ def test_claude_model_cap_counts_all_queries_in_one_invocation(monkeypatch, tmp_
 def test_incomplete_native_mirror_never_becomes_a_new_checkpoint(monkeypatch, tmp_path, mirror):
     from uuid import uuid4
     from claude_agent_sdk import ResultMessage, SystemMessage
-    from sandbox.context_store import ContextStore
+    from agent.context_store import ContextStore
     agent, _ = make_agent(monkeypatch, tmp_path)
     agent.context_store = ContextStore(tmp_path / 'context.db', 'run')
     agent.context_store.initialize([])
@@ -261,7 +261,7 @@ def test_incomplete_native_mirror_never_becomes_a_new_checkpoint(monkeypatch, tm
 @pytest.mark.parametrize('source', ['http', 'result', 'exception', 'cleanup'])
 def test_claude_failure_metadata_replaces_private_result_and_stderr(monkeypatch, tmp_path, source):
     from claude_agent_sdk import ResultMessage, ProcessError
-    from sandbox.activity import ActivityReporter
+    from agent.activity import ActivityReporter
     agent, _ = make_agent(monkeypatch, tmp_path)
     events = []
     activity = ActivityReporter(lambda *args: events.append(args))
@@ -452,7 +452,7 @@ def test_claude_local_rejection_receipts_cannot_hide_terminal_results(
                                    'changed-failure', 'stop', 'boundary'])
 def test_claude_terminal_recovery_entry_spends_no_attempt_or_status(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reason: str) -> None:
-    from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS
+    from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS
     from test_codex_sdk import install_transport_relay, model_failure
     agent, events = make_agent(monkeypatch, tmp_path)
     relay, resumed = install_transport_relay(agent)
@@ -480,8 +480,8 @@ def test_claude_terminal_result_during_recovery_cannot_be_replaced_by_success(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase: str, failure: str) -> None:
     from contextlib import closing
     from dataclasses import replace
-    from sandbox.context_store import ContextStore
-    from sandbox.transport_recovery import recovery_marker, valid_retry
+    from agent.context_store import ContextStore
+    from agent.transport_recovery import recovery_marker, valid_retry
     from test_codex_sdk import model_failure
     agent, _ = make_agent(monkeypatch, tmp_path, timeout=6)
     terminal = replace(recovery_result(),
@@ -617,7 +617,7 @@ def test_claude_recovery_preserves_terminal_boundaries(
 
 def test_claude_transport_budget_survives_invocation_reentry(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS
+    from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS
     from test_codex_sdk import model_failure
     agent, _ = make_agent(monkeypatch, tmp_path, transport_attempt=MAX_TRANSPORT_ATTEMPTS - 1)
     invocations = []

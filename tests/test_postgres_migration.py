@@ -60,7 +60,8 @@ def test_plan_is_read_only_and_requires_no_destination(source, monkeypatch):
     monkeypatch.setattr(psycopg, 'connect', lambda *a, **kw: pytest.fail('plan must not contact Postgres'))
     report = migration.plan(store.path.parent)
     assert report['objects']['table'] >= 81
-    assert report['objects']['view'] == 2 and report['objects']['trigger'] == 1
+    from app.database_schema import SESSION_EVENT_TRIGGERS, PRIVATE_TRIGGERS
+    assert report['objects']['view'] == 2 and report['objects']['trigger'] == 1 + len(SESSION_EVENT_TRIGGERS) + len(PRIVATE_TRIGGERS)
     assert report['tables']['connections']['rows'] == 1
     assert report['source_preserved'] and not report['runtime_cutover']
     assert hashlib.sha256(store.path.read_bytes()).hexdigest() == before
@@ -104,6 +105,24 @@ def test_permission_revocation_trigger_survives_the_migration(source, target, ch
         conn.execute(f'SET search_path TO {migration.identifier(name)}, pg_catalog')
         conn.execute(f'UPDATE runs SET {change} WHERE id=%s', (source.state.test_run_id,))
         assert conn.execute('SELECT status FROM github_write_access').fetchone()[0] == 'revoked'
+
+
+def test_private_ownership_and_derivation_guards_survive_migration(source, target):
+    store, (url, name) = source.state.store, target
+    owner = store.identity({'method': 'google', 'identity': {'sub': 'private-owner',
+        'email': 'private@example.com', 'name': 'Private Owner'}})
+    run = store.create_run('Private migration canary', '', 'demo', [], chat_enabled=True,
+                           user_id=owner, private_owner_id=owner)
+    migration.transfer(store.path.parent, url, name)
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(f'SET search_path TO {migration.identifier(name)}, pg_catalog')
+        assert conn.execute('SELECT private_owner_id FROM runs WHERE id=%s', (run['id'],)).fetchone()[0] == owner
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("UPDATE runs SET private_owner_id='' WHERE id=%s", (run['id'],))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute('UPDATE runs SET parent_run_id=%s WHERE id=%s', (run['id'], source.state.test_run_id))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute('UPDATE runs SET side_chat_of=%s WHERE id=%s', (source.state.test_run_id, run['id']))
 
 
 def test_failed_readback_rolls_back_everything_and_retry_succeeds(source, target, monkeypatch):

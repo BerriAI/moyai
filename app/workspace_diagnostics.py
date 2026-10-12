@@ -6,7 +6,7 @@ import re
 from pydantic import BaseModel, ConfigDict
 
 from sandbox.broker_failure import BROKER_ROUTES, safe_id, safe_error
-from sandbox.sdk_failure import CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
+from agent.harnesses.sdk_failure import CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
 from .connectors import TOOLS
 
 

@@ -1,4 +1,3 @@
-import asyncio
 import json
 import time
 
@@ -8,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.db import Store
 from app.slack_activity import SlackActivity
-from sandbox.activity import ActivityReporter
+from agent.activity import ActivityReporter
 from test_slack import event, signed, slack_app
 from test_slack_chat import ROOT, dm_event, finish, start
 
@@ -17,11 +16,14 @@ from test_slack_chat import ROOT, dm_event, finish, start
 def activity(slack_app):
     app, client, _, _ = slack_app
     client.portal.call(app.state.slack.chat.shutdown)
+    app.state.activity_test_portal = client.portal
     return slack_app
 
 
 def sync(app):
-    asyncio.run(app.state.slack.chat.activity.sync())
+    # Concurrent status sends share the application's token-refresh lock;
+    # repeated polls must use its event loop, just like the real worker.
+    app.state.activity_test_portal.call(app.state.slack.chat.activity.sync)
 
 
 def test_native_working_refresh_clear_and_restart(activity):
@@ -122,7 +124,7 @@ def test_paused_thread_clears_and_changed_workspace_never_receives_status(activi
     sync(app)
     assert len(activity[3]) == count
     with pytest.raises(RuntimeError, match='destination'):
-        asyncio.run(app.state.slack.channel.set_status(app.state.slack.channel.source_for_run(run_id), 'is working…'))
+        app.state.activity_test_portal.call(app.state.slack.channel.set_status, app.state.slack.channel.source_for_run(run_id), 'is working…')
 
 
 def test_connection_is_rechecked_after_token_refresh(activity, monkeypatch):
@@ -154,7 +156,7 @@ def test_uncertain_status_retries_but_completion_clears_immediately(activity, mo
     finish(app, run_id, 'Answer survived')
     sync(app)
     assert activity[3][-1]['status'] == ''
-    asyncio.run(app.state.slack.chat.deliver_one())
+    app.state.activity_test_portal.call(app.state.slack.chat.deliver_one)
     assert activity[3][-1]['text'].startswith('Answer survived')
     assert activity[3][-1]['blocks'][-1]['type'] == 'context'
 
@@ -168,7 +170,7 @@ def test_posting_during_work_refreshes_indicator_and_web_followup_starts_it(acti
     sync(app)
     assert activity[3][-1]['status'] == 'is getting ready…'
     before = len(activity[3])
-    asyncio.run(app.state.slack.chat.deliver_one())
+    app.state.activity_test_portal.call(app.state.slack.chat.deliver_one)
     sync(app)
     assert len(activity[3]) == before + 2
     assert activity[3][-1]['status'] == 'is getting ready…'

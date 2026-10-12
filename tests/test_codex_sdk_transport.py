@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.codex_harness import CodexAgent
+from agent.harnesses.codex_harness import CodexAgent
 from sandbox.broker_relay import BrokerRelay
-from sandbox.context_store import ContextStore, ContextUnavailable
+from agent.context_store import ContextStore, ContextUnavailable
 from test_workspace import workspace as broker_workspace
 from test_workspace import recovery_catalog  # noqa: F401 -- actual broker declarations
 
@@ -182,7 +182,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
     from dataclasses import replace
     from io import BytesIO
     import httpx
-    from sandbox.claude_harness import ClaudeAgent
+    from agent.harnesses.claude_harness import ClaudeAgent
     from test_claude_native_compaction import send_message
 
     workspace = tmp_path / 'native-tools'
@@ -259,7 +259,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
         agent = cls(spec={'model': state.app.state.settings.agent_model, 'timeout': 60,
             'max_iterations': tool_steps + 10},
             relay=state.relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': state.relay.url, 'WORKSPACE_RUN_TOKEN': state.capability}}}},
             activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
                 complete=lambda *args: events.append(('complete', args)), commentary=progress),
@@ -268,7 +268,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
             options = agent.options
             agent.options = lambda system: replace(options(system), tools=['Read'], allowed_tools=['Read'], mcp_servers={})
         try:
-            from sandbox.context_store import ContextUnavailable
+            from agent.context_store import ContextUnavailable
             try:
                 result = agent.run_conversation('Perform the fixture steps once and preserve the current task.',
                     conversation_history=[], system_message='Keep each tool receipt. Do not repeat completed actions.')
@@ -447,7 +447,7 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         return CodexAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': max_iterations},
             relay=relay, config={'mcp_servers': {'workspace': {
                 'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'fixture-capability'}}}},
             activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
                 complete=lambda *args: events.append(('complete', args)),
@@ -539,7 +539,8 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
             assert result['final_response'] == 'codex-transport-ok'
             assert ('commentary', 'codex-transport-ok') not in events
         expected_samples = 6 if outcome == 'context-recovery-limit' else 5
-        assert result['completed'] and len(samples) == expected_samples and len(calls) == 1
+        assert result['completed'], result
+        assert len(samples) == expected_samples and len(calls) == 1
         assert len(requests) == expected_samples + len(summaries)
         assert 'requester-private-first-marker' not in json.dumps(requests[-1])
         assert 'requester-private-second-marker' in json.dumps(requests[-1])
@@ -613,6 +614,22 @@ def test_context_rejection_compacts_in_place_with_live_tools(tmp_path, monkeypat
     assert proof['final_response'] == 'yield-test-complete'
 
 
+def test_native_compaction_recovers_broker_outage_with_running_preview(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-context-preview',
+                             compact_outage_seconds=4, progress=print)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == proof['command_starts'] == 1
+    assert proof['native_compactions'] == 2 and proof['transport_attempt'] == 1
+    assert proof['original_request_receipts'] == 1 and proof['original_request_in_continuation']
+    assert proof['upstream_requests'] == proof['model_calls'] == 6
+    assert proof['readiness_statuses'][0] == 503 and proof['readiness_statuses'][-1] == 200
+    assert {sample['phase'] for sample in proof['preview_samples']} == {'before', 'during', 'after'}
+    assert len({(sample['pid'], sample['port']) for sample in proof['preview_samples']}) == 1
+    assert all(sample['status'] == 200 for sample in proof['preview_samples'])
+    assert not proof['faults'] and proof['saved_prose'].count('yield-test-complete') == 1
+
+
 @pytest.mark.parametrize('outcome', ['settle-transport-finite', 'settle-transport-preview'])
 def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypatch, outcome):
     proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome)
@@ -672,7 +689,7 @@ def test_native_interrupted_sse_preserves_existing_command(tmp_path, monkeypatch
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
                       context_rounds=1, compact_rejections=0,
-                      outage_seconds=0, interrupted=None, on_outage=lambda: None,
+                      outage_seconds=0, compact_outage_seconds=0, interrupted=None, on_outage=lambda: None,
                       on_status=lambda kind, message, data: None, tool_catalog=None, read_status=502):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
 
@@ -723,6 +740,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             pid = int((workspace / 'preview-pid').read_text())
             with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
                 sample = {'phase': phase, 'pid': pid, 'port': port, 'status': response.status}
+            if compact_outage_seconds and not any(saved['phase'] == phase for saved in preview_samples):
+                progress(f'Preview {phase} recovery: HTTP {sample["status"]}, PID {pid}, port {port}')
             preview_samples.append(sample)
             return sample
         except (OSError, ValueError) as exc:
@@ -735,7 +754,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     agent = None
     native_errors, native_error_payloads, native_plugins, native_clients, native_threads = [], [], [], [], []
     from openai_codex.async_client import AsyncCodexClient
-    from sandbox.sdk_failure import codex_details
+    from agent.harnesses.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
         async def initialize(self):
             native_clients.append(self)
@@ -831,6 +850,15 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 compactions.append(body)
                 progress('Native compaction request; original command remains live')
                 assert agent.journal.pending
+                if compact_outage_seconds and len(compactions) == 1:
+                    sample_preview('before')
+                    outage_started = time.monotonic()
+                    outage_until = outage_started + compact_outage_seconds
+                    observer = threading.Thread(target=observe_outage, daemon=True)
+                    observer.start()
+                    progress(f'Compaction receives HTTP 503; broker unavailable for {compact_outage_seconds} seconds')
+                    on_outage()
+                    return self.reply({}, 503)
                 if len(compactions) <= compact_rejections:
                     return self.reply({'detail': {'code': 'context_compaction_required',
                         'input_tokens': 300000, 'input_budget': 200000}}, 409)
@@ -904,7 +932,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     (context_rounds + 2 + int(transport) if context_case else 2 if interrupted else 3)):
                 assert bool(agent.journal.pending) != finish_during_compaction
                 assert agent.model_calls == sequence + len(compactions)
-                if transport and preview:
+                if (transport or compact_outage_seconds) and preview:
                     sample_preview('after')
                     progress('After reconnect: original preview server still answers HTTP 200')
                 corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
@@ -976,7 +1004,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': max(60, outage_seconds + 45),
         'max_iterations': 2 if outcome == 'settle-limit' else 8},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
             complete=completed, commentary=lambda text: None,
@@ -1011,6 +1039,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             outage_elapsed=time.monotonic() - outage_started if outage_started else 0,
             readiness_statuses=readiness_statuses, preview_samples=preview_samples, status_events=status_events,
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
+        proof['original_request_receipts'] = sum(m.get('role') == 'user'
+            and m.get('content') == 'Run the local slow tool once.' for m in store.history())
+        proof['original_request_in_continuation'] = 'Run the local slow tool once.' in json.dumps(requests[-1])
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
         return proof
@@ -1046,8 +1077,8 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
     from app.message_queue import MessageQueue
     from sandbox.broker_relay import BrokerRelay
     from sandbox.broker_transport import unseal
-    from sandbox.continuation import ActiveTurnSteering, AgentSteer
-    from sandbox.harness_registry import resolve
+    from agent.continuation import ActiveTurnSteering, AgentSteer
+    from agent.harnesses.harness_registry import resolve
     from openai_codex.async_client import AsyncCodexClient
     from openai_codex.errors import InvalidRequestError
     import asyncio
@@ -1143,7 +1174,7 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
     relay.steering = steering
     agent = CodexAgent(spec={'model': 'openai/gpt-6-astra', 'max_iterations': 6, 'timeout': 30},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *a: None, complete=lambda *a: None, commentary=lambda *a: None),
         step=lambda: steering.step(agent), cwd=str(tmp_path), definition=definition)
@@ -1213,7 +1244,7 @@ def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, h
     attempts, events, validation_seen = [], [], []
     guest = tmp_path / 'automation-native'
     guest.mkdir()
-    mcp_script = str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')
+    mcp_script = str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')
     original_config = entrypoint.hermes_config
 
     def local_config(spec, broker_url, workspace):
@@ -1241,11 +1272,11 @@ def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, h
         arguments = None
         if not discover and len(attempts) < 2:
             if attempts:
-                validation_seen.append('definition.metadata.bootstrap_source' in text and '16384 characters' in text)
+                validation_seen.append('definition.metadata.bootstrap_source' in text and 'Input should be a valid string' in text)
                 assert not app.state.store.rows('SELECT * FROM automations')
             arguments = {'turn_id': app.state.store.run(state.run['id'])['active_message_id'],
                 'request_key': 'native-corrected-automation', 'definition': definition(**(
-                    {} if attempts else {'metadata': {'bootstrap_source': 'private-script-marker' + 'x' * (16385 - len('private-script-marker'))}}))}
+                    {} if attempts else {'metadata': {'bootstrap_source': ['private-script-marker']}}))}
             attempts.append('corrected' if attempts else 'invalid')
         sequence = len(state.requests)
         pipe = SimpleNamespace(server=state, wfile=BytesIO(), send_response=lambda *args: None,

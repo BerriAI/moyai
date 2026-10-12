@@ -33,11 +33,12 @@ def test_native_tool_search_preserves_broker_scope_and_direct_writes(workspace, 
     app.state.store.claim_message(run_id)
     app.state.store.update_run(run_id, status='running')
     provider_calls, broker_calls = [], []
-    async def provider(name, arguments):
+    async def provider(name, arguments, *, run):
+        assert run['id'] == run_id
         provider_calls.append(name)
         return {'result': 'fixture-ok'}
     async def github(run, name, arguments):
-        return await provider(name, arguments)
+        return await provider(name, arguments, run=run)
     monkeypatch.setattr(app.state.connectors, 'call', provider)
     monkeypatch.setattr(app.state.connectors.github, 'call', github)
 
@@ -81,7 +82,7 @@ def test_native_tool_search_preserves_broker_scope_and_direct_writes(workspace, 
     url = f'http://127.0.0.1:{server.server_port}'
     config = hermes_config({'model': 'test-model', 'broker_url': url}, url, tmp_path)
     # Only filesystem/executable locations differ from the sandbox config.
-    config['mcp_servers']['workspace'].update(command=python, args=[str(root / 'sandbox/mcp_bridge.py')])
+    config['mcp_servers']['workspace'].update(command=python, args=[str(root / 'agent/tools/mcp_bridge.py')])
     (profile / 'config.yaml').write_text(json.dumps(config))
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'TMPDIR') if key in os.environ}
     env.update(HERMES_HOME=str(profile), PYTHONPATH=source, HERMES_RUNTIME_DIR=str(tmp_path / 'runtimes'))

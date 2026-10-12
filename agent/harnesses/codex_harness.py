@@ -1,0 +1,763 @@
+"""Native Codex SDK execution within Moyai's existing sandbox and lifecycle."""
+import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from dataclasses import replace
+import json
+import os
+from pathlib import Path
+import tempfile
+import threading
+import sys
+import tomllib
+from uuid import uuid4
+
+from agent.harnesses.harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
+from sandbox.harness_dependencies import prepare_codex
+from agent.harnesses.codex_catalog import search_catalog
+from agent.context_recovery import run_with_context_recovery, prepare_context, maintain_context
+from agent.harnesses.sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
+from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
+
+
+RECEIPT_TIMEOUT_SECONDS = 10
+MCP_STARTUP_TIMEOUT_SECONDS = 60
+
+
+def toml_value(value):
+    if isinstance(value, dict):
+        return '{' + ','.join(json.dumps(key) + '=' + toml_value(item)
+                              for key, item in value.items() if item is not None) + '}'
+    return json.dumps(value)
+
+
+class CodexAgent(HarnessAgent):
+    typed_replay = True
+    def __init__(self, *, spec, relay, config, activity, step, cwd, definition, context_store=None):
+        self.context = HarnessContext(spec, relay, config, activity, step, cwd)
+        self.context_store = context_store
+        self.stopped = threading.Event()
+        self.receipts = threading.Condition(threading.RLock())
+        self.journal = None
+        self.inputs = None
+        self.calls = {}
+        self.completed = set()
+        self.observed_outputs = set()
+        self.compaction_window = None
+        self.boundary_failed = False
+        self.boundary_reason = ''
+        self.model_calls = 0
+        self.transport_attempt = spec.get('transport_attempt', 0)
+        relay.before_model = self.before_model
+        relay.context_recovery = True
+
+    def validate(self):
+        prepare_codex()
+        from openai_codex.async_client import AsyncCodexClient  # noqa: F401
+
+    def interrupt(self):
+        # The host invokes this at a settled tool boundary. User Stop separately
+        # revokes the broker capability and terminates the enclosing sandbox.
+        with self.receipts:
+            self.stopped.set()
+            self.receipts.notify_all()
+
+    def before_model(self, request=None):
+        with self.receipts:
+            if self.stopped.is_set() or self.boundary_failed:
+                return False
+            if request is not None:
+                try:
+                    items = json.loads(request).get('input', [])
+                    if not isinstance(items, (list, str)):
+                        raise ValueError('Invalid input')
+                    expected = {item['call_id'] for item in items if isinstance(item, dict)
+                                and item.get('type') in {'function_call_output', 'custom_tool_call_output',
+                                                        'tool_search_output'}}
+                    if not all(isinstance(call_id, str) and call_id for call_id in expected):
+                        raise ValueError('Invalid call ID')
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    self.boundary_failed = True
+                    self.boundary_reason = 'invalid model request'
+                    return False
+                # HTTP and app-server notifications arrive on different threads.
+                # Input IDs are only a barrier; wire text never becomes a receipt.
+                # A code-mode output may yield while nested tools are still live.
+                # Let the model poll them; lifecycle work below must still wait.
+                if not self.receipts.wait_for(
+                        lambda: expected <= self.completed | self.observed_outputs or self.stopped.is_set(),
+                        timeout=RECEIPT_TIMEOUT_SECONDS):
+                    self.boundary_failed = True
+                    self.boundary_reason = 'native output notification timed out'
+                    return False
+            if self.stopped.is_set():
+                return False
+            if self.journal and not self.journal.pending:
+                self.context.step()
+                if not self.stopped.is_set() and not self.boundary_failed:
+                    maintain_context(self)
+            if self.stopped.is_set() or self.boundary_failed:
+                return False
+            # Polling is inference too. Pending work cannot bypass the turn cap.
+            limit = self.context.spec.get('max_iterations')
+            if limit and self.model_calls >= limit:
+                self.boundary_failed = True
+                self.boundary_reason = 'model call limit reached'
+                return False
+            self.model_calls += 1
+            return True
+
+    def sdk_config(self, home):
+        from openai_codex import CodexConfig
+        from codex_cli_bin import bundled_codex_path, bundled_path_dir
+        ctx = self.context
+        settings = {
+            'model_provider': 'moyai',
+            'model_providers': {'moyai': {
+                'name': 'Moyai', 'base_url': ctx.relay.url + '/v1', 'wire_api': 'responses',
+                'env_key': 'WORKSPACE_RUN_TOKEN', 'requires_openai_auth': False,
+                'supports_websockets': False, 'request_max_retries': 0, 'stream_max_retries': 0}},
+            # Optional MCP servers connect asynchronously in Codex. Without
+            # required=True, inference can start with only the native tools.
+            'mcp_servers': {'moyai': {**ctx.config['mcp_servers']['workspace'],
+                'required': True, 'startup_timeout_sec': MCP_STARTUP_TIMEOUT_SECONDS}},
+            'projects': {str(Path(ctx.cwd).resolve()): {'trust_level': 'untrusted'}},
+            'project_doc_max_bytes': 0, 'web_search': 'disabled',
+            # Moyai owns plugins; native marketplace sync outlives SDK shutdown.
+            'features': {'hooks': False, 'apps': False, 'plugins': False, 'memories': False,
+                         'multi_agent': False, 'unified_exec': False, 'shell_snapshot': False},
+            'skills': {'include_instructions': False, 'bundled': {'enabled': False}},
+            'agents': {'enabled': False},
+            'cli_auth_credentials_store': 'ephemeral', 'history': {'persistence': 'none'},
+        }
+        if ctx.spec.get('independent_runtime'):
+            # This server is Moyai's authenticated capability boundary. Native
+            # read-only sandbox approval defaults otherwise reject even remote
+            # MCP actions. The broker still checks task scope and revocation.
+            settings['mcp_servers']['moyai']['default_tools_approval_mode'] = 'approve'
+            # Match QM's empty control jail. All real workspace operations use
+            # supplied tools and the separately leased computer, never this host.
+            settings['features'].update(shell_tool=False, goals=False, browser_use=False,
+                browser_use_external=False, computer_use=False, image_generation=False,
+                in_app_browser=False, request_permissions_tool=False, tool_suggest=False)
+        if self.compaction_window:
+            settings['model_context_window'] = self.compaction_window
+            settings['model_auto_compact_token_limit'] = max(1024, self.compaction_window * 4 // 5)
+        # CodexConfig.env merges the parent environment. Clear inherited secrets
+        # and runtime switches rather than handing the child another provider key.
+        keep = {'PATH', 'LANG', 'LC_ALL', 'TMPDIR', 'SYSTEMROOT'}
+        env = {key: value if key in keep else '' for key, value in os.environ.items()}
+        env.update(CODEX_HOME=str(home), WORKSPACE_RUN_TOKEN=os.environ['WORKSPACE_RUN_TOKEN'])
+        if bundled_path_dir():
+            env['PATH'] = str(bundled_path_dir()) + os.pathsep + os.environ.get('PATH', '')
+        lease = getattr(ctx.relay, 'codex_runtime', None)
+        self.runtime_info = lease.ready() if lease else None
+        catalog = search_catalog(bundled_codex_path(), home,
+            ctx.spec['model'].removeprefix('openai/'),
+            {key: value for key, value in env.items() if key in keep | {'CODEX_HOME'}},
+            **({'cached': self.runtime_info['catalog']} if self.runtime_info else {}))
+        if catalog:
+            settings['model_catalog_json'] = catalog
+        settings_args = tuple(name + '=' + toml_value(value) for name, value in settings.items())
+        # The SDK merges env, and empty native feature/originator variables still
+        # have meaning. Remove them before exec instead of treating blank as unset.
+        remove = set(os.environ) - keep - {'CODEX_HOME', 'WORKSPACE_RUN_TOKEN'}
+        launch = ['/usr/bin/env', *[part for key in sorted(remove) for part in ('-u', key)],
+                  str(bundled_codex_path()), *[part for value in settings_args for part in ('-c', value)],
+                  'app-server', '--listen', 'stdio://']
+        return CodexConfig(cwd=str(home), env=env,
+                           launch_args_override=tuple(launch), config_overrides=settings_args,
+                           client_name='moyai', client_title='Moyai', experimental_api=True)
+
+    @asynccontextmanager
+    async def native_client(self, home):
+        from openai_codex.async_client import AsyncCodexClient
+        from pydantic import RootModel
+        config = self.sdk_config(home)
+        self.runtime_config, self.runtime_thread, self.runtime_clean = None, None, False
+        lease = getattr(self.context.relay, 'codex_runtime', None)
+        if self.runtime_info:
+            self.runtime_config = tomllib.loads('\n'.join(config.config_overrides))
+            provider = self.runtime_config['model_providers']['moyai']
+            # The reusable process has no capability in its environment. Each
+            # ephemeral thread receives this invocation's relay and token only.
+            provider.pop('env_key', None)
+            provider['http_headers'] = {'Authorization': 'Bearer ' + os.environ['WORKSPACE_RUN_TOKEN']}
+            proxy = Path(__file__).resolve().parents[2] / 'sandbox/codex_runtime.py'
+            config = replace(config, launch_args_override=(sys.executable, str(proxy),
+                             'proxy', self.runtime_info['socket']))
+            lease.clean = False
+        if not self.runtime_info:
+            async with AsyncCodexClient(config) as client:
+                yield client
+            return
+
+        # Close the SDK transport before discarding its native process. Keep
+        # teardown separate from the turn so it cannot replace either a saved
+        # answer or the original execution exception/cancellation.
+        stack, unloaded = AsyncExitStack(), False
+        try:
+            client = await stack.enter_async_context(AsyncCodexClient(config))
+            yield client
+            with suppress(Exception):
+                if self.runtime_clean and self.runtime_thread:
+                    async with asyncio.timeout(5):
+                        await client.request('thread/backgroundTerminals/clean',
+                            {'threadId': self.runtime_thread}, response_model=RootModel[dict])
+                        await client.request('thread/unsubscribe', {'threadId': self.runtime_thread},
+                                             response_model=RootModel[dict])
+                        while True:
+                            loaded = await client.request('thread/loaded/list', {}, response_model=RootModel[dict])
+                            if not loaded.root['data']:
+                                unloaded = True
+                                break
+                            await asyncio.sleep(.01)
+        finally:
+            original_error, cancelled = sys.exception(), None
+
+            async def release():
+                clean = False
+                try:
+                    await stack.aclose()
+                    clean = unloaded and cancelled is None
+                except (Exception, asyncio.CancelledError):
+                    pass
+                finally:
+                    lease.clean = clean
+                    if not clean:
+                        with suppress(Exception):
+                            await asyncio.to_thread(lease.close)
+                            self.context.relay.codex_runtime = None
+
+            # Shield and join the owned cleanup, including repeated cancellation.
+            # Keep the lease attached until close finishes so a failed release
+            # still has the synchronous entrypoint as its final owner.
+            cleanup = asyncio.create_task(release())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            cleanup.result()
+            if cancelled is not None and original_error is None:
+                raise cancelled
+
+    def record_item(self, item, *, completed):
+        kind = item.get('type')
+        if kind == 'commandExecution':
+            name, args = 'terminal', {'command': item.get('command', ''), 'cwd': item.get('cwd', '')}
+            output = item.get('aggregatedOutput') or ''
+            failed = item.get('status') != 'completed' or item.get('exitCode') != 0
+        elif kind == 'fileChange':
+            name, args = 'apply_patch', {'changes': item.get('changes', [])}
+            output = json.dumps(item.get('changes', []), ensure_ascii=False)
+            failed = item.get('status') != 'completed'
+        elif kind == 'mcpToolCall':
+            name = 'mcp__' + item['server'] + '__' + item['tool']
+            args = item.get('arguments') or {}
+            result = item.get('result') or {}
+            failed = item.get('status') != 'completed' or bool(result.get('isError'))
+            # Native errors may contain raw provider credentials or private stderr.
+            output = json.dumps(result, ensure_ascii=False) if result else 'Tool failed; action not confirmed.'
+        elif kind == 'imageView':
+            name, args = 'view_image', {'path': item.get('path', '')}
+            output, failed = 'Image viewed.', False
+        elif kind in {'tool_search_call', 'tool_search_output'}:
+            call_id = item.get('call_id')
+            if not call_id or item.get('execution') != 'client':
+                return
+            name = 'tool_search'
+            if kind == 'tool_search_call':
+                args, output, failed = item.get('arguments') or {}, '', False
+            else:
+                if call_id not in self.calls:
+                    return
+                _, args = self.calls[call_id]
+                output = json.dumps({'tools': item.get('tools', [])}, ensure_ascii=False)
+                failed = item.get('status') != 'completed'
+        else:
+            return
+        call_id = item['call_id'] if kind.startswith('tool_search_') else item['id']
+        with self.receipts:
+            if call_id in self.completed:
+                return
+            if call_id not in self.calls:
+                self.calls[call_id] = (name, args)
+                self.journal.tool_started(call_id, name, args)
+                self.context.activity.start(call_id, name, args)
+            if completed:
+                self.journal.tool_finished(call_id, output)
+                self.context.activity.complete(call_id, name, args, {
+                    'content': [{'type': 'text', 'text': output}], 'isError': failed})
+                self.completed.add(call_id)
+                self.receipts.notify_all()
+
+    def run_conversation(self, prompt, *, conversation_history, system_message):
+        self.validate()
+        self.stopped.clear()
+        self.boundary_failed = False
+        self.boundary_reason = ''
+        conversation_history = prepare_context(self, conversation_history)
+        self.journal = TurnJournal(conversation_history, prompt, self.context_store)
+        return run_with_context_recovery(self, prompt, conversation_history,
+            lambda current: asyncio.run(self._run(current, system_message)))
+
+    def record_tool_event(self, method, payload):
+        item = payload.get('item', {})
+        if method == 'rawResponseItem/completed':
+            if item.get('type') in {'tool_search_call', 'tool_search_output'}:
+                self.record_item(item, completed=item['type'] == 'tool_search_output')
+            elif item.get('type') in {'function_call_output', 'custom_tool_call_output'}:
+                # Observation permits polling; only native completion is a receipt.
+                with self.receipts:
+                    self.observed_outputs.add(item['call_id'])
+                    self.receipts.notify_all()
+        elif method in {'item/started', 'item/completed'}:
+            self.record_item(item, completed=method == 'item/completed')
+
+    async def drain_tool_events(self, client, turn_ids):
+        from openai_codex.errors import TransportClosedError
+        for turn_id in turn_ids:
+            try:
+                while True:
+                    event = await client.next_turn_notification(turn_id)
+                    payload = (event.payload.params if hasattr(event.payload, 'params') else
+                               event.payload.model_dump(mode='json', by_alias=True))
+                    self.record_tool_event(event.method, payload)
+            except TransportClosedError:
+                pass  # Completed queues can still receive later tool results.
+
+    async def await_with_tool_events(self, client, turn_ids, operation):
+        # SDK startup can reach model admission before its RPC returns. Keep
+        # receipts flowing for live commands owned by already-completed turns.
+        request = asyncio.create_task(operation)
+        try:
+            while True:
+                await self.drain_tool_events(client, turn_ids)
+                done, _ = await asyncio.wait({request}, timeout=0.05)
+                if done:
+                    return await request
+        finally:
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+
+    async def compact_context(self, client, thread_id, turn_ids):
+        """Retry failed inference inside compaction without replacing live tools."""
+        relay = self.context.relay
+        pressure = getattr(relay, 'context_required', None)
+        while True:
+            previous_failure = getattr(relay, 'last_failure', None)
+            error = None
+            try:
+                if await self._compact_context(client, thread_id, turn_ids):
+                    return True
+            except Exception as exc:
+                error = exc
+            failed_request = getattr(relay, 'last_failure', None)
+            if (self.stopped.is_set() or self.boundary_failed
+                    or getattr(relay, 'uncertain_tool', False)
+                    or getattr(relay, 'context_required', None) is not pressure
+                    or failed_request is previous_failure
+                    or not retryable_failure(failed_request, live=True)
+                    or self.transport_attempt >= MAX_TRANSPORT_ATTEMPTS):
+                if error is not None:
+                    raise error
+                return False
+            # This retries only the model-only compact operation on the same
+            # native thread. Pending commands retain their runtime and handles;
+            # they never enter the cold recovery path or get replayed.
+            self.transport_attempt += 1
+            self.context.activity.emit('status',
+                'Reconnecting to finish context compaction with the existing tools.',
+                {'activity_version': 1, 'phase': 'reconnecting', 'stage': 'context_transport'})
+            await self.await_with_tool_events(client, turn_ids, asyncio.sleep(2 ** self.transport_attempt))
+            if (not await self.wait_for_model(client, turn_ids, failed_request, context_pressure=pressure)
+                    or not relay.resume_model(failed_request, live=True)):
+                if error is not None:
+                    raise error
+                return False
+            self.context.activity.emit('status', 'Connection restored. Finishing context compaction.',
+                {'activity_version': 1, 'phase': 'recovered', 'stage': 'context_transport'})
+
+    async def _compact_context(self, client, thread_id, turn_ids):
+        # This public SDK operation subscribes to thread events only; it does
+        # not create a native goal. Compact has no returned turn ID to subscribe
+        # to. Release the route before starting another ordinary native turn.
+        route = client.register_goal_operation(thread_id)
+        self.context.relay.native_compacting = True
+        result = None
+
+        async def read_events():
+            nonlocal result
+            compact_turn, compacted = None, False
+            while True:
+                event = await client.next_goal_notification(route)
+                payload = (event.payload.params if hasattr(event.payload, 'params') else
+                           event.payload.model_dump(mode='json', by_alias=True))
+                self.record_tool_event(event.method, payload)
+                if event.method == 'turn/started':
+                    compact_turn = payload['turn']['id']
+                elif event.method == 'item/completed' and payload['item']['type'] == 'contextCompaction':
+                    compacted = True
+                elif event.method == 'error':
+                    if codex_details(payload.get('error')).get('code') == 'responseStreamDisconnected':
+                        self.context.relay.note_stream_disconnect()
+                elif event.method == 'turn/completed' and payload['turn']['id'] == compact_turn:
+                    result = compacted and payload['turn']['status'] == 'completed'
+
+        # The goal route owns new thread events, even for old turn IDs. Keep
+        # consuming it during the RPC and through the route's final queued event.
+        notifications = asyncio.create_task(read_events())
+        try:
+            await self.await_with_tool_events(client, turn_ids, client.thread_compact(thread_id))
+            while result is None and not self.stopped.is_set():
+                await self.drain_tool_events(client, turn_ids)
+                done, _ = await asyncio.wait({notifications}, timeout=0.05)
+                if done:
+                    await notifications  # Propagate a failed reader, not a false success.
+            return result is True and not self.stopped.is_set()
+        finally:
+            # Unsubscribe before adding the SDK's end marker. Let the reader
+            # save receipts queued after turn/completed instead of cancelling it.
+            client.unregister_goal_operation(route)
+            route.wake_notification_reader()
+            await asyncio.gather(notifications, return_exceptions=True)
+            self.context.relay.native_compacting = False
+
+    async def settle_pending_receipts(self, client, turn_ids):
+        """Keep the native runtime alive for late receipts before a handoff.
+
+        A failed inference turn can finish while its yielded commands are still
+        running. The SDK's completed turn queue remains readable, but reports
+        TransportClosedError whenever it is temporarily empty. Closing the
+        client here would discard those commands' eventual completion events.
+        """
+        from openai_codex.errors import TransportClosedError
+        try:
+            async with asyncio.timeout(RECEIPT_TIMEOUT_SECONDS):
+                while self.journal.pending:
+                    for turn_id in turn_ids:
+                        while self.journal.pending:
+                            try:
+                                event = await client.next_turn_notification(turn_id)
+                            except TransportClosedError:
+                                break
+                            if event.method == 'item/completed':
+                                payload = event.payload.model_dump(mode='json', by_alias=True)
+                                self.record_item(payload['item'], completed=True)
+                    # Stop cancels grace waiting, but already-queued native
+                    # completions still belong to the durable journal.
+                    if self.stopped.is_set():
+                        break
+                    if self.journal.pending:
+                        await asyncio.sleep(0.05)
+        except TimeoutError:
+            # The shared recovery gate still rejects genuinely unknown outcomes.
+            # Neither elapsed time nor raw output IDs are completion receipts.
+            pass
+
+    async def wait_for_model(self, client, turn_ids, observed_failure, *, context_pressure=None):
+        """Keep native history/tools alive while the broker process restarts."""
+        relay = self.context.relay
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.context.spec.get('transport_recovery_seconds', 600)
+        probe, retry_at = None, 0
+        try:
+            while True:
+                await self.drain_tool_events(client, turn_ids)
+                limit = self.context.spec.get('max_iterations')
+                if (self.stopped.is_set() or self.boundary_failed or relay.uncertain_tool
+                        or relay.last_failure is not observed_failure
+                        or relay.context_required is not context_pressure
+                        or (limit and self.model_calls >= limit)):
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    self.boundary_failed = True
+                    self.boundary_reason = 'model connection recovery timed out'
+                    return False
+                if probe is None and loop.time() >= retry_at:
+                    probe = asyncio.create_task(asyncio.to_thread(relay.model_ready, timeout=min(1, remaining)))
+                if probe is not None and probe.done():
+                    try:
+                        ready = probe.result()
+                    except Exception:
+                        # Revoked access and invalid replies cannot authorize a
+                        # live continuation or a fresh cold recovery window.
+                        self.boundary_failed = True
+                        self.boundary_reason = 'broker readiness could not be verified'
+                        return False
+                    probe = None
+                    if ready:
+                        return True
+                    retry_at = loop.time() + 1
+                await asyncio.sleep(min(0.05, remaining))
+        finally:
+            if probe is not None:
+                probe.cancel()
+                await asyncio.gather(probe, return_exceptions=True)
+
+    async def _run(self, prompt, system_message):
+        from openai_codex.errors import InvalidRequestError
+        # Each fresh SDK invocation has its own local ceiling. The gateway and
+        # shared recovery loop retain the whole task's request cap and deadline.
+        self.model_calls = 0
+        self.calls.clear()
+        self.completed.clear()
+        self.observed_outputs.clear()
+        self.journal.call_namespace = uuid4().hex
+        self.inputs = HarnessInputs(self.journal)
+        message_items = {}
+        pending_message = None
+
+        def publish_pending():
+            # Providers may omit phase. The newest unclassified item could be
+            # the answer; only subsequent work proves it was an interim update.
+            nonlocal pending_message
+            if pending_message is not None:
+                self.context.activity.commentary(pending_message['text'])
+                pending_message = None
+
+        finished, answer = False, ''
+        failure = {}
+        settlement_started = False
+        prior_turns = set()
+        compaction_progress, compaction_attempts = 0, 0
+        late_inputs = []
+        steered = False
+        notification = None
+        # Native transcripts are private, disposable state. Only Moyai's public
+        # journal crosses requester/model changes and filesystem checkpoints.
+        try:
+            with tempfile.TemporaryDirectory(prefix='moyai-codex-') as home:
+                # The task deadline covers startup and execution. Optional
+                # teardown runs after that deadline scope has exited.
+                async with AsyncExitStack() as clients:
+                    async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
+                        client = await clients.enter_async_context(self.native_client(home))
+                        await client.initialize()
+                        thread = await client.thread_start({
+                            'model': self.context.spec['model'].removeprefix('openai/'), 'modelProvider': 'moyai',
+                            'cwd': self.context.cwd, 'ephemeral': True,
+                            'developerInstructions': system_message + '\nUse Moyai MCP tools for authorized app actions. '
+                                'Do not start detached work. Moyai owns credentials, memory, skills and delegation.',
+                            'approvalPolicy': 'never', 'sandbox': 'read-only' if self.context.spec.get('independent_runtime') else 'danger-full-access',
+                            # The pinned SDK exposes this native app-server field
+                            # through dict params. Consume output IDs and native
+                            # search receipts, never private reasoning/response text.
+                            'experimentalRawEvents': True,
+                            **({'config': self.runtime_config} if self.runtime_config else {})})
+                        self.runtime_thread = thread.thread.id
+                        if getattr(self, 'replay_history', None):
+                            from openai_codex.generated.v2_all import ThreadInjectItemsResponse
+                            from agent.harnesses.replay import codex_items
+                            items = codex_items(self.replay_history)
+                            await client.request('thread/inject_items', {
+                                'threadId': thread.thread.id, 'items': items},
+                                response_model=ThreadInjectItemsResponse)
+                            # These receipts were committed before this native
+                            # invocation. They need no new SDK notification and
+                            # must never be mistaken for unsettled live writes.
+                            with self.receipts:
+                                self.completed.update(item['call_id'] for item in items
+                                    if item['type'] == 'function_call_output')
+                        turn = await client.turn_start(thread.thread.id, prompt)
+                        while True:
+                            notification = asyncio.create_task(client.next_turn_notification(turn.turn.id))
+                            while True:
+                                # Live commands retain their originating turn ID,
+                                # including across multiple in-place compactions.
+                                await self.drain_tool_events(client, prior_turns)
+                                corrections = self.inputs.take()
+                                if corrections:
+                                    try:
+                                        await client.turn_steer(thread.thread.id, turn.turn.id, '\n\n'.join(corrections))
+                                        steered = True
+                                    except InvalidRequestError as exc:
+                                        # The native turn can finish before its notification
+                                        # is read. Only a definite non-delivery permits a
+                                        # new turn on this same live thread; other faults
+                                        # keep the task incomplete with journaled input.
+                                        if exc.message != 'no active turn to steer':
+                                            raise
+                                        late_inputs.extend(corrections)
+                                done, _ = await asyncio.wait({notification}, timeout=0.05)
+                                if done:
+                                    break
+                            event = await notification
+                            notification = None
+                            payload = (event.payload.params if hasattr(event.payload, 'params') else
+                                       event.payload.model_dump(mode='json', by_alias=True))
+                            if event.method == 'rawResponseItem/completed':
+                                self.record_tool_event(event.method, payload)
+                            elif event.method in {'item/started', 'item/completed'}:
+                                item = payload['item']
+                                if item['type'] == 'userMessage':
+                                    # Native incorporation, rather than arrival time,
+                                    # fences final candidates from before a correction.
+                                    publish_pending()
+                                    message_items.clear()
+                                elif item['type'] == 'agentMessage' and event.method == 'item/completed':
+                                    if item['id'] in message_items:
+                                        continue
+                                    message_items[item['id']] = item
+                                    text = item.get('text', '')
+                                    if text:
+                                        publish_pending()
+                                    if text and item.get('phase') != 'final_answer':
+                                        self.journal.finish(text, phase=item.get('phase'))
+                                        if item.get('phase') == 'commentary':
+                                            self.context.activity.commentary(text)
+                                        else:
+                                            pending_message = item
+                                else:
+                                    if (item['type'] in {'commandExecution', 'fileChange', 'mcpToolCall', 'imageView'}
+                                            and item['id'] not in self.calls):
+                                        publish_pending()
+                                    self.record_item(item, completed=event.method == 'item/completed')
+                            elif event.method == 'error':
+                                failure.update(codex_details(payload.get('error'), will_retry=payload.get('willRetry')))
+                            elif event.method == 'turn/completed':
+                                finished = payload['turn']['status'] == 'completed'
+                                if not finished:
+                                    failure['native_status'] = (payload['turn']['status']
+                                        if payload['turn']['status'] in {'failed', 'interrupted'} else 'unknown')
+                                    if payload['turn'].get('error'):
+                                        failure.update(codex_details(payload['turn']['error']))
+                                relay = self.context.relay
+                                if failure.get('code') == 'responseStreamDisconnected':
+                                    relay.note_stream_disconnect()
+                                failed_request = getattr(relay, 'last_failure', None)
+                                if (payload['turn']['status'] == 'failed' and not self.stopped.is_set()
+                                        and not self.boundary_failed and not getattr(relay, 'uncertain_tool', False)
+                                        and not getattr(relay, 'context_required', None)
+                                        and retryable_failure(failed_request, live=True)
+                                        and self.transport_attempt < MAX_TRANSPORT_ATTEMPTS):
+                                    # Preserve the native thread and its running tools. A
+                                    # preview server cannot settle merely by waiting before
+                                    # a cold restart; the live agent must inspect/stop it.
+                                    self.transport_attempt += 1
+                                    self.context.activity.emit('status',
+                                        'Reconnecting to continue with the existing tools and saved results.',
+                                        {'activity_version': 1, 'phase': 'reconnecting', 'stage': 'model_transport'})
+                                    await asyncio.sleep(2 ** self.transport_attempt)
+                                    if (await self.wait_for_model(client, [turn.turn.id, *prior_turns], failed_request)
+                                            and relay.resume_model(failed_request, live=True)):
+                                        self.context.activity.emit('status', 'Connection restored. Continuing the task.',
+                                            {'activity_version': 1, 'phase': 'recovered', 'stage': 'model_transport'})
+                                        prior_turns.add(turn.turn.id)
+                                        publish_pending()
+                                        message_items.clear()
+                                        failure.clear()
+                                        late_inputs.extend(self.inputs.take())
+                                        turn = await self.await_with_tool_events(client, prior_turns,
+                                            client.turn_start(thread.thread.id,
+                                            'The model connection was interrupted. Continue the same task '
+                                            'using this thread and its existing tool sessions. Do not restart or '
+                                            'replay actions. Inspect pending tools, wait for finite work, and stop '
+                                            'preview servers you no longer need. Collect actual results before '
+                                            'answering.\n\n' + '\n\n'.join(late_inputs)))
+                                        late_inputs.clear()
+                                        steered = False
+                                        continue
+                                if (getattr(self.context.relay, 'context_required', None)
+                                        and not self.stopped.is_set() and not self.boundary_failed):
+                                    finished = False
+                                    progress = self.journal.completed_tools
+                                    compaction_attempts = compaction_attempts + 1 if progress == compaction_progress else 1
+                                    compaction_progress = progress
+                                    prior_turns.add(turn.turn.id)
+                                    if compaction_attempts <= 3 and await self.compact_context(client, thread.thread.id, prior_turns):
+                                        self.context.relay.context_required = None
+                                        publish_pending()
+                                        message_items.clear()
+                                        failure.clear()
+                                        late_inputs.extend(self.inputs.take())
+                                        turn = await self.await_with_tool_events(client, prior_turns,
+                                            client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
+                                            'Continue the unfinished task after compaction. Existing commands are still '
+                                            'owned by this thread. Collect their results without restarting or replaying actions.'))
+                                        late_inputs.clear()
+                                        steered = False
+                                        continue
+                                if ((not finished or getattr(relay, 'context_required', None))
+                                        and self.journal.pending):
+                                    finished = False
+                                    await self.settle_pending_receipts(client, [turn.turn.id, *prior_turns])
+                                    break
+                                if (finished and self.journal.pending and not settlement_started
+                                        and not self.stopped.is_set() and not self.boundary_failed):
+                                    # One settlement turn shares this invocation's
+                                    # deadline and model-call cap. Never publish an
+                                    # answer that preceded its tool results.
+                                    settlement_started = True
+                                    prior_turns.add(turn.turn.id)
+                                    publish_pending()
+                                    message_items.clear()
+                                    turn = await self.await_with_tool_events(client, prior_turns,
+                                        client.turn_start(thread.thread.id,
+                                        'Unfinished tool calls remain. Settle them before answering: '
+                                        'wait for finite work, or deliberately stop preview servers you no longer need. '
+                                        'Collect their actual results; do not restart or replay actions. '
+                                        'Then provide the final answer based on the confirmed results.'))
+                                    steered = False
+                                    continue
+                                if finished and not self.stopped.is_set() and not self.boundary_failed and not self.journal.pending:
+                                    late_inputs.extend(self.inputs.take())
+                                    # Native completion can record a late accepted
+                                    # steer without sampling again. Its user item
+                                    # clears old candidates; continue from that
+                                    # history instead of resending accepted input.
+                                    awaiting_answer = steered and not message_items
+                                    # Admission and finalization share the inbox lock.
+                                    # A racing accepted message stays in this SDK session.
+                                    if late_inputs or awaiting_answer or not self.inputs.close_if_empty():
+                                        late_inputs.extend(self.inputs.take())
+                                        publish_pending()
+                                        message_items.clear()
+                                        turn = await self.await_with_tool_events(client, prior_turns,
+                                            client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
+                                            'Continue from the latest user correction already in this conversation. '
+                                            'Preserve completed work and answer the updated request.'))
+                                        steered = False
+                                        late_inputs.clear()
+                                        continue
+                                break
+                        self.runtime_clean = (finished and not self.stopped.is_set()
+                                              and not self.boundary_failed and not self.journal.pending)
+        except Exception as exc:
+            finished = False
+            failure.update(exception_details(exc))
+        finally:
+            self.inputs.close()
+            if notification is not None:
+                notification.cancel()
+                await asyncio.gather(notification, return_exceptions=True)
+        interrupted = self.stopped.is_set()
+        completed = finished and not interrupted and not self.boundary_failed and not self.journal.pending
+        if completed:
+            final_text = [item['text'] for item in message_items.values()
+                          if item.get('phase') == 'final_answer' and item.get('text')]
+            for text in final_text:
+                self.journal.finish(text)
+            # Presentation is derived from native items, never another event.
+            # Commentary already belongs to the journal; only confirmed final
+            # items are committed here, once per native identity, not per text.
+            answer = '\n'.join(final_text) if final_text else (pending_message or {}).get('text', '')
+            if final_text:
+                publish_pending()
+        else:
+            # Failed/interrupted candidates remain saved public progress, never
+            # a confirmed final answer. Retries must not silently drop them.
+            publish_pending()
+        diagnostic = failure_diagnostic(self, 'codex', failure) if not completed and not interrupted else None
+        return {'completed': bool(completed), 'interrupted': interrupted,
+                'failed': not completed and not interrupted, 'messages': self.journal.messages,
+                **({'sdk_failure': diagnostic} if diagnostic else {}),
+                'final_response': (answer if completed else failure_summary(diagnostic) if diagnostic else
+                    'Codex stopped before completing the response. Saved tool receipts are preserved.')}
+
+    def close(self):
+        if self.inputs is not None:
+            self.inputs.close()
+        self.context.relay.before_model = None
+        self.context.relay.context_recovery = False

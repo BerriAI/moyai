@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.claude_harness import ClaudeAgent
-from sandbox.context_store import ContextStore
+from agent.harnesses.claude_harness import ClaudeAgent
+from agent.context_store import ContextStore
 
 
 def send_message(handler, request, block, usage):

@@ -124,7 +124,8 @@ def test_invalid_updates_never_request_approval_or_reach_linear(linear, argument
     app, client, run_id, headers, _, calls = linear
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': 'linear_update_issue', 'arguments': arguments})
-    assert response.status_code == 422
+    assert response.status_code == 200 and response.json()['code'] == 'invalid_arguments'
+    assert response.json()['dispatched'] is False
     assert not calls and not app.state.store.approvals(run_id)
 
 
@@ -163,7 +164,11 @@ def test_update_respects_connection_and_session_boundaries(linear, restriction):
         app.state.store.update_run(run_id, token_hash='')
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': 'linear_update_issue', 'arguments': UPDATE})
-    assert response.status_code in {401, 403}
+    if restriction in {'read_only', 'disabled', 'disconnect'}:
+        assert response.status_code == 200 and response.json()['outcome'] == 'rejected'
+        assert response.json()['dispatched'] is False
+    else:
+        assert response.status_code in {401, 403}
     assert not calls and not app.state.store.approvals(run_id)
 
 

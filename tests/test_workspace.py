@@ -17,7 +17,7 @@ from app.security import digest
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
-                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01)
+                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01, repository_context_enabled=False, bundled_skills_enabled=False)
     app = create_app(settings)
     # Existing endpoint tests use synthetic providers. Keep the real budget
     # check, but supply fixture limits/counting instead of external metadata.
@@ -91,21 +91,30 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
     assert response.status_code == 200
     catalogs.append(response.json())
-    safe = set('''agents_results agents_read_artifact automation_environments automation_webhook_info
+    safe = set('''swarm_board agents_results agents_read_artifact automation_environments automation_webhook_info automation_history automation_self_read
         credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
-        github_pull_request github_pull_request_comments linear_my_issues linear_teams linear_search linear_issue
-        slack_search slack_thread slack_me notion_search notion_page media_list sessions_search sessions_read model_list
-        workspace_diagnostics'''.split())
+        github_pull_request github_pull_request_comments github_ci_checks github_workflow_runs github_workflow_jobs github_job_logs
+        github_search github_issues github_issue github_issue_comments github_pull_requests github_branches github_commits
+        github_commit github_compare_commits github_file github_labels github_milestones github_releases
+        github_review_threads github_workflow_artifacts github_download_artifact github_capabilities github_publication_status
+        linear_my_issues linear_teams linear_search linear_issue
+        slack_search slack_thread slack_channel slack_me notion_search notion_page media_list sessions_search sessions_read model_list
+        workspace_diagnostics history_read bundled_skill_read artifacts_list artifact_read'''.split())
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
-    read_effects = set('''automation_list memory_search skills_search skills_load skills_read_file'''.split())
-    writes = set('''agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
-        automation_update automation_enable automation_pause automation_claim_item credentials_resolve
+    read_effects = set('''automation_list memory_search memory_read skills_search skills_load skills_read_file
+        repository_context_search repository_context_read'''.split())
+    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel agents_send agents_wait automation_webhook_setup automation_create
+        automation_update automation_enable automation_pause automation_grant automation_self_update automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request
-        github_update_pull_request github_comment_pull_request linear_comment linear_create_issue
+        github_update_pull_request github_comment_pull_request github_close_pull_request
+        github_create_issue github_update_issue github_comment_issue github_edit_issue_comment github_comment_review
+        github_update_pull_request_details github_pull_request_reviewers github_reply_review_comment
+        github_edit_pull_request_comment github_set_review_thread_resolved github_mark_pull_request_ready github_workflow_action
+        linear_comment linear_create_issue
         linear_update_issue slack_send notion_append media_share media_revoke model_switch memory_save
-        memory_forget skills_save'''.split())
+        memory_forget skills_save goal artifact_publish artifact_fetch'''.split())
     assert not (safe & read_effects or safe & writes or read_effects & writes)
     assert {tool['name'] for catalog in catalogs for tool in catalog} == safe | read_effects | writes
     assert safe <= {tool['name'] for tool in recovery_catalog}
@@ -236,11 +245,13 @@ def test_writes_execute_without_approval(workspace, monkeypatch, role, provider,
 def test_scope_denial_and_bad_arguments_never_reach_provider(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         pytest.fail("Provider must not be called")
     monkeypatch.setattr(app.state.connectors, "call", fail)
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "slack_send", "arguments": {}}).status_code == 403
-    assert client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "linear_issue", "arguments": {"issue_id": "../../secrets"}}).status_code == 422
+    rejected = client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "linear_issue", "arguments": {"issue_id": "../../secrets"}})
+    assert rejected.status_code == 200 and rejected.json()['code'] == 'invalid_arguments'
+    assert rejected.json()['dispatched'] is False
     assert client.get(f"/broker/{run_id}/tools", headers={"Authorization": "Bearer wrong"}).status_code == 401
 
 
@@ -248,7 +259,7 @@ def test_uncertain_write_is_not_retried(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
     calls = []
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         calls.append(1)
         raise ConnectorError("The connection dropped after sending.")
     monkeypatch.setattr(app.state.connectors, "call", fail)
@@ -294,20 +305,22 @@ def test_members_can_use_org_connections_but_cannot_administer_them(workspace):
 def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         pytest.fail("Disabled tool reached the provider")
     monkeypatch.setattr(app.state.connectors, "call", fail)
     assert client.patch("/api/connections/linear/policy", json={"enabled": True, "read_only": True}).status_code == 200
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
-    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics"}
+    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics", "bundled_skill_read", "history_read", "goal", "artifact_publish", "artifact_fetch", "artifact_read", "artifacts_list"}
     assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | builtins
-    assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
-                       json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).status_code == 403
+    denied = client.post(f"/broker/{run_id}/tools/call", headers=headers,
+                       json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).json()
+    assert denied['code'] == 'access_denied' and denied['dispatched'] is False
     client.patch("/api/connections/linear/policy", json={"enabled": False, "read_only": True})
     assert {tool["name"] for tool in client.get(f"/broker/{run_id}/tools", headers=headers).json()} == builtins
-    assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
-                       json={"name": "linear_search", "arguments": {"query": "MCP"}}).status_code == 403
+    denied = client.post(f"/broker/{run_id}/tools/call", headers=headers,
+                       json={"name": "linear_search", "arguments": {"query": "MCP"}}).json()
+    assert denied['code'] == 'access_denied' and denied['dispatched'] is False
     assert not app.state.store.approvals(run_id)
     assert len(client.get("/api/organization").json()["activity"]) == 2
 
@@ -438,3 +451,92 @@ def test_linear_issue_creation_runs_directly_for_admins_and_members(workspace, m
     assert tool['annotations']['readOnlyHint'] is False
     if role == 'member':
         assert client.patch('/api/connections/linear/policy', json={'enabled':True,'read_only':False}).status_code == 403
+
+
+def as_client(app, host):
+    client = TestClient(app, base_url=app.state.settings.public_url, client=(host, 50000))
+    client.headers["Origin"] = app.state.settings.public_url
+    return client
+
+
+def test_failed_logins_from_one_client_do_not_block_others(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    attacker, admin = as_client(app, "203.0.113.9"), as_client(app, "192.0.2.10")
+    for _ in range(10):
+        assert attacker.post("/api/login", json={"password": "guess"}).status_code == 401
+    assert attacker.post("/api/login", json={"password": "guess"}).status_code == 429
+    for _ in range(11):
+        assert admin.post("/api/login", json={"password": "organization-admin-password"}).status_code == 200
+
+
+def test_ipv6_clients_are_limited_per_56(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    for n in range(10):
+        assert as_client(app, f"2001:db8:0:{n:x}::1").post("/api/login", json={"password": "guess"}).status_code == 401
+    assert as_client(app, "2001:db8:0:ff::1").post("/api/login", json={"password": "guess"}).status_code == 429
+    assert as_client(app, "2001:db8:1::1").post("/api/login", json={"password": "organization-admin-password"}).status_code == 200
+
+
+def test_failed_logins_have_a_global_backstop(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    for n in range(300):
+        assert as_client(app, f"198.51.100.{n // 10}").post("/api/login", json={"password": "guess"}).status_code == 401
+    assert as_client(app, "192.0.2.10").post("/api/login", json={"password": "organization-admin-password"}).status_code == 429
+
+
+@pytest.mark.parametrize("peer,hops,attacker,other", [
+    # Captured from Render: loopback peer, "<forged>, <client>, <Cloudflare edge>, <Render proxy>".
+    ("127.0.0.1", 3, "{}, 110.235.218.74, 104.22.66.198, 10.30.126.74", "192.0.2.10, 104.22.66.198, 10.30.126.74"),
+    # A Cloudflare Worker's own address is in Cloudflare's ranges; it must not unlock the forged hop.
+    ("127.0.0.1", 3, "{}, 2a06:98c0:3600::103, 104.22.66.198, 10.30.126.74", "192.0.2.10, 104.22.66.198, 10.30.126.74"),
+    # Captured from Modal: private peer, proxy replaces X-Forwarded-For with the client.
+    ("172.20.5.85", 1, "110.235.218.74", "192.0.2.10"),
+])
+def test_trusted_proxy_hops_resolve_the_real_client(workspace, peer, hops, attacker, other):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    app.state.settings.trusted_proxy_hops = hops
+    proxied = as_client(app, peer)
+    for n in range(10):
+        forwarded = {"X-Forwarded-For": attacker.format(f"203.0.113.{n}")}
+        assert proxied.post("/api/login", json={"password": "guess"}, headers=forwarded).status_code == 401
+    assert proxied.post("/api/login", json={"password": "guess"}, headers={"X-Forwarded-For": attacker.format("x")}).status_code == 429
+    assert proxied.post("/api/login", json={"password": "organization-admin-password"},
+                        headers={"X-Forwarded-For": other}).status_code == 200
+
+
+def test_forwarded_for_is_ignored_from_a_public_peer(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    app.state.settings.trusted_proxy_hops = 1
+    direct = as_client(app, "93.184.216.34")
+    for n in range(10):
+        assert direct.post("/api/login", json={"password": "guess"}, headers={"X-Forwarded-For": f"203.0.113.{n}"}).status_code == 401
+    assert direct.post("/api/login", json={"password": "guess"}, headers={"X-Forwarded-For": "203.0.113.99"}).status_code == 429
+
+
+def test_throttle_survives_a_mistype_then_a_later_success(monkeypatch):
+    from app.security import Throttle
+    clock = [1000.0]
+    monkeypatch.setattr("app.security.time.monotonic", lambda: clock[0])
+    throttle = Throttle(2)
+    for at, action in [(1030, lambda: throttle.record("admin")),        # mistyped password
+                       (1080, lambda: throttle.blocked("other")),       # sweep keeps the recent miss
+                       (1100, lambda: throttle.blocked("admin")),       # later success prunes the key
+                       (1150, lambda: throttle.blocked("other"))]:      # next sweep must not crash
+        clock[0] = at
+        action()
+    throttle.record("other")
+    throttle.record("other")
+    assert throttle.blocked("other") and not throttle.blocked("admin")
+
+
+def test_throttle_tracks_a_bounded_number_of_clients():
+    from app.security import Throttle
+    throttle = Throttle(1, max_keys=3)
+    for key in "abcd":
+        throttle.record(key)
+    assert len(throttle.hits) == 3 and not throttle.blocked("a") and throttle.blocked("d")

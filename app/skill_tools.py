@@ -9,15 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .db import now
 
-MAX_FILE = 1024 * 1024
-MAX_BUNDLE = 4 * MAX_FILE
-MAX_FILES = 20
 
 
 def safe_path(value):
     if (len(value) > 200 or not re.fullmatch(r'[A-Za-z0-9_.\-/]+', value)
             or any(part in {'', '.', '..'} or part.startswith('.') for part in value.split('/'))
-            or value.lower() == 'skill.md'):
+            ):
         raise ValueError('Use a relative supporting-file path such as references/runbook.md.')
     return value
 
@@ -26,7 +23,7 @@ class SkillFile(BaseModel):
     model_config = ConfigDict(extra='forbid')
     path: str
     attachment_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
-    content: str | None = Field(default=None, max_length=MAX_FILE)
+    content: str | None = Field(default=None)
 
     _path = field_validator('path')(safe_path)
 
@@ -42,11 +39,11 @@ class SaveSkill(BaseModel):
     name: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=64)
     description: str = Field(min_length=3, max_length=320)
     scope: Literal['personal', 'organization'] | None = Field(default=None,
-        description='The user must choose personal or organization. Omit when they have not chosen; the tool returns a scope question without saving. Never infer a preference.')
-    instructions: str | None = Field(default=None, min_length=3, max_length=32000)
+        description='Defaults to personal. Organization sharing requires an explicit user request and administrator authority.')
+    instructions: str | None = Field(default=None, min_length=3)
     instructions_attachment_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
-    files: list[SkillFile] = Field(default_factory=list, max_length=MAX_FILES)
-    remove_files: list[str] = Field(default_factory=list, max_length=MAX_FILES)
+    files: list[SkillFile] = Field(default_factory=list)
+    remove_files: list[str] = Field(default_factory=list)
     expected_revision: int = Field(default=0, ge=0)
     request_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
 
@@ -55,6 +52,8 @@ class SaveSkill(BaseModel):
         if self.instructions is not None and self.instructions_attachment_id is not None:
             raise ValueError('Choose instructions or instructions_attachment_id.')
         paths = [file.path for file in self.files] + [safe_path(path) for path in self.remove_files]
+        if any(path.lower() == 'skill.md' for path in paths):
+            raise ValueError('Use instructions to update SKILL.md.')
         if len(paths) != len(set(paths)):
             raise ValueError('Each file path must occur only once.')
         return self
@@ -65,7 +64,7 @@ class ReadSkillFile(BaseModel):
     name: str = Field(pattern=r'^(?:(?:personal|org):)?[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=73)
     path: str
     offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=16000, ge=1, le=24000)
+    limit: int = Field(default=16000, ge=1)
     search: str = Field(default='', max_length=200)
 
     _path = field_validator('path')(safe_path)
@@ -73,13 +72,13 @@ class ReadSkillFile(BaseModel):
 
 SAVE_TOOL = {
     'name': 'skills_save',
-    'description': 'Create or update a reusable skill when the current user asks to save/install one. Ask the user to choose Personal (their requests only) or Organization (all teammates) before saving, unless they already specified the scope. Never infer a default. Omit scope when no choice was made: this returns scope_required without saving; present the question and wait for their reply. Organization publishing requires an admin. Ownership is set by the server. Use instructions_attachment_id to import an uploaded SKILL.md exactly, and files [{path: "references/runbook.md", attachment_id: "..."}] to copy supporting text files without reproducing their content. Only sent attachments from this session through the current turn are eligible. Inline instructions/content also work. On updates omit instructions to keep them; files are merged and remove_files explicitly deletes paths. Use expected_revision=0 to create, or the current revision from skills_search to update (skills_load stays pinned for a turn). Reuse request_id for identical retries. Never save secrets, claim success before this tool succeeds, or publish personally scoped content without the owner asking.',
+    'description': 'Create or update a reusable skill when the current user asks to save/install one. Default to Personal for the requester. Organization sharing requires an explicit user request; do not publish a private correction to teammates automatically. Organization publishing requires an admin. Ownership is set by the server. Use instructions_attachment_id to import an uploaded SKILL.md exactly, and files [{path: "references/runbook.md", attachment_id: "..."}] to copy supporting text files without reproducing their content. Only sent attachments from this session through the current turn are eligible. Inline instructions/content also work. On updates omit instructions to keep them; files are merged and remove_files explicitly deletes paths. Use expected_revision=0 to create, or the current revision from skills_search to update (skills_load stays pinned for a turn). Reuse request_id for identical retries. Never save secrets, claim success before this tool succeeds, or publish personally scoped content without the owner asking.',
     'inputSchema': SaveSkill.model_json_schema(),
     'annotations': {'readOnlyHint': False},
 }
 READ_TOOL = {
     'name': 'skills_read_file',
-    'description': 'Read a supporting file from an authorized skill. Use an exact reference from skills_search or the user request and a path returned by skills_load. Optional search finds an exact text occurrence at/after offset; limit bounds the excerpt. The excerpt is privately inserted into the next model call; this tool returns offsets and metadata only. The four most recently read excerpts remain available; use next_offset to continue. This does not copy files into the sandbox or execute scripts.',
+    'description': 'Read a supporting file from an authorized skill. Use an exact reference from skills_search or the user request and a path returned by skills_load. Optional search finds an exact text occurrence at/after offset; limit bounds the excerpt. The excerpt is privately inserted into the next model call; this tool returns offsets and metadata only. Read receipts are retained for the turn; their model view fits the current window. Use next_offset to continue. SKILL.md reads the pinned primary instructions. This does not copy files into the sandbox or execute scripts.',
     'inputSchema': ReadSkillFile.model_json_schema(),
     'annotations': {'readOnlyHint': True},
 }
@@ -124,15 +123,12 @@ def file_manifest(files):
 
 
 def checked_text(raw, *, instructions=False):
-    limit = 128000 if instructions else MAX_FILE
-    if len(raw) > limit:
-        raise HTTPException(413, 'Skill instructions must be at most 32,000 characters; supporting files at most 1 MiB each.')
     try:
         value = raw.decode('utf-8')
     except UnicodeDecodeError:
         raise HTTPException(422, 'Skills support UTF-8 text files only.') from None
-    if '\x00' in value or (instructions and not 3 <= len(value.strip()) <= 32000):
-        raise HTTPException(422, 'Use text without NUL characters and 3–32,000 characters for instructions.')
+    if '\x00' in value or (instructions and len(value.strip()) < 3):
+        raise HTTPException(422, 'Use UTF-8 text without NUL characters and at least three characters for instructions.')
     return value
 
 
@@ -149,14 +145,12 @@ def saved_result(skills, conn, operation, actor, admin, fingerprint):
 
 
 def save_skill(skills, run, args):
+    from .private_sinks import deny_export
+    deny_export(skills.store, run["id"])
     from .skills import SkillForm
     actor, admin = writing_actor(skills, run)
     if args.scope is None:
-        return {'saved': False, 'status': 'scope_required',
-                'question': 'Where should I save this skill: Personal (only for your requests) or Organization (shared with teammates)?',
-                'choices': [{'scope': 'personal', 'label': 'Personal · my requests only', 'available': True},
-                            {'scope': 'organization', 'label': 'Organization · all teammates', 'available': admin}],
-                'instructions': 'Nothing has been saved. Ask the current user to choose and wait for their reply. Do not pick a default or retry with an inferred scope. Organization saves require an admin; explain that if unavailable.'}
+        args = args.model_copy(update={'scope': 'personal'})
     if args.scope == 'organization' and not admin:
         raise HTTPException(403, 'Only an administrator can publish organization skills.')
     fingerprint = hashlib.sha256(json.dumps(args.model_dump(), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -210,8 +204,6 @@ def save_skill(skills, run, args):
         for file in args.files:
             files[file.path] = (checked_text(imports[file.attachment_id][1]) if file.attachment_id
                                 else checked_text(file.content.encode()))
-        if len(files) > MAX_FILES or sum(len(text.encode()) for text in files.values()) > MAX_BUNDLE:
-            raise HTTPException(413, 'A skill can contain at most 20 supporting files and 4 MiB of supporting text.')
         body = SkillForm(name=args.name, description=args.description, scope=args.scope, instructions=instructions,
                          revision=args.expected_revision, client_id=hashlib.sha256(json.dumps(operation).encode()).hexdigest())
         skill_id = skills.save(body, actor, admin, old['id'] if old else '', conn=conn)
@@ -235,6 +227,9 @@ def read_file(skills, run, args):
     with skills.store.connect() as conn:
         conn.begin_write()
         files = bundle(skills, conn, skill['id'], loaded['revision'])
+        use = conn.execute('SELECT encrypted FROM skill_uses WHERE run_id=? AND message_id=? AND skill_id=?',
+            (run['id'], run['active_message_id'], skill['id'])).fetchone()
+        files['SKILL.md'] = skills.security.decrypt(use['encrypted'])
         if args.path not in files:
             raise HTTPException(404, 'Supporting file not found in the loaded skill revision.')
         content, offset = files[args.path], args.offset
@@ -250,8 +245,6 @@ def read_file(skills, run, args):
                      (run['id'], run['active_message_id'], skill['id'], args.path, offset))
         conn.execute('INSERT INTO skill_file_reads(run_id,message_id,actor_id,skill_id,path,"offset",length) VALUES(?,?,?,?,?,?,?)',
                      (run['id'], run['active_message_id'], run['active_user_id'], skill['id'], args.path, offset, end - offset))
-        conn.execute('DELETE FROM skill_file_reads WHERE run_id=? AND message_id=? AND id NOT IN (SELECT id FROM skill_file_reads WHERE run_id=? AND message_id=? ORDER BY id DESC LIMIT 4)',
-                     (run['id'], run['active_message_id'], run['id'], run['active_message_id']))
     return {'loaded': True, 'reference': skills.metadata(skill)['reference'], 'revision': loaded['revision'],
             'path': args.path, 'offset': offset, 'next_offset': end if end < len(content) else None,
             'characters': len(content), 'excerpt_characters': end - offset}
