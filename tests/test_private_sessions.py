@@ -41,7 +41,7 @@ def test_private_creation_immutable_and_exact_retry(private_app):
 
 @pytest.mark.parametrize('method,suffix,body', [
     ('GET', '', None), ('GET', '/events', None), ('GET', '/artifact', None),
-    ('GET', '/files', None), ('GET', '/files/content?path=secret.txt', None),
+    ('GET', '/files', None), ('GET', '/files?view=media', None), ('GET', '/files/content?path=secret.txt', None),
     ('GET', '/computer', None), ('GET', '/computer/captures/secret.png', None),
     ('GET', '/side-chats', None), ('GET', '/pull-request', None),
     ('POST', '/messages', {'content': 'Hijack private turn', 'client_id': 'evil-message'}),

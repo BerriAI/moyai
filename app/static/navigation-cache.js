@@ -23,6 +23,7 @@ globalThis.MoyaiNavigationCache = {
     const entries = new Map(), pending = new Map();
     let bytes = 0, generation = 0;
     const allowed = path => /^\/api\/runs\/[a-f0-9]{32}\?activity=summary$/.test(path) ||
+      /^\/api\/runs\/[a-f0-9]{32}\/files(?:\?view=media)?$/.test(path) ||
       /^\/api\/runs\/[a-f0-9]{32}\/pull-request\?url=/.test(path) ||
       ['/api/session', '/api/config', '/api/organization', '/api/connections',
         '/api/environments', '/api/admin/environments', '/api/admin/users',

@@ -151,7 +151,7 @@ const settleCaptures=()=>new Promise(setImmediate);
 
 test('captures read saved media without a live computer and discover newly completed captures',async()=>{
   const f=capturePanel();f.tab.activate();
-  assert.equal(f.requests.length,1);assert.equal(f.requests[0].path,'/api/runs/session/files');assert.equal(f.requests[0].options,undefined);
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].path,'/api/runs/session/files?view=media');assert.equal(f.requests[0].options.timeoutMs,30000);
   f.requests[0].resolve({files:[]});await settleCaptures();
   assert.match(f.node('[data-captures]').innerHTML,/No saved captures yet/);
   assert.equal([...f.timers.values()][0].delay,3000);
@@ -164,7 +164,7 @@ test('captures read saved media without a live computer and discover newly compl
   const writes=f.node('[data-captures]').writes;await f.poll();
   f.requests[2].resolve({files:[captured(),captured('flow.webm','video')]});await settleCaptures();
   assert.equal(f.node('[data-captures]').writes,writes,'Unchanged catalog refresh must not restart video playback');
-  assert.ok(f.requests.every(request=>request.path.endsWith('/files')&&!request.options));
+  assert.ok(f.requests.every(request=>request.path.endsWith('/files?view=media')&&request.options.timeoutMs===30000));
   f.dispose();
 });
 test('capture previews open the saved file while downloads and modified clicks stay native',async()=>{

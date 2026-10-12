@@ -85,7 +85,7 @@ def test_http_files_captures_attachments_owner_boundary(sinks, user, private):
     login(s, client, user)
     expected = 200 if not private or user == 'alice' else 404
     base = '/api/runs/' + run['id']
-    for url in [base+'/files', base+'/files/content?path=new-files/private.txt',
+    for url in [base+'/files', base+'/files?view=media', base+'/files/content?path=new-files/private.txt',
                 base+'/files/content?path=new-files/private.txt&preview=true',
                 base+'/computer/captures/private.png', '/api/attachments/'+'a'*32]:
         response = client.get(url)
@@ -96,6 +96,44 @@ def test_http_files_captures_attachments_owner_boundary(sinks, user, private):
     assert ranged.status_code == (206 if expected == 200 else 404)
     if expected == 200:
         assert client.get(base+'/files/content?path=new-files/private.txt').text == SECRET
+
+
+@pytest.mark.parametrize('user', ['bob', 'admin'])
+def test_cached_private_file_catalog_does_not_authorize_another_user(sinks, monkeypatch, user):
+    s, client = sinks
+    run = run_for(s)
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, 'w') as handle:
+        handle.writestr('new-files/'+SECRET+'.txt', SECRET)
+    s.store.artifacts.save(run['id']+'.zip', archive.getvalue())
+    url = '/api/runs/'+run['id']+'/files'
+    login(s, client, 'alice')
+    assert SECRET in client.get(url).text
+    monkeypatch.setattr(s.store.artifacts, 'open', lambda *a, **k: pytest.fail('Expected a cached catalog'))
+    assert client.get(url).status_code == 200
+    login(s, client, user)
+    response = client.get(url)
+    assert response.status_code == 404
+    assert SECRET not in response.text
+
+
+def test_private_catalog_rechecks_deletion_after_waiting_for_cache(sinks, monkeypatch):
+    s, client = sinks
+    run = run_for(s)
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, 'w') as handle:
+        handle.writestr('new-files/'+SECRET+'.txt', SECRET)
+    s.store.artifacts.save(run['id']+'.zip', archive.getvalue())
+    login(s, client, 'alice')
+    read = artifact_files.ArchiveCatalog.read
+    def read_then_delete(self, *args):
+        catalog = read(self, *args)
+        s.store.execute("UPDATE runs SET deleted_at='2026-01-01' WHERE id=?", (run['id'],))
+        return catalog
+    monkeypatch.setattr(artifact_files.ArchiveCatalog, 'read', read_then_delete)
+    response = client.get('/api/runs/'+run['id']+'/files')
+    assert response.status_code == 404
+    assert SECRET not in response.text
 
 
 @pytest.mark.parametrize('user', ['alice', 'bob', 'admin'])

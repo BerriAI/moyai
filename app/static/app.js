@@ -8,11 +8,15 @@ const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,siz
 const computer = MoyaiComputer.create({api,escape:esc,onCaptures:()=>workspacePanel?.open('captures')});
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'GitHub'};
 async function api(path, options = {}) {
-  const {recent=false,...requestOptions}=options;
+  const {recent=false,timeoutMs=0,...requestOptions}=options;
   const read=(requestOptions.method||'GET').toUpperCase()==='GET';
   const load=async()=>{
+    if(timeoutMs)requestOptions.signal=AbortSignal.timeout(timeoutMs);
     const response = await fetch(path, {...requestOptions, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...requestOptions.headers}});
-    const body = await response.json().catch(() => ({}));
+    const body = await response.json().catch(error => {
+      if(error.name==='AbortError'||error.name==='TimeoutError')throw error;
+      return {};
+    });
     if (!response.ok) {
       const upload = ['PUT','POST'].includes(options.method) && path.startsWith('/api/attachments/');
       const fallback = upload ? (
@@ -517,7 +521,7 @@ function initializeChatControls(){
 async function openLinkedFile(link,version){
   const current=()=>version===state.pageVersion&&state.selected===link.runId;
   try{
-    const catalog=await api(`/api/runs/${link.runId}/files`);if(!current())return;
+    const catalog=await MoyaiFiles.loadCatalog(api,link.runId,{fileRef:link.fileRef});if(!current())return;
     const file=MoyaiFiles.resolve(link.fileRef,catalog.files);
     if(!file)throw new Error('This file is not available in this session’s saved files. Open Files to browse the available results.');
     await savedFiles.open(file,link.fileRef);
