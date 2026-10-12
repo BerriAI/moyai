@@ -28,7 +28,9 @@ from agent.prompts import system_prompt
 from agent.tools import computer_tools, github_tools
 from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
 from agent.tools.remote_computer import requires_computer
+from sandbox.broker_failure import TRANSIENT_STATUSES
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
+from .database import DatabaseBusyError
 from .db import database, now
 from .deepagents_workflow import TurnInput, TurnScope
 from .security import digest
@@ -119,7 +121,7 @@ class DeepAgentsRuntime:
         if response.status_code >= 400:
             # Provider bodies can contain prompts/credentials. Do not put them
             # into exception messages, logs or public activity records.
-            raise ApplicationError(f'Broker request failed ({response.status_code}).',
+            raise ApplicationError(f'Broker request failed ({response.status_code}).', response.status_code,
                 type='BrokerRejected', non_retryable=response.status_code in {400, 401, 403, 404, 409, 413, 422})
         return response.json()
 
@@ -218,8 +220,20 @@ class DeepAgentsRuntime:
                  digest(self.runner.token(scope.run_id, scope.message_id)), scope.message_id, scope.actor_id))
 
     async def catalog(self, scope):
-        tools = await self.broker(scope, '/tools')
-        return github_tools.advertised_tools(tools) + BROWSER_TOOLS + [GUIDANCE_TOOL] + computer_tools.TOOLS
+        """Retry only pre-dispatch reads, with fresh authorization on each attempt."""
+        async with asyncio.timeout(45):
+            for attempt in range(3):
+                try:
+                    tools = await self.broker(scope, '/tools')
+                    return github_tools.advertised_tools(tools) + BROWSER_TOOLS + [GUIDANCE_TOOL] + computer_tools.TOOLS
+                except (ApplicationError, DatabaseBusyError, httpx.TimeoutException,
+                        httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                    if isinstance(exc, ApplicationError) and (exc.type != 'BrokerRejected' or exc.non_retryable
+                            or not exc.details or exc.details[0] not in TRANSIENT_STATUSES):
+                        raise
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
 
     def append(self, scope, entries):
         self.journal.exchange(self.current(scope), {'action': 'append', 'entries': entries})
