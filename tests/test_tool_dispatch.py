@@ -12,6 +12,7 @@ from app.message_queue import MessageQueue
 from app.tool_dispatch import ToolDispatch
 from test_deepagents_publication import active  # noqa: F401
 from test_deepagents_runtime import durable_app  # noqa: F401
+from test_workspace import cloud_capability, workspace  # noqa: F401
 
 
 @pytest.fixture
@@ -438,6 +439,69 @@ async def test_unavailable_tools_never_claim_dispatch(broker, monkeypatch, name)
     with pytest.raises(ApplicationError, match='403'):
         await manager.deepagents_runtime.broker(scope, '/tools/call', {**body(scope), 'name': name, 'arguments': {}})
     assert receipts(store, scope) == [] and calls == []
+
+
+@pytest.mark.parametrize('arguments,status', [({'after': -1}, 422), ({'limit': 0}, 422),
+    ({'after': True}, 422), ({'unexpected': True}, 422), ({'request_id': []}, 422),
+    ({'request_id': ''}, 422), ({'request_id': 'b' * 32}, 404)])
+async def test_computer_receipt_read_rejections_stay_unsent(broker, arguments, status):
+    app, manager, store, scope, calls = broker
+    request = {**body(scope), 'name': 'computer_operation_read', 'arguments': arguments}
+    with pytest.raises(ApplicationError, match=str(status)):
+        await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+    saved = receipts(store, scope)
+    assert len(saved) == 1 and saved[0]['outcome'] == 'rejected' and not saved[0]['dispatched']
+    repeated = await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+    assert repeated['outcome'] == 'rejected' and not repeated['dispatched']
+    assert not repeated['outcome_uncertain'] and calls == []
+    corrected = {**request, 'request_id': 'c' * 32, 'arguments': {}}
+    assert await manager.deepagents_runtime.broker(scope, '/tools/call', corrected) == {
+        'operations': [], 'next': None}
+    assert receipts(store, scope)[-1]['outcome'] == 'completed'
+
+
+async def test_computer_receipt_read_scope_rejection_stays_unsent(broker, monkeypatch):
+    from app.computer_operations import ComputerOperations
+    app, manager, store, scope, calls = broker
+    original = ComputerOperations.current
+
+    def changed(conn, caller):
+        store.update_run(scope.run_id, status='stopping')
+        return original(conn, caller)
+
+    monkeypatch.setattr(ComputerOperations, 'current', staticmethod(changed))
+    with pytest.raises(ApplicationError, match='409'):
+        await manager.deepagents_runtime.broker(scope, '/tools/call', {
+            **body(scope), 'name': 'computer_operation_read', 'arguments': {}})
+    saved = receipts(store, scope)
+    assert len(saved) == 1 and saved[0]['outcome'] == 'rejected' and not saved[0]['dispatched']
+    assert calls == []
+
+
+async def test_unexpected_computer_receipt_failure_is_not_misclassified(broker, monkeypatch):
+    from fastapi import HTTPException
+    app, manager, store, scope, calls = broker
+
+    def failed(*args):
+        raise HTTPException(503, 'Receipt storage unavailable.')
+
+    monkeypatch.setattr(manager.agent_runtime.operations, 'read', failed)
+    with pytest.raises(ApplicationError, match='503'):
+        await manager.deepagents_runtime.broker(scope, '/tools/call', {
+            **body(scope), 'name': 'computer_operation_read', 'arguments': {}})
+    assert receipts(store, scope)[0]['outcome'] == 'unknown'
+
+
+def test_unavailable_computer_receipt_service_never_claims_dispatch(workspace):
+    app, client = workspace
+    run_id, headers = cloud_capability(app, [])
+    app.state.store.execute('UPDATE runs SET harness=? WHERE id=?', ('deepagents-temporal', run_id))
+    assert not hasattr(app.state.manager, 'agent_runtime')
+    response = client.post(f'/broker/{run_id}/tools/call', headers=headers, json={
+        'name': 'computer_operation_read', 'arguments': {}, 'input_id': 1, 'request_id': 'a' * 32})
+    assert response.status_code == 409, response.text
+    assert 'unavailable' in response.json()['detail']
+    assert app.state.store.rows("SELECT 1 FROM events WHERE run_id=? AND kind='tool_dispatch'", (run_id,)) == []
 
 
 async def test_error_after_internal_write_remains_uncertain(broker, monkeypatch):

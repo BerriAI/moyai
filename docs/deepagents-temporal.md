@@ -187,6 +187,16 @@ history, rolling back to a release without the codec is unsupported; retain code
 support in any rollback build. No production settings, secrets, or deployments
 are changed by running the local proof.
 
+The existing rolling GitHub Actions deployment requires candidate contracts to
+match every live role. It will reject a protocol-17 installation before deploying
+this protocol-18 release. A green release-rehearsal check does not authorize that
+transition: it verifies controller behavior against fixtures. The first upgrade
+needs a reviewed compatible bridge or a separately rehearsed maintenance
+transition for the actual service topology. Do not lower the protocol revision,
+change stored fingerprints, or disable admission checks to force rolling mode.
+Subsequent protocol-18 rolling releases still need compatible saved histories,
+shared settings and rollback builds that retain the payload codec.
+
 ## Local verification
 
 ```sh

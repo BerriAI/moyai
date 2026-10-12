@@ -12,6 +12,7 @@ from agent.tools.remote_computer import LOCAL_TOOLS
 from agent.tools.mcp_bridge import BROWSER_TOOLS
 
 from .db import now
+from .tool_dispatch import ToolRejected
 
 
 def encoded(value):
@@ -144,18 +145,25 @@ class ComputerOperations:
 
     def read(self, caller, arguments):
         if not isinstance(arguments, dict) or set(arguments) - {'request_id', 'after', 'limit'}:
-            raise HTTPException(422, 'Use request_id or after/limit to read computer receipts.')
+            raise ToolRejected(422, 'Use request_id or after/limit to read computer receipts.')
         after, limit = arguments.get('after', 0), arguments.get('limit', 20)
         if type(after) is not int or after < 0 or type(limit) is not int or limit < 1:
-            raise HTTPException(422, 'Supply a nonnegative cursor and a positive page size.')
+            raise ToolRejected(422, 'Supply a nonnegative cursor and a positive page size.')
+        if 'request_id' in arguments and (not isinstance(arguments['request_id'], str) or not arguments['request_id']):
+            raise ToolRejected(422, 'Supply a nonempty request identity.')
         with self.store.connect() as conn:
             conn.begin_read()
-            self.current(conn, caller)
+            try:
+                self.current(conn, caller)
+            except HTTPException as exc:
+                # The owner check precedes the read. Storage failures below
+                # still propagate without being labeled known local rejections.
+                raise ToolRejected(exc.status_code, exc.detail, exc.headers) from None
             if 'request_id' in arguments:
                 row = conn.execute('SELECT * FROM computer_operations WHERE run_id=? AND request_id=?',
                                    (caller['id'], arguments['request_id'])).fetchone()
                 if not row:
-                    raise HTTPException(404, 'No computer operation has this identity.')
+                    raise ToolRejected(404, 'No computer operation has this identity.')
                 return self.result(row)
             rows = conn.execute('SELECT * FROM computer_operations WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?',
                                 (caller['id'], after, limit+1)).fetchall()

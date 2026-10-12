@@ -1487,6 +1487,8 @@ def _create_app(settings, store):
             raise HTTPException(403, 'Credential requests require a durable chat session.')
         if body.name in AGENT_TOOLS and not coordinator.available(run):
             raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
+        if body.name == 'computer_operation_read' and computer_operations is None:
+            raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
         spec = CREDENTIAL_TOOLS.get(body.name) or AGENT_TOOLS.get(body.name)
         if spec:
             try:
@@ -1508,8 +1510,6 @@ def _create_app(settings, store):
             await checkpoints.flush()
             return result
         if body.name == 'computer_operation_read':
-            if computer_operations is None:
-                raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
             return await asyncio.to_thread(computer_operations.read, run, body.arguments)
         if body.name in ARTIFACT_SPECS:
             try:

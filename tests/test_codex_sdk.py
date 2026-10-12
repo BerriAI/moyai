@@ -520,7 +520,20 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
     agent, events, store = codex_agent
     started, finished = native_item('commandExecution')
     namespaces = []
-    if outcome == 'timeout': agent.context.spec['timeout'] = 0.05
+    deadlines = []
+    if outcome == 'timeout':
+        # Expire the real invocation deadline at settlement, not during journal
+        # setup on a busy runner. The settlement must not create a new budget.
+        agent.context.spec['timeout'] = 60
+        timeout = asyncio.timeout
+
+        def task_timeout(seconds):
+            scope = timeout(seconds)
+            if seconds == agent.context_timeout:
+                deadlines.append(scope)
+            return scope
+
+        monkeypatch.setattr(asyncio, 'timeout', task_timeout)
 
     async def stream():
         assert agent.before_model()
@@ -532,7 +545,10 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
         if outcome == 'boundary': agent.boundary_failed = True
         if outcome == 'limit': agent.context.spec['max_iterations'] = 1
         yield sdk_event('turn/completed', {'turn': {'status': 'failed' if outcome == 'failed' else 'completed'}})
-        if outcome == 'timeout': await asyncio.Event().wait()
+        if outcome == 'timeout':
+            assert len(deadlines) == 1
+            deadlines[0].reschedule(asyncio.get_running_loop().time())
+            await asyncio.Event().wait()
         if outcome == 'limit':
             assert not agent.before_model()
             yield sdk_event('turn/completed', {'turn': {'status': 'failed'}})
@@ -561,6 +577,7 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
         assert result['sdk_failure']['boundary_reason'] == 'model call limit reached'
     if outcome == 'timeout':
         assert result['sdk_failure']['exception_type'] == 'TimeoutError'
+        assert deadlines[0].expired()
 
 
 @pytest.mark.parametrize('outcome', ['receipt', 'queued', 'unknown', 'unconfirmed', 'failed', 'stop', 'deadline'])
