@@ -114,7 +114,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         github_edit_pull_request_comment github_set_review_thread_resolved github_mark_pull_request_ready github_workflow_action
         linear_comment linear_create_issue
         linear_update_issue slack_send notion_append media_share media_revoke model_switch memory_save
-        memory_forget skills_save goal artifact_publish artifact_fetch'''.split())
+        memory_forget skills_save goal artifact_publish artifact_fetch computer_handoff'''.split())
     assert not (safe & read_effects or safe & writes or read_effects & writes)
     assert {tool['name'] for catalog in catalogs for tool in catalog} == safe | read_effects | writes
     assert safe <= {tool['name'] for tool in recovery_catalog}

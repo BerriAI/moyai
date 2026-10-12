@@ -298,7 +298,7 @@ function tabStrip(){
   const panel=dom.node('aside'),tabs=new Map(['changes','files','activity'].map((id,index)=>[id,{id,uid:String(index),kind:id==='changes'?'pr':id,title:id,loaded:true,element:ctx.document.createElement('section')}]));
   Object.assign(ctx,{tabs,panel,active:'changes',visible:true,disposed:false,expanded:false,tabSignature:'',closingStatus:{},layout:dom.element,
     q:selector=>panel.querySelector(selector),esc:escape,ico:()=>'',glyph:{},MoyaiPullRequest:native,menu(value){panel.querySelector('.panel-menu').hidden=!value;},save(){},mount(){throw Error('Retained tab must not mount again');},
-    card:ctx.document.createElement('aside'),outside(){},followPullRequest(){}});
+    card:ctx.document.createElement('aside'),outside(){},followPullRequest(){},revealHandoff(){}});
   ctx.document.removeEventListener=()=>{};
   vm.runInContext(source.slice(source.indexOf('    function draw('),source.indexOf('    function hide(')),ctx);
   vm.runInContext(source.slice(source.indexOf('    function select('),source.indexOf('    function error(')),ctx);
@@ -496,6 +496,7 @@ function agentToolbox(){
     set innerHTML(value){this.html=value;this.writes++;},get innerHTML(){return this.html;}});
   const card=host(),pullsSection=host(),agentsSection=host(),agentTab=host(),classes=new Set(),toggle={hidden:true};
   const ctx={disposed:false,run:{id:'parent'},agents:[],agentSignature:'',pullRequests:[],card,pullsSection,agentsSection,
+    handoffFor:()=>null,user:'owner',lastHandoff:0,latestSession:null,
     tabs:new Map([['agents',{kind:'agents',element:agentTab}]]),
     document:{activeElement:null,querySelector:()=>toggle,querySelectorAll:()=>[]},ico:()=>'',
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),

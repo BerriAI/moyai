@@ -46,6 +46,14 @@ def projection(connection, run, messages):
     deferred = starts & completed & answered
     loaded = (starts - deferred) | active
     events = {event['id']: event for event in receipts}
+    # A sign-in handoff remains actionable after its successful answer has moved
+    # into deferred history. Keep one small receipt in the initial projection.
+    handoff = connection.execute("SELECT * FROM events WHERE run_id=? AND id<=? AND kind='computer' ORDER BY id DESC LIMIT 1",
+                                 (run['id'], cursor)).fetchone()
+    if handoff:
+        handoff = dict(handoff)
+        handoff['data'] = json.loads(handoff['data'])
+        events[handoff['id']] = handoff
     # Failed or unfinished work retains its commentary until a successful
     # answer is present. Every query shares the cursor's SQLite snapshot so SSE
     # can safely resume strictly after that cursor.

@@ -31,6 +31,42 @@ const frame=(url='https://example.com',controller='owner')=>({url,has_sandbox:tr
 const key=(input,value,modifiers={})=>input.emit('keydown',{key:value,...modifiers});
 function type(input,value,options={}){input.value=value;input.emit('input',options);}
 
+test('a handoff wakes once after shutdown without claiming control or sending input',async()=>{
+  let state={available:false,has_sandbox:false,shutting_down:true,can_wake:false};const actions=[];
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options)return state;
+    actions.push(JSON.parse(options.body).action);
+    return {available:false,has_sandbox:false,waking:true};
+  });
+  const host=node();await view.open('one',host,{wake:true,reason:'Sign in with SSO.'});
+  assert.deepEqual(actions,[]);
+  state={available:false,has_sandbox:false,can_wake:true};await flush(1000);
+  assert.deepEqual(actions,['wake']);
+  await flush(1000);assert.deepEqual(actions,['wake']);
+  state=frame('sign-in','');await flush(1000);
+  assert.equal(host.child.querySelector('[data-screen]').hidden,false);
+  assert.equal(host.child.querySelector('[data-keyboard]').readOnly,true);
+  view.close();
+});
+
+test('handoff wake failure remains retryable and closing cancels a deferred wake',async()=>{
+  const actions=[];let state={available:false,has_sandbox:false,can_wake:true};
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options)return state;
+    const action=JSON.parse(options.body).action;actions.push(action);
+    if(action==='wake')throw new Error('All workspaces are busy.');
+    return state;
+  });
+  const host=node();await view.open('one',host,{wake:true});
+  assert.match(host.child.querySelector('[data-notice]').textContent,/All workspaces are busy/);
+  await flush(1000);assert.deepEqual(actions,['wake']);
+  await host.child.querySelector('[data-wake]').onclick();assert.deepEqual(actions,['wake','wake']);
+  state={available:false,has_sandbox:false,shutting_down:true};
+  await view.open('two',node(),{wake:true});view.close();await tick();
+  state={available:false,has_sandbox:false,can_wake:true};await flush(1000);
+  assert.equal(actions.filter(action=>action==='wake').length,2);
+});
+
 test('hiding while a claim is in flight releases after the claim completes',async()=>{
   const actions=[];let finishClaim;
   const {view}=browser(async(path,options)=>{
