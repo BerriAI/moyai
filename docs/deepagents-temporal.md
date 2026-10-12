@@ -101,6 +101,13 @@ their input/capability check. The claim is the dispatch boundary, after connecto
 validation and connection refresh. A pending or accepted correction that commits
 first cancels the unstarted call. Once a claim commits, steering stays responsive
 while the running call completes; its factual outcome is saved even after Stop.
+Local argument and availability rejections retain a known-unsent outcome; duplicate
+lookups must not describe them as dispatched. Only explicit rejection receipts or
+a typed pre-action rejection establish that fact. A generic HTTP 4xx after a handler
+starts can follow a committed write, so its outcome remains uncertain. Credential
+and agent argument validation happens before dispatch; saved-state validation and
+checkpoint failures after a handler are not treated as rejected input.
+
 The existing event journal records dispatch/outcome metadata without raw tool
 payloads. Duplicate identities never replay an action, including after a lost
 response or broker replacement; uncertain outcomes require reconciliation.

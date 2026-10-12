@@ -408,3 +408,70 @@ async def test_repository_preparation_uses_the_same_scoped_broker(broker, tmp_pa
     assert workspace == Path(tmp_path / 'workspace/repo')
     assert len(calls) == 1
     assert receipts(store, scope)[0]['tool'] == 'github_checkout'
+
+
+@pytest.mark.parametrize('name', ['skills_save', 'memory_save', 'media_share', 'model_switch',
+    'automation_create', 'credentials_request', 'agents_fanout', 'unknown_tool'])
+async def test_local_argument_rejections_are_never_recorded_as_dispatched(broker, name):
+    app, manager, store, scope, calls = broker
+    request = {**body(scope), 'name': name, 'arguments': {}}
+    try:
+        result = await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+    except ApplicationError:
+        pass  # Preserve existing HTTP error contracts as well as tool receipts.
+    else:
+        assert result.get('error') or result.get('isError'), result
+    saved = receipts(store, scope)
+    assert all(r['outcome'] == 'rejected' and r['dispatched'] is False for r in saved), saved
+    if saved:
+        repeated = await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+        assert repeated['dispatched'] is False and not repeated['outcome_uncertain']
+        assert 'already dispatched' not in repeated['error']
+    assert calls == []
+
+
+@pytest.mark.parametrize('name', ['agents_fanout', 'credentials_request'])
+async def test_unavailable_tools_never_claim_dispatch(broker, monkeypatch, name):
+    app, manager, store, scope, calls = broker
+    monkeypatch.setattr('app.agents.AgentCoordinator.available', lambda *a: False)
+    monkeypatch.setattr(app.state.credentials, 'tools', lambda *a: [])
+    with pytest.raises(ApplicationError, match='403'):
+        await manager.deepagents_runtime.broker(scope, '/tools/call', {**body(scope), 'name': name, 'arguments': {}})
+    assert receipts(store, scope) == [] and calls == []
+
+
+async def test_error_after_internal_write_remains_uncertain(broker, monkeypatch):
+    from fastapi import HTTPException
+    app, manager, store, scope, calls = broker
+
+    async def changed_after_write(*args):
+        calls.append('counted internal write')
+        # Automation can recheck current actor after committing and synchronizing.
+        raise HTTPException(409, 'The requester changed after the saved action.')
+
+    monkeypatch.setattr(app.state.automation_tools, 'call', changed_after_write)
+    request = {**body(scope), 'name': 'automation_create', 'arguments': {}}
+    with pytest.raises(ApplicationError, match='409'):
+        await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+    repeated = await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+    assert repeated['outcome'] == 'unknown' and repeated['dispatched'] is True
+    assert repeated['outcome_uncertain'] is True and repeated['retryable'] is False
+    assert calls == ['counted internal write']
+
+
+@pytest.mark.parametrize('attribute,name', [('skills', 'skills_save'), ('memory', 'memory_save'),
+                                          ('media_shares', 'media_share')])
+async def test_definite_local_access_rejection_preserves_unsent_receipt(broker, monkeypatch, attribute, name):
+    from fastapi import HTTPException
+    app, manager, store, scope, calls = broker
+
+    def denied(*args):
+        raise HTTPException(403, 'Fixture access denial before mutation.')
+
+    monkeypatch.setattr(getattr(app.state, attribute), 'call', denied)
+    request = {**body(scope), 'name': name, 'arguments': {}}
+    first = await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+    repeated = await manager.deepagents_runtime.broker(scope, '/tools/call', request)
+    assert first['dispatched'] is repeated['dispatched'] is False
+    assert first['outcome'] == repeated['outcome'] == 'rejected'
+    assert not repeated['outcome_uncertain'] and calls == []

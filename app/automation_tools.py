@@ -292,7 +292,7 @@ class AutomationTools:
             # Only rejected input is a correctable tool outcome. Validation of
             # saved state or failures after an action must retain their cause.
             return {'error': 'Invalid automation arguments. Correct the listed fields and try again.',
-                    'status_code': 422, 'validation_errors': [
+                    'status_code': 422, 'outcome': 'rejected', 'dispatched': False, 'validation_errors': [
                         {'field': '.'.join(str(part) for part in error['loc']) or 'arguments',
                          'type': error['type'], 'message': error['msg']}
                         for error in exc.errors(include_input=False, include_context=False, include_url=False)]}

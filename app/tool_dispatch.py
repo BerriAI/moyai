@@ -12,6 +12,10 @@ from .db import now
 from .message_queue import MessageQueue
 
 
+class ToolRejected(HTTPException):
+    """A local handler rejected the request before its action could commit."""
+
+
 class ToolDispatch:
     def __init__(self, store, caller, body):
         self.store, self.caller, self.body = store, caller, body
@@ -35,7 +39,9 @@ class ToolDispatch:
                 return {'isError': True, 'outcome': receipt['outcome'], 'dispatched': receipt['dispatched'],
                         'outcome_uncertain': receipt['outcome'] == 'unknown',
                         'request_id': body.request_id, 'retryable': False,
-                        'error': 'This tool was already dispatched. Inspect its saved outcome and the destination; do not repeat the action.'}
+                        'error': ('This tool was already dispatched. Inspect its saved outcome and the destination; do not repeat the action.'
+                                  if receipt['dispatched'] else
+                                  'This tool was not dispatched. Review the rejection and use a new request identity for a corrected action.')}
             run = conn.execute('SELECT * FROM runs WHERE id=?', (caller['id'],)).fetchone()
             if (not run or run['deleted_at'] or run['deletion_requested_at']
                     or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
