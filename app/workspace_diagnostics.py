@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from sandbox.broker_failure import BROKER_ROUTES, safe_id, safe_error
 from agent.harnesses.sdk_failure import CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
 from .connectors import TOOLS
+from .deepagents_diagnostics import ACTIVITY_TYPES
 
 
 class DiagnosticArgs(BaseModel):
@@ -32,7 +33,8 @@ def failure_record(row):
     for key in ('response_started', 'transient', 'transport_interrupted', 'uncertain_tool', 'boundary_failed'):
         if type(data.get(key)) is bool:
             result[key] = data[key]
-    for key, values in {'route': BROKER_ROUTES, 'sdk': {'codex', 'claude-agent-sdk'},
+    for key, values in {'route': BROKER_ROUTES, 'sdk': {'codex', 'claude-agent-sdk', 'deepagents-temporal'},
+                        'activity_type': ACTIVITY_TYPES,
                         'code': CODEX_ERRORS, 'native_status': CLAUDE_RESULTS,
                         'terminal_reason': CLAUDE_TERMINAL_REASONS}.items():
         if isinstance(data.get(key), str) and data[key] in values:
