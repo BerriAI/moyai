@@ -91,7 +91,8 @@ export function mountSculpture(host: HTMLElement | null) {
   canvas.addEventListener('pointercancel', up); canvas.addEventListener('keydown', key)
   canvas.addEventListener('webglcontextlost', lost)
   document.addEventListener('visibilitychange', visibility); motion.addEventListener('change', visibility)
-  new GLTFLoader().load('/static/models/moyai.gltf', gltf => {
+  // GLB keeps geometry in the same-origin response; data: buffer fetches violate our CSP.
+  new GLTFLoader().load('/static/models/moyai.glb', gltf => {
     if (disposed || !host.isConnected) { release(gltf.scene); cleanup(); return }
     pivot.add(gltf.scene); ready = true; host.append(canvas); host.classList.add('sculpture-ready'); resize()
   }, undefined, cleanup)
