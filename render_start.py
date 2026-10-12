@@ -30,11 +30,26 @@ BROKER_GRACEFUL_SHUTDOWN_SECONDS = 240
 class RenderOverlapServer(uvicorn.Server):
     """Keep accepting briefly while Render's private routing converges."""
 
-    def __init__(self, config, *, listener_grace_seconds=LISTENER_GRACE_SECONDS):
+    def __init__(self, config, *, listener_grace_seconds=LISTENER_GRACE_SECONDS, failure_check=None):
         super().__init__(config)
         self.listener_grace_seconds = listener_grace_seconds
         self.listener_grace_deadline = None
         self.http_drain_deadline = None
+        self.failure_check = failure_check
+        self.retired = False
+
+    async def on_tick(self, counter):
+        if await super().on_tick(counter):
+            return True
+        if self.failure_check and self.failure_check():
+            # A fenced broker cannot recover its original ownership session.
+            # Use normal HTTP/lifespan cleanup before Render replaces it; never
+            # reconnect underneath live requests or keep serving permanent 503s.
+            logging.getLogger('uvicorn.error').error('Retiring failed broker for automatic restart after cleanup')
+            self.retired = True
+            self.should_exit = True
+            return True
+        return False
 
     def handle_exit(self, sig, frame):
         # Measure from the first signal, not from when the event loop gets to
@@ -157,6 +172,13 @@ async def bootstrap():
     await import_checkpoint(settings.data_dir, volume)
 
 
+def broker_failed():
+    # Uvicorn has loaded the application before its first serving tick.
+    from app.main import app
+    owner = app.state.broker_requests
+    return bool(owner and owner.failed)
+
+
 def main():
     configure_environment()
     stage = os.environ.get("RENDER_MIGRATION_STAGE", "true").lower()
@@ -173,11 +195,14 @@ def main():
         # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
         proxy_headers=False,
     )
-    server = RenderOverlapServer(config) if role in {"api", "broker", "coordinator"} else uvicorn.Server(config)
+    server = (RenderOverlapServer(config, failure_check=broker_failed if stage == 'false' and role == 'broker' else None)
+              if role in {'api', 'broker', 'coordinator'} else uvicorn.Server(config))
     try:
         server.run()
     except KeyboardInterrupt:
         pass
+    if getattr(server, 'retired', False):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

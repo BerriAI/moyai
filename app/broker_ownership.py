@@ -5,9 +5,13 @@ proof that work is still owned. Age alone is never permission to recover it.
 """
 import asyncio
 from contextlib import suppress
+import logging
 
-from .database import DatabaseError
+from .database import DatabaseBusyError, DatabaseError
 from .db import database
+
+
+logger = logging.getLogger('uvicorn.error.moyai.broker')
 
 
 class BrokerWork:
@@ -78,7 +82,7 @@ class BrokerMaintenance:
     def acquire(self):
         if self.owned:
             return True
-        self.store.rows('SELECT 1')
+        self.store.database.check_owner()
         self.owned = self.store.database.owner.execute(
             'SELECT pg_try_advisory_lock(726946, %s::regnamespace::oid::int)',
             (self.store.database.schema,)).fetchone()[0]
@@ -139,6 +143,7 @@ class BrokerRequests:
         self.task = None
         self.failed = False
         self.closing = False
+        self.recovery_busy = False
 
     @property
     def draining(self):
@@ -147,16 +152,32 @@ class BrokerRequests:
     def check(self):
         if self.maintenance.task and self.maintenance.task.done() and not self.closing:
             raise DatabaseError('Broker maintenance ownership stopped.')
-        self.work.store.rows('SELECT 1')
+        self.work.database.check_owner()
         self.slots.check()
+
+    async def recover(self):
+        try:
+            await database(self.work.recover)
+        except DatabaseBusyError:
+            # Only the ownership-aware orphan scan is retried. A busy request
+            # pool/row must not retire a healthy owner or replay tool writes.
+            if not self.recovery_busy:
+                logger.warning('Broker orphan recovery deferred while Postgres is busy; ownership checks continue.')
+            self.recovery_busy = True
+        else:
+            if self.recovery_busy:
+                logger.info('Broker orphan recovery resumed after database contention.')
+            self.recovery_busy = False
 
     async def watch(self):
         while True:
             try:
                 await database(self.check)
-                await database(self.work.recover)
-            except Exception:
+                await self.recover()
+            except Exception as exc:
                 self.failed = True
+                logger.error('Broker ownership failed; cancelling owned requests: %s',
+                             str(exc) if isinstance(exc, DatabaseError) else type(exc).__name__)
                 # Leave shared slot locks held until each route has finished
                 # closing its provider connection and recording its outcome.
                 for task in set(self.tasks) | set(self.slots._maintenance):
@@ -168,14 +189,17 @@ class BrokerRequests:
 
     async def start(self):
         await database(self.check)
-        await database(self.work.recover)
+        await self.recover()
         self.maintenance.start()
         self.task = asyncio.create_task(self.watch(), name='broker-ownership-watch')
 
     async def close(self):
         self.closing = True
         if self.task:
-            self.task.cancel()
+            # A failed watcher is already draining maintenance. Cancelling it
+            # again would interrupt that cleanup during automatic retirement.
+            if not self.failed:
+                self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
         await self.maintenance.close()

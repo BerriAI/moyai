@@ -241,6 +241,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Verify compatible owners, revocation, stream draining and failed handoffs
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_background_contracts.py tests/test_worker_compatibility.py tests/test_worker_release_fences.py tests/test_worker_handoff.py tests/test_coordinator_handoff.py tests/test_broker_overlap.py
+      - name: Verify broker self-healing and drain before automatic retirement
+        run: |
+          uv run --frozen --python 3.13 pytest -q --tb=short tests/test_render_shutdown.py tests/test_render_shutdown_roles.py
+          uv run --frozen --python 3.13 python scripts/broker_recovery_probe.py
       - name: Replace all four roles while messages and inference continue
         run: uv run --frozen --python 3.13 python -m scripts.worker_release_probe --all-roles --output /tmp/moyai-rolling-release
       - uses: actions/upload-artifact@v4

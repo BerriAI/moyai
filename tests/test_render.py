@@ -157,3 +157,22 @@ def test_render_api_shutdown_budget_leaves_time_for_cleanup(monkeypatch, role, s
         assert calls[0].listener_grace_seconds + seconds == 270
     elif role == 'coordinator':
         assert calls[0].listener_grace_seconds + seconds == 50
+
+
+def test_render_failed_broker_exits_nonzero_for_platform_restart(monkeypatch):
+    import render_start
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example')
+    monkeypatch.setenv('MOYAI_RUNTIME_ROLE', 'broker')
+    monkeypatch.setenv('RENDER_MIGRATION_STAGE', 'false')
+    monkeypatch.setattr(render_start, 'bootstrap', AsyncMock())
+
+    def retire(server):
+        assert server.failure_check is render_start.broker_failed
+        server.retired = True
+
+    monkeypatch.setattr(render_start.RenderOverlapServer, 'run', retire)
+    with pytest.raises(SystemExit) as stopped:
+        render_start.main()
+    assert stopped.value.code == 1

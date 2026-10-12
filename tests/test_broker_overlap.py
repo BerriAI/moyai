@@ -1,6 +1,6 @@
 """Verified broker generations share real PostgreSQL ownership and capacity."""
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -318,6 +318,122 @@ async def test_dead_recovery_skips_busy_schema_without_blocking_other_sessions(v
     assert status(replacement, 'context_jobs', 'operation_id', context) == 'interrupted'
     assert status(replacement, 'approvals', 'id', request) == 'uncertain'
     assert not store.rows('SELECT 1 FROM broker_work_owners')
+
+
+async def test_pool_contention_does_not_retire_broker_or_cancel_live_request(verified):
+    import httpx
+
+    broker, settings = verified
+    app = broker()
+    owner = app.state.broker_requests
+    pool = app.state.store.database.pool
+    pool.timeout = .1
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    @app.get('/broker/contention-probe')
+    async def probe():
+        entered.set()
+        await finish.wait()
+        return {'status': 'completed'}
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=settings.public_url) as client:
+            request = asyncio.create_task(client.get('/broker/contention-probe'))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                async with asyncio.timeout(2):
+                    while not owner.maintenance.owned:
+                        await asyncio.sleep(.01)
+                with ExitStack() as held:
+                    for _ in range(pool.max_size):
+                        held.enter_context(pool.connection())
+                    # Several real pool timeouts must not poison ownership or
+                    # cancel a request that already passed admission.
+                    await asyncio.sleep(1.3)
+                    assert pool.get_stats().get('requests_errors', 0) > 0
+                    assert not owner.failed
+                    assert not request.done()
+                finish.set()
+                assert (await asyncio.wait_for(request, 2)).status_code == 200
+                assert (await client.get('/broker/contention-probe')).status_code == 200
+                async with asyncio.timeout(6):
+                    while not app.state.manager.ready.is_set():
+                        await asyncio.sleep(.01)
+                assert (await client.get('/health')).status_code == 200
+                assert not owner.task.done()
+            finally:
+                finish.set()
+                await asyncio.gather(request, return_exceptions=True)
+
+
+@pytest.mark.parametrize('loss', ['runtime_connection', 'runtime_lock', 'broker_policy', 'capacity'])
+async def test_pool_contention_cannot_hide_real_ownership_loss(verified, loss):
+    broker, _ = verified
+    app = broker()
+    owner = app.state.broker_requests
+    db = app.state.store.database
+    db.pool.timeout = .1
+    async with app.router.lifespan_context(app):
+        async with asyncio.timeout(2):
+            while not owner.maintenance.owned:
+                await asyncio.sleep(.01)
+        with ExitStack() as held:
+            for _ in range(db.pool.max_size):
+                held.enter_context(db.pool.connection())
+            if loss == 'runtime_connection':
+                db.owner.close()
+            elif loss == 'runtime_lock':
+                db.owner.execute('SELECT pg_advisory_unlock_shared(726940, %s::regnamespace::oid::int)', (db.schema,))
+            elif loss == 'broker_policy':
+                import psycopg
+                from psycopg import sql
+                with psycopg.connect(db.pool.conninfo) as conn:
+                    conn.execute(sql.SQL("UPDATE {}.runtime_broker_policy SET fingerprint='revoked'").format(sql.Identifier(db.schema)))
+            else:
+                app.state.model_slots._connection.close()
+            async with asyncio.timeout(2):
+                while not owner.failed:
+                    await asyncio.sleep(.01)
+            assert owner.draining
+
+
+@pytest.mark.parametrize('at_startup', [False, True])
+async def test_orphan_recovery_resumes_after_real_row_lock_timeout(verified, at_startup):
+    import psycopg
+    from psycopg import sql
+    from app.db import database
+
+    broker, _ = verified
+    old, replacement = broker(), broker()
+    request, context = pending(old, 'orphan blocked by another transaction')
+    owner = replacement.state.broker_requests
+    pool = replacement.state.store.database.pool
+    # Real PostgreSQL lock timeouts, shortened only to bound the regression.
+    with ExitStack() as connections:
+        for _ in range(pool.max_size):
+            conn = connections.enter_context(pool.connection())
+            conn.execute("SET lock_timeout='100ms'")
+    async with AsyncExitStack() as lifetime:
+        if not at_startup:
+            await lifetime.enter_async_context(replacement.router.lifespan_context(replacement))
+        with psycopg.connect(pool.conninfo) as blocker:
+            blocker.execute(sql.SQL('SELECT id FROM {}.model_requests WHERE id=%s FOR UPDATE').format(
+                sql.Identifier(replacement.state.store.database.schema)), (request,))
+            old.state.store.database.owner.close()
+            if at_startup:
+                await lifetime.enter_async_context(replacement.router.lifespan_context(replacement))
+            async with asyncio.timeout(3):
+                while not owner.recovery_busy:
+                    await asyncio.sleep(.01)
+            assert not owner.failed
+            assert status(replacement, 'model_requests', 'id', request) == 'pending'
+            assert status(replacement, 'approvals', 'id', request) == 'executing'
+        async with asyncio.timeout(3):
+            while await database(status, replacement, 'model_requests', 'id', request) != 'interrupted':
+                await asyncio.sleep(.01)
+        assert status(replacement, 'context_jobs', 'operation_id', context) == 'interrupted'
+        assert status(replacement, 'approvals', 'id', request) == 'uncertain'
+        assert not owner.failed and not owner.task.done()
 
 
 def test_recovery_rechecks_receipts_and_new_backend_identity_after_read_probe(verified, monkeypatch):

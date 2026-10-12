@@ -30,7 +30,7 @@ async def wait_until(predicate):
 
 
 @asynccontextmanager
-async def serving(app):
+async def serving(app, *, failure_check=None):
     class Server(RenderOverlapServer):
         # The subprocess tests cover OS signal delivery. Here call the same
         # handler without installing process-wide handlers in pytest's loop.
@@ -40,7 +40,7 @@ async def serving(app):
 
     server = Server(uvicorn.Config(app, host='127.0.0.1', port=0,
         timeout_graceful_shutdown=3, log_level='critical', proxy_headers=False),
-        listener_grace_seconds=1)
+        listener_grace_seconds=1, failure_check=failure_check)
     task = asyncio.create_task(server.serve())
     try:
         await wait_until(lambda: server.started or task.done())
@@ -52,6 +52,63 @@ async def serving(app):
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, 8)
+
+
+@pytest.mark.parametrize('verified', [1], indirect=True)
+async def test_failed_broker_retires_after_request_cleanup_and_replacement_serves(verified, monkeypatch):
+    broker, _ = verified
+    first, replacement = broker(), broker()
+    entered, cleaning, release = (asyncio.Event() for _ in range(3))
+    maintenance_cleaning, release_maintenance, interrupted = (asyncio.Event() for _ in range(3))
+    original_close = first.state.memory_review.close
+
+    async def close_maintenance():
+        maintenance_cleaning.set()
+        try:
+            await release_maintenance.wait()
+        except asyncio.CancelledError:
+            interrupted.set()
+            raise
+        await original_close()
+
+    monkeypatch.setattr(first.state.memory_review, 'close', close_maintenance)
+
+    @first.get('/broker/retirement-probe')
+    async def probe():
+        permit = await first.state.model_slots.acquire()
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            await first.state.model_slots.release_async(permit)
+
+    async with AsyncExitStack() as stack:
+        old, client, retired = await stack.enter_async_context(serving(
+            first, failure_check=lambda: first.state.broker_requests.failed))
+        _, next_client, _ = await stack.enter_async_context(serving(replacement))
+        running = asyncio.create_task(client.get('/broker/retirement-probe'))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            first.state.store.database.owner.close()
+            await asyncio.wait_for(cleaning.wait(), 3)
+            await wait_until(lambda: not old.servers[0].is_serving())
+            assert old.retired and not retired.done()
+            assert replacement.state.model_slots.locked()
+            release.set()
+            await asyncio.wait_for(maintenance_cleaning.wait(), 3)
+            await asyncio.sleep(.2)
+            assert not retired.done() and not interrupted.is_set()
+            release_maintenance.set()
+            await asyncio.wait_for(asyncio.shield(retired), 5)
+            assert first.state.model_slots._closed
+            assert not replacement.state.model_slots.locked()
+            assert (await next_client.get('/health')).status_code == 200
+        finally:
+            release.set()
+            release_maintenance.set()
+            await asyncio.gather(running, return_exceptions=True)
 
 
 async def test_broker_listener_grace_preserves_admitted_model_stream_and_owner(verified, monkeypatch):

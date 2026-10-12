@@ -21,6 +21,10 @@ class IntegrityError(DatabaseError):
     pass
 
 
+class DatabaseBusyError(DatabaseError):
+    """Pool admission or a lock timed out; never permission to replay a write."""
+
+
 RUNTIME_SETTINGS = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
              'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
              'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
@@ -344,6 +348,9 @@ class PostgresDatabase:
             prepare_schema(self.owner, schema, schema_mode)
             if self.schema_updates:
                 self._initialize_schema()
+            # Ownership probes use this existing session, independently of the
+            # request pool. Its policy reads need the same schema as the pool.
+            self.owner.execute(f'SET search_path TO {identifier(schema)}, pg_catalog')
 
             def configure(conn):
                 conn.execute(f'SET search_path TO {identifier(schema)}, pg_catalog')
@@ -399,6 +406,7 @@ class PostgresDatabase:
     @contextmanager
     def connect(self, *, write_scope=None):
         import psycopg
+        from psycopg_pool import PoolTimeout
 
         try:
             # Failure of the ownership session fences all further application
@@ -413,8 +421,28 @@ class PostgresDatabase:
                                          schema_updates=self.schema_updates)
         except psycopg.IntegrityError:
             raise IntegrityError('Database constraint rejected the change.') from None
+        except (PoolTimeout, psycopg.errors.LockNotAvailable):
+            raise DatabaseBusyError('Postgres is busy; the transaction was not acknowledged.') from None
         except psycopg.Error:
             raise DatabaseError('Postgres operation failed; the transaction was not acknowledged.') from None
+
+    def check_owner(self):
+        """Verify the original ownership session without waiting for the pool.
+
+        Never reconnect: losing this session must still fence live work. Use
+        the ordinary lock and compatibility checks even during pool congestion.
+        """
+        import psycopg
+
+        try:
+            if self.owner.closed or self.owner.broken:
+                raise DatabaseError('Postgres ownership connection was lost. Restart this application process.')
+            PostgresConnection(self.owner, self.schema, self.owner_pid, policy=self.policy,
+                               api_policy=self.api_policy, worker_policy=self.worker_policy,
+                               broker_policy=self.broker_policy,
+                               coordinator_policy=self.coordinator_policy).check_owner()
+        except psycopg.Error:
+            raise DatabaseError('Postgres ownership check failed. Restart this application process.') from None
 
     def stored_policy(self):
         if not self.owner.execute('SELECT to_regclass(%s)',
