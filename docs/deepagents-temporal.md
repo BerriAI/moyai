@@ -69,6 +69,15 @@ with an explicit reconciliation message rather than automatically repeating an
 external action. Existing broker outboxes and computer receipts remain authoritative.
 Temporal is not an exactly-once guarantee for external services.
 
+Before dispatch, catalog discovery retries transient broker HTTP failures, network
+interruptions and busy local database reads with at most three attempts, one- and
+two-second backoffs, and a 45-second overall deadline. Every attempt revalidates
+the execution capability and fetches the current catalog; permissions are not
+cached across retries. Cancellation, revoked capabilities and nontransient
+rejections stop immediately. This recovery is confined to the catalog GET, never
+the tool POST or its receipt bookkeeping. Exhaustion still fails the turn; it
+does not repair underlying database pool pressure or authorize replaying a write.
+
 Send Now first persists the input and returns an HTTP receipt. A workflow signal
 wakes an independent control monitor, which journals the attributed input in
 Temporal and acknowledges that the running agent accepted it. Acceptance is not
