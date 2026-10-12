@@ -246,13 +246,11 @@ class SlackSessions:
             await self.checkpoints.flush()
             return
         try:
-            if not self.connectors.allowed("slack_thread"):
-                raise ConnectorError("Slack is unavailable.")
-            headers = self.connectors.headers("slack", await self.connectors.credentials("slack"))
+            selection = await self.connectors.personal_slack.select(self.store.run(run_id), 'slack_thread')
+            headers = self.connectors.headers("slack", selection.credentials)
             context.update(await self.read_context(source, headers))
             context.update(self.sources.snapshot(run_id))
-            if not self.connectors.allowed("slack_thread"):
-                raise ConnectorError("Slack access was paused.")
+            self.connectors.personal_slack.recheck(selection)
             # A permalink is helpful but must not discard successfully read context.
             try:
                 async with asyncio.timeout(3):
@@ -263,6 +261,7 @@ class SlackSessions:
                         context["permalink"] = url
             except (ConnectorError, TimeoutError):
                 pass
+            self.connectors.personal_slack.recheck(selection)
             status = "ready"
             message = f"Read {len(context['messages'])} Slack messages from the {context['kind']}"
             if context["truncated"]:
@@ -270,13 +269,15 @@ class SlackSessions:
         except asyncio.CancelledError:
             self.store.execute("UPDATE slack_events SET context_status='pending' WHERE run_id=?", (run_id,))
             raise
-        except Exception:
+        except Exception as exc:
             status = "unavailable"
             installation = self.connectors.slack_installation()
             self.store.execute("UPDATE slack_source_coverage SET status='incomplete',updated_at=? WHERE team_id=? AND channel=? AND thread_ts=?",
                 (now(), installation.get('team_id'), source['channel'], source['thread_ts']))
             context.update(self.sources.snapshot(run_id))
             context["warning"] = "Live Slack synchronization is unavailable. Saved observations are retained; use slack_context for their versions and coverage. Do not assume the source is complete."
+            if isinstance(exc, ConnectorError) and "private web chat" in str(exc):
+                context["warning"] = str(exc)
             message = "Slack conversation could not be read; the agent will be told context is missing"
         self.store.execute("UPDATE slack_events SET context_status=?,context_json=? WHERE run_id=?", (status, json.dumps(context), run_id))
         self.store.event(run_id, "context", message)

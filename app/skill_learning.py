@@ -3,6 +3,7 @@
 Only the inference owner runs reviews. The Settings API owns acceptance; model
 output can never activate a skill or publish one to the organization.
 """
+from .private_sinks import private_run
 import asyncio
 import json
 import logging
@@ -125,6 +126,8 @@ class SkillLearning:
             FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=?''', (message_id,)).fetchone()
 
     def allowed_in(self, conn, source, owner, revision):
+        if source and private_run(self.store, source['run_id'], conn):
+            return False
         if (not source or source['role'] != 'user' or source['status'] != 'completed'
                 or source['steering_parent_id'] or not source['chat_enabled'] or source['parent_run_id']
                 or source['deleted_at'] or source['deletion_requested_at'] or source['automated'] or source['mode'] == 'demo'):

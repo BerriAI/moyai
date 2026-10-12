@@ -134,9 +134,11 @@ def test_initial_team_failure_rolls_back_mission_children_and_dispatch(durable, 
 
 async def test_initial_team_queues_under_capacity_then_resumes_coordinator_with_real_results(durable):
     manager, cloud, _ = durable
-    # This test exercises full-computer capacity, not independent agent startup.
-    manager.settings.independent_agent_runtime = False
     manager.settings.max_concurrent_runs = 1
+    # This test exercises the shared computer capacity pool. Codex's separate
+    # agent runtime intentionally bypasses that pool; tied creation timestamps
+    # can otherwise put a Codex child in either of the first two positions.
+    manager.settings.independent_agent_runtime = False
     cloud.saving_before_answer = False
     run = bootstrap(manager)
     root = run['id']

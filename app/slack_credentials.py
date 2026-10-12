@@ -1,4 +1,5 @@
 """Signed scope choices and one durable Slack card per secure access request."""
+from .private_sinks import private_run, deny_export
 import html
 import json
 import re
@@ -17,6 +18,8 @@ class SlackCredentials:
         self.owner, self.store = owner, owner.store
 
     def collect_in(self, conn, binding):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         vault = self.owner.manager.credentials
         pending = {row['id']: row for row in vault.pending_rows(conn, binding['run_id'], include_children=True)}
         for row in pending.values():
@@ -29,6 +32,8 @@ class SlackCredentials:
                     self.queue_in(conn, binding, row, row['status'] if row['status'] != 'pending' else 'unavailable')
 
     def queue_in(self, conn, binding, request, state):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         key = 'credential:' + request['id']
         card = conn.execute('SELECT * FROM slack_outbox WHERE run_id=? AND dedupe_key=?', (binding['run_id'], key)).fetchone()
         previous = json.loads(card['metadata']) if card else {}
@@ -52,6 +57,7 @@ class SlackCredentials:
                 (text, json.dumps(metadata), state, card['id']))
 
     def current_in(self, conn, card_id, binding, identity):
+        deny_export(self.store, binding['run_id'], conn)
         card = conn.execute('SELECT * FROM slack_outbox WHERE id=? AND run_id=?', (card_id, binding['run_id'])).fetchone()
         data = json.loads(card['metadata']) if card else {}
         destination = {'team_id': identity[0], 'bot_user_id': identity[1], 'channel': binding['channel'], 'thread_ts': binding['thread_ts']}

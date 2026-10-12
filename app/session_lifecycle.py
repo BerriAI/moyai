@@ -1,4 +1,6 @@
 """Personal archiving and retained deletion for shared workspace sessions."""
+from starlette.requests import HTTPConnection
+from .session_privacy import SessionPrivacy
 import asyncio
 import json
 import logging
@@ -126,6 +128,13 @@ class SessionLifecycle:
             raise HTTPException(403, 'Only the session creator or an administrator can delete this session.')
 
     def read_actor(self, run, target_id=None):
+        if target_id:
+            target = self.store.run(target_id)
+            if SessionPrivacy.is_private(target):
+                current = self.store.run(run['id'])
+                if (not current or current.get('private_owner_id') != target['private_owner_id']
+                        or current['active_user_id'] != target['private_owner_id']):
+                    raise HTTPException(404, 'Session not found.')
         fresh = self.store.run(run['id'])
         if (not fresh or fresh['deleted_at'] or fresh['deletion_requested_at'] or not fresh['chat_enabled']
                 or not fresh['active_user_id'] or not fresh['active_message_id']
@@ -176,7 +185,9 @@ class SessionLifecycle:
         args = SearchSessions.model_validate(arguments)
         actor = self.search_actor(run)
         ids = self.store.sidebar_run_ids(actor, archive_owner=actor, archived=None, pin_owner=actor,
-                                        search=args.query.split(), limit=args.limit + 1, exclude_id=run['id'])
+                                        search=args.query.split(), limit=args.limit + 1, exclude_id=run['id'],
+                                        include_private=SessionPrivacy.is_private(run),
+                                        privacy_owner=run.get('private_owner_id', ''))
         archives = self.archives(actor)
         sessions = []
         for run_id in ids[:args.limit]:
@@ -188,22 +199,22 @@ class SessionLifecycle:
                              'url': self.security.settings.public_url.rstrip('/') + '/#run=' + run_id})
         return {'sessions': sessions, 'has_more': len(ids) > args.limit}
 
-    def require_live_api(self, request: Request):
+    def require_live_api(self, request: HTTPConnection):
         """Guard the actual dispatched run routes, including files and computer."""
         route = request.scope.get('route')
         if not getattr(route, 'path', '').startswith('/api/runs/{run_id}'):
             return
-        self.security.require(request, mutation=request.method in {'POST', 'PUT', 'PATCH', 'DELETE'})
+        self.security.require(request, mutation=request.scope.get('method', '') in {'POST', 'PUT', 'PATCH', 'DELETE'})
         rows = self.store.rows('SELECT deleted_at,deletion_requested_at FROM runs WHERE id=?',
                                (request.path_params['run_id'],))
         run = rows[0] if rows else None
-        deleting = request.method == 'DELETE' and route.path == '/api/runs/{run_id}'
+        deleting = request.scope.get('method', '') == 'DELETE' and route.path == '/api/runs/{run_id}'
         # A fresh/reconnecting stream must receive its terminal marker. The
         # events handler checks deletion before reading any retained history.
-        events = request.method == 'GET' and route.path == '/api/runs/{run_id}/events'
+        events = request.scope.get('method', '') == 'GET' and route.path == '/api/runs/{run_id}/events'
         if not run or (run['deleted_at'] and not (deleting or events)):
             raise HTTPException(404, 'Session not found.')
-        if run['deletion_requested_at'] and not deleting and request.method != 'GET':
+        if run['deletion_requested_at'] and not deleting and request.scope.get('method', '') != 'GET':
             raise HTTPException(409, 'This session is being deleted. Its agents and workspace are stopping automatically.')
 
     def archives(self, actor):
@@ -211,7 +222,7 @@ class SessionLifecycle:
 
     @staticmethod
     def can_delete(run, actor, admin):
-        return not run['parent_run_id'] and (admin or bool(actor and run['owner_id'] == actor))
+        return SessionPrivacy.can_access(run, actor) and not run['parent_run_id'] and (admin or bool(actor and run['owner_id'] == actor))
 
     def metadata(self, run, actor, admin, archives=None, *, root_id=None):
         archives = self.archives(actor) if archives is None else archives
@@ -229,6 +240,7 @@ class SessionLifecycle:
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run or run['deleted_at']:
                 raise HTTPException(404, 'Session not found.')
+            SessionPrivacy(self.store).require_owner(run, actor)
             if run['parent_run_id']:
                 raise HTTPException(422, 'Archive the parent session to keep its agents together.')
             if archived:
@@ -240,6 +252,7 @@ class SessionLifecycle:
     def delete(self, run_id, actor, admin, *, check_only=False):
         # Shared with enqueue's BEGIN IMMEDIATE: one commits first, and the
         # other observes either queued work or the retained deletion marker.
+        SessionPrivacy(self.store).require_owner(self.store.run(run_id), actor)
         with self.store.connect() as conn:
             conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()

@@ -244,12 +244,12 @@ test('real home startup reuses shared config and renders while the sole sidebar 
   f.request('/api/session').resolve({authenticated:true,local:true});await flush();f.request('/api/config').resolve({model:'initial'});await flush();
   assert.equal(f.requests.filter(item=>item.path==='/api/config').length,1);
   assert.equal(f.requests.filter(item=>item.path.startsWith('/api/runs?')).length,1);
-  f.request('/api/connections').resolve([]);f.request('/api/environments').resolve([]);await flush();
+  f.request('/api/connections').resolve([]);f.request('/api/environments').resolve([]);f.request('/api/connections/slack/personal').resolve({available:false});await flush();
   assert.match(f.node('#content').innerHTML,/What are we working on/);await boot;assert.equal(f.state.sessionSearchLoading,true);
   const saved=deferred();f.context.modelPreferenceSave=saved.promise;const later=f.context.navigate('tasks');await flush();
   assert.equal(f.requests.filter(item=>item.path==='/api/config').length,1,'later home freshness waits for preference writes');
   saved.resolve();await flush();assert.equal(f.requests.filter(item=>item.path==='/api/config').length,2);
-  f.request('/api/config').resolve({model:'latest preference'});f.request('/api/connections').resolve([]);f.request('/api/environments').resolve([]);await flush();
+  f.request('/api/config').resolve({model:'latest preference'});f.request('/api/connections').resolve([]);f.request('/api/environments').resolve([]);f.request('/api/connections/slack/personal').resolve({available:false});await flush();
   assert.equal(f.state.config.model,'latest preference');await later;
   assert.equal(f.requests.filter(item=>item.path.startsWith('/api/runs?')).length,2,'later navigation refreshes the sidebar independently');
 });

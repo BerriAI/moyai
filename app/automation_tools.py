@@ -100,6 +100,8 @@ class AutomationTools:
             initialize_schema(self.store)
 
     def actor(self, run, turn_id=None, *, history=False, scoped=False):
+        from .private_sinks import deny_export
+        deny_export(self.store, run['id'])
         caller, run = run, self.store.run(run['id'])
         if (not run or run['deleted_at'] or run['deletion_requested_at'] or not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}):

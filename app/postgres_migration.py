@@ -123,6 +123,13 @@ def inspect_schema(source: sqlite3.Connection) -> Schema:
         name, kind, ddl = row['name'], row['type'], row['sql']
         identifier(name)
         if kind == 'trigger':
+            from .database_schema import PRIVATE_TRIGGERS, PRIVATE_FUNCTION, PRIVATE_POSTGRES
+            if name in PRIVATE_TRIGGERS:
+                if ' '.join(ddl.split()) != ' '.join(PRIVATE_TRIGGERS[name].split()):
+                    raise MaintenanceError('Changed privacy trigger; port its behavior before copying.')
+                if PRIVATE_FUNCTION not in triggers:
+                    triggers.extend([PRIVATE_FUNCTION, PRIVATE_POSTGRES])
+                continue
             from .database_schema import SESSION_EVENT_FUNCTION, SESSION_EVENT_TRIGGERS
             if name in SESSION_EVENT_TRIGGERS:
                 sqlite, postgres = SESSION_EVENT_TRIGGERS[name]

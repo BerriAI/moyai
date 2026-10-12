@@ -40,7 +40,7 @@ def read_history(store, automation_id, *, cursor='', limit=20, summaries=True):
         raise HTTPException(422, 'History page length must be positive.')
     rows = store.rows('''SELECT a.occurrence,a.run_id,a.revision,a.outcome,a.detail,a.created_at,
         r.status,r.deletion_requested_at,r.deleted_at''' + (',r.summary' if summaries else '') + '''
-        FROM automation_runs a LEFT JOIN runs r ON r.id=a.run_id WHERE a.automation_id=?'''
+        FROM automation_runs a LEFT JOIN runs r ON r.id=a.run_id WHERE a.automation_id=? AND COALESCE(r.private_owner_id,'')='' '''
         + clause + ' ORDER BY a.created_at DESC,a.occurrence DESC LIMIT ?', (*values, limit + 1))
     more, rows = len(rows) > limit, rows[:limit]
     for row in rows:

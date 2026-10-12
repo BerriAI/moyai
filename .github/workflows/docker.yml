@@ -24,6 +24,9 @@ jobs:
       - name: Test secure access recovery and broker transport
         if: matrix.group == 'security'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_credentials.py tests/test_credential_discovery.py tests/test_credential_tools.py tests/test_broker_transport.py tests/test_mcp_bridge.py tests/test_mcp_concurrency.py tests/test_github_refresh.py tests/test_github_coding.py tests/test_github_diagnostics.py tests/test_workspace.py::test_every_broker_tool_has_an_audited_replay_classification tests/test_github_identity.py::test_repeatable_broker_metadata_preserves_selection_and_never_publishes
+      - name: Test personal Slack and owner-only sessions
+        if: matrix.group == 'security'
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_personal_slack.py tests/test_private_sessions.py tests/test_private_sinks.py tests/test_slack_secrets.py tests/test_private_integrations.py
       - name: Test Cloudflare identity gate and sandbox transport
         if: matrix.group == 'security'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py

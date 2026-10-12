@@ -21,6 +21,7 @@ from fastapi.responses import Response, StreamingResponse
 from . import captures
 from .attachments import inspect_file, IMAGE_PREVIEW_BYTES
 from .published_artifacts import text_page
+from .private_sinks import require_owner, require_request_owner
 
 PREVIEW_PAGE = 128 * 1024
 
@@ -89,7 +90,8 @@ def safe_member(info):
 
 
 @contextmanager
-def saved_archive(settings, store, run_id, revision=None):
+def saved_archive(settings, store, run_id, revision=None, *, actor=""):
+    require_owner(store, run_id, actor)
     if not re.fullmatch(r'[0-9a-f]{32}', run_id) or not store.run(run_id):
         raise HTTPException(404, 'Session not found.')
     name = run_id + '.zip'
@@ -104,6 +106,7 @@ def saved_archive(settings, store, run_id, revision=None):
             entries = archive.infolist()
             counts = Counter(i.filename for i in entries)
             files = {i.filename: i for i in entries if safe_member(i) and counts[i.filename] == 1}
+            require_owner(store, run_id, actor)
             yield archive, files, current, len(entries) - len(files)
     except FileNotFoundError:
         raise HTTPException(404, 'No saved files are available yet.') from None
@@ -127,13 +130,14 @@ def routes(settings, store, security, published=None):
 
     @router.get('/api/runs/{run_id}/files')
     def list_files(run_id: str, request: Request, view: Literal['all', 'media'] = 'all'):
-        security.require(request)
-        if not re.fullmatch(r'[0-9a-f]{32}', run_id) or not store.run(run_id):
+        actor = require_request_owner(store, security, request, run_id)
+        if not re.fullmatch(r'[0-9a-f]{32}', run_id):
             raise HTTPException(404, 'Session not found.')
-        media = captures.listing(settings, run_id, store=store)
+        media = captures.listing(settings, run_id, store=store, actor=actor)
         outputs = published.listing(run_id) if published else []
         media = outputs + media
         info = store.artifacts.info(run_id + '.zip')
+        require_owner(store, run_id, actor)
         if view == 'media':
             # Captures and explicitly published outputs have their own manifests;
             # listing them must never open the potentially multi-GB recovery ZIP.
@@ -147,12 +151,15 @@ def routes(settings, store, security, published=None):
             raise HTTPException(404, 'No saved files are available yet.')
 
         def scan():
-            with saved_archive(settings, store, run_id, info['revision']) as (_, files, revision, skipped):
+            with saved_archive(settings, store, run_id, info['revision'], actor=actor) as (_, files, revision, skipped):
                 ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
                 return {'revision': revision, 'files': [file_info(run_id, i, revision) for i in ordered],
                         'limited': bool(skipped)}
 
         catalog = catalogs.read((run_id, info['revision'], info['reference']), scan)
+        # Cache hits and readers waiting on another scan must recheck the run
+        # before releasing filenames, including deletion during that wait.
+        require_owner(store, run_id, actor)
         explicit_paths = {item['workspace_path'] for item in outputs}
         return {**catalog, 'files': media + [item for item in catalog['files'] if item['workspace_path'] not in explicit_paths],
                 'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}
@@ -160,8 +167,8 @@ def routes(settings, store, security, published=None):
     @router.get('/api/runs/{run_id}/files/content')
     def content(run_id: str, request: Request, path: str,
                 revision: str | None = Query(default=None, max_length=64), preview: bool = False, inline: bool = False, offset: int = 0, length: int = PREVIEW_PAGE):
-        security.require(request)
-        with saved_archive(settings, store, run_id, revision) as (archive, files, pinned, __):
+        actor = require_request_owner(store, security, request, run_id)
+        with saved_archive(settings, store, run_id, revision, actor=actor) as (archive, files, pinned, __):
             info = files.get(path)
             if info is None:
                 raise HTTPException(404, 'This file is not available in the saved archive.')
@@ -193,7 +200,7 @@ def routes(settings, store, security, published=None):
             name = quote(PurePosixPath(path).name, safe='')
         # The response owns its archive context for the entire stream.
         def chunks():
-            with saved_archive(settings, store, run_id, pinned) as (archive, files, _, __):
+            with saved_archive(settings, store, run_id, pinned, actor=actor) as (archive, files, _, __):
                 with archive.open(files[path]) as stream:
                     yield from iter(lambda: stream.read(1024 * 1024), b'')
         return StreamingResponse(chunks(), media_type='application/octet-stream', headers={
