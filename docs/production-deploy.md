@@ -16,6 +16,13 @@ and require a separately planned transition. An undeclared schema bump is not an
 online migration; see [schema migrations](schema-migrations.md) for the reviewed
 operations, initial activation and breaking-change procedure.
 
+For an incompatible runtime upgrade of the four-service topology, explicitly
+select **maintenance** during a planned outage. It drains execution, stages all
+four roles, verifies that every old owner has exited, applies any required
+offline migration, and activates the matching candidate before resuming work.
+Follow the [four-service maintenance runbook](maintenance-deploy.md), including
+the recovery boundaries for an uncertain migration outcome.
+
 The explicit **api** option remains for the narrower
 [compatible API deployment topology](api-deploy.md). The explicit **coordinated**
 option remains for the original two/three-service topology, described below.

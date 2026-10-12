@@ -73,7 +73,7 @@ def initialize_defaults(store, settings):
         store.execute('INSERT INTO sandbox_settings VALUES(1,0,?)', (encrypted,))
 
 
-def migrate(settings):
+def migrate(settings, *, before_migrate=None):
     from .db import Store
 
     if not settings.moyai_database_url or not settings.encryption_key or not settings.session_secret:
@@ -81,7 +81,8 @@ def migrate(settings):
     store = Store(settings.data_dir, default_model=settings.resolve_model(),
         database_url=settings.moyai_database_url, database_schema=settings.moyai_database_schema,
         database_initialize=settings.moyai_database_initialize, database_pool_size=1,
-        application_instance=True, runtime_role='standalone', schema_mode='migrate')
+        application_instance=True, runtime_role='standalone', schema_mode='migrate',
+        migration_guard=before_migrate)
     try:
         initialize_components(store)
         initialize_defaults(store, settings)

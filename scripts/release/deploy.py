@@ -503,7 +503,7 @@ class Release:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, default=Path('release-receipt.json'))
-    parser.add_argument('--release-type', choices=['coordinated', 'api', 'rolling'], default='coordinated')
+    parser.add_argument('--release-type', choices=['coordinated', 'api', 'rolling', 'maintenance'], default='coordinated')
     parser.add_argument('--preflight', action='store_true', default=os.environ.get('PREFLIGHT_ONLY') == 'true',
                         help='Check CI, credentials and the current topology without changing production.')
     args = parser.parse_args()
@@ -525,7 +525,16 @@ def main():
         render = API('https://api.render.com/v1', os.environ.pop('RENDER_DEPLOY_API_KEY', ''))
         github = GitHub(API('https://api.github.com', os.environ.pop('GH_TOKEN', '')),
                         os.environ['GITHUB_RUN_ID'], os.environ.get('GITHUB_SHA', ''))
-        if args.release_type == 'rolling':
+        if args.release_type == 'maintenance':
+            from scripts.release.maintenance_deploy import MaintenanceRelease
+            from scripts.release.maintenance_probe import SSHMaintenanceProbe
+            from scripts.release.maintenance_migration import SSHMaintenanceMigration
+            from scripts.release.online_migration import SSHMigration
+            release = MaintenanceRelease(render, github, SSHMaintenanceProbe(key_path, connections=connections),
+                                         args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
+                                         migrate=SSHMigration(key_path), offline_migrate=SSHMaintenanceMigration(key_path),
+                                         preflight_only=args.preflight)
+        elif args.release_type == 'rolling':
             from scripts.release.rolling_deploy import RollingRelease
             from scripts.release.online_migration import SSHMigration
             release = RollingRelease(render, github, SSHProbe(key_path, source=ROOT / 'rolling_probe.py', connections=connections),

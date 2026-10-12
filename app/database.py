@@ -286,7 +286,7 @@ class PostgresConnection:
 
 
 class PostgresDatabase:
-    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone', runtime_settings=None, schema_mode='auto'):
+    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone', runtime_settings=None, schema_mode='auto', migration_guard=None):
         import psycopg
         from psycopg_pool import ConnectionPool
 
@@ -306,6 +306,9 @@ class PostgresDatabase:
             raise ValueError('Unknown schema mode.')
         if schema_mode == 'migrate' and (not application_instance or runtime_role != 'standalone'):
             raise ValueError('Schema migration requires exclusive application ownership.')
+        if migration_guard is not None and (not callable(migration_guard) or schema_mode != 'migrate'
+                or not application_instance or runtime_role != 'standalone'):
+            raise ValueError('Migration guards require exclusive standalone migration ownership.')
         if runtime_role == 'api' and schema_mode != 'verify':
             raise DatabaseError('API replicas require verified schema startup.')
         if self.coordinator_handoff and (schema_mode != 'verify' or not runtime_settings.moyai_separate_broker
@@ -340,6 +343,10 @@ class PostgresDatabase:
                     # Reject incompatible builds/keys and duplicate brokers before
                     # even CREATE IF NOT EXISTS or legacy data backfills can run.
                     self.admit_runtime(runtime_settings)
+            if migration_guard is not None:
+                # The exclusive runtime lock is already held. A rejected guard
+                # must leave even the first dirty marker and initializer undone.
+                migration_guard(self.owner, self.schema)
             from .schema_migrations import prepare_schema
             prepare_schema(self.owner, schema, schema_mode)
             if self.schema_updates:
