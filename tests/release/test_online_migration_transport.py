@@ -54,6 +54,8 @@ def test_one_exact_request_uses_pinned_ssh_and_never_sends_database_credentials(
     assert result == receipt and len(calls) == 1
     args, kwargs = calls[0]
     assert 'StrictHostKeyChecking=yes' in args and 'IdentitiesOnly=yes' in args
+    assert 'ControlMaster=no' in args and 'ControlPath=none' in args
+    assert args[1:3] == ['-F', '/dev/null']
     assert args[-2] == COORDINATOR + '@ssh.oregon.render.com'
     assert kwargs['timeout'] == 60 and kwargs['capture_output'] is True
     assert Path(migration.__file__).read_text() in kwargs['input']

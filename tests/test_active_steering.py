@@ -156,7 +156,7 @@ def test_native_receipt_keeps_root_turn_user_model_and_has_only_one_final_answer
     assert run['active_model'] == original['active_model']
     assert not app.state.store.has_queued_messages(run_id)
     assert [m['status'] for m in app.state.store.messages(run_id)] == ['running', 'injected']
-    assert len(app.state.store.rows("SELECT * FROM events WHERE run_id=? AND message='Your message is guiding the current task.'", (run_id,))) == 1
+    assert len(app.state.store.rows("SELECT * FROM events WHERE run_id=? AND message='Your message was accepted by the running agent.'", (run_id,))) == 1
     app.state.store.finish_message(run_id, first, 'Original objective completed with the correction')
     messages = app.state.store.messages(run_id)
     assert [m['role'] for m in messages] == ['user', 'user', 'assistant']

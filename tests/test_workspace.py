@@ -114,7 +114,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         github_edit_pull_request_comment github_set_review_thread_resolved github_mark_pull_request_ready github_workflow_action
         linear_comment linear_create_issue
         linear_update_issue slack_send notion_append media_share media_revoke model_switch memory_save
-        memory_forget skills_save goal artifact_publish artifact_fetch'''.split())
+        memory_forget skills_save goal artifact_publish artifact_fetch computer_handoff'''.split())
     assert not (safe & read_effects or safe & writes or read_effects & writes)
     assert {tool['name'] for catalog in catalogs for tool in catalog} == safe | read_effects | writes
     assert safe <= {tool['name'] for tool in recovery_catalog}
@@ -245,7 +245,7 @@ def test_writes_execute_without_approval(workspace, monkeypatch, role, provider,
 def test_scope_denial_and_bad_arguments_never_reach_provider(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         pytest.fail("Provider must not be called")
     monkeypatch.setattr(app.state.connectors, "call", fail)
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "slack_send", "arguments": {}}).status_code == 403
@@ -305,13 +305,13 @@ def test_members_can_use_org_connections_but_cannot_administer_them(workspace):
 def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         pytest.fail("Disabled tool reached the provider")
     monkeypatch.setattr(app.state.connectors, "call", fail)
     assert client.patch("/api/connections/linear/policy", json={"enabled": True, "read_only": True}).status_code == 200
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
-    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics", "bundled_skill_read", "history_read", "goal", "artifact_publish", "artifact_fetch", "artifact_read", "artifacts_list"}
+    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics", "bundled_skill_read", "history_read", "goal", "computer_handoff", "artifact_publish", "artifact_fetch", "artifact_read", "artifacts_list"}
     assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | builtins
     denied = client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).json()

@@ -14,6 +14,23 @@ function loadSkillText(context){
   for(const file of ['icons','skill-icons','skill-composer'])vm.runInContext(readFileSync(`app/static/${file}.js`,'utf8'),context);
 }
 
+test('stream snapshots coalesce across reconnect and finalize once under their original input',()=>{
+  const data=run();
+  const snapshot=(id,text,phase='streaming',input=1)=>event(id,'message',text,
+    {phase,turn_id:1,input_id:input,activity_id:'deepagents:1:0:1',...(phase==='commentary'?{public_update:true}:{})});
+  data.events.push(snapshot(2,'First'),snapshot(3,'First sentence.'));
+  assert.equal(current(data).rows.filter(e=>e.kind==='message').length,1);
+  assert.equal(current(data).rows.find(e=>e.kind==='message').message,'First sentence.');
+  data.messages[1].status='injected';data.messages[1].steering_parent_id=1;
+  data.events.push(event(4,'status','Accepted',{phase:'steering',message_id:2,turn_id:1}),
+    snapshot(5,'First sentence. Complete.','commentary'),
+    event(6,'message','Corrected response.',{phase:'streaming',turn_id:1,input_id:2,activity_id:'deepagents:1:0:2'}));
+  const items=timeline(data);
+  assert.equal(items.get('1').filter(e=>e.content==='First sentence. Complete.').length,1);
+  assert.equal(items.get('2').filter(e=>e.content==='Corrected response.').length,1);
+  assert.deepEqual(timeline(JSON.parse(JSON.stringify(data))),items);
+});
+
 test('long histories associate steering and answers without rescanning every message for each turn',()=>{
   const data={status:'idle',messages:[],events:[]};let reads=0;
   for(let i=0;i<500;i++){

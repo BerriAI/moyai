@@ -5,11 +5,18 @@
   function prUrl(value){
     return typeof value==='string'&&value.length<=512&&/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(value)?value:null;
   }
+  function handoffFor(run,user,after=0){
+    if(run.mode!=='modal'||!['running','reconnecting','saving','completed','idle'].includes(run.status))return null;
+    const latest=run.messages?.findLast(message=>message.role==='user'&&message.status!=='deleted');
+    const event=run.events?.findLast(event=>event.kind==='computer'&&event.data?.phase==='handoff'&&event.data.version===1);
+    return event&&event.id>after&&event.run_id===run.id&&event.data.user_id===user&&
+      String(event.data.turn_id)===String(latest?.steering_parent_id||latest?.id)?event:null;
+  }
   function restore(value){
     try{
       const data=JSON.parse(value);
       const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','captures','files','file','activity','chat','pulls','pr','agents'].includes(t.kind)&& (t.kind!=='pr'||prUrl(t.url))&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
-      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||40)),tabs};
+      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||40)),handoff:Number(data.handoff)||0,tabs};
     }catch{return {visible:false,active:'',width:40,tabs:[]};}
   }
   function fileTree(files){
@@ -36,6 +43,7 @@
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
     const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true,tabSignature='';
+    let lastHandoff=initial.handoff||0,latestSession=run;
     const activity=layout.querySelector('#session-details');
     const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',captures:'archive',files:'file',file:'file',chat:'chat',activity:'list',pulls:'pull',pr:'pull',agents:'participants'};
     const panel=document.createElement('aside');panel.className='workspace-panel';panel.id='workspace-panel';panel.setAttribute('aria-label','Session workspace');panel.hidden=true;
@@ -47,7 +55,7 @@
     layout.append(panel);const q=s=>panel.querySelector(s),views=q('.panel-views'),parking=q('[data-parking]');
     const closingStatus=document.createElement('div');closingStatus.className='panel-empty';closingStatus.setAttribute('role','status');closingStatus.textContent='Closing tabs…';closingStatus.hidden=true;views.append(closingStatus);
     if(activity){parking.append(activity);activity.hidden=false;}
-    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,sourceRef:t.sourceRef,url:t.url,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
+    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,handoff:lastHandoff,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,sourceRef:t.sourceRef,url:t.url,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
     function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');layout.closest('.workspace')?.style.setProperty('--workspace-panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
     resize(width);q('.panel-resize').setAttribute('aria-valuemin','30');q('.panel-resize').setAttribute('aria-valuemax','70');
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
@@ -107,6 +115,7 @@
     function outside(e){if(!panel.contains(e.target))menu(false);}document.addEventListener('pointerdown',outside);
     panel.addEventListener('keydown',e=>{if(e.key==='Escape'&&!q('.panel-menu').hidden){menu(false);q('[data-add]').focus();}});
     function make(kind,data={}){
+      if(run.private_owner_id && kind==='chat'){toast('Side chats are unavailable for private sessions. Start a separate private web chat from Settings.');return null;}
       if(kind==='pr'){
         const receipt=pullRequests.find(pr=>pr.url.toLowerCase()===String(data.url).toLowerCase());
         if(!receipt)return null;
@@ -148,9 +157,9 @@
       t.element.remove();tabs.delete(id);reconcile();
     }
     function good(t){return !disposed&&tabs.get(t.id)===t;}
-    function error(t,e){if(good(t))MoyaiUI.render(t.element, `<div class="panel-empty" role="alert">${esc(e.message)}<p><button type="button" data-retry>Retry</button></p></div>`);t.element.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t));}
+    function error(t,e){if(good(t))MoyaiUI.render(t.element, `<div class="panel-empty" role="alert">${esc(e.message)}<p><button type="button" data-retry>Retry</button></p></div>`);t.element.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t,true));}
     function loading(t){MoyaiUI.render(t.element, '<div class="panel-empty" role="status">Loading…</div>');}
-    async function mount(t){
+    async function mount(t,refresh=false){
       const epoch=t.epoch=(t.epoch||0)+1;const current=()=>good(t)&&epoch===t.epoch;
       if(t.kind==='pulls'){renderPulls(t.element);return;}
       if(t.kind==='agents'){renderAgents(t.element);return;}
@@ -163,7 +172,7 @@
           },
           load:({refresh=false,page,head_sha,base_sha}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}${page?`&page=${page}&head_sha=${encodeURIComponent(head_sha||'')}&base_sha=${encodeURIComponent(base_sha||'')}`:''}`,{recent:!refresh})}));return;
       }
-      if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
+      if(t.kind==='computer'){t.activate=()=>{const options=t.handoff||{};t.handoff=null;return computer.open(run.id,t.element,options);};t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}
       if(t.kind==='activity'){
         t.element.append(activity);
@@ -175,9 +184,9 @@
       if(t.kind==='chat'){mountChat(t);return;}
       t.renderPreview=null;loading(t);
       try{
-        const catalog=await api(`/api/runs/${run.id}/files`);if(!current())return;
         if(t.kind==='files'){
-          MoyaiUI.render(t.element, '<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><p class="panel-footnote">Latest saved version · Select a file to open it in a tab.</p>');
+          let catalog={files:[]};
+          MoyaiUI.render(t.element, '<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><div class="panel-footnote" data-file-status role="status">Loading saved files…</div>');
           t.expandedFolders??=new Set();
           const input=t.element.querySelector('input');input.value=t.fileSearch||'';
           function list(){
@@ -188,13 +197,24 @@
               if(term||!folder.isConnected)return;
               if(folder.open)t.expandedFolders.add(folder.dataset.folder);else t.expandedFolders.delete(folder.dataset.folder);
             });
-            t.element.querySelectorAll('[data-file]').forEach(b=>b.onclick=()=>openFile(files[Number(b.dataset.file)]));
+            t.element.querySelectorAll('[data-file]').forEach(b=>b.addEventListener('click',()=>openFile(files[Number(b.dataset.file)])));
           }
-          t.element.querySelector('input').oninput=list;t.element.querySelector('[data-refresh]').onclick=()=>mount(t);list();return;
+          input.oninput=list;
+          t.element.querySelector('[data-refresh]').addEventListener('click',()=>mount(t,true));
+          await MoyaiFiles.loadCatalog(api,run.id,{refresh,onUpdate:data=>{
+            if(!current())return;
+            catalog=data;list();
+            const status=t.element.querySelector('[data-file-status]');
+            MoyaiUI.render(status, data.error?`${esc(data.error)} <button type="button" data-retry>Retry workspace files</button>`:
+              data.archive_pending?'Loading remaining workspace files…':'Latest saved version · Select a file to open it in a tab.');
+            status.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t,true));
+          }});
+          return;
         }
-        const file=catalog.files.find(f=>f.archive_path===t.path);if(!file)throw new Error('This file is no longer in the latest saved workspace. Open Files to choose another.');
+        const catalog=await MoyaiFiles.loadCatalog(api,run.id,{refresh,filePath:t.path});if(!current())return;
+        const file=catalog.files.find(f=>f.archive_path===t.path);if(!file&&catalog.error)throw new Error(catalog.error);if(!file)throw new Error('This file is no longer in the latest saved workspace. Open Files to choose another.');
         t.title=file.name;draw();MoyaiUI.render(t.element, `<header class="panel-file-heading"><div><strong>${esc(file.name)}</strong><small>${esc(file.path)}</small></div><a href="${esc(file.url)}" download="${esc(file.name)}">↓ Download</a><button type="button" data-refresh aria-label="Refresh file">↻</button></header><div class="panel-file-content"></div>`);
-        const content=t.element.querySelector('.panel-file-content');t.element.querySelector('[data-refresh]').onclick=()=>mount(t);
+        const content=t.element.querySelector('.panel-file-content');t.element.querySelector('[data-refresh]').addEventListener('click',()=>mount(t,true));
         if(file.inline_url&&['image','video'].includes(file.kind)){content.classList.add('panel-media');MoyaiUI.render(content, file.kind==='video'?`<video controls preload="metadata" src="${esc(file.inline_url)}"></video>`:`<img src="${esc(file.inline_url)}" alt="${esc(file.name)}">`);}
         else{
           const result=await api(file.preview_url);if(!current()||!content.isConnected)return;
@@ -218,7 +238,7 @@
         clearTimeout(timer);const v=++version;
         if(!viewActive||document.hidden||!good(t))return;
         try{
-          const catalog=await api(`/api/runs/${run.id}/files`).catch(e=>{if(e.status===404)return {files:[]};throw e;});
+          const catalog=await api(`/api/runs/${run.id}/files?view=media`,{timeoutMs:30000}).catch(e=>{if(e.status===404)return {files:[]};throw e;});
           if(v!==version||!viewActive||!good(t))return;
           files=catalog.files.filter(file=>file.archive_path.startsWith('capture:'));
           const next=JSON.stringify(files);
@@ -274,7 +294,15 @@
       const toggle=document.querySelector('#subagents-button');if(toggle){toggle.hidden=!agents.length;toggle.title=`Subagents (${agents.length})`;}
       for(const t of tabs.values())if(t.kind==='agents')renderAgents(t.element);
     }
-    function syncSession(data){syncAgents(data);syncPullRequests(data);}
+    function revealHandoff(){
+      if(disposed||document.hidden)return;
+      const event=handoffFor(latestSession,user,lastHandoff);if(!event)return;
+      const t=make('computer');if(!t)return;
+      lastHandoff=event.id;t.handoff={wake:true,reason:event.data.reason};
+      if(visible&&active===t.id)t.activate();else select(t.id);
+      save();
+    }
+    function syncSession(data){if(disposed||data.id!==run.id)return;latestSession=data;syncAgents(data);syncPullRequests(data);revealHandoff();}
     function renderPulls(host){
       MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Pull requests</h2><span>${pullRequests.length}</span></header><div class="pull-request-list">${pullRequests.map(pr=>`<a class="pull-request-row" href="${esc(pr.url)}" data-pr-url="${esc(pr.url)}" title="${esc(pr.title)}" target="_blank" rel="noopener noreferrer"><span class="pull-request-icon">${ico('pull',18)}</span><span><strong>${esc(pr.title)}</strong><small>${esc(pr.repository)} #${pr.number}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Pull requests created in this session will appear here.</p>'}</div>`);
     }
@@ -384,7 +412,7 @@
     }
     function menuItems(search){
       // Search both the saved original request and its display title.
-      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Review this session’s PR details and changes'},{kind:'agents',title:'Subagents',detail:'Follow the agents assigned to this session'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Review this session’s PR details and changes'},{kind:'agents',title:'Subagents',detail:'Follow the agents assigned to this session'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>(!run.private_owner_id||i.kind!=='chat')&&(i.chatId||i.title.toLowerCase().includes(search)));
     }
     function syncTitles(rows){
       // Do not replace chat tabs or drafts when a background title arrives.
@@ -401,9 +429,9 @@
     }
     initial.tabs.forEach(t=>{if(t.kind!=='computer'||run.mode==='modal')make(t.kind,t);});
     if(initial.visible&&tabs.size)select(tabs.has(initial.active)?initial.active:tabs.keys().next().value);else{active=initial.active;draw();}
-    restoring=false;save();
-    api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
-    return {open,openFile,openPullRequest,syncPullRequests,syncSession,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabHost.removeEventListener('click',tabClick);toolHost.removeEventListener('click',toolClick);tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-session-tools');}};
+    restoring=false;save();document.addEventListener('visibilitychange',revealHandoff);
+    if(!run.private_owner_id)api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
+    return {open,openFile,openPullRequest,syncPullRequests,syncSession,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabHost.removeEventListener('click',tabClick);toolHost.removeEventListener('click',toolClick);tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);document.removeEventListener('visibilitychange',revealHandoff);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-session-tools');}};
   }
-  return {create,restore,fileTree,renderFileTree,prUrl};
+  return {create,restore,fileTree,renderFileTree,prUrl,handoffFor};
 });

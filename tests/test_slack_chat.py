@@ -946,10 +946,14 @@ def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(
     finish(app, run_id, 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>. Not <@U00000001>, <@U99999999>, <!channel> or `<@U0B1TDTHL4Q>`')
     app.state.slack.chat.last_post.clear()
     client.portal.call(app.state.slack.chat.deliver_one)
-    text = sent[-1]['text']
+    # Status/activity requests can complete after the answer. Inspect the
+    # answer itself rather than whichever Slack request happened to finish last.
+    wait_for(lambda: any(item.get('text', '').startswith('Credit to ') for item in sent))
+    answer = next(item for item in sent if item.get('text', '').startswith('Credit to '))
+    text = answer['text']
     assert 'Credit to <@U0B1TDTHL4Q> and <@U0C59A1GHPD>.' in text
     assert 'Not &lt;@U00000001&gt;, &lt;@U99999999&gt;, &lt;!channel&gt; or `&lt;@U0B1TDTHL4Q&gt;`' in text
-    assert sent[-1]['blocks'][0]['text']['text'].startswith('Credit to <@U0B1TDTHL4Q>')
+    assert answer['blocks'][0]['text']['text'].startswith('Credit to <@U0B1TDTHL4Q>')
 
 
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):
@@ -1289,7 +1293,10 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
 
 
 @pytest.mark.parametrize('background_claim', [False, True])
-def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, monkeypatch, background_claim):
+@pytest.mark.parametrize('clear_after_answer', [False, True])
+def test_acknowledgment_is_native_status_without_periodic_chatter(
+    slack_app, monkeypatch, background_claim, clear_after_answer,
+):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     client.post('/hooks/slack/events', **signed(event('EvDuplicateType', type='message')))
@@ -1330,14 +1337,22 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, mon
             release.set()
 
     client.portal.call(deliver)
-    # A background watcher can already own the answer when deliver_one returns.
+    # The watcher can own the send, and a native status clear can follow it.
+    # Assert the saved receipt and actual chat replies, not the last API call.
     wait_for(lambda: app.state.store.rows(
-        "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' AND status='sent'", (run_id,),
+        "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' AND status='sent'",
+        (run_id,),
     ))
-    client.portal.call(chat.activity.sync)
-    # Native working-status/clear calls share this capture and have no text.
-    answers = [message for message in slack_app[3] if 'text' in message]
-    assert len(answers) == 1 and answers[0]['text'].startswith('Here is the answer.')
+    if clear_after_answer:
+        client.portal.call(chat.activity.sync)
+        # The background watcher can already own the clear. Its durable attempt
+        # makes this sync a no-op while the actual Slack request is in flight.
+        wait_for(lambda: [message['status'] for message in slack_app[3] if 'status' in message][-1] == '')
+        assert [message['status'] for message in slack_app[3] if 'status' in message][-1] == ''
+    replies = [message for message in slack_app[3] if 'text' in message]
+    assert len(replies) == 1
+    assert replies[0]['text'].startswith('Here is the answer.')
+    assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind IN ('ack','progress','control')")
 
 
 def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):

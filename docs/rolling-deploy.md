@@ -12,6 +12,34 @@ without deployment, useful after configuration changes. It is not a required
 separate run. An incompatible schema, contract or shared configuration is rejected
 before deployment and needs a separately planned transition.
 
+Rolling **preflight_only** also repeats the four-service read checks for three
+rounds after the initial baseline. This exercises repeated SSH commands without
+changing environments, deploying containers, or applying a migration. Failed SSH
+checks record only fixed error categories, exit codes, elapsed time, authentication
+and command-request milestones, and whether probe output arrived. Raw SSH output
+and command arguments are never written to the receipt. A connection failure after
+any stdout is terminal: an incomplete observation must not be discarded in favor
+of a later healthy sample. These diagnostics identify deployment transport failures;
+they do not establish that production continuity has been verified.
+
+Read-only rolling observations reuse one owned OpenSSH connection per service and
+accepted deployment ID. Each observation still starts a fresh remote interpreter;
+no readiness, schema, policy or ownership result is cached. Before changing a
+selected service, the controller closes its connection. A stale environment or
+predecessor identity during candidate polling also closes it before the next
+observation, so a reused connection cannot pin those polls to an old container.
+Unaffected services keep their connections. Missing or disconnected control
+sockets fail locally rather than opening an untracked fallback connection.
+
+A failed command is never replayed by this transport. The controller's existing
+bounded read-only retries remain in charge. Named pre-authentication connection
+failures delay a subsequent connection by 10 seconds, then at most 20 seconds;
+that delay shares the observation's original timeout budget. Authentication,
+host identity and ambiguous-output failures remain terminal. All owned masters
+and private control sockets are cleaned up on completion or cancellation. Online
+migration commands remain separate, single-shot connections without multiplexing.
+This reduces connection churn; it does not establish a provider connection limit.
+
 This mode replaces the worker, broker, coordinator and API in that order. Users
 can continue sending messages and admitted work stays under its existing durable
 ownership. Each replacement must become healthy, and its predecessor must retire,
@@ -46,8 +74,8 @@ separately planned initial migration and routing activation before enabling it:
   implements the correlated rolling health headers. Set environment variable
   `MOYAI_API_SERVICE_ID` in GitHub's `moyai-production` environment to the activated
   API service; retain the existing deployment and SSH credentials. SSH runtime
-  probes are read-only; an approved online schema plan uses the same private
-  connection to the coordinator's installed migration engine.
+  probes are read-only; an approved online schema plan uses a separate, single-shot
+  SSH connection to the coordinator's installed migration engine.
 
 The controller rejects the old singleton-broker/whole-cluster build contract,
 local disks, unverified schemas, staged services, mismatched saved build labels,
@@ -187,6 +215,14 @@ recovery. These simulated checks do not establish live deployment continuity.
 and validates HTTP process correlation. These tests do not deploy Render or
 establish production latency. The first activated production release still needs
 an observed continuous-traffic rehearsal with bounded inference streams.
+
+The transport also has a loopback-only OpenSSH rehearsal. It generates temporary
+synthetic host/client keys and starts local `sshd`; it contacts no provider. Run
+`python -m scripts.release.rehearse_ssh` with OpenSSH client/server installed. It
+checks fresh interpreter execution over one reused connection, no implicit direct
+fallback after a socket disappears or master exits, instance switching after
+invalidation, preservation of an unaffected connection, and cleanup. This local
+transport proof is separate from the required production continuity rehearsal.
 
 ```sh
 MOYAI_TEST_POSTGRES_URL=postgresql://... uv run --frozen --python 3.13 pytest -q tests/release

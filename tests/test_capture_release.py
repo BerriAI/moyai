@@ -254,7 +254,7 @@ async def test_computer_mutation_waiting_for_ui_lock_rechecks_shutdown(workspace
     lock = hub.locks[run_id] = asyncio.Lock()
     await lock.acquire()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=app.state.settings.public_url,
-                                cookies=client.cookies, headers=client.headers) as browser:
+                                cookies=client.cookies.jar, headers=client.headers) as browser:
         post = asyncio.create_task(browser.post(f'/api/runs/{run_id}/computer', json={'action': 'record_start'}))
         await asyncio.sleep(0)
         if closing == 'stopping':

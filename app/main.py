@@ -1,3 +1,4 @@
+from .session_privacy import SessionPrivacy
 import asyncio
 import hmac
 import json
@@ -25,6 +26,7 @@ from .config import Settings
 from .static_assets import versioned_index
 from .connectors import Connectors, ConnectorError, TOOLS, RETRY_SAFE_READS
 from .db import Store, now, database
+from .tool_dispatch import ToolDispatch, ToolRejected
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
@@ -92,6 +94,7 @@ class NewRun(BaseModel):
     mode: Literal["demo", "modal"] = "demo"
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
     environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
+    private_session: bool = Field(default=False, strict=True)
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list)
@@ -134,6 +137,8 @@ class Decision(BaseModel):
 class ToolCall(BaseModel):
     name: str = Field(max_length=80)
     arguments: dict
+    input_id: int | None = Field(default=None, gt=0)
+    request_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
 
 
 class Login(BaseModel):
@@ -212,6 +217,8 @@ def create_app(settings: Settings | None = None):
 def _create_app(settings, store):
     user_roles = UserRoles(store, settings)
     security = Security(settings, user_roles)
+    privacy = SessionPrivacy(store, security)
+    store.session_privacy = security.session_privacy = privacy
     from .sandbox_settings import SandboxSettings
     sandbox_settings = SandboxSettings(store, settings, security)
     connectors = Connectors(store, security, settings)
@@ -275,6 +282,8 @@ def _create_app(settings, store):
     from .message_queue import MessageQueue
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
     identities = SlackIdentities(store, connectors, settings, security, checkpoints, credentials.same_requester)
+    personal_slack = connectors.personal_slack
+    credentials.personal_slack = personal_slack
     connectors.slack_identities = identities
     slack.identities = identities
     manager.prepare_context = slack.prepare
@@ -472,6 +481,10 @@ def _create_app(settings, store):
         from .broker_ownership import BrokerOwnershipMiddleware
         app.add_middleware(BrokerOwnershipMiddleware, owner=broker_requests)
     app.state.broker_requests = broker_requests
+    app.state.personal_slack = personal_slack
+    personal_slack.same_requester = credentials.same_requester
+    personal_slack_callback = personal_slack.routes(app, checkpoints=checkpoints)
+    app.state.session_privacy = privacy
     app.state.session_lifecycle = session_lifecycle
     app.state.session_maintenance = session_maintenance
     app.state.lens_feedback = lens_feedback
@@ -775,7 +788,7 @@ def _create_app(settings, store):
         memberships = session_folders.memberships(owner)
         pins = session_folders.pins(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
-        parent_id = store.root_id(selected['id']) if selected else ''
+        parent_id = store.root_id(selected['id']) if privacy.can_access(selected, owner) else ''
         search = search.strip().lower()
         ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, *pins, parent_id],
                                     archive_owner=owner, archived=archived, pin_owner=owner,
@@ -794,7 +807,7 @@ def _create_app(settings, store):
                            'folder_id': memberships.get(run_id), 'children': []}
         nodes = dict(runs)
         for child in store.subtrees(list(runs), sidebar=True):
-            if child['id'] not in runs and not child['deleted_at']:
+            if child['id'] not in runs and not child['deleted_at'] and privacy.can_access(child, owner):
                 visible = public_run(child)
                 nodes[child['id']] = {**{key: visible[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at', 'active_message_id')},
                                      'archived': runs[child['ancestor_id']]['archived'], 'can_delete': False, 'children': []}
@@ -820,6 +833,9 @@ def _create_app(settings, store):
     async def create(body: NewRun, request: Request):
         received_at = now()
         await database(security.require, request, mutation=True)
+        private_owner_id = await database(privacy.individual_owner, request) if body.private_session else ''
+        if body.private_session and (body.side_chat_of or body.swarm or not body.chat_enabled):
+            raise HTTPException(422, 'Private sessions require a direct chat without derivation or swarms.')
         if body.swarm and (not settings.temporal_enabled or body.mode != 'modal'):
             raise HTTPException(422, 'Swarm mode requires the durable cloud runtime.')
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
@@ -828,6 +844,8 @@ def _create_app(settings, store):
             parent = await database(store.run, body.side_chat_of)
             if not parent or parent['deleted_at']:
                 raise HTTPException(404, 'Original session not found.')
+            await database(privacy.require_request, request, parent)
+            privacy.require_no_export(parent)
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
@@ -840,6 +858,8 @@ def _create_app(settings, store):
             if missing_cloud():
                 raise HTTPException(503, "Cloud setup is incomplete. See Runtime for the missing settings.")
             connected = {item["id"] for item in await database(connectors.list) if item["connected"] and item["enabled"]}
+            if private_owner_id and await database(personal_slack.configured, private_owner_id) and (await database(connectors.policy, 'slack'))['enabled']:
+                connected.add('slack')
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
         if body.mode == 'modal' and not metadata_request and (body.repo_url or body.github_repository_id):
@@ -859,7 +879,7 @@ def _create_app(settings, store):
                                    attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request,
                                    swarm_budget_seconds=body.swarm.budget_seconds if body.swarm else None,
                                    durable_submit=manager.submit_in if body.swarm else None,
-                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None, received_at=received_at)
+                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None, received_at=received_at, private_owner_id=private_owner_id)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -895,7 +915,8 @@ def _create_app(settings, store):
         return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
     def load_run_details(run_id, request, activity):
-        security.require(request)
+        # The route dependency authenticates and checks live-session access.
+        # Recheck ownership below against the same snapshot as the content.
         from .activity_history import projection
         actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
         if actor is None:
@@ -909,6 +930,7 @@ def _create_app(settings, store):
             run = store.run(run_id, connection=connection)
             if not run or run['deleted_at']:
                 raise HTTPException(404, "Task not found")
+            privacy.require_owner(run, actor)
             messages = public_messages(run, store.messages(run_id, connection=connection))
             activity_data = projection(connection, run, messages) if activity == 'summary' and run['chat_enabled'] else {
                 'events': store.events(run_id, limit=10000, connection=connection)}
@@ -916,9 +938,15 @@ def _create_app(settings, store):
             approvals = store.approvals(run_id, connection=connection)
             goal = store.goal(run_id, connection=connection)
             agents = coordinator.view(run_id, include_costs=admin, connection=connection)
+            feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'], connection=connection)
+            has_artifact = store.artifacts.info(run_id + '.zip', connection) is not None
+            # This returns only availability, not a capture listing. Use the
+            # authorized conversation snapshot and its existing pool slot.
+            capture_prefix = captures.directory(settings, run_id).name + '/'
+            has_captures = any(captures.valid_name(row['name'].removeprefix(capture_prefix))
+                               for row in store.artifacts.listing(capture_prefix, connection))
         project = environments.context(run)
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'])
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = metadata['workflow_root_id']
@@ -926,7 +954,7 @@ def _create_app(settings, store):
         archives = {sidebar_id} if metadata['archived'] else set()
         return {**public_run(run), **session_lifecycle.metadata(run, actor, admin, archives, root_id=sidebar_id),
                 **metadata['sidebar'],
-                'feedback_enabled': lens_feedback.enabled,
+                'feedback_enabled': lens_feedback.enabled and not privacy.is_private(run),
                 **activity_data, "approvals": approvals, "messages": messages,
                 'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
@@ -934,7 +962,7 @@ def _create_app(settings, store):
                 "agents": agents,
                 "credential_requests": credentials.pending(run,actor,admin),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": has_artifact, "has_captures": has_captures, "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
@@ -1018,7 +1046,7 @@ def _create_app(settings, store):
         received_at = now()
         # Validation and the enqueue transaction stay off the event loop so a
         # slow database cannot stall other conversations' streams and pages.
-        security.require(request, mutation=True)
+        await run_in_threadpool(security.require, request, mutation=True)
         run = await run_in_threadpool(store.run, run_id)
         if run and run.get('swarm') and not settings.temporal_enabled:
             raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
@@ -1266,6 +1294,8 @@ def _create_app(settings, store):
 
     @app.get("/oauth/{provider}/callback")
     async def oauth_callback(provider: Provider, request: Request, state: str = "", code: str = "", error: str = ""):
+        if provider == 'slack' and personal_slack.is_oauth_state(state):
+            return await personal_slack_callback(request, state=state, code=code, error=error)
         sid = security.require(request, admin=True)
         with store.connect() as conn:
             rows = conn.execute("DELETE FROM oauth_states WHERE state_hash=? AND provider=? AND session_id=? AND expires>? RETURNING state_hash",
@@ -1298,6 +1328,8 @@ def _create_app(settings, store):
         if (not run or run['deleted_at'] or run['deletion_requested_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
+        if privacy.is_private(run) and run['active_user_id'] != run['private_owner_id']:
+            raise HTTPException(403, 'Private session requester changed.')
         if enforce_swarm_time and (run.get('swarm') or run['parent_run_id']):
             # Admission reads current root policy even if its execution worker
             # is offline. An extension keeps the same authenticated capability;
@@ -1384,13 +1416,15 @@ def _create_app(settings, store):
         return {'steer_message_id': target}
 
     from .computer_operations import READ_TOOL as COMPUTER_OPERATION_READ
+    from .computer_handoff import TOOL as COMPUTER_HANDOFF, request_handoff
     computer_operations = manager.agent_runtime.operations if hasattr(manager, 'agent_runtime') else None
 
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
-                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
+        listed = [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL, COMPUTER_HANDOFF] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name, run)]
+        return [tool for tool in listed if privacy.allow_tool(run, tool["name"], TOOLS.get(tool["name"], (None, False))[1])]
 
     @app.get("/broker/{run_id}/tools")
     def tool_list(run_id: str, request: Request):
@@ -1423,9 +1457,59 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        dispatch = None
+        if run['harness'] == 'deepagents-temporal':
+            if body.input_id is None or body.request_id is None:
+                raise HTTPException(422, 'Durable tools require their input and stable request identities.')
+            dispatch = ToolDispatch(store, run, body)
+        try:
+            result = await execute_tool(run_id, request, run, body, dispatch)
+        except (Exception, asyncio.CancelledError) as exc:
+            if dispatch:
+                # A status code alone cannot prove no action happened: handlers
+                # can recheck scope after committing an internal write.
+                rejected = isinstance(exc, ToolRejected)
+                await database(dispatch.finish, {'dispatched': False} if rejected else None,
+                               outcome='rejected' if rejected else 'unknown')
+            raise
+        # Confirmed outcomes must survive cancellation during receipt persistence.
+        if dispatch:
+            await database(dispatch.finish, result)
+        return result
+
+    async def execute_tool(run_id, request, run, body, dispatch):
+        def rejected_result(error, **fields):
+            return {'error': error, **fields, **({'outcome': 'rejected', 'dispatched': False} if dispatch else {})}
+
+        if not privacy.allow_tool(run, body.name, TOOLS.get(body.name, (None, False))[1]):
+            privacy.require_no_export(run)
+        if body.name in CREDENTIAL_TOOLS and not credentials.tools(run):
+            raise HTTPException(403, 'Credential requests require a durable chat session.')
+        if body.name in AGENT_TOOLS and not coordinator.available(run):
+            raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
+        if body.name == 'computer_operation_read' and computer_operations is None:
+            raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
+        spec = CREDENTIAL_TOOLS.get(body.name) or AGENT_TOOLS.get(body.name)
+        if spec:
+            try:
+                spec[0].model_validate(body.arguments)
+            except ValidationError:
+                return rejected_result('Invalid credential tool arguments.' if body.name in CREDENTIAL_TOOLS
+                                       else 'Invalid agent arguments.')
+        if dispatch and body.name not in TOOLS:
+            receipt = await database(dispatch.claim)
+            if receipt is not None:
+                return receipt
+        if body.name == 'computer_handoff':
+            try:
+                result = await asyncio.to_thread(request_handoff, store, run, body.arguments)
+            except ValidationError:
+                raise ToolRejected(422, 'Supply a short handoff reason without credentials.') from None
+            except HTTPException as exc:
+                raise ToolRejected(exc.status_code, exc.detail, exc.headers) from None
+            await checkpoints.flush()
+            return result
         if body.name == 'computer_operation_read':
-            if computer_operations is None:
-                raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
             return await asyncio.to_thread(computer_operations.read, run, body.arguments)
         if body.name in ARTIFACT_SPECS:
             try:
@@ -1468,17 +1552,19 @@ def _create_app(settings, store):
             try:
                 DiagnosticArgs.model_validate(body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Workspace diagnostics takes no arguments and only reads the current session.') from None
+                raise ToolRejected(422, 'Workspace diagnostics takes no arguments and only reads the current session.') from None
             return inspect_workspace(store, connectors, run, workspace_catalog(run))
         if body.name in MEDIA_TOOLS:
             try:
                 result = await asyncio.to_thread(media_shares.call, run, body.name, body.arguments)
             except ValidationError:
-                result = {'error': 'Invalid media arguments. Use media_list and the current tool schema.', 'status_code': 422}
+                result = rejected_result('Invalid media arguments. Use media_list and the current tool schema.', status_code=422)
             except HTTPException as exc:
                 if exc.status_code == 401:
                     raise
-                result = {'error': exc.detail, 'status_code': exc.status_code}
+                result = {'error': exc.detail, 'status_code': exc.status_code,
+                          **({'outcome': 'rejected' if 400 <= exc.status_code < 500 else 'unknown',
+                             'dispatched': not 400 <= exc.status_code < 500} if dispatch else {})}
             await checkpoints.flush()
             return result
         if body.name == 'sessions_read':
@@ -1486,19 +1572,21 @@ def _create_app(settings, store):
             try:
                 return await asyncio.to_thread(read_session, session_lifecycle, run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Use a session ID or URL, nonnegative cursors, and a positive page size.') from None
+                raise ToolRejected(422, 'Use a session ID or URL, nonnegative cursors, and a positive page size.') from None
         if body.name == 'sessions_search':
             try:
                 return session_lifecycle.search(run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Enter session search keywords (1-200 characters) and a limit from 1 to 20.') from None
+                raise ToolRejected(422, 'Enter session search keywords (1-200 characters) and a limit from 1 to 20.') from None
         if body.name in MODEL_TOOLS:
             try:
                 result = model_tools.call(run, body.name, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Invalid model arguments. Use model_list and the current tool schema.') from None
+                raise ToolRejected(422, 'Invalid model arguments. Use model_list and the current tool schema.') from None
+            except HTTPException as exc:
+                raise ToolRejected(exc.status_code, exc.detail, exc.headers) from None
             except ValueError as exc:
-                raise HTTPException(422, str(exc)) from None
+                raise ToolRejected(422, str(exc)) from None
             await checkpoints.flush()
             return result
         if body.name in AUTOMATION_TOOLS:
@@ -1512,58 +1600,56 @@ def _create_app(settings, store):
             try:
                 result = memory.call(run, body.name, body.arguments)
             except ValidationError:
-                result = {'error': 'Invalid memory arguments. Check the current turn, text limits and tool schema.', 'status_code': 422}
+                result = rejected_result('Invalid memory arguments. Check the current turn, text limits and tool schema.', status_code=422)
             except HTTPException as exc:
                 if exc.status_code not in {403, 404, 409, 422}:
                     raise
                 # A definite rejection is a tool receipt, not an uncertain
                 # transport failure that prevents the runtime from continuing.
-                result = {'error': exc.detail, 'status_code': exc.status_code}
+                result = rejected_result(exc.detail, status_code=exc.status_code)
             await checkpoints.flush()
             return result
         if body.name == 'automation_claim_item':
             try:
                 result = automations.claim(run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Invalid item key.') from None
+                raise ToolRejected(422, 'Invalid item key.') from None
             await checkpoints.flush()
             return result
         if body.name in SKILL_TOOLS:
             try:
                 result = await asyncio.to_thread(skills.call, run, body.name, body.arguments)
             except ValidationError:
-                result = {'error': 'Invalid skill arguments. Check the tool schema, text limits and relative file paths.', 'status_code': 422}
+                result = rejected_result('Invalid skill arguments. Check the tool schema, text limits and relative file paths.', status_code=422)
             except HTTPException as exc:
                 if exc.status_code not in {403, 404, 409, 413, 422}:
                     raise
                 # Definite skill rejections are recoverable tool receipts.
                 # A missing skill or revision conflict must not abort a sync.
-                result = {'error': exc.detail, 'status_code': exc.status_code}
+                result = rejected_result(exc.detail, status_code=exc.status_code)
             await checkpoints.flush()
             return result
         if body.name in CREDENTIAL_TOOLS:
-            if not credentials.tools(run):
-                raise HTTPException(403,'Credential requests require a durable chat session.')
             try:
                 result = await credentials.call(run, body.name, body.arguments)
-                await checkpoints.flush()
-                return result
             except ValidationError:
-                return {'error':'Invalid credential tool arguments.'}
+                return {'error': 'Saved credential state could not be validated.', 'outcome': 'unknown'}
             except ValueError as exc:
-                return {'error':str(exc)}
+                return {'error': str(exc), 'outcome': 'unknown'}
+            await checkpoints.flush()
+            return result
         if body.name in AGENT_TOOLS:
-            if not coordinator.available(run):
-                raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
             try:
                 result = await coordinator.call(run_id, body.name, body.arguments, caller=run)
-                await checkpoints.flush()
-                return result
-            except (ValueError, ValidationError) as exc:
-                # Do not include validation payloads or private provider errors.
-                return {'error': 'Invalid agent arguments.' if isinstance(exc, ValidationError) else str(exc)}
+            except ValidationError:
+                return {'error': 'Saved agent state could not be validated.', 'outcome': 'unknown'}
+            except ValueError as exc:
+                # A group may already have been saved before snapshot/queue failure.
+                return {'error': str(exc), 'outcome': 'unknown'}
+            await checkpoints.flush()
+            return result
         if body.name not in TOOLS or TOOLS[body.name][0] not in run["plugins"]:
-            raise HTTPException(403, "This tool is not enabled for this task.")
+            raise ToolRejected(403, "This tool is not enabled for this task.")
         provider, write, schema, _ = TOOLS[body.name]
         try:
             arguments = schema.model_validate(body.arguments).model_dump()
@@ -1573,7 +1659,14 @@ def _create_app(settings, store):
                     'outcome_uncertain': False, 'retryable': False,
                     'fields': [{'path': list(error['loc']), 'code': error['type']}
                                for error in exc.errors(include_input=False, include_context=False)]}
-        if not connectors.allowed(body.name):
+        if body.name in {'slack_search', 'slack_thread', 'slack_channel'} and not arguments.get('as_bot'):
+            try:
+                owner = personal_slack.selected_owner(run)
+                if personal_slack.configured(owner):
+                    personal_slack.eligible(run, owner)
+            except ConnectorError as exc:
+                return ConnectorError(str(exc), code='access_denied', dispatched=False).receipt(write=write)
+        if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return ConnectorError("This operation is disabled by the organization's connection policy.",
                                   code='access_denied', dispatched=False).receipt(write=write)
         if provider == 'github':
@@ -1581,13 +1674,17 @@ def _create_app(settings, store):
                 await connectors.github.ensure_connection()
             except ConnectorError as exc:
                 return ConnectorError(str(exc), code=exc.code, dispatched=False).receipt(write=write)
-            run = {**store.run(run_id), 'github_connection_version': connectors.github.connection_version()}
+            run = {**run, 'github_connection_version': connectors.github.connection_version()}
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)
-        if not connectors.allowed(body.name):
+        if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return ConnectorError('The organization connection changed. No action was sent.',
                                   code='access_changed', dispatched=False).receipt(write=write)
+        if dispatch:
+            receipt = await database(dispatch.claim)
+            if receipt is not None:
+                return receipt
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run, arguments) if body.name == 'linear_my_issues'
@@ -1606,6 +1703,7 @@ def _create_app(settings, store):
     @app.post('/broker/{run_id}/credentials/materialize')
     async def credential_materialize(run_id: str, request: Request):
         run = require_run(run_id, request)
+        privacy.require_no_export(run)
         if not credentials.tools(run):
             raise HTTPException(403, 'Credential access requires a durable chat session.')
         try:
@@ -1836,7 +1934,7 @@ def _create_app(settings, store):
                     if not capture.done:
                         raise HTTPException(502, 'Model gateway returned an invalid completion.')
                     status = 'completed'
-                    trace_response = json.loads(raw_response)
+                    trace_response = json.loads(raw_response) if not privacy.is_private(run) else {}
             except httpx.HTTPError as exc:
                 error = model_error(exc)
                 raise HTTPException(502, 'Model gateway could not be reached.',
@@ -1854,8 +1952,9 @@ def _create_app(settings, store):
                 spend.finish(request_id, capture, status)
                 if status == 'completed':
                     context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
-                tracing.model(run, request_id, trace_started, body['messages'],
-                              {**trace_response, **capture.response}, status, gateway_id=gateway_id, error=error)
+                if not privacy.is_private(run):
+                    tracing.model(run, request_id, trace_started, body['messages'],
+                                  {**trace_response, **capture.response}, status, gateway_id=gateway_id, error=error)
                 await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:

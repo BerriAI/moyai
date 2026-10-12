@@ -331,6 +331,13 @@ button:hover { background: var(--soft); }
   button { transition: none; }
 }
 
+/* A real sculpture at the constellation anchor; only its canvas captures drag. */
+.welcome-mark canvas { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:152px; height:152px; touch-action:none; cursor:grab; border-radius:50%; }
+.welcome-mark canvas.dragging { cursor:grabbing; }
+.welcome-mark canvas:focus-visible { outline:2px solid var(--purple); outline-offset:4px; }
+.welcome-mark.sculpture-ready img { visibility:hidden; }
+.welcome-mark.sculpture-ready .welcome-orbit { opacity:.45; }
+
 /* Subagent identity is independent of the adjacent live status indicator. */
 .agent-identity{display:inline-flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;height:22px;border-radius:6px;background:color-mix(in srgb,currentColor 12%,transparent)}
 .agent-identity-blue{color:var(--ui-primary)}

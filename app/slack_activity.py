@@ -3,6 +3,7 @@
 Unlike chat messages, setting a status is idempotent and safe to retry. Slack
 expires it after two minutes and clears it whenever the bot posts a reply.
 """
+from .private_sinks import private_run
 import asyncio
 import logging
 import time
@@ -32,7 +33,7 @@ class SlackActivity:
         self.store = owner.store
 
     def status_for(self, row):
-        if row['paused']:
+        if private_run(self.store, row['run_id']) or row['paused']:
             return ''
         state = response_status({**row, 'status': row['run_status']})
         if row['queued'] and state in {'idle', 'completed'}:
@@ -87,6 +88,8 @@ class SlackActivity:
         await asyncio.gather(*(self.send(run_id, status) for run_id, status in pending))
 
     async def send(self, run_id, status):
+        if private_run(self.store, run_id):
+            return
         stamp = time.time()
         # Record even an ambiguous attempt so completion/restart clears it.
         await database(self.store.execute, '''INSERT INTO slack_activity(run_id,status,refreshed_at,retry_at)

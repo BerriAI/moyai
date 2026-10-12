@@ -2,7 +2,11 @@
 
 
 def tool_guidance(harness):
-    if harness == 'hermes':
+    if harness == 'deepagents-temporal':
+        discovery = ('Use workspace_tools to discover authorized names and input schemas, then workspace_call '
+                     'with the exact name and a JSON arguments object. Load bundled_skill_read or personal skills '
+                     'only when relevant. Computer tools own files, terminals and browsers. ')
+    elif harness == 'hermes':
         discovery = (
             'Workspace MCP tools load on demand through tool_search, tool_describe, and tool_call. '
             'Search by service and action, describe the exact matching names, then invoke them through tool_call. '

@@ -42,7 +42,7 @@ def execute(payload):
     settings = Settings(
         _env_file=None, data_dir=state / 'broker', public_url=broker_url,
         litellm_api_base=payload['model_base_url'], litellm_api_key=payload['model_api_key'],
-        agent_model=payload['model'], temporal_enabled=False,
+        agent_model=payload['model'], agent_harness=payload['harness'], temporal_enabled=False,
         session_titles_enabled=False, memory_review_enabled=False,
         litellm_spend_recovery_enabled=False,
         trace_environment='lens-eval', moyai_build_sha=payload['version'],

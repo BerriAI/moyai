@@ -3,6 +3,7 @@
 Content is encrypted at rest. Search returns references; selected notes are
 resolved afresh at the model broker, never copied into sandbox tool results.
 """
+from .private_sinks import deny_export
 import hashlib
 import json
 import re
@@ -165,6 +166,7 @@ class Memory:
 
     def active(self, run, turn_id=None):
         # Refresh so stale capabilities cannot write for a new requester.
+        deny_export(self.store, run['id'])
         previous = run
         run = self.store.run(run['id'])
         if run and any(previous.get(key) != run.get(key) for key in ('token_hash', 'active_message_id', 'active_user_id')):
@@ -221,6 +223,10 @@ class Memory:
 
     def save_in(self, conn, owner, body, *, source=None, run=None, note_id=''):
         """Shared storage checks; caller owns the transaction and authorization."""
+        if run:
+            deny_export(self.store, run['id'], conn)
+        if source and source.get('run_id'):
+            deny_export(self.store, source['run_id'], conn)
         confirmed = self.repository_scopes(run) if run else []
         if body.repository_id is not None:
             chosen = next((r for r in confirmed if r['id'] == body.repository_id), None)

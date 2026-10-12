@@ -3,11 +3,15 @@
 Never extract agent-controlled paths onto the server. A revision pins previews
 and downloads to the archive the user selected, rather than a later overwrite.
 """
-from collections import Counter
+from collections import Counter, OrderedDict
+from concurrent.futures import Future, TimeoutError
 from contextlib import contextmanager
+import json
 from pathlib import PurePosixPath
 import re
 import stat
+import threading
+from typing import Literal
 from urllib.parse import quote, urlencode
 import zipfile
 import zlib
@@ -17,8 +21,60 @@ from fastapi.responses import Response, StreamingResponse
 from . import captures
 from .attachments import inspect_file, IMAGE_PREVIEW_BYTES
 from .published_artifacts import text_page
+from .private_sinks import require_owner, require_request_owner
 
 PREVIEW_PAGE = 128 * 1024
+
+
+class ArchiveCatalog:
+    """Bounded, per-app metadata cache; never retains private archive bytes.
+
+    A current manifest lookup and authorization precede every use. Revisions
+    pin entries, and concurrent readers share one verified archive download.
+    Each process owns its cache; no cross-worker coordination is implied.
+    """
+
+    def __init__(self, max_bytes=8 * 1024 * 1024, max_entries=32):
+        self.max_bytes, self.max_entries = max_bytes, max_entries
+        self.entries, self.pending = OrderedDict(), {}
+        self.size = 0
+        self.lock = threading.Lock()
+
+    def read(self, key, load):
+        with self.lock:
+            if key in self.entries:
+                encoded = self.entries[key]
+                self.entries.move_to_end(key)
+                return json.loads(encoded)
+            future = self.pending.get(key)
+            owner = future is None
+            if owner:
+                if len(self.pending) >= 16:
+                    raise HTTPException(503, 'Saved files are busy. Retry in a moment.')
+                future = self.pending[key] = Future()
+        if not owner:
+            try:
+                return json.loads(future.result(timeout=30))
+            except TimeoutError:
+                raise HTTPException(503, 'The saved workspace is still loading. Retry in a moment.') from None
+        try:
+            value = load()
+            encoded = json.dumps(value).encode()
+            with self.lock:
+                if len(encoded) <= self.max_bytes:
+                    self.entries[key] = encoded
+                    self.size += len(encoded)
+                    while len(self.entries) > self.max_entries or self.size > self.max_bytes:
+                        _, removed = self.entries.popitem(last=False)
+                        self.size -= len(removed)
+            future.set_result(encoded)
+            return value
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with self.lock:
+                self.pending.pop(key, None)
 
 
 def safe_member(info):
@@ -34,7 +90,8 @@ def safe_member(info):
 
 
 @contextmanager
-def saved_archive(settings, store, run_id, revision=None):
+def saved_archive(settings, store, run_id, revision=None, *, actor=""):
+    require_owner(store, run_id, actor)
     if not re.fullmatch(r'[0-9a-f]{32}', run_id) or not store.run(run_id):
         raise HTTPException(404, 'Session not found.')
     name = run_id + '.zip'
@@ -49,6 +106,7 @@ def saved_archive(settings, store, run_id, revision=None):
             entries = archive.infolist()
             counts = Counter(i.filename for i in entries)
             files = {i.filename: i for i in entries if safe_member(i) and counts[i.filename] == 1}
+            require_owner(store, run_id, actor)
             yield archive, files, current, len(entries) - len(files)
     except FileNotFoundError:
         raise HTTPException(404, 'No saved files are available yet.') from None
@@ -68,28 +126,49 @@ def file_info(run_id, info, revision):
 
 def routes(settings, store, security, published=None):
     router = APIRouter()
+    catalogs = ArchiveCatalog()
 
     @router.get('/api/runs/{run_id}/files')
-    def list_files(run_id: str, request: Request):
-        security.require(request)
-        media = captures.listing(settings, run_id, store=store) if store.run(run_id) else []
+    def list_files(run_id: str, request: Request, view: Literal['all', 'media'] = 'all'):
+        actor = require_request_owner(store, security, request, run_id)
+        if not re.fullmatch(r'[0-9a-f]{32}', run_id):
+            raise HTTPException(404, 'Session not found.')
+        media = captures.listing(settings, run_id, store=store, actor=actor)
         outputs = published.listing(run_id) if published else []
         media = outputs + media
-        if media and store.artifacts.info(run_id + '.zip') is None:
+        info = store.artifacts.info(run_id + '.zip')
+        require_owner(store, run_id, actor)
+        if view == 'media':
+            # Captures and explicitly published outputs have their own manifests;
+            # listing them must never open the potentially multi-GB recovery ZIP.
+            return {'revision': 'published', 'files': media, 'limited': False,
+                    'archive_pending': info is not None,
+                    'archive_revision': info['revision'] if info else None,
+                    'note': 'Published files and saved captures.'}
+        if media and info is None:
             return {'revision': 'published', 'files': media, 'limited': False, 'note': 'Verified artifact versions and saved browser captures.'}
-        with saved_archive(settings, store, run_id) as (_, files, revision, skipped):
-            ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
-            explicit_paths = {item['workspace_path'] for item in outputs}
-            legacy = [file_info(run_id, i, revision) for i in ordered]
-            return {'revision': revision, 'files': media + [item for item in legacy if item['workspace_path'] not in explicit_paths],
-                    'limited': bool(skipped),
-                    'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}
+        if info is None:
+            raise HTTPException(404, 'No saved files are available yet.')
+
+        def scan():
+            with saved_archive(settings, store, run_id, info['revision'], actor=actor) as (_, files, revision, skipped):
+                ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
+                return {'revision': revision, 'files': [file_info(run_id, i, revision) for i in ordered],
+                        'limited': bool(skipped)}
+
+        catalog = catalogs.read((run_id, info['revision'], info['reference']), scan)
+        # Cache hits and readers waiting on another scan must recheck the run
+        # before releasing filenames, including deletion during that wait.
+        require_owner(store, run_id, actor)
+        explicit_paths = {item['workspace_path'] for item in outputs}
+        return {**catalog, 'files': media + [item for item in catalog['files'] if item['workspace_path'] not in explicit_paths],
+                'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}
 
     @router.get('/api/runs/{run_id}/files/content')
     def content(run_id: str, request: Request, path: str,
                 revision: str | None = Query(default=None, max_length=64), preview: bool = False, inline: bool = False, offset: int = 0, length: int = PREVIEW_PAGE):
-        security.require(request)
-        with saved_archive(settings, store, run_id, revision) as (archive, files, pinned, __):
+        actor = require_request_owner(store, security, request, run_id)
+        with saved_archive(settings, store, run_id, revision, actor=actor) as (archive, files, pinned, __):
             info = files.get(path)
             if info is None:
                 raise HTTPException(404, 'This file is not available in the saved archive.')
@@ -121,7 +200,7 @@ def routes(settings, store, security, published=None):
             name = quote(PurePosixPath(path).name, safe='')
         # The response owns its archive context for the entire stream.
         def chunks():
-            with saved_archive(settings, store, run_id, pinned) as (archive, files, _, __):
+            with saved_archive(settings, store, run_id, pinned, actor=actor) as (archive, files, _, __):
                 with archive.open(files[path]) as stream:
                     yield from iter(lambda: stream.read(1024 * 1024), b'')
         return StreamingResponse(chunks(), media_type='application/octet-stream', headers={

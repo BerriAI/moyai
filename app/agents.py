@@ -3,6 +3,7 @@
 Every child uses the existing Temporal session workflow. Handles return immediately;
 the parent can explicitly checkpoint and release its machine while waiting.
 """
+from .private_sinks import deny_export
 import asyncio
 import json
 import hashlib
@@ -52,7 +53,7 @@ class AgentCoordinator:
         return AgentSwarm(MoyaiSwarmBackend(self, run_id, self.check_parent(run_id)))
 
     def available(self, run):
-        return self.settings.temporal_enabled and run['chat_enabled'] and not run.get('deleted_at')
+        return not run.get('private_owner_id') and self.settings.temporal_enabled and run['chat_enabled'] and not run.get('deleted_at')
 
     def tools(self, run):
         if not self.available(run):
@@ -63,12 +64,15 @@ class AgentCoordinator:
                 for name, (schema, read_only, description) in TOOLS.items()]
 
     def group(self, parent_id, group_id):
+        deny_export(self.store, parent_id)
         rows = self.store.rows('SELECT * FROM agent_groups WHERE id=? AND parent_id=?', (group_id, parent_id))
         if not rows:
             raise ValueError('Agent group does not belong to this session.')
         return rows[0]
 
     def children(self, group_id):
+        for row in self.store.rows('SELECT id FROM runs WHERE agent_group_id=?', (group_id,)):
+            deny_export(self.store, row['id'])
         return self.store.rows('SELECT id,agent_label,status,summary,error,checkpoint_error,created_at,updated_at,harness,model,active_model FROM runs WHERE agent_group_id=? ORDER BY created_at,id', (group_id,))
 
     def pending_group(self, parent_id):
@@ -117,9 +121,11 @@ class AgentCoordinator:
         Names include the last turn so retries retain old versions. No network
         operations or awaits occur inside the handoff/enqueue transaction.
         """
+        deny_export(self.store, group['parent_id'], conn)
         children = conn.execute('SELECT * FROM runs WHERE agent_group_id=? ORDER BY created_at,id', (group['id'],)).fetchall()
         snapshot = []
         for child in children:
+            deny_export(self.store, child['id'], conn)
             name = child['id'] + '.zip'
             artifact_name = ''
             if self.store.artifacts.info(name, conn=conn) is not None:
@@ -187,6 +193,7 @@ class AgentCoordinator:
                 'instruction': 'The application will save your workspace and resume this request with worker results. Do not poll or repeat the delegation.'}
 
     def check_parent(self, parent_id):
+        deny_export(self.store, parent_id)
         run = self.store.run(parent_id)
         if not run or not self.available(run) or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'} or not run['active_message_id']:
             raise ValueError('Delegation requires an active Temporal chat turn.')
@@ -482,6 +489,7 @@ class AgentCoordinator:
         return self.published_artifacts
 
     def read_artifact(self, parent_id, args):
+        deny_export(self.store, parent_id)
         child = self.store.run(args.child_id)
         if not child or child['deleted_at'] or child['deletion_requested_at'] or child['parent_run_id'] != parent_id:
             raise ValueError('Worker does not belong to this session.')

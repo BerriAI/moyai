@@ -21,6 +21,36 @@ REVOKE_POSTGRES = '''CREATE TRIGGER revoke_github_write_access
     EXECUTE FUNCTION revoke_github_write_access_fn()'''
 
 
+PRIVATE_OWNER_TRIGGER = '''CREATE TRIGGER immutable_private_owner
+    BEFORE UPDATE OF private_owner_id ON runs WHEN NEW.private_owner_id != OLD.private_owner_id
+    BEGIN SELECT RAISE(ABORT, 'Session privacy is immutable'); END'''
+PRIVATE_TRIGGERS = {'immutable_private_owner': PRIVATE_OWNER_TRIGGER}
+for _action in ('INSERT', 'UPDATE OF parent_run_id,side_chat_of,private_owner_id'):
+    _suffix = 'insert' if _action == 'INSERT' else 'update'
+    PRIVATE_TRIGGERS[f'private_derivation_{_suffix}'] = f'''CREATE TRIGGER private_derivation_{_suffix}
+        BEFORE {_action} ON runs
+        WHEN ((NEW.parent_run_id!='' OR NEW.side_chat_of!='') AND NEW.private_owner_id!='')
+          OR EXISTS(SELECT 1 FROM runs p WHERE p.id IN (NEW.parent_run_id,NEW.side_chat_of)
+                    AND p.private_owner_id!='')
+        BEGIN SELECT RAISE(ABORT, 'Private session derivation is disabled'); END'''
+PRIVATE_FUNCTION = '''CREATE OR REPLACE FUNCTION enforce_session_privacy() RETURNS trigger
+    LANGUAGE plpgsql SET search_path FROM CURRENT AS $moyai$
+    BEGIN
+        IF TG_OP = 'UPDATE' AND NEW.private_owner_id != OLD.private_owner_id THEN
+            RAISE EXCEPTION 'Session privacy is immutable' USING ERRCODE = '23514';
+        END IF;
+        IF ((NEW.parent_run_id != '' OR NEW.side_chat_of != '') AND NEW.private_owner_id != '')
+            OR EXISTS(SELECT 1 FROM runs p WHERE p.id IN (NEW.parent_run_id,NEW.side_chat_of)
+                      AND p.private_owner_id != '') THEN
+            RAISE EXCEPTION 'Private session derivation is disabled' USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END; $moyai$'''
+PRIVATE_POSTGRES = '''CREATE OR REPLACE TRIGGER immutable_session_privacy
+    BEFORE INSERT OR UPDATE OF private_owner_id,parent_run_id,side_chat_of ON runs
+    FOR EACH ROW EXECUTE FUNCTION enforce_session_privacy()'''
+
+
 SQLITE_OCCUPIED_SESSION = """(json_extract(state, '$.phase')
     NOT IN ('idle', 'waiting_children', 'waiting_credential', 'waiting_environment')
     OR json_type(state, '$.phase') = 'null')

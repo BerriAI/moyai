@@ -97,7 +97,7 @@ def test_incompatible_harness_and_protocol_cannot_silently_disable_opt_in(worksp
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     response = client.post('/api/runs', json={'prompt': 'Task', 'model': ASTRA_ULTRAFAST, 'harness': 'hermes'})
-    assert response.status_code == 422 and 'requires Codex' in response.text
+    assert response.status_code == 422 and 'requires the Responses API' in response.text
     run = client.post('/api/runs', json={'prompt': 'Existing Hermes task', 'harness': 'hermes', 'chat_enabled': True}).json()
     app.state.store.claim_message(run['id'])
     app.state.store.update_run(run['id'], status='running', token_hash=digest('capability'))

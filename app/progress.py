@@ -80,7 +80,7 @@ def record(conn: Connection, run_id: str, message: str, data: dict[str, object],
         return
     rows = conn.execute("""SELECT message,data FROM events WHERE run_id=? AND kind='message'
         AND COALESCE(json_number(data,'turn_id'),0)=?
-        AND COALESCE(json_text(data,'phase'),'')!='processing'""", (run_id, turn_id)).fetchall()
+        AND COALESCE(json_text(data,'phase'),'') NOT IN ('processing','streaming')""", (run_id, turn_id)).fetchall()
     previous = [(row['message'], json.loads(row['data'])) for row in rows]
     if data.get('activity_id') and any(meta.get('activity_id') == data['activity_id'] for _, meta in previous):
         return

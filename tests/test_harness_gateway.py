@@ -12,6 +12,37 @@ from test_workspace import workspace
 from test_tracing import Processor
 
 
+def test_deepagents_single_oversized_input_is_rejected_before_inference(workspace, monkeypatch):
+    from app.context_budget import ModelContextLimits
+    app, client = workspace
+    model = app.state.settings.resolve_model()
+    async def limits(model):
+        return ModelContextLimits(context_window=16000, max_input_tokens=12000, max_output_tokens=4000)
+    monkeypatch.setattr(app.state.context_budget, 'limits', limits)
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    forwarded = []
+    def upstream(request):
+        if request.url.path.endswith('/responses'):
+            forwarded.append(json.loads(request.content))
+            return httpx.Response(200, json={'id': 'resp-test', 'output': [],
+                'usage': {'input_tokens': 10, 'output_tokens': 1, 'total_tokens': 11}})
+        return httpx.Response(200, json={'total_tokens': 40000})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('Context test', '', 'modal', [], harness='deepagents-temporal', model=model)
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    def post(content):
+        return client.post(f"/broker/{run['id']}/v1/responses", headers={'Authorization': 'Bearer cap'},
+            json={'input': [{'role': 'user', 'content': content}], 'stream': False})
+    assert post('Preserve the original task.').status_code == 200
+    assert 'Preserve the original task.' in json.dumps(forwarded[0]['input'])
+    response = post('x' * 40000)
+    assert response.status_code == 409, response.text
+    assert response.json()['detail']['code'] == 'context_compaction_required'
+    assert len(forwarded) == 1  # Oversized input never reached inference.
+
+
 @pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
 @pytest.mark.parametrize('upstream_status', [400, 401, 403, 404, 408, 422, 429, 503])
 def test_gateway_failure_keeps_status_ledger_and_request_correlation(workspace, monkeypatch, caplog, route, upstream_status):

@@ -211,7 +211,8 @@ asyncio.run(manager.advance(payload['run_id']))
     replacement.cleanup = AsyncMock()
     replacement.step = AsyncMock(return_value=True)
     async with asyncio.timeout(5):
-        while await replacement.advance(waiting) == 'capacity':
+        while (result := await replacement.advance(waiting)) is not True:
+            assert result == 'capacity' or result == {'retry_seconds': .25}
             assert occupied(replacement) == 3
             await asyncio.sleep(.05)
     assert replacement.state(victim)['phase'] == 'idle'

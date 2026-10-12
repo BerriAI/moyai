@@ -33,11 +33,12 @@ def test_native_tool_search_preserves_broker_scope_and_direct_writes(workspace, 
     app.state.store.claim_message(run_id)
     app.state.store.update_run(run_id, status='running')
     provider_calls, broker_calls = [], []
-    async def provider(name, arguments):
+    async def provider(name, arguments, *, run):
+        assert run['id'] == run_id
         provider_calls.append(name)
         return {'result': 'fixture-ok'}
     async def github(run, name, arguments):
-        return await provider(name, arguments)
+        return await provider(name, arguments, run=run)
     monkeypatch.setattr(app.state.connectors, 'call', provider)
     monkeypatch.setattr(app.state.connectors.github, 'call', github)
 

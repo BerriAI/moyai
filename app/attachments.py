@@ -1,4 +1,5 @@
 """Durable user uploads. Drafts are private; sent files share chat access."""
+from .private_sinks import require_owner
 import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
@@ -207,6 +208,7 @@ class Attachments:
                  'path': f"/workspace/.moyai-attachments/{row['id']}/{row['name']}"} for row in rows]
 
     def broker_row(self, run, attachment_id, *, conn=None):
+        require_owner(self.store, run['id'], run.get('active_user_id', ''), conn)
         query = "SELECT a.* FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.status!='deleted' AND (m.id=? OR m.status!='queued' OR (m.steering_parent_id=? AND m.queue_locked=1))"
         params = (attachment_id, run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0)
         rows = conn.execute(query, params).fetchall() if conn is not None else self.store.rows(query, params)
@@ -225,6 +227,7 @@ class Attachments:
         # Keep image bytes out of sandbox transcripts, Temporal history and logs.
         # Only this run's sent attachments, up to its currently executing turn,
         # are eligible. Future queued messages cannot leak into the active turn.
+        require_owner(self.store, run['id'], run.get('active_user_id', ''))
         rows = self.store.rows("SELECT a.id,a.preview,a.preview_ref,a.preview_size FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.run_id=? AND (m.id<=? OR m.steering_parent_id=?) AND m.status NOT IN ('queued','deleted') AND (a.preview_size>0 OR length(a.preview)>0) ORDER BY m.id DESC,a.created_at DESC",
                                (run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0))
         images = {row['id']: row for row in rows}
@@ -378,6 +381,9 @@ class Attachments:
             if rows[0]['message_id'] is not None and not self.store.rows("""SELECT 1 FROM messages m
                     JOIN runs r ON r.id=m.run_id WHERE m.id=? AND r.deleted_at=''""", (rows[0]['message_id'],)):
                 raise HTTPException(404, 'Attachment not found.')
+            if rows[0]['message_id'] is not None:
+                message = self.store.rows('SELECT run_id FROM messages WHERE id=?', (rows[0]['message_id'],))[0]
+                require_owner(self.store, message['run_id'], owner)
             return rows[0]
 
         @router.get('/api/attachments/{attachment_id}/preview')
@@ -385,7 +391,14 @@ class Attachments:
             row = accessible(request, attachment_id)
             if not row['preview_ref'] and not row['preview']:
                 raise HTTPException(404, 'No image preview available.')
-            return Response(await asyncio.to_thread(self.payload, row, 'preview'), media_type='image/jpeg')
+            raw = await asyncio.to_thread(self.payload, row, 'preview')
+            accessible(request, attachment_id)
+            return Response(raw, media_type='image/jpeg')
+
+        def readable_chunks(request, row, offset=0, length=None):
+            for chunk in uploads.chunks(row, offset, length):
+                accessible(request, row['id'])
+                yield chunk
 
         @router.get('/api/attachments/{attachment_id}/audio')
         async def audio(attachment_id: str, request: Request):
@@ -410,19 +423,21 @@ class Attachments:
                 status = 206
             headers['Content-Length'] = str(end-start+1)
             if row['part_size']:
-                return StreamingResponse(uploads.chunks(row, start, end-start+1), status_code=status,
+                return StreamingResponse(readable_chunks(request, row, start, end-start+1), status_code=status,
                                          media_type=row['media_type'], headers=headers)
             raw = await asyncio.to_thread(self.payload, row)
+            accessible(request, attachment_id)
             return Response(raw[start:end+1], status_code=status, media_type=row['media_type'], headers=headers)
 
         @router.get('/api/attachments/{attachment_id}')
         async def download(attachment_id: str, request: Request):
             row = accessible(request, attachment_id)
             if row['part_size']:
-                return StreamingResponse(uploads.chunks(row), media_type='application/octet-stream',
+                return StreamingResponse(readable_chunks(request, row), media_type='application/octet-stream',
                     headers={'Content-Length':str(row['size']),
                              'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'])})
             raw = await asyncio.to_thread(self.payload, row)
+            accessible(request, attachment_id)
             return Response(raw, media_type='application/octet-stream',
                             headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'])})
 

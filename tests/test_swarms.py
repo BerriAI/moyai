@@ -13,7 +13,7 @@ from app.db import Store, now
 from app.main import NewRun, create_app, public_messages
 from app.swarms import create_in, execution_policy, remaining_seconds
 from app.temporal_runtime import TemporalRunManager
-from test_durable import durable, drive
+from test_durable import durable, drive, sandbox_harness_catalog
 from test_agents import attach, launch, pause_parent
 
 
@@ -67,7 +67,7 @@ def bootstrap(manager, *, client_id='shared-agent-mission', attachment_ids=None)
         durable_submit=manager.submit_in, swarm_bootstrap=manager.swarms.bootstrap_in)
 
 
-def test_initial_team_commits_twenty_native_workers_with_pinned_diverse_runtimes(durable):
+def test_initial_team_commits_twenty_workers_with_pinned_diverse_runtimes(durable):
     manager, cloud, _ = durable
     manager.settings.swarm_models = 'anthropic/claude-opus-5-5,openai/gpt-6.1-sol'
     run = bootstrap(manager)
@@ -75,7 +75,7 @@ def test_initial_team_commits_twenty_native_workers_with_pinned_diverse_runtimes
     assert len(children) == INITIAL_TEAM_SIZE == 20
     assert len({child['agent_label'] for child in children}) == INITIAL_TEAM_SIZE
     assert {child['harness'] for child in children} == {
-        'codex', 'claude-agent-sdk', 'hermes', 'opencode', 'deepagents', 'tool-loop', 'pi'}
+        'codex', 'claude-agent-sdk', 'hermes', 'opencode', 'deepagents', 'tool-loop', 'pi', 'deepagents-temporal'}
     counts = [sum(child['harness'] == harness for child in children) for harness in {child['harness'] for child in children}]
     assert max(counts) - min(counts) <= 1
     for child in children:
@@ -132,9 +132,13 @@ def test_initial_team_failure_rolls_back_mission_children_and_dispatch(durable, 
     assert {table: len(manager.store.rows('SELECT * FROM ' + table)) for table in before} == before
 
 
-async def test_initial_team_queues_under_capacity_then_resumes_coordinator_with_real_results(durable):
+async def test_legacy_team_queues_under_capacity_then_resumes_coordinator_with_real_results(durable, sandbox_harness_catalog):
     manager, cloud, _ = durable
     manager.settings.max_concurrent_runs = 1
+    # This test exercises the shared computer capacity pool. Codex's separate
+    # agent runtime intentionally bypasses that pool; tied creation timestamps
+    # can otherwise put a Codex child in either of the first two positions.
+    manager.settings.independent_agent_runtime = False
     cloud.saving_before_answer = False
     run = bootstrap(manager)
     root = run['id']

@@ -9,8 +9,13 @@ from evals.agent import runtime_selection
     # A configured custom gateway alias is a model ID, not a UI picker shortcut.
     ('team-model', 'team-model', 'claude-agent-sdk'),
 ])
-def test_should_use_production_model_resolution_and_native_harness_selection(model, resolved, harness):
-    assert runtime_selection({'AGENT_MODEL': model}) == (resolved, harness)
+def test_should_use_production_model_resolution_with_an_explicit_native_harness(model, resolved, harness):
+    assert runtime_selection({'AGENT_MODEL': model, 'MOYAI_EVAL_HARNESS': harness}) == (resolved, harness)
+
+
+def test_should_not_silently_substitute_a_native_sdk_for_the_durable_default():
+    with pytest.raises(ValueError, match='does not evaluate Deep Agents'):
+        runtime_selection({'AGENT_MODEL': 'openai/gpt-6.1-sol'})
 
 
 def test_should_honor_explicit_deployment_harness_and_eval_override():
@@ -28,7 +33,7 @@ def test_should_not_inherit_unrelated_process_or_dotenv_configuration(monkeypatc
     monkeypatch.setenv('AGENT_MODEL', 'anthropic/claude-opus-5-5')
     monkeypatch.setenv('AGENT_HARNESS', 'claude-agent-sdk')
     (tmp_path / '.env').write_text('AGENT_MODEL=anthropic/claude-opus-5-5\nAGENT_HARNESS=claude-agent-sdk\n')
-    assert runtime_selection({'AGENT_MODEL': 'openai/gpt-6.1-sol'}) == ('openai/gpt-6.1-sol', 'codex')
+    assert runtime_selection({'AGENT_MODEL': 'openai/gpt-6.1-sol', 'MOYAI_EVAL_HARNESS': 'codex'}) == ('openai/gpt-6.1-sol', 'codex')
 
 
 @pytest.mark.parametrize('key', ['AGENT_HARNESS', 'MOYAI_EVAL_HARNESS'])

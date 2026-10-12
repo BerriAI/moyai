@@ -1,4 +1,5 @@
 """Authenticated event delivery into a bounded, persistent automation inbox."""
+from .private_sinks import deny_export, private_run
 import asyncio
 import base64
 import binascii
@@ -110,6 +111,8 @@ class AutomationEvents:
 
     def accept_in(self, conn, row, delivery, context):
         """Caller owns the write transaction, including any native cursor advance."""
+        if context and context.get('provider') == 'session' and context.get('session_id'):
+            deny_export(self.store, context['session_id'], conn)
         occurrence = 'event:' + row['id'] + ':' + hashlib.sha256(delivery.encode()).hexdigest()
         if conn.execute('SELECT 1 FROM automation_events WHERE occurrence=?', (occurrence,)).fetchone():
             return 'duplicate'
@@ -142,8 +145,8 @@ class AutomationEvents:
             if run_id in seen:
                 return False
             seen.add(run_id)
-            run = conn.execute("SELECT parent_run_id,side_chat_of,chat_enabled FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
-            if not run or not run['chat_enabled'] or run['parent_run_id']:
+            run = conn.execute("SELECT parent_run_id,side_chat_of,chat_enabled,private_owner_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
+            if not run or run['private_owner_id'] or not run['chat_enabled'] or run['parent_run_id']:
                 return False
             if conn.execute('SELECT 1 FROM automation_runs WHERE run_id=?', (run_id,)).fetchone():
                 return False
@@ -151,6 +154,7 @@ class AutomationEvents:
         return True
 
     def session_payload(self, conn, message):
+        deny_export(self.store, message['run_id'], conn)
         prior = conn.execute('''SELECT id,role,content,user_id,created_at,input_kind,source_json,response_to_id FROM messages
             WHERE run_id=? AND id<? AND status!='deleted' AND role IN ('user','assistant')
             ORDER BY id''', (message['run_id'], message['id'])).fetchall()
@@ -207,6 +211,10 @@ class AutomationEvents:
                 ORDER BY position,received_at,automation_id LIMIT 200""")
             waiting = set()
             for event in rows:
+                context = json.loads(event['context'])
+                if context.get('provider') == 'session' and private_run(self.store, context.get('session_id', '')):
+                    self.store.execute("UPDATE automation_events SET status='ignored',detail='',context='{}' WHERE occurrence=?", (event['occurrence'],))
+                    continue
                 if event['automation_id'] in waiting:
                     continue
                 try:

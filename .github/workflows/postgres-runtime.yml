@@ -59,6 +59,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Preserve SQLite admission behavior
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_admission_scaling.py
+      - name: Verify personal Slack and immutable private sessions on PostgreSQL
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_personal_slack.py tests/test_private_sessions.py tests/test_private_sinks.py tests/test_slack_secrets.py tests/test_private_integrations.py
       - name: Verify enrolled bootstrap reads and deferred identity maintenance
         run: |
           uv run --frozen --python 3.13 pytest -q --tb=short tests/test_session_bootstrap.py
@@ -101,6 +103,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Verify scheduling under Postgres contention and real Temporal restart
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_performance.py tests/test_scheduling_diagnostics.py tests/test_temporal_integration.py tests/test_active_steering.py tests/test_steering_latency.py tests/test_automation_environments.py tests/test_automation_parity.py tests/test_automation_temporal.py
+      - name: Verify Deep Agents session continuation and recovery on Postgres
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_deepagents_runtime.py tests/test_deepagents_acceptance.py tests/test_deepagents_workers.py tests/test_deepagents_publication.py tests/test_deepagents_failures.py tests/test_tool_dispatch.py
       - name: Demonstrate responsive scheduling during Postgres writer and pool waits
         run: uv run --frozen --python 3.13 python scripts/scheduling_stall_demo.py
 
@@ -142,6 +146,29 @@ jobs:
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py tests/test_slack_notifications.py tests/test_session_events.py
       - name: Verify chat snapshots reuse PostgreSQL pool connections
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_message_snapshot_pool.py tests/test_conversation_metadata.py tests/test_slack_mentions.py tests/test_attachments.py
+
+  handoffs:
+    # The database-backed handoff suite needs its own runtime budget: running
+    # it after the distributed suites exhausted that job's 20-minute deadline.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-runtime-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-runtime-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
       - name: Verify agent handoffs, warm workspaces and admission on PostgreSQL
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py tests/test_admission_scaling.py tests/test_idle_window.py tests/test_independent_runtime.py tests/test_independent_runtime_warm.py
       - name: Measure admission while another sandbox termination is slow

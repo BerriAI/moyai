@@ -92,6 +92,31 @@
     const target=container.querySelector('[data-source-line]');
     if(target){target.focus({preventScroll:true});target.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});}
   }
+  async function loadCatalog(api,runId,{refresh=false,onUpdate=()=>{},filePath=null,fileRef=null}={}){
+    const path=`/api/runs/${runId}/files`;
+    const read=url=>api(url,{recent:!refresh,timeoutMs:30000});
+    const initial=await read(path+'?view=media');
+    onUpdate(initial);
+    if(!initial.archive_pending||initial.files.some(file=>file.archive_path===filePath)||(fileRef&&resolve(fileRef,initial.files)))return initial;
+    let result;
+    try{
+      result=await read(path);
+      // A newer media manifest can arrive while the tab still has a recent
+      // full catalog. Revalidate changed checkpoints and independent outputs.
+      const media=result.files.filter(file=>/^(capture|published):/.test(file.archive_path));
+      if((initial.archive_revision&&result.revision!==initial.archive_revision)||JSON.stringify(media)!==JSON.stringify(initial.files)){
+        result=await api(path,{timeoutMs:30000});
+      }
+    }
+    catch(error){
+      // An archive outage must not hide independent captures. Access failures
+      // still invalidate the complete view, including the initial response.
+      if([401,403,404,409].includes(error.status))throw error;
+      result={...initial,archive_pending:false,archive_error:true,error:['TimeoutError','AbortError'].includes(error.name)?
+        'Workspace files are taking longer than expected. Retry to load them.':error.message};
+    }
+    onUpdate(result);return result;
+  }
   function create({api,markdown,escape:esc,size,onOpen}){
     let run=null,catalog=null,key='',loading=null,requestId=0,previewId=0,viewId=0,selected=null,dialog=null;
     const doc=document;
@@ -114,12 +139,13 @@
       if(!(run?.has_artifact||run?.has_captures||run?.has_published_artifacts))return;
       const next=run.id+':'+(run.events||[]).filter(e=>e.kind==='artifact').at(-1)?.id;
       if(!force&&key===next)return loading;
+      const refresh=force||!!key;
       key=next;const id=++requestId,rid=run.id;
       loading=(async()=>{
         try{
-          const data=await api(`/api/runs/${rid}/files`);
+          const data=await loadCatalog(api,rid,{refresh,onUpdate:data=>{if(id===requestId){catalog=data;update();}}});
           if(id!==requestId)return;
-          catalog=data;update();
+          catalog=data;if(data.error)key='';update();
         }catch(error){if(id!==requestId)return;catalog={files:[],error:error.message};key='';update();}
       })();
       return loading;
@@ -194,5 +220,5 @@
     });
     return {sync,decorate,reset,open};
   }
-  return {reference,resolve,sessionLink,decorate:decorateReferences,preview,reveal,create};
+  return {reference,resolve,sessionLink,decorate:decorateReferences,preview,reveal,loadCatalog,create};
 });

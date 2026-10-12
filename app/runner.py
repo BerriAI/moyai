@@ -1,3 +1,4 @@
+from .private_sinks import private_run
 import asyncio
 import contextlib
 import json
@@ -463,7 +464,7 @@ class RunManager:
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
                 "activity_input_id": activity_input_id,
-                "tracing_enabled": bool(self.store.tracing and self.store.tracing.enabled),
+                "tracing_enabled": bool(not private_run(self.store, run_id) and self.store.tracing and self.store.tracing.enabled),
                 "omit_private_tool_payloads": bool(self.store.tracing and
                     self.store.tracing.preferences.for_run(run)['omit_private_tool_payloads']),
                 "is_child_agent": bool(run.get('parent_run_id')),
@@ -483,6 +484,8 @@ class RunManager:
         return spec
 
     async def cloud(self, run):
+        if run.get('harness') == 'deepagents-temporal':
+            raise ValueError('Deep Agents requires Temporal. Configure TEMPORAL_ENABLED=true and a reachable Temporal server.')
         run_id = run["id"]
         self.store.update_run(run_id, status="provisioning")
         self.store.event(run_id, "status", "Provisioning an isolated sandbox")

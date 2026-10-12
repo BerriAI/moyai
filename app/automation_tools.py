@@ -100,6 +100,8 @@ class AutomationTools:
             initialize_schema(self.store)
 
     def actor(self, run, turn_id=None, *, history=False, scoped=False):
+        from .private_sinks import deny_export
+        deny_export(self.store, run['id'])
         caller, run = run, self.store.run(run['id'])
         if (not run or run['deleted_at'] or run['deletion_requested_at'] or not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}):
@@ -290,7 +292,7 @@ class AutomationTools:
             # Only rejected input is a correctable tool outcome. Validation of
             # saved state or failures after an action must retain their cause.
             return {'error': 'Invalid automation arguments. Correct the listed fields and try again.',
-                    'status_code': 422, 'validation_errors': [
+                    'status_code': 422, 'outcome': 'rejected', 'dispatched': False, 'validation_errors': [
                         {'field': '.'.join(str(part) for part in error['loc']) or 'arguments',
                          'type': error['type'], 'message': error['msg']}
                         for error in exc.errors(include_input=False, include_context=False, include_url=False)]}

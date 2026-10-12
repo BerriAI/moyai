@@ -151,7 +151,7 @@ const settleCaptures=()=>new Promise(setImmediate);
 
 test('captures read saved media without a live computer and discover newly completed captures',async()=>{
   const f=capturePanel();f.tab.activate();
-  assert.equal(f.requests.length,1);assert.equal(f.requests[0].path,'/api/runs/session/files');assert.equal(f.requests[0].options,undefined);
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].path,'/api/runs/session/files?view=media');assert.equal(f.requests[0].options.timeoutMs,30000);
   f.requests[0].resolve({files:[]});await settleCaptures();
   assert.match(f.node('[data-captures]').innerHTML,/No saved captures yet/);
   assert.equal([...f.timers.values()][0].delay,3000);
@@ -164,7 +164,7 @@ test('captures read saved media without a live computer and discover newly compl
   const writes=f.node('[data-captures]').writes;await f.poll();
   f.requests[2].resolve({files:[captured(),captured('flow.webm','video')]});await settleCaptures();
   assert.equal(f.node('[data-captures]').writes,writes,'Unchanged catalog refresh must not restart video playback');
-  assert.ok(f.requests.every(request=>request.path.endsWith('/files')&&!request.options));
+  assert.ok(f.requests.every(request=>request.path.endsWith('/files?view=media')&&request.options.timeoutMs===30000));
   f.dispose();
 });
 test('capture previews open the saved file while downloads and modified clicks stay native',async()=>{
@@ -298,7 +298,7 @@ function tabStrip(){
   const panel=dom.node('aside'),tabs=new Map(['changes','files','activity'].map((id,index)=>[id,{id,uid:String(index),kind:id==='changes'?'pr':id,title:id,loaded:true,element:ctx.document.createElement('section')}]));
   Object.assign(ctx,{tabs,panel,active:'changes',visible:true,disposed:false,expanded:false,tabSignature:'',closingStatus:{},layout:dom.element,
     q:selector=>panel.querySelector(selector),esc:escape,ico:()=>'',glyph:{},MoyaiPullRequest:native,menu(value){panel.querySelector('.panel-menu').hidden=!value;},save(){},mount(){throw Error('Retained tab must not mount again');},
-    card:ctx.document.createElement('aside'),outside(){},followPullRequest(){}});
+    card:ctx.document.createElement('aside'),outside(){},followPullRequest(){},revealHandoff(){}});
   ctx.document.removeEventListener=()=>{};
   vm.runInContext(source.slice(source.indexOf('    function draw('),source.indexOf('    function hide(')),ctx);
   vm.runInContext(source.slice(source.indexOf('    function select('),source.indexOf('    function error(')),ctx);
@@ -496,6 +496,7 @@ function agentToolbox(){
     set innerHTML(value){this.html=value;this.writes++;},get innerHTML(){return this.html;}});
   const card=host(),pullsSection=host(),agentsSection=host(),agentTab=host(),classes=new Set(),toggle={hidden:true};
   const ctx={disposed:false,run:{id:'parent'},agents:[],agentSignature:'',pullRequests:[],card,pullsSection,agentsSection,
+    handoffFor:()=>null,user:'owner',lastHandoff:0,latestSession:null,
     tabs:new Map([['agents',{kind:'agents',element:agentTab}]]),
     document:{activeElement:null,querySelector:()=>toggle,querySelectorAll:()=>[]},ico:()=>'',
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),

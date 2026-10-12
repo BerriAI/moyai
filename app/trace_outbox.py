@@ -1,4 +1,5 @@
 """Persist sanitized OTLP spans before sending them; retry with unchanged IDs."""
+from .private_sinks import private_run
 import asyncio
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -43,6 +44,8 @@ class TraceOutbox:
         self.enqueue_payload(span, payload, connection)
 
     def enqueue_payload(self, span, payload, connection=None):
+        if private_run(self.store, (span.attributes or {}).get('moyai.run_id', ''), connection):
+            return
         values = (format(span.context.trace_id, '032x'), format(span.context.span_id, '016x'),
                   payload, time.time())
         sql = f'''INSERT INTO {self.table}(trace_id,span_id,payload,created_at)
@@ -65,6 +68,12 @@ class TraceOutbox:
                 self.loop.call_soon_threadsafe(self.wake.set)
             except RuntimeError:
                 pass  # A closed exporter recovers its durable queue on restart.
+
+    def payload_run_ids(self, payload):
+        request = ExportTraceServiceRequest.FromString(payload)
+        return {attr.value.string_value for resource in request.resource_spans
+                for scope in resource.scope_spans for span in scope.spans
+                for attr in span.attributes if attr.key == 'moyai.run_id'}
 
     def encode_batch(self, rows):
         request = ExportTraceServiceRequest()
@@ -125,6 +134,16 @@ class TraceOutbox:
             # spans must not all be loaded into memory to send just a few.
             rows = self.store.rows(f'''SELECT * FROM {self.table}
                 WHERE (trace_id,span_id) IN (VALUES {','.join('(?,?)' for _ in queue_ids)}) ORDER BY created_at,trace_id,span_id''', tuple(value for pair in queue_ids for value in pair))
+            allowed = []
+            for row in rows:
+                if any(private_run(self.store, run_id) for run_id in self.payload_run_ids(row['payload'])):
+                    self.store.execute(f"UPDATE {self.table} SET payload=NULL,delivered_at=?,last_error='private session suppressed' WHERE trace_id=? AND span_id=?",
+                                       (time.time(), row['trace_id'], row['span_id']))
+                else:
+                    allowed.append(row)
+            if not allowed:
+                return bool(rows)
+            rows = allowed
             error = ''
             retry_after = 0
             try:
@@ -193,6 +212,9 @@ class RaindropEventOutbox(TraceOutbox):
                         'convo_id': attrs['session.id']},
         }
         self.enqueue_payload(span, json.dumps(event).encode(), connection)
+
+    def payload_run_ids(self, payload):
+        return {json.loads(payload).get('properties', {}).get('run_id', '')}
 
     def encode_batch(self, rows):
         return json.dumps([json.loads(row['payload']) for row in rows]).encode()

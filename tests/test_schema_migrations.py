@@ -43,6 +43,9 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
         store = api.state.store
         assert TABLES <= {
             r[0] for r in execute(settings, 'SELECT tablename FROM pg_tables WHERE schemaname=current_schema()')}
+        assert {'personal_slack_grants', 'personal_slack_states'} <= {
+            r[0] for r in execute(settings, 'SELECT tablename FROM pg_tables WHERE schemaname=current_schema()')}
+        assert execute(settings, "SELECT tgname FROM pg_trigger WHERE tgrelid='runs'::regclass AND tgname='immutable_session_privacy'")
         # A legacy sentinel catches accidental backfills that contain no DDL.
         run = store.create_run('Synthetic saved run', '', 'modal', [])
         store.execute("UPDATE runs SET model='' WHERE id=?", (run['id'],))

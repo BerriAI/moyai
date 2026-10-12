@@ -1,4 +1,5 @@
 """Native app adapters. Credentials stay in this process, outside agent sandboxes."""
+from .personal_slack import PersonalSlack
 import asyncio
 import html
 import json
@@ -164,6 +165,7 @@ class Connectors:
         self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion", "github")}
         self.github = GitHub(store, security, settings, self)
         self.slack_identities = None
+        self.personal_slack = PersonalSlack(store, security, settings, self)
 
     def check_execution(self, run):
         if not run:
@@ -205,9 +207,17 @@ class Connectors:
         row = rows[0] if rows else {"enabled": True, "read_only": False, "checked_at": None, "check_status": None}
         return {**row, "enabled": bool(row["enabled"]), "read_only": bool(row["read_only"])}
 
-    def allowed(self, name):
+    def allowed(self, name, run=None, *, as_bot=False):
         provider, write, _, _ = TOOLS[name]
         policy = self.policy(provider)
+        if run is not None and not as_bot and name in {'slack_search', 'slack_thread', 'slack_channel'}:
+            try:
+                owner = self.personal_slack.selected_owner(run)
+                if self.personal_slack.configured(owner):
+                    self.personal_slack.eligible(run, owner)
+                    return policy['enabled'] and ('plugins' not in run or 'slack' in run['plugins'])
+            except ConnectorError:
+                return False
         return policy["enabled"] and (not write or not policy["read_only"]) and bool(
             self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,)))
 
@@ -359,7 +369,10 @@ class Connectors:
             raise ConnectorError('My Linear tickets requires an authenticated session owner.', dispatched=False)
         provider, _, schema, _ = TOOLS[name]
         args = schema.model_validate(arguments).model_dump()
-        if not self.allowed(name):
+        selection = None
+        if name in {'slack_search', 'slack_thread', 'slack_channel'} and not args.get('as_bot'):
+            selection = await self.personal_slack.select(run, name)
+        if not self.allowed(name, run=run if selection else None):
             raise ConnectorError("This operation is disabled by your organization's connection policy.", dispatched=False)
         if name == 'slack_send':
             return await self.slack_send(args, run)
@@ -370,8 +383,8 @@ class Connectors:
             if args['channel'].startswith('D') and 'im:history' not in self.slack_installation().get('scopes', []):
                 raise ConnectorError('Reconnect Slack with the Moyai bot im:history permission to read its DMs.', dispatched=False)
         else:
-            headers = self.headers(provider, await self.credentials(provider))
-        if not self.allowed(name):
+            headers = self.headers(provider, selection.credentials if selection else await self.credentials(provider))
+        if not self.allowed(name, run=run if selection else None):
             raise ConnectorError("This operation is disabled by your organization's connection policy.", dispatched=False)
         if provider == "linear":
             if name == "linear_teams":
@@ -433,7 +446,17 @@ class Connectors:
             }[name]
             if args.get('cursor'):
                 payload['cursor'] = args['cursor']
-            data = await self.request(method, f"https://slack.com/api/{endpoint}", headers=headers, params=payload)
+            try:
+                data = await self.request(method, f"https://slack.com/api/{endpoint}", headers=headers, params=payload)
+            except Exception:
+                if selection and self.personal_slack.configured(selection.owner):
+                    self.personal_slack.record_error(selection.owner, selection.revision)
+                    raise ConnectorError('Personal Slack read failed. Retry or reconnect personal Slack in Settings > Personal Slack.') from None
+                raise
+            if selection:
+                self.personal_slack.recheck(selection)
+            elif not self.allowed(name):
+                raise ConnectorError('The Slack connection is disabled.')
             if name == 'slack_search':
                 messages = data.get('messages', {})
                 paging = messages.get('paging', {})

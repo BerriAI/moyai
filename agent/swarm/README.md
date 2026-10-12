@@ -17,7 +17,7 @@ async def explore(backend):
     )
 ```
 
-`Agent()` is valid. Optional `name`, `harness: Harness`, and `model` configure a participant. Missing names become unique neutral names; missing runtimes inherit the owning agent's runtime, subject to host compatibility checks. Harness IDs are a typed enum: `HERMES`, `CLAUDE_AGENT_SDK`, `CODEX`, `OPENCODE`, `DEEPAGENTS`, `TOOL_LOOP`, and `PI`. Names and the shared task remain text. Definitions are immutable and reject unknown fields, unknown harnesses, blank explicit names, and duplicate names.
+`Agent()` is valid. Optional `name`, `harness: Harness`, and `model` configure a participant. Missing names become unique neutral names; missing runtimes inherit the owning agent's runtime, subject to host compatibility checks. Harness IDs are a typed enum: `HERMES`, `CLAUDE_AGENT_SDK`, `CODEX`, `OPENCODE`, `DEEPAGENTS`, `DEEPAGENTS_TEMPORAL`, `TOOL_LOOP`, and `PI`. Names and the shared task remain text. Definitions are immutable and reject unknown fields, unknown harnesses, blank explicit names, and duplicate names.
 
 `agent.swarm` is an internal extraction boundary for a future SDK. It depends only on the standard library and Pydantic, not Moyai, Temporal, cloud providers or the UI. It is not a separately published package. The host injects an authenticated `SwarmBackend`; Moyai obtains it with `coordinator.swarm(agent_run_id)` during an active turn. The capability is bound to that agent, requester, active turn and execution token, so callers cannot choose another owner or extend its budget.
 
