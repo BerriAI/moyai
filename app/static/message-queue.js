@@ -27,12 +27,15 @@
       if(signature===nextSignature)return;signature=nextSignature;
       const focused=element.ownerDocument?.activeElement;
       const editingId=focused?.dataset?.queueEdit,selection=editingId?[focused.selectionStart,focused.selectionEnd]:null;
+      const focusedRow=focused&&element.contains?.(focused)?focused.closest?.('[data-queued-row]')?.dataset.queuedRow:null;
+      const focusedAction=focused?.dataset?.queueAction;
       element.hidden=!messages.length&&!drafts.size;
       MoyaiUI.render(element, `<div class="queue-heading"><span role="status">${messages.length} queued</span><small>${sendImmediately()?'New messages send immediately':'Enter to queue · Ctrl/⌘ Enter to send now'}</small></div><div class="queued-list">${messages.map(message=>card(message,run,user,role,drafts.has(message.id),locked,attachments,renderMessage)).join('')}${[...drafts].map(([id,draft])=>{
         const message=messages.find(message=>message.id===id),available=message&&canEdit(message,user,role);
         return `<form class="queue-editor" data-queue-editor="${id}"><label for="queue-edit-${id}">${available?'Edit queued message':'Unsent edit'}</label>${!available?'<p class="queue-edit-warning">This message has moved into the conversation. Your edit is still here; you can use it as a follow-up.</p>':message.revision!==draft.revision?'<p class="queue-edit-warning">The saved message changed. Your unsaved edit is preserved.</p>':''}<textarea id="queue-edit-${id}" data-queue-edit="${id}" required rows="3" ${locked?'disabled':''}>${esc(draft.content)}</textarea><div class="queue-edit-actions"><small>${available?'The model and attachments stay with this message.':'Your composer draft will be preserved.'}</small><button type="button" data-queue-action="discard" data-queue-id="${id}" ${locked?'disabled':''}>${available?'Cancel':'Discard edit'}</button><button type="${available?'submit':'button'}" ${available?'':`data-queue-action="followup" data-queue-id="${id}"`} ${locked?'disabled':''}>${available?'Save edit':'Use as follow-up'}</button></div></form>`;
       }).join('')}</div>`);
-      element.querySelectorAll('[data-queue-action]').forEach(button=>button.onclick=()=>act(Number(button.dataset.queueId),button.dataset.queueAction));
+      // Tooltip state updates replace DOM onclick properties; native listeners survive.
+      element.querySelectorAll('[data-queue-action]').forEach(button=>button.addEventListener('click',()=>act(Number(button.dataset.queueId),button.dataset.queueAction)));
       element.querySelectorAll('[data-queue-edit]').forEach(input=>{
         const id=Number(input.dataset.queueEdit);input.oninput=()=>{drafts.get(id).content=input.value;};
         input.onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)&&!event.shiftKey&&!event.isComposing){event.preventDefault();event.stopPropagation();act(id,'save-now');}};
@@ -41,6 +44,13 @@
       element.querySelectorAll('[data-queued-row]').forEach(row=>row.onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)&&!event.shiftKey&&!event.isComposing){event.preventDefault();act(Number(row.dataset.queuedRow),'steer');}});
       element.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>preview(messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
       if(editingId){const input=element.querySelector(`[data-queue-edit="${editingId}"]`);input?.focus({preventScroll:true});if(input&&selection)input.setSelectionRange(...selection);}
+      else if(focusedRow){
+        // A refreshed queue must not drop focus onto body and lose Ctrl/Cmd+Enter.
+        const row=element.querySelector(`[data-queued-row="${focusedRow}"]`);
+        const action=focusedAction&&row?.querySelector(`[data-queue-action="${focusedAction}"]`);
+        if(row)(action&&!action.disabled?action:row).focus({preventScroll:true});
+        else focusComposer();
+      }
     }
     async function act(id,action){
       if(busy||deleting)return;
