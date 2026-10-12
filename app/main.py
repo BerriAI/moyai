@@ -1413,12 +1413,13 @@ def _create_app(settings, store):
         return {'steer_message_id': target}
 
     from .computer_operations import READ_TOOL as COMPUTER_OPERATION_READ
+    from .computer_handoff import TOOL as COMPUTER_HANDOFF, request_handoff
     computer_operations = manager.agent_runtime.operations if hasattr(manager, 'agent_runtime') else None
 
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        listed = [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        listed = [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL, COMPUTER_HANDOFF] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name, run)]
         return [tool for tool in listed if privacy.allow_tool(run, tool["name"], TOOLS.get(tool["name"], (None, False))[1])]
 
@@ -1455,6 +1456,13 @@ def _create_app(settings, store):
             raise HTTPException(422, 'Invalid tool request.')
         if not privacy.allow_tool(run, body.name, TOOLS.get(body.name, (None, False))[1]):
             privacy.require_no_export(run)
+        if body.name == 'computer_handoff':
+            try:
+                result = await asyncio.to_thread(request_handoff, store, run, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Supply a short handoff reason without credentials.') from None
+            await checkpoints.flush()
+            return result
         if body.name == 'computer_operation_read':
             if computer_operations is None:
                 raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
