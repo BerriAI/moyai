@@ -146,6 +146,7 @@ def test_real_git_sends_both_credentials_but_refuses_redirects(access_origin):
 
 
 @pytest.mark.parametrize('url', ['https://attacker.example/broker/run', 'http://workspace.example/broker/run',
+                                  'http://127.0.0.1:1234', 'http://localhost:1234',
                                   'https://workspace.example/api/credentials',
                                   'https://workspace.example.attacker.example/broker/run',
                                   'https://user@workspace.example/broker/run'])
@@ -171,6 +172,33 @@ def test_git_headers_are_scoped_to_broker_url_and_do_not_persist_in_config(monke
     assert env['GIT_CONFIG_VALUE_3'] == 'CF-Access-Client-Secret: test-secret'
     assert env['GIT_CONFIG_KEY_4'] == 'http.followRedirects'
     assert env['GIT_CONFIG_VALUE_4'] == 'false'
+    assert not any(name.startswith('WORKSPACE_ACCESS_') for name in env)
+    assert os.environ['WORKSPACE_ACCESS_CLIENT_SECRET'] == 'test-secret'
+
+
+def test_owned_relay_git_environment_is_bearer_only(access_origin, monkeypatch):
+    from agent.tools import github_tools
+    remote, _ = access_origin
+    relay = BrokerRelay(remote, 'test-run').start()
+    try:
+        monkeypatch.setenv('WORKSPACE_BROKER_URL', relay.url)
+        with pytest.raises(ValueError):
+            git_environment(relay.url, 'test-run')
+        env = relay.git_environment()
+        assert env['GIT_CONFIG_COUNT'] == '2'
+        assert env['GIT_CONFIG_KEY_0'] == 'http.' + relay.url + '/.extraHeader'
+        assert env['GIT_CONFIG_VALUE_0'] == 'Authorization: Bearer test-run'
+        assert env['GIT_CONFIG_KEY_1'] == 'http.followRedirects'
+        assert env['GIT_CONFIG_VALUE_1'] == 'false'
+        assert not any(name.startswith('WORKSPACE_ACCESS_') for name in env)
+        assert 'test-edge-secret' not in json.dumps(env)
+        assert os.environ['WORKSPACE_ACCESS_CLIENT_SECRET'] == 'test-edge-secret'
+        observed = []
+        monkeypatch.setattr(github_tools, 'checkout', lambda *args, **kwargs: observed.append((args, kwargs)))
+        github_tools.call('github_checkout', {}, None, 'https://attacker.example', 'wrong-token', relay=relay)
+        assert observed == [((None, relay.url, relay.token), {'env': env})]
+    finally:
+        relay.close()
 
 
 def test_public_activity_and_archives_redact_edge_credentials(monkeypatch, tmp_path):
@@ -191,9 +219,12 @@ def test_public_activity_and_archives_redact_edge_credentials(monkeypatch, tmp_p
         assert all(b'test-sensitive' not in archive.read(name) for name in archive.namelist())
 
 
-@pytest.mark.parametrize(('inherit_environment', 'access_enabled'), [(False, True), (True, True), (False, False)])
+@pytest.mark.parametrize(('inherit_environment', 'access_enabled', 'remote_tool'), [
+    (False, True, False), (True, True, False), (False, False, False),
+    (True, True, True), (True, False, True),
+])
 def test_real_mcp_git_checkout_and_publication_through_access(
-        access_origin, edge_backend, tmp_path, monkeypatch, inherit_environment, access_enabled):
+        access_origin, edge_backend, tmp_path, monkeypatch, inherit_environment, access_enabled, remote_tool):
     from sandbox.agent import hermes_config
     from sandbox.broker_transport import unseal
     from agent.tools.harness_tools import tools_for
@@ -248,6 +279,9 @@ def test_real_mcp_git_checkout_and_publication_through_access(
                 request = json.loads(unseal('test-run', path, raw))
                 if request['name'] == 'github_checkout':
                     value = metadata
+                    if request['arguments'].get('number'):
+                        value = {**metadata, 'number': 100, 'checkout_ref': 'refs/heads/moyai/test',
+                                 'base_sha': git(source, 'rev-parse', 'HEAD')}
                 else:
                     # Simulate server-side publication to a local provider. The
                     # MCP subprocess still performs a real authenticated fetch.
@@ -285,7 +319,23 @@ def test_real_mcp_git_checkout_and_publication_through_access(
         call = tools_for(str(workspace), config)[1]
 
         def invoke(name, args):
-            reply = json.loads(asyncio.run(call(name, json.dumps(args))))
+            if remote_tool:
+                program = ('import json, sys; from pathlib import Path; '
+                           'from agent.tools import github_tools; '
+                           'github_tools.ROOT = Path(json.loads(sys.argv[1])["workspace"]); '
+                           'from sandbox.remote_tool import run; '
+                           'run(json.loads(sys.argv[1]))')
+                spec = {'workspace': str(workspace), 'broker_url': remote,
+                        'name': name, 'arguments': args}
+                execution = subprocess.run([sys.executable, '-c', program, json.dumps(spec)],
+                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+                    timeout=30, check=True, env={**os.environ, 'SSL_CERT_FILE': os.environ['GIT_SSL_CAINFO'],
+                                               'MOYAI_WORKSPACE': str(workspace)})
+                events = [json.loads(line.removeprefix('WORKSPACE_EVENT '))
+                          for line in execution.stdout.splitlines() if line.startswith('WORKSPACE_EVENT ')]
+                reply = events[-1]['tool_result']
+            else:
+                reply = json.loads(asyncio.run(call(name, json.dumps(args))))
             assert not reply['isError'], reply
             assert 'test-edge-secret' not in json.dumps(reply)
             return json.loads(reply['content'][0]['text'])
@@ -302,6 +352,9 @@ def test_real_mcp_git_checkout_and_publication_through_access(
             result = invoke(name, args)
             assert 'checkout_warning' not in result
             assert json.loads((repo / '.git/moyai.json').read_text())['base_sha'] == result['commit']
+        checked_out = invoke('github_checkout', {'repository_id': 101, 'number': 100, 'directory': 'pr-head'})
+        assert checked_out['base_sha'] == result['commit']
+        assert (workspace / 'pr-head/change.txt').read_text() == 'after 2\n'
         assert len(publications) == 2 and all(len(files) == 1 for files in publications)
         print('PASS publication and revision: authenticated fetch updates local checkout base')
         config_text = (repo / '.git/config').read_text()

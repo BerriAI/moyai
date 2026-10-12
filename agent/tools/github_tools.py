@@ -51,7 +51,7 @@ def metadata(directory):
     return data
 
 
-def checkout(broker, remote, token, directory='', repository='', number=None, repository_id=None):
+def checkout(broker, remote, token, directory='', repository='', number=None, repository_id=None, *, env=None):
     arguments = {'repository': repository} if repository else {}
     if repository_id is not None:
         arguments['repository_id'] = repository_id
@@ -96,7 +96,7 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
         base = git(target, 'rev-parse', '--verify', 'refs/remotes/origin/' + repo['default_branch']).decode().strip()
     else:
         # Capability is sent in a temporary environment, never in argv, URL or Git config.
-        env = git_environment(remote, token)
+        env = env if env is not None else git_environment(remote, token)
         if number is not None:
             target.mkdir()
             git(target, 'init')
@@ -202,11 +202,15 @@ def advertised_tools(tools):
     return result
 
 
-def call(name, args, broker, remote, token):
+def call(name, args, broker, remote, token, *, relay=None):
+    options = {}
+    if relay is not None:
+        remote, token = relay.url, relay.token
+        options['env'] = relay.git_environment()
     if name == 'github_checkout':
         if set(args) - {'directory', 'repository', 'repository_id', 'number'}:
             raise GitHubToolError('Checkout accepts only a directory, repository and optional PR number.')
-        return checkout(broker, remote, token, **args)
+        return checkout(broker, remote, token, **args, **options)
     if name in {'github_create_pull_request', 'github_update_pull_request'}:
         payload = collect(directory=args.get('directory', ''), title=args['title'], body=args.get('body', ''), request_key=args['request_key'])
         if name == 'github_update_pull_request':
@@ -216,18 +220,18 @@ def call(name, args, broker, remote, token):
         if result.get('commit') and not result.get('error'):
             target = directory_path(args.get('directory', ''))
             try:
-                sync_publication(target, result, remote, token)
-            except (GitHubToolError, OSError):
+                sync_publication(target, result, remote, token, **options)
+            except (ValueError, OSError):
                 result = {**result, 'checkout_warning': 'Publication succeeded, but local base synchronization failed. Recover with github_checkout using this PR number in a fresh directory before further edits.'}
         return result
     raise GitHubToolError('Unknown local GitHub tool.')
 
 
-def sync_publication(target, result, remote, token):
+def sync_publication(target, result, remote, token, *, env=None):
     data = metadata(target)
     if not re.fullmatch(r'[0-9a-f]{40}', result.get('commit', '')) or not result.get('repository_id') or (data.get('repository_id') and result['repository_id'] != data['repository_id']):
         raise GitHubToolError('Invalid publication receipt.')
-    env = git_environment(remote, token)
+    env = env if env is not None else git_environment(remote, token)
     git(target, 'fetch', '--no-tags', '--', remote.rstrip('/') + f"/github/repositories/{result['repository_id']}.git",
         result['commit'], env=env)
     data.update(base_sha=result['commit'], number=result['number'], repository_id=result['repository_id'], repository=result['repository'])

@@ -105,7 +105,7 @@ READ_WORKERS = 4
 MAX_PENDING_PER_LANE = 32
 
 
-def call_tool(params, tools):
+def call_tool(params, tools, *, relay=None):
     name, args = params['name'], params.get('arguments', {})
     try:
         if os.environ.get('MOYAI_REMOTE_COMPUTER') == '1':
@@ -130,7 +130,7 @@ def call_tool(params, tools):
             available = broker('/tools')  # Recheck revocation/read-only changes.
             if name not in {tool['name'] for tool in available}:
                 raise github_tools.GitHubToolError('This GitHub operation is not enabled for the session.')
-            data = github_tools.call(name, args, broker, GIT_BROKER, TOKEN)
+            data = github_tools.call(name, args, broker, GIT_BROKER, TOKEN, **({'relay': relay} if relay is not None else {}))
         else:
             data = browser_tool(name, args) if name.startswith("browser_") else broker("/tools/call", {"name": name, "arguments": args})
         if name == 'workspace_diagnostics' and isinstance(data, dict) and not data.get('error'):
@@ -168,7 +168,7 @@ def call_tool(params, tools):
                 pass
         return {"content": [{"type": "text", "text": message}], "isError": True}
     except Exception as exc:
-        return {"content": [{"type": "text", "text": f"Tool failed ({type(exc).__name__}). The action was not confirmed; do not retry writes automatically."}], "isError": True}
+        return {"content": [{"type": "text", "text": f"Tool failed ({type(exc).__name__}). The action was not confirmed; do not retry writes automatically."}], "isError": True, "error_type": type(exc).__name__}
 
 
 def serve():

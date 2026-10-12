@@ -401,6 +401,183 @@ def durable_app(tmp_path):
     app.state.store.close()
 
 
+@pytest.fixture
+async def traced_tool_runtime(durable_app, request):
+    from dataclasses import asdict
+    from temporalio.testing import ActivityEnvironment
+    from app.config import Settings
+    from app.deepagents_context import _runtime
+    from app.deepagents_workflow import workspace_call
+    from app.security import digest
+    from app.tracing import AgentTracing
+
+    manager, store = durable_app.state.manager, durable_app.state.store
+    tracing = store.tracing = AgentTracing(store, Settings(_env_file=None,
+        litellm_trace_endpoint='https://traces.example/v1/traces', litellm_trace_api_key='trace-secret',
+        raindrop_write_key='', langfuse_public_key='', langfuse_secret_key='', langsmith_api_key='', braintrust_api_key=''))
+    owner = store.identity({'method': 'google', 'identity': {'sub': 'trace-owner', 'email': 'trace@example.com'}})
+    run = store.create_run('Trace a tool.', '', 'modal', [], chat_enabled=True,
+        harness='deepagents-temporal', user_id=owner, private_owner_id=owner if getattr(request, 'param', False) else '')
+    manager.submit(run)
+    manager.begin_turn(run['id'], store.run(run['id']))
+    scope = TurnScope(run['id'], manager.state(run['id'])['message_id'], actor_id=owner)
+    store.update_run(run['id'], status='running', token_hash=digest(manager.token(run['id'], scope.message_id)))
+    runtime = manager.deepagents_runtime
+    runtime.journal.exchange(store.run(run['id']), {'action': 'import', 'entries': [],
+        'manifest': {'id': 'empty', 'count': 0}, 'complete': True})
+
+    async def invoke():
+        token = _runtime.set(runtime)
+        try:
+            message = await ActivityEnvironment().run(workspace_call.ainvoke, {
+                'name': 'workspace_call', 'id': 'trace-call', 'type': 'tool_call', 'args': {
+                    'name': 'github_checkout', 'arguments_json': '{"repository":"private-argument-sentinel"}',
+                    'scope': asdict(scope), 'call_id': 'trace-call'}})
+            return json.loads(message.content)
+        finally:
+            _runtime.reset(token)
+
+    yield SimpleNamespace(runtime=runtime, store=store, scope=scope, tracing=tracing, invoke=invoke)
+    await tracing.close()
+
+
+@pytest.mark.parametrize('failed', [False, True])
+async def test_tool_invocation_exports_real_bridge_outcome(traced_tool_runtime, monkeypatch, failed):
+    import httpx
+    from agent.tools import mcp_bridge
+    from sandbox.broker_transport import unseal
+    from test_trace_outbox import spans, transport
+
+    probe = traced_tool_runtime
+    catalog = [{'name': 'github_checkout', 'inputSchema': {'type': 'object'}}]
+    paths, dispatched, received = [], [], []
+    monkeypatch.delenv('MOYAI_REMOTE_COMPUTER', raising=False)
+    monkeypatch.setattr(mcp_bridge, 'broker', lambda *args: catalog)
+
+    def checkout(name, arguments, *args, **kwargs):
+        assert arguments == {'repository': 'private-argument-sentinel'}
+        dispatched.append(name)
+        if failed:
+            raise ValueError('private-exception-sentinel', {'authorization': 'private-credential-sentinel'})
+        return {'workspace': '/workspace', 'content': 'private-result-sentinel'}
+
+    monkeypatch.setattr(mcp_bridge.github_tools, 'call', checkout)
+
+    def broker(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith('/tools'):
+            return httpx.Response(200, json=catalog)
+        assert request.url.path.endswith('/agent-runtime')
+        token = probe.runtime.runner.token(probe.scope.run_id, probe.scope.message_id)
+        receipt = mcp_bridge.call_tool(json.loads(unseal(token, '/agent-runtime', request.content)), catalog)
+        return httpx.Response(200, json={'status': 'completed', 'result': receipt})
+
+    def receiver(request):
+        received.append(request.content)
+        return httpx.Response(200)
+
+    probe.runtime.broker_transport = httpx.MockTransport(broker)
+    await transport(probe.tracing, receiver)
+    result = await probe.invoke()
+    assert result['result']['isError'] is failed
+    assert dispatched == ['github_checkout'] and len(paths) == 2
+    assert await probe.tracing.outboxes[0].export_once()
+    exported = spans(received[0])
+    assert len(exported) == 1
+    span = exported[0]
+    attrs = {attr.key: attr.value.string_value for attr in span.attributes}
+    trace_id, parent_id, *_ = probe.tracing.identity(probe.store.run(probe.scope.run_id), probe.scope.message_id)
+    assert span.trace_id.hex() == format(trace_id, '032x') and span.parent_span_id.hex() == format(parent_id, '016x')
+    assert span.name == attrs['gen_ai.tool.name'] == 'github_checkout'
+    assert attrs['openinference.span.kind'] == 'TOOL' and attrs['gen_ai.operation.name'] == 'execute_tool'
+    assert attrs['moyai.turn_id'] == str(probe.scope.message_id)
+    assert span.status.code == (2 if failed else 1)
+    if failed:
+        assert attrs['error.type'] == 'ValueError'
+        assert span.status.message == 'Operation error'
+        assert {attr.key: attr.value.string_value for attr in span.events[0].attributes} == {
+            'exception.type': 'ValueError', 'exception.message': 'Operation error'}
+    else:
+        assert 'error.type' not in attrs and not span.events
+    assert all(secret not in received[0] for secret in (
+        b'private-argument-sentinel', b'private-exception-sentinel', b'private-credential-sentinel',
+        b'private-result-sentinel', b'trace-secret', b'The action was not confirmed'))
+
+
+@pytest.mark.parametrize('traced_tool_runtime,outcome', [(outcome == 'private', outcome) for outcome in
+    ('rejected', 'raised', 'cancelled', 'persistence', 'private', 'disabled', 'capture', 'capture_raised',
+     'untyped', 'invalid_type')], indirect=['traced_tool_runtime'])
+async def test_tool_invocation_tracing_preserves_execution(traced_tool_runtime, monkeypatch, outcome):
+    import httpx
+    from temporalio.exceptions import ApplicationError
+    from test_trace_outbox import spans
+
+    probe = traced_tool_runtime
+    dispatched = []
+    dispatch_started = asyncio.Event()
+
+    async def broker(request):
+        if request.url.path.endswith('/tools'):
+            return httpx.Response(200, json=[] if outcome == 'rejected' else [{'name': 'github_checkout'}])
+        dispatched.append(request.url.path)
+        if outcome in {'raised', 'capture_raised'}:
+            raise ValueError('private-transport-sentinel')
+        if outcome == 'cancelled':
+            dispatch_started.set()
+            await asyncio.Event().wait()
+        if outcome in {'untyped', 'invalid_type'}:
+            result = {'isError': True, 'content': [{'type': 'text', 'text': 'ValueError: private-error-sentinel'}]}
+            if outcome == 'invalid_type':
+                result['error_type'] = 'ValueError(private-error-sentinel)'
+            return httpx.Response(200, json={'status': 'completed', 'result': result})
+        return httpx.Response(200, json={'status': 'completed', 'result': {'isError': False}})
+
+    def fail(*args, **kwargs):
+        if outcome == 'persistence':
+            probe.store.execute('UPDATE runs SET active_message_id=? WHERE id=?',
+                                (probe.scope.message_id + 100, probe.scope.run_id))
+        raise RuntimeError('private-persistence-sentinel')
+
+    probe.runtime.broker_transport = httpx.MockTransport(broker)
+    if outcome == 'persistence':
+        monkeypatch.setattr(probe.runtime, 'append', fail)
+    elif outcome == 'disabled':
+        probe.tracing.enabled = False
+    elif outcome in {'capture', 'capture_raised'}:
+        monkeypatch.setattr(probe.tracing, 'tool', fail)
+    error = {'raised': ApplicationError, 'capture_raised': ApplicationError, 'persistence': RuntimeError}.get(outcome)
+    if outcome == 'cancelled':
+        async with asyncio.TaskGroup() as tasks:
+            invocation = tasks.create_task(probe.invoke())
+            await asyncio.wait_for(dispatch_started.wait(), 5)
+            invocation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await invocation
+    elif error:
+        with pytest.raises(error) as raised:
+            await probe.invoke()
+        if error is ApplicationError:
+            assert raised.value.non_retryable and raised.value.type == 'UncertainToolOutcome'
+    else:
+        result = await probe.invoke()
+        assert result.get('isError') if outcome == 'rejected' else result['result']['isError'] is (outcome in {'untyped', 'invalid_type'})
+    assert len(dispatched) == (0 if outcome == 'rejected' else 1)
+    rows = probe.store.rows('SELECT payload FROM trace_outbox')
+    if outcome in {'private', 'disabled', 'capture', 'capture_raised'}:
+        assert rows == []
+        return
+    assert len(rows) == 1
+    span = spans(rows[0]['payload'])[0]
+    attrs = {attr.key: attr.value.string_value for attr in span.attributes}
+    assert attrs['moyai.turn_id'] == str(probe.scope.message_id)
+    assert span.status.code == (1 if outcome == 'persistence' else 2)
+    expected = {'rejected': 'ToolRejected', 'raised': 'ValueError', 'cancelled': 'CancelledError',
+                'untyped': 'ToolError', 'invalid_type': 'ToolError'}
+    assert attrs.get('error.type') == expected.get(outcome)
+    assert all(secret not in rows[0]['payload'] for secret in (
+        b'private-transport-sentinel', b'private-persistence-sentinel', b'private-error-sentinel'))
+
+
 async def drive_session(manager, run_id, predicate=None):
     async with asyncio.timeout(25):
         while True:

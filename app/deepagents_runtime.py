@@ -19,7 +19,7 @@ from langchain_core.messages import HumanMessage, message_chunk_to_message, mess
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from agent.activity import ActivityReporter, public_text, split_focus, tool_details
+from agent.activity import ActivityReporter, public_text, result_status, split_focus, tool_details
 from agent.agent import conversation_prompt
 from agent.continuation import resumed_context
 from agent.goals import goal_instructions, HELP, command
@@ -268,9 +268,29 @@ class DeepAgentsRuntime:
             await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _call_tool(self, scope, call_id, name, arguments):
+        observation = {'tool': name, 'start_ns': time.time_ns(), 'call_id':
+            hashlib.sha256(f'{scope.run_id}:{scope.message_id}:{scope.segment}:{call_id}'.encode()).hexdigest()[:32]}
+        try:
+            return await self._invoke_tool(scope, call_id, name, arguments, observation)
+        except (Exception, asyncio.CancelledError) as exc:
+            if 'status' not in observation:
+                observation.update(status='cancelled' if isinstance(exc, asyncio.CancelledError) else 'error',
+                                   error_type=type(exc).__name__)
+            raise
+        finally:
+            observation.setdefault('end_ns', time.time_ns())
+            try:
+                if self.runner.store.tracing:
+                    await database(self.runner.store.tracing.tool, scope.run_id, observation,
+                                   message_id=scope.message_id)
+            except Exception:
+                pass
+
+    async def _invoke_tool(self, scope, call_id, name, arguments, observation):
         if name not in {t['name'] for t in await self.catalog(scope)}:
+            observation.update(status='error', error_type='ToolRejected')
             return {'isError': True, 'error': 'Tool is not in the authorized catalog. No action was attempted.'}
-        identity = hashlib.sha256(f'{scope.run_id}:{scope.message_id}:{scope.segment}:{call_id}'.encode()).hexdigest()[:32]
+        identity = observation['call_id']
         r = self.runner
         reporter = ActivityReporter(lambda kind, message, data: r.store.event(scope.run_id, kind, message, data))
         reporter.prefix = identity
@@ -297,11 +317,15 @@ class DeepAgentsRuntime:
                     'input_id': scope.input_id or scope.message_id, 'request_id': identity})
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            observation.update(status='error', error_type=type(exc).__name__)
             # The broker/computer receipt remains the authority. Never convert
             # uncertainty to a retryable tool error that could repeat a write.
             raise ApplicationError('Tool outcome could not be confirmed. Inspect saved receipts before retrying.',
                                    type='UncertainToolOutcome', non_retryable=True) from None
+        observation.update(status=result_status(value)[0], end_ns=time.time_ns())
+        if observation['status'] == 'error':
+            observation['error_type'] = value.get('error_type') if isinstance(value, dict) else None
         # Keep persistence outside the dispatch exception boundary: a confirmed
         # action must not be reported as an unexecuted/retryable action.
         await database(reporter.complete, call_id, name, arguments, value)
