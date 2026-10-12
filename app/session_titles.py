@@ -1,4 +1,5 @@
 """Best-effort session names, independent of chat execution and read endpoints."""
+from .private_sinks import private_run, require_request_owner
 import asyncio
 import logging
 import re
@@ -155,11 +156,15 @@ class SessionTitles:
         return True
 
     def schedule(self, run_id):
+        if private_run(self.store, run_id):
+            return
         if self.save_request(run_id) and self.settings.moyai_runtime_role != 'api':
             self.enqueue(run_id)
 
     async def request(self, run_id):
         # Keep database waits off the request loop; queue operations stay on it.
+        if await database(private_run, self.store, run_id):
+            return
         if await database(self.save_request, run_id) and self.settings.moyai_runtime_role != 'api':
             self.enqueue(run_id)
 
@@ -210,6 +215,8 @@ class SessionTitles:
         return row
 
     async def _generate(self, run_id):
+        if private_run(self.store, run_id):
+            return
         row = await database(self.claim, run_id)
         await self.checkpoints.flush()
         if not row or not row['content'].strip():

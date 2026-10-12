@@ -71,10 +71,10 @@ class Store:
                        'updated_at', 'owner_id', 'active_user_id', 'chat_enabled',
                        'model', 'parent_run_id', 'agent_group_id', 'agent_label',
                        'display_title', 'active_message_id', 'side_chat_of',
-                       'deletion_requested_at', 'deleted_at', 'pending_result')
+                       'deletion_requested_at', 'deleted_at', 'pending_result', 'private_owner_id')
     SIDEBAR_CHILD_COLUMNS = ('id', 'parent_run_id', 'agent_label', 'status', 'mode',
                              'created_at', 'updated_at', 'active_message_id',
-                             'deletion_requested_at', 'deleted_at', 'pending_result')
+                             'deletion_requested_at', 'deleted_at', 'pending_result', 'private_owner_id')
 
     def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False, database_pool_size=8, runtime_role='standalone', runtime_settings=None, schema_mode='auto'):
         if schema_mode not in {'auto', 'verify', 'migrate'}:
@@ -107,6 +107,8 @@ class Store:
     def _initialize(self, directory, default_model, object_storage):
         if self.schema_updates:
             self._initialize_schema(default_model)
+            from .session_privacy import initialize_schema as initialize_privacy
+            initialize_privacy(self)
             from .swarms import initialize_schema
             initialize_schema(self)
             from .swarm_chat import initialize_schema as initialize_swarm_chat
@@ -261,7 +263,7 @@ class Store:
             conn.execute("CREATE INDEX IF NOT EXISTS login_states_client ON login_states(client, expires)")
             if 'metadata' not in conn.column_names('slack_outbox'):
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
-            for table, names in [('runs', ('owner_id', 'active_user_id')), ('messages', ('user_id',))]:
+            for table, names in [('runs', ('owner_id', 'active_user_id', 'private_owner_id')), ('messages', ('user_id',))]:
                 existing = conn.column_names(table)
                 for name in names:
                     if name not in existing:
@@ -461,7 +463,7 @@ class Store:
         return linked['id'] if linked else user_id
 
     def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False, pin_owner=None,
-                        search=(), limit=100, exclude_id='', search_folders=False):
+                        search=(), limit=100, exclude_id='', search_folders=False, privacy_owner=None, include_private=True):
         """Filter before the recent limit and apply the same scope to filed/focused runs.
 
         Identity links affect this shared-workspace view only, never authorization.
@@ -500,6 +502,8 @@ class Store:
                     WHERE m.run_id=runs.id AND m.owner_id=? AND strpos(unicode_lower(f.name),needle.term)>0)"""
                 params.append(archive_owner)
             predicate += ' AND NOT EXISTS(SELECT 1 FROM search_input needle WHERE ' + missing + ')'
+        predicate += " AND (private_owner_id='' OR private_owner_id=?)"
+        params.append((privacy_owner if privacy_owner is not None else archive_owner or user_id or '') if include_private else '')
         query = prefix + 'SELECT id FROM runs WHERE ' + predicate
         scope = ' AND (' + ' OR '.join(scopes) + ')' if scopes else ''
         ids = [row['id'] for row in self.rows(query + scope + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT ?', [*params, *scope_params, limit])]
@@ -578,7 +582,13 @@ class Store:
             row['swarm'] = public_mission(mission[0])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None, received_at=None):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None, received_at=None, private_owner_id=''):
+        if private_owner_id:
+            owners = self.rows('SELECT kind FROM users WHERE id=?', (private_owner_id,))
+            if private_owner_id != user_id or not owners or owners[0]['kind'] not in {'google', 'cloudflare'}:
+                raise ValueError('Private sessions require a verified individual owner.')
+            if not chat_enabled or side_chat_of or swarm_budget_seconds is not None:
+                raise ValueError('Private sessions require a direct chat without derivation or swarms.')
         if swarm_budget_seconds is not None and (not chat_enabled or mode != 'modal' or metadata_request or not durable_submit):
             raise ValueError('Swarm mode requires a durable cloud chat session.')
         sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
@@ -590,7 +600,7 @@ class Store:
         with self.connect() as conn:
             conn.begin_write()
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at,r.deletion_requested_at FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at,r.deletion_requested_at,r.private_owner_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
                     if previous['deleted_at'] or previous['deletion_requested_at']:
                         raise ValueError('This session was deleted. Start a new session.')
@@ -601,16 +611,18 @@ class Store:
                                       else mission['budget_seconds'] if mission else None)
                     if initial_budget != swarm_budget_seconds:
                         raise ValueError('That submission ID was already used for different content.')
-                    if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
+                    if (previous['private_owner_id'] != private_owner_id or previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
                     return self.run(previous['run_id'])
             context = ''
             if side_chat_of:
-                parent = conn.execute("SELECT prompt,summary FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''", (side_chat_of,)).fetchone()
+                parent = conn.execute("SELECT prompt,summary,private_owner_id FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''", (side_chat_of,)).fetchone()
                 if not parent:
                     raise ValueError('The original session no longer exists.')
+                if parent['private_owner_id']:
+                    raise ValueError('Private sessions cannot create side chats.')
                 messages = conn.execute('''SELECT id,role,content,status,user_id,created_at,input_kind,source_json,response_to_id
                     FROM messages WHERE run_id=? AND status!='deleted' ORDER BY id''', (side_chat_of,)).fetchall()
                 conversation = []
@@ -625,8 +637,8 @@ class Store:
             if pending >= self.max_pending_runs and not metadata_request:
                 raise ValueError('The session queue is full. Wait for a task to finish.')
             conn.execute(
-                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id,harness,github_repository_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id, harness, github_repository_id),
+                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id,harness,github_repository_id,private_owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id, harness, github_repository_id, private_owner_id),
             )
             conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (sandbox_provider, run_id))
             if side_chat_of:
@@ -756,6 +768,8 @@ class Store:
             raise ValueError('This session was deleted. Start a new session.')
         if not row or not row["chat_enabled"]:
             raise ValueError("This older task has no saved chat workspace. Start a new session.")
+        if row['private_owner_id'] and row['private_owner_id'] != user_id:
+            raise ValueError('Session not found.')
         existing = conn.execute("SELECT * FROM messages WHERE run_id=? AND client_id=?", (run_id, client_id)).fetchone()
         if existing:
             if (existing["content"] != content or existing['user_id'] != user_id or (model is not None and existing['model'] != model)

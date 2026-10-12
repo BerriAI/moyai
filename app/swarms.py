@@ -3,6 +3,7 @@
 Only checkpointed, completed turns can earn automatic continuation. Ambiguous
 actions and failed turns require explicit human intervention, never replay.
 """
+from .private_sinks import deny_export
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -195,6 +196,7 @@ class SwarmMissions:
         snapshot. Each gets its own scoped copy of the initial uploads. Runtime
         concurrency still belongs to normal admission, including queueing.
         """
+        deny_export(self.store, run_id, conn)
         existing = conn.execute('SELECT id FROM agent_groups WHERE parent_id=? AND request_key=?',
                                 (run_id, INITIAL_TEAM_KEY)).fetchone()
         if existing:

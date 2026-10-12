@@ -155,9 +155,101 @@ def test_object_archives_override_legacy_bytes_and_keep_revisions_and_faults(wor
     assert client.get(url.removesuffix('/files')).json()['has_artifact'] is True
     assert store.objects.reads == count
     assert client.get(file['url']).status_code == 503
-    assert client.get(url).status_code == 503
+    # A verified catalog is metadata, like has_artifact; subsequent downloads
+    # still fail closed if the backing object becomes unavailable.
+    assert client.get(url).status_code == 200
     client.cookies.clear()
     assert client.get(file['url']).status_code == 401
+
+
+def test_media_catalog_never_downloads_the_workspace_archive(workspace):
+    client, url, path = saved(workspace, [('new-files/report.md', 'saved report')])
+    store = workspace[0].state.store
+    store.objects = MemoryObjects()
+    store.artifacts.save(path.name, path.read_bytes())
+    run_id = path.stem
+    store.artifacts.save(run_id + '-captures/demo.webm', b'video')
+    store.objects.fail = True
+    result = client.get(url + '?view=media')
+    assert result.status_code == 200
+    assert result.json()['archive_pending'] is True
+    assert [item['archive_path'] for item in result.json()['files']] == ['capture:demo.webm']
+    assert store.objects.reads == 0
+    assert client.get(url).status_code == 503
+    client.cookies.clear()
+    assert client.get(url + '?view=media').status_code == 401
+
+
+def test_catalog_reuses_verified_revision_but_refreshes_independent_captures(workspace):
+    client, url, path = saved(workspace, [('new-files/report.md', 'saved report')])
+    store = workspace[0].state.store
+    store.objects = MemoryObjects()
+    store.artifacts.save(path.name, path.read_bytes())
+    first = client.get(url).json()
+    assert store.objects.reads == 1
+    assert client.get(url).json() == first
+    assert store.objects.reads == 1
+    store.artifacts.save(path.stem + '-captures/new.webm', b'video')
+    second = client.get(url).json()
+    assert second['revision'] == first['revision']
+    assert second['files'][0]['archive_path'] == 'capture:new.webm'
+    assert store.objects.reads == 1
+    # Replacing the archive selects a different index, including on the same
+    # application instance; deletion cannot be masked by a warm catalog.
+    raw = BytesIO()
+    with zipfile.ZipFile(raw, 'w') as archive:
+        archive.writestr('new-files/replacement.md', 'replacement')
+    store.artifacts.save(path.name, raw.getvalue())
+    third = client.get(url).json()
+    assert third['revision'] != first['revision']
+    assert third['files'][-1]['path'] == 'replacement.md'
+    assert store.objects.reads == 2
+    store.execute('DELETE FROM artifact_objects WHERE name=?', (path.name,))
+    path.unlink()
+    assert client.get(url).json()['files'] == second['files'][:1]
+
+
+def test_failed_archive_scan_is_retryable_and_does_not_poison_cache(workspace):
+    client, url, path = saved(workspace, [('new-files/report.md', 'saved report')])
+    store = workspace[0].state.store
+    store.objects = MemoryObjects()
+    store.artifacts.save(path.name, path.read_bytes())
+    store.objects.fail = True
+    assert client.get(url).status_code == 503
+    store.objects.fail = False
+    assert client.get(url).status_code == 200
+    assert store.objects.reads == 2
+
+
+def test_archive_catalog_coalesces_readers_and_bounds_retained_metadata():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    cache = artifact_files.ArchiveCatalog(max_bytes=80, max_entries=1)
+    started, release = Event(), Event()
+    calls = []
+
+    def load():
+        calls.append('scan')
+        started.set()
+        assert release.wait(2)
+        return {'files': ['one']}
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        first = executor.submit(cache.read, 'same', load)
+        assert started.wait(2)
+        others = [executor.submit(cache.read, 'same', load) for _ in range(3)]
+        release.set()
+        results = [first.result()] + [future.result() for future in others]
+    assert calls == ['scan']
+    results[0]['files'].append('mutation')
+    assert results[1] == {'files': ['one']}
+    assert cache.read('same', load) == {'files': ['one']}
+    cache.read('next', lambda: {'files': ['two']})
+    assert list(cache.entries) == ['next']
+    cache.read('oversized', lambda: {'files': ['x' * 100]})
+    assert list(cache.entries) == ['next']
+    assert cache.size <= 80
 
 
 @pytest.mark.parametrize('format,extension', [('PNG', 'png'), ('JPEG', 'jpg'), ('WEBP', 'webp'), ('GIF', 'gif')])

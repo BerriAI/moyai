@@ -3,6 +3,7 @@
 Chunks are transport units, not file-size limits. A manifest becomes visible only
 after every byte is verified under the current execution fence.
 """
+from .private_sinks import require_request_owner, require_owner
 import base64
 import codecs
 import hashlib
@@ -126,6 +127,7 @@ class PublishedArtifacts:
         return run
 
     def target(self, admitted, run_id):
+        require_owner(self.store, run_id or admitted['id'], admitted.get('private_owner_id', ''))
         with self.store.connect() as conn:
             self.active(conn, admitted)
         target = self.readable(run_id or admitted['id'])
@@ -271,7 +273,7 @@ class PublishedArtifacts:
         router = APIRouter()
         @router.get('/api/runs/{run_id}/artifacts/content')
         def content(run_id: str, request: Request, path: str, revision: str, preview: bool = False, inline: bool = False, offset: int = 0, length: int = 65536):
-            security.require(request)
+            require_request_owner(self.store, security, request, run_id)
             manifest = self.manifest(run_id, path, revision)
             if offset < 0 or length < 1:
                 raise HTTPException(422, 'Use a nonnegative byte offset and positive length.')

@@ -3,7 +3,9 @@
 No Store/app initialization, job mutation, customer content or credentials leave
 the service. Pending work is allowed. Schema/contracts must already be activated.
 """
+from contextlib import contextmanager
 import hashlib
+import http.client
 import json
 import os
 import sys
@@ -12,6 +14,27 @@ import urllib.request
 from urllib.parse import urlsplit
 
 ROLES = ('api', 'worker', 'broker', 'coordinator')
+
+
+class ProbeFailure(ValueError):
+    def __init__(self, reason, *, stage=None):
+        if reason not in {'database_unavailable', 'database_error', 'health_unavailable', 'runtime_validation_failed'}:
+            raise ValueError('Invalid probe failure classification')
+        if stage is not None and (reason != 'runtime_validation_failed' or stage not in {
+                'environment', 'configuration', 'snapshot', 'contracts', 'health_identity'}):
+            raise ValueError('Invalid probe validation stage')
+        self.reason = reason
+        self.stage = stage
+
+
+@contextmanager
+def validation_stage(stage):
+    try:
+        yield
+    except ProbeFailure:
+        raise
+    except Exception:
+        raise ProbeFailure('runtime_validation_failed', stage=stage) from None
 
 
 def require(condition):
@@ -95,43 +118,73 @@ def schema_capability(connection, schema, revision):
 
 
 def probe(options):
-    from app.config import Settings
-    from app.runtime_compatibility import api_fingerprint, background_fingerprint
-    from render_start import configure_environment
-    import psycopg
-    require(not options['staged'] and not options['drain'])
-    for name, value in {'RENDER_GIT_COMMIT': options['sha'], 'MOYAI_BUILD_SHA': options['sha'],
-                        'MOYAI_RUNTIME_ROLE': options['role'], 'RENDER_MIGRATION_STAGE': 'false',
-                        'MAINTENANCE_DRAIN': 'false', 'MOYAI_COORDINATOR_HANDOFF': 'true'}.items():
-        require(os.environ.get(name) == value)
-    preserved = {key: os.environ.get(key) for key in options['env_keys']}
-    require(hashlib.sha256(json.dumps(preserved, sort_keys=True).encode()).hexdigest() == options['env_digest'])
-    configure_environment()
-    settings = Settings(_env_file=None)
-    require(settings.moyai_schema_mode == 'verify' and settings.moyai_separate_broker
-            and settings.moyai_coordinator_handoff and settings.temporal_enabled)
-    with psycopg.connect(settings.moyai_database_url, connect_timeout=10) as connection:
-        state = snapshot(connection, settings.moyai_database_schema)
-        state.update(schema_capability(connection, settings.moyai_database_schema, state['schema']))
-    contracts = {'api': api_fingerprint(settings), **{
-        role: background_fingerprint(settings, role) for role in ('worker', 'broker', 'coordinator')}}
-    require(state['contracts'] == contracts)
+    with validation_stage('environment'):
+        require(not options['staged'] and not options['drain'])
+        for name, value in {'RENDER_GIT_COMMIT': options['sha'], 'MOYAI_BUILD_SHA': options['sha'],
+                            'MOYAI_RUNTIME_ROLE': options['role'], 'RENDER_MIGRATION_STAGE': 'false',
+                            'MAINTENANCE_DRAIN': 'false', 'MOYAI_COORDINATOR_HANDOFF': 'true'}.items():
+            require(os.environ.get(name) == value)
+        preserved = {key: os.environ.get(key) for key in options['env_keys']}
+        require(hashlib.sha256(json.dumps(preserved, sort_keys=True).encode()).hexdigest() == options['env_digest'])
+    with validation_stage('configuration'):
+        from app.config import Settings
+        from app.runtime_compatibility import api_fingerprint, background_fingerprint
+        from render_start import configure_environment
+        import psycopg
+        configure_environment()
+        settings = Settings(_env_file=None)
+        require(settings.moyai_schema_mode == 'verify' and settings.moyai_separate_broker
+                and settings.moyai_coordinator_handoff and settings.temporal_enabled)
+    try:
+        connection = psycopg.connect(settings.moyai_database_url, connect_timeout=10)
+    except psycopg.Error as error:
+        # Reconnect only before observing state, and only for classified
+        # connection loss/server restarts. Authentication/unknown errors stop.
+        transient = error.sqlstate in {'08000', '08001', '08003', '08006', '08007',
+                                      '57P01', '57P02', '57P03'}
+        raise ProbeFailure('database_unavailable' if transient else 'database_error') from None
+    with validation_stage('snapshot'):
+        try:
+            with connection:
+                state = snapshot(connection, settings.moyai_database_schema)
+                state.update(schema_capability(connection, settings.moyai_database_schema, state['schema']))
+        except psycopg.Error:
+            # Never retry after observing even partial state: a later sample must
+            # not conceal policy/schema/ownership drift from this observation.
+            raise ProbeFailure('database_error') from None
+    with validation_stage('contracts'):
+        contracts = {'api': api_fingerprint(settings), **{
+            role: background_fingerprint(settings, role) for role in ('worker', 'broker', 'coordinator')}}
+        require(state['contracts'] == contracts)
     request = urllib.request.Request('http://127.0.0.1:10000/health',
                                     headers={'Host': urlsplit(settings.public_url).netloc})
     try:
         response = urllib.request.urlopen(request, timeout=10)
     except urllib.error.HTTPError as error:
         response = error
-    except (urllib.error.URLError, TimeoutError):
-        return {'ok': True, **state, 'ready': None, 'identity': None}
-    with response:
-        health = health_identity(response, options, state)
+    except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
+        raise ProbeFailure('health_unavailable') from None
+    with validation_stage('health_identity'):
+        try:
+            with response:
+                health = health_identity(response, options, state)
+        except (TimeoutError, ConnectionError, http.client.HTTPException):
+            raise ProbeFailure('health_unavailable') from None
     return {'ok': True, **state, **health}
+
+
+def result(options):
+    try:
+        return probe(options)
+    except ProbeFailure as error:
+        return {'ok': False, 'reason': error.reason, **({'stage': error.stage} if error.stage else {})}
+    except Exception:
+        return {'ok': False, 'reason': 'runtime_validation_failed'}
 
 
 if __name__ == '__main__':
     try:
-        result = probe(json.loads(sys.argv[1]))
+        value = result(json.loads(sys.argv[1]))
     except Exception:
-        result = {'ok': False}
-    print('MOYAI_RELEASE_PROBE=' + json.dumps(result, sort_keys=True))
+        value = {'ok': False, 'reason': 'probe_request_invalid'}
+    print('MOYAI_RELEASE_PROBE=' + json.dumps(value, sort_keys=True))

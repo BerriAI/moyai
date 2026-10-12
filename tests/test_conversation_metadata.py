@@ -68,9 +68,11 @@ def test_conversation_metadata_read_budget(login, monkeypatch):
     assert {'goal', 'approvals', 'agents', 'pr_write_access', 'credential_requests',
             'slack_mirroring', 'has_captures', 'has_artifact', 'has_published_artifacts'} <= detail.keys()
     # The previous path needed 35 data reads and 29 checkouts for the same six
-    # messages. PostgreSQL also checks its schema owner on every checkout.
+    # messages. Two narrow privacy admission reads now fit alongside the
+    # metadata. PostgreSQL retains its original budget by sharing checkouts;
+    # it also checks its schema owner on every checkout.
     reads = [sql for sql in queries if sql.lstrip().upper().startswith(('SELECT', 'WITH'))]
-    assert 0 < len(reads) <= (40 if store.database else 26), queries
+    assert 0 < len(reads) <= (40 if store.database else 28), queries
     assert len(checkouts) <= 14
 
 

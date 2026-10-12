@@ -658,3 +658,8 @@
 .settings-view .performance-method p,.settings-view .performance-empty p {max-width:75ch;line-height:1.6}
 @media(max-width:780px){.settings-view .performance-filters {grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:480px){.settings-view .performance-filters,.settings-view .performance-metrics {grid-template-columns:minmax(0,1fr)}.settings-view .performance-average {font-size:32px}}
+
+.settings-view .personal-slack-page > .card { margin-block:0 24px; }
+.settings-view .personal-slack-page .connection-facts dd { overflow-wrap:anywhere; }
+.settings-view #personal-slack-error { color:var(--settings-danger); }
+.settings-view .personal-slack-page .connection-state.needs-attention { color:var(--settings-warning); background:var(--settings-warning-bg); }

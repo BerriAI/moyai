@@ -248,7 +248,7 @@ def test_reconnecting_capability_still_works_and_stop_revokes_it(workspace):
 
 @pytest.mark.parametrize('harness,outcome', [
     (harness, outcome) for harness in ('codex', 'claude-agent-sdk', 'opencode', 'deepagents', 'tool-loop')
-    for outcome in ('transient', 'exhausted')
+    for outcome in ('transient', 'exhausted', 'runtime_transient', 'runtime_exhausted')
 ] + [('codex', outcome) for outcome in ('401', '403', 'invalid', 'late', 'followup', 'control', 'timeout')])
 def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, outcome):
     from agent.context_store import ContextStore
@@ -257,6 +257,11 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
     events, reads, invocations = [], [], []
     from app.session_journal import SessionJournal
     from app.goals import Goals
+    startup_exhausted = outcome in {'exhausted', 'runtime_exhausted'}
+    startup_transient = outcome in {'transient', 'runtime_transient'}
+    # The prompt budget preflight and the runtime readiness check both read
+    # metadata before execution. Exercise outages at either boundary.
+    outage_read = 2 if outcome.startswith('runtime_') else 1
     server_store = Store(tmp_path / 'broker')
     server_run = server_store.create_run('Do the task', '', 'modal', [], chat_enabled=True, user_id='fixture')
     server_store.claim_message(server_run['id'])
@@ -271,8 +276,9 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
             assert self.path == '/context/window'
             assert self.headers['Authorization'] == 'Bearer test-token'
             reads.append(started())
-            unavailable = outcome == 'exhausted' or (outcome == 'transient' and len(reads) == 1) or (
-                outcome == 'late' and started())
+            unavailable = ((startup_exhausted and len(reads) >= outage_read)
+                           or (startup_transient and len(reads) == outage_read)
+                           or (outcome == 'late' and started() > 0))
             self.send_response(int(outcome) if outcome in {'401', '403'} else 502 if unavailable else 200)
             self.end_headers()
             self.wfile.write(json.dumps({'input_budget': 0 if outcome == 'invalid' else
@@ -280,6 +286,8 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
         def do_POST(self):
             raw = self.rfile.read(int(self.headers['Content-Length']))
             body = json.loads(unseal('test-token', self.path, raw))
+            if self.path == '/context/journal' and body.get('action') == 'append':
+                assert started() == 1
             result = (journal.exchange(server_run, body) if self.path == '/context/journal' else
                       goals.exchange(server_run, body, internal=True) if self.path == '/goal' else {})
             self.send_response(200)
@@ -304,7 +312,7 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
     monkeypatch.setattr(agent, 'computer_request', lambda *args, **kwargs: {})
     monkeypatch.setattr(agent, 'collect_archive', lambda *args: None)
     monkeypatch.setattr('sandbox.broker_relay.read_with_reconnect', lambda request, reader, **kwargs:
-        read_with_reconnect(request, reader, **kwargs, budget=0 if outcome in {'exhausted', 'late'} else 5,
+        read_with_reconnect(request, reader, **kwargs, budget=0 if startup_exhausted or outcome == 'late' else 5,
                             sleep=lambda seconds: None))
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     monkeypatch.chdir(tmp_path)
@@ -321,27 +329,37 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
                 agent.run(spec)
             assert reads == [0] and not invocations and not started()
         else:
-            assert agent.run(spec) == (75 if outcome == 'exhausted' else 1 if outcome in {'late', 'timeout'} else 0)
+            assert agent.run(spec) == (75 if startup_exhausted else 1 if outcome in {'late', 'timeout'} else 0)
             final = next(extra for kind, _, extra in reversed(events) if kind == 'final')
-            assert bool(final.get('startup_retry')) is (outcome == 'exhausted')
-            assert started() == (0 if outcome == 'exhausted' else 1)
-            if outcome == 'exhausted':
+            assert bool(final.get('startup_retry')) is startup_exhausted
+            assert started() == (0 if startup_exhausted else 1)
+            if startup_exhausted:
                 assert final['startup_retry'] == {'version': 1, 'stage': 'context_window', 'reason': 'HTTP 502'}
-                assert reads == [0] and not invocations
+                assert reads == [0] * outage_read and not invocations
             elif outcome in {'control', 'timeout'}:
-                assert not invocations
-                assert not reads if outcome == 'control' else reads and not any(reads)
+                assert not invocations and reads == ([] if outcome == 'control' else [0, 0])
             else:
                 assert invocations == ([64000, 32000] if outcome == 'followup' else [64000])
-                # Skill catalog initialization may also read the budget. Every
-                # startup read must precede execution; continuation reads must
-                # follow it. Do not couple this contract to the number of GETs.
-                assert reads and not any(reads) if outcome == 'transient' else reads[-1] == 1 and not any(reads[:-1])
-                store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
-                try:
-                    assert 'saved-receipt' in json.dumps(store.history()) and not store.pending
-                finally:
-                    store.close()
+                assert reads == ([0, 0, 0] if startup_transient else [0, 0, 1])
+                if outcome == 'late':
+                    assert final['context_failure'] == 'Context services did not reconnect. Completed work is preserved.'
+        store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
+        try:
+            history = store.history()
+            durable = journal.exchange(server_run, {'action': 'read'})
+            assert durable['next'] is None
+            assert history == [entry['message'] for entry in durable['entries']]
+            calls = [call for message in history for call in message.get('tool_calls', [])]
+            receipts = [message for message in history if message['role'] == 'tool']
+            assert len(calls) == len(receipts) == len(invocations)
+            assert len({call['id'] for call in calls}) == len(calls)
+            assert [message['tool_call_id'] for message in receipts] == [call['id'] for call in calls]
+            assert all(message['content'] == 'saved-receipt' for message in receipts)
+            assert not store.pending
+            if not started():
+                assert history == []
+        finally:
+            store.close()
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
         server_store.close()

@@ -3,6 +3,7 @@
 Only current, durable attention states are eligible. Preparing a DM is safe to
 retry; a message whose Slack receipt is lost is never replayed automatically.
 """
+from .private_sinks import private_run
 import asyncio
 import html
 import logging
@@ -77,6 +78,8 @@ class SlackNotifications:
         return bot, allowed
 
     def enabled_in(self, conn, run, user_id):
+        if private_run(self.store, run['id'], conn):
+            return False
         preference = conn.execute('SELECT slack_notifications FROM user_preferences WHERE user_id=?', (user_id,)).fetchone()
         on_slack = conn.execute('''SELECT 1 FROM slack_threads WHERE run_id=?
             UNION ALL SELECT 1 FROM slack_events WHERE run_id=? LIMIT 1''', (run['id'], run['id'])).fetchone()

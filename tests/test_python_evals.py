@@ -94,6 +94,14 @@ def worker(monkeypatch, tmp_path):
         settings.model_context_limits = {settings.agent_model: {
             'context_window': 100000, 'max_input_tokens': 90000, 'max_output_tokens': 10000}}
         app = app_factory(settings)
+        # The fake harness still uses the real broker's context-window route.
+        # Supply synthetic provider metadata instead of contacting gateway.example.
+        from app.context_budget import ModelContextLimits
+        async def limits(model):
+            assert model == ENV['AGENT_MODEL']
+            return ModelContextLimits(context_window=2_000_000, max_input_tokens=2_000_000,
+                                      max_output_tokens=1_000_000)
+        monkeypatch.setattr(app.state.context_budget, 'limits', limits)
         for outbox in app.state.tracing.outboxes:
             outbox.client = httpx.AsyncClient(transport=httpx.MockTransport(receiver))
         state['app'] = app

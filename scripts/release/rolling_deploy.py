@@ -13,7 +13,9 @@ import subprocess
 import sys
 
 from scripts.release.api_deploy import topology
+from scripts.release.ssh_diagnostics import valid_diagnostics
 from scripts.release.deploy import (ACTIVE_DEPLOYS, BROKER, COORDINATOR, WORKER,
+                                    PROBE_FAILURES, PROBE_VALIDATION_STAGES, TRANSIENT_PROBE_FAILURES,
                                     Release, ReleaseError, SHARED_DEFAULTS, SHARED_KEYS)
 
 ROLES = ('api', 'worker', 'broker', 'coordinator')
@@ -72,6 +74,7 @@ class RollingRelease(Release):
         self.selected = None
         self.active_deploy = None
         self.replacement = None
+        self.candidate_probe_attempts = {}
 
     def inspect(self, service_id, role):
         item, owner = super().inspect(service_id, role)
@@ -95,7 +98,9 @@ class RollingRelease(Release):
         return item, owner
 
     def check_state(self, state, *, settled=False, schema=None):
-        if (not state.get('ok') or any(state.get(key) != self.baseline[key]
+        if not isinstance(state, dict) or state.get('ok') is not True:
+            raise ReleaseError('Runtime probe did not return verified state; release stopped.')
+        if (any(state.get(key) != self.baseline[key]
                 for key in ('policy', 'contracts'))
                 or state.get('schema') != (self.baseline['schema'] if schema is None else schema)):
             raise ReleaseError('Cluster policy, schema or compatibility contracts changed; release stopped.')
@@ -140,11 +145,74 @@ class RollingRelease(Release):
         for sid, service in self.expected.items():
             if sid == self.selected:
                 continue
-            state = self.probe(service)
+            state = self.required_state(service)
             self.check_state(state)
             if state.get('ready') is not True or state.get('identity') != self.identities[sid]:
                 raise ReleaseError('An unaffected service lost readiness or changed its process identity.')
             self.check_schema_support(state, sid)
+
+    def record_probe_failure(self, service, state, attempt, *, phase=None):
+        reason = state.get('reason') if isinstance(state, dict) else None
+        stage = state.get('stage') if isinstance(state, dict) else None
+        valid_stage = (reason == 'runtime_validation_failed' and isinstance(stage, str)
+                       and stage in PROBE_VALIDATION_STAGES)
+        transport = state.get('transport') if isinstance(state, dict) else None
+        valid_transport = valid_diagnostics(transport, reason)
+        classified = (isinstance(state, dict) and (set(state) == {'ok', 'reason'} or
+                      (set(state) == {'ok', 'reason', 'stage'} and valid_stage) or
+                      (set(state) == {'ok', 'reason', 'transport'} and valid_transport))
+                      and state['ok'] is False and isinstance(reason, str) and reason in PROBE_FAILURES)
+        reason = reason if classified else 'probe_output_invalid'
+        details = {'stage': stage} if classified and valid_stage else {}
+        if classified and valid_transport:
+            details['transport'] = deepcopy(transport)
+        self.record.setdefault('probe_failures', []).append(
+            {'role': service.role, 'reason': reason, 'attempt': attempt, **details,
+             **({'phase': phase} if phase else {})})
+        self.save()
+        label = reason + (f':{stage}' if 'stage' in details else '')
+        if 'transport' in details:
+            label += ':' + transport['kind']
+        return reason, label
+
+    def required_state(self, service):
+        # Only known read-only transport failures may retry. SSHMigration.run,
+        # Render PUT/POST, validated drift and explicit unready states do not.
+        for attempt in range(1, 4):
+            state = self.probe(service)
+            if isinstance(state, dict) and state.get('ok') is True:
+                if attempt > 1:
+                    self.check_control_plane()
+                return state
+            reason, label = self.record_probe_failure(service, state, attempt)
+            if reason not in TRANSIENT_PROBE_FAILURES or attempt == 3:
+                raise ReleaseError(f'Read-only {service.role} probe failed ({label}) after {attempt} attempt(s); release stopped.')
+            self.log(f'Retrying read-only {service.role} probe ({reason}); attempt {attempt + 1} of 3.', flush=True)
+            self.sleep(2)
+            self.check_control_plane()
+
+    def candidate_state(self, service, phase):
+        key = (service.id, service.deploy_id, phase)
+        attempt = self.candidate_probe_attempts.get(key, 0) + 1
+        self.candidate_probe_attempts[key] = attempt
+        state = self.probe(service)
+        if isinstance(state, dict) and state.get('ok') is True:
+            return state
+        reason, label = self.record_probe_failure(service, state, attempt, phase=phase)
+        if reason == 'runtime_validation_failed' and state.get('stage') == 'environment':
+            self.rotate_probe(service)
+        # Render may still route SSH to the draining old container. Its build
+        # check fails at environment validation. Only named startup/transport
+        # states may wait; interrupted or malformed observations always stop.
+        if (reason in TRANSIENT_PROBE_FAILURES | {'health_unavailable'} or
+                (reason == 'runtime_validation_failed' and state.get('stage') == 'environment')):
+            return None
+        raise ReleaseError(f'Candidate {service.role} {phase} probe failed ({label}); release stopped.')
+
+    def rotate_probe(self, service):
+        # Synthetic probes and older one-shot callers need no lifecycle hook.
+        if invalidate := getattr(self.probe, 'invalidate', None):
+            invalidate(service)
 
     def check_schema_support(self, state, sid, *, candidate=False):
         expected = self.candidate.get('schema_support') if candidate else self.schema_supports[sid]
@@ -193,7 +261,7 @@ class RollingRelease(Release):
         entry.update(status=receipt['status'], confirmed=True)
         self.save()
         self.check_control_plane()
-        states = {sid: self.probe(service) for sid, service in self.expected.items()}
+        states = {sid: self.required_state(service) for sid, service in self.expected.items()}
         for sid, state in states.items():
             self.check_state(state, schema=plan['to_revision'])
             if state.get('ready') is not True or state.get('identity') != self.identities[sid]:
@@ -217,6 +285,7 @@ class RollingRelease(Release):
 
     def replace(self, service, sha):
         self.selected, self.replacement = service.id, None
+        self.rotate_probe(service)
         self.phase('Replace ' + service.role + ' while other roles continue serving work')
         self.configure(service, {'MOYAI_BUILD_SHA': sha})
         self.unchanged()
@@ -246,12 +315,13 @@ class RollingRelease(Release):
 
         def ready():
             self.unchanged()
-            state = self.probe(service)
-            if not state.get('ok'):
+            state = self.candidate_state(service, 'readiness')
+            if state is None:
                 return False  # SSH may still reach the draining old container.
             self.check_state(state)
             owner = state.get('identity')
             if not owner or owner in self.identities.values():
+                self.rotate_probe(service)
                 return False
             if self.replacement and self.replacement != owner:
                 raise ReleaseError('Candidate process identity changed unexpectedly.')
@@ -264,12 +334,14 @@ class RollingRelease(Release):
 
         def retired():
             self.unchanged()
-            state = self.probe(service)
-            if not state.get('ok'):
+            state = self.candidate_state(service, 'retirement')
+            if state is None:
                 return False
             self.check_state(state)
             if (state.get('ready') is not True or state.get('identity') != self.replacement
                     or self.identities[service.id] in state['owners']):
+                if state.get('identity') == self.identities[service.id]:
+                    self.rotate_probe(service)
                 return False
             self.check_state(state, settled=True)
             self.check_schema_support(state, service.id, candidate=True)
@@ -303,7 +375,7 @@ class RollingRelease(Release):
                 if item_owner != owner or any(item.env.get(key, SHARED_DEFAULTS.get(key, '')) !=
                         coordinator.env.get(key, SHARED_DEFAULTS.get(key, '')) for key in SHARED_KEYS):
                     raise ReleaseError('Rolling services do not share the required configuration.')
-            states = {sid: self.probe(service) for sid, service in self.expected.items()}
+            states = {sid: self.required_state(service) for sid, service in self.expected.items()}
             if any(not state.get('ok') or state.get('ready') is not True or not state.get('identity')
                    for state in states.values()):
                 raise ReleaseError('Preflight readiness or rolling release support is missing; no changes made.')
@@ -331,6 +403,13 @@ class RollingRelease(Release):
                     {'plan': plan, 'status': 'planned', 'confirmed': False, 'verified': False} if plan else None))
             self.unchanged()
             if self.preflight_only:
+                # Exercise repeated SSH connections without any mutation. A
+                # single successful handshake does not qualify the transport
+                # used repeatedly throughout a rolling release.
+                self.phase('Repeat read-only rolling checks to diagnose deployment transport')
+                for _ in range(2):
+                    self.unchanged()
+                self.record['transport_check_rounds'] = 3
                 self.record['status'] = 'preflight_passed'
                 self.phase('Rolling preflight passed; no changes made')
                 return

@@ -1,4 +1,5 @@
 """Encrypted task credentials, their authorization, and durable access requests."""
+from . import slack_secrets
 import asyncio
 import hmac
 import json
@@ -260,6 +261,7 @@ ONEPASSWORD_GUIDANCE = (
 )
 
 TOOLS = {
+    **slack_secrets.TOOLS,
     'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
     'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
@@ -273,6 +275,7 @@ class Credentials:
     def __init__(self, store, security, settings, manager, checkpoints):
         self.store, self.security, self.settings = store, security, settings
         self.manager, self.checkpoints = manager, checkpoints
+        self.personal_slack = None
         from .model_slots import ModelSlots
         self.slots = ModelSlots(settings.max_concurrent_model_requests)
         if store.schema_updates:
@@ -410,7 +413,8 @@ class Credentials:
             return []
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
                  'annotations': {'readOnlyHint': name == 'credentials_list', 'idempotentHint': name == 'credentials_list'}}
-                for name, (schema, description) in TOOLS.items()]
+                for name, (schema, description) in TOOLS.items()
+                if name not in slack_secrets.TOOLS or slack_secrets.enabled(self, run)]
 
     def setup(self, row):
         return {'setup_url': PROVIDERS[row['provider']]['setup'] or row['setup_url'],
@@ -562,8 +566,19 @@ class Credentials:
         return dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (row['id'],)).fetchone())
 
     def request(self, run, args):
+        from .private_sinks import deny_export, private_run
+        private_slack = (private_run(self.store, run['id']) and isinstance(args, CredentialRequest)
+                         and (args.provider, args.name, args.format) == ('generic', 'slack-personal', 'env'))
+        if private_slack:
+            slack_secrets.private_context(self, run)
+        else:
+            deny_export(self.store, run['id'])
         with self.store.connect() as conn:
             conn.begin_write()
+            if private_slack:
+                saved = self.saved_choice(conn, run, args.model_dump(), args.secret_id)
+                if not saved or saved['scope'] != 'personal':
+                    raise HTTPException(403, 'Save a personal slack-personal secret in Settings > Secrets first, then request it by secret_id.')
             actor = run['active_user_id']
             if not actor or not run['active_message_id']:
                 raise ValueError('Start an authenticated chat session before requesting access.')
@@ -697,7 +712,9 @@ class Credentials:
         return {**self.ready(row), 'generation': row['generation']}
 
     def pending(self, run, user_id, admin):
+        from .private_sinks import require_owner
         with self.store.connect() as conn:
+            require_owner(self.store, run['id'], user_id, conn)
             rows = self.pending_rows(conn, run['id'])
         return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure', 'preferred_scope', 'scope_revision')},
                  'input_fields': json.loads(row['input_fields']),
@@ -812,6 +829,8 @@ class Credentials:
             accepted = []
             for request_id in args.request_ids:
                 row, secret = self.authorized_request(conn, run, request_id)
+                if row['provider'] == 'generic' and row['name'] == 'slack-personal':
+                    raise HTTPException(403, 'Use the server-side personal Slack tools; this token cannot be exported to a command.')
                 if row['provider'] != 'generic':
                     raise HTTPException(422, 'Use the inference proxy for provider keys.')
                 if row['status'] == 'pending':
@@ -869,6 +888,8 @@ class Credentials:
 
     async def call(self, run, name, arguments):
         args = TOOLS[name][0].model_validate(arguments)
+        if name in slack_secrets.TOOLS:
+            return await slack_secrets.call(self, run, name, args)
         if name == 'credentials_list':
             return self.inventory(run, args)
         if name == 'credentials_request':

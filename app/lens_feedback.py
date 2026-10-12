@@ -1,4 +1,5 @@
 """Persist reply feedback and deliver it to Lens."""
+from .private_sinks import deny_export, private_run
 import asyncio
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -40,6 +41,7 @@ class LensFeedback:
         return row['trace_id'] if row else None
 
     def submit(self, run_id, message_id, author, score, comment, source):
+        deny_export(self.store, run_id)
         if not self.enabled:
             raise FeedbackNotConfigured('Lens feedback is not configured.')
         if type(score) is not int or not 0 <= score <= 10:
@@ -94,11 +96,11 @@ class LensFeedback:
             return 'delivered'
         return 'failed' if row['failed'] else 'pending'
 
-    def for_messages(self, run_id, author):
+    def for_messages(self, run_id, author, *, connection=None):
         rows = self.store.rows('''
             SELECT message_id,score,comment,delivered_at,failed
             FROM lens_feedback WHERE run_id=? AND author=?
-        ''', (run_id, author))
+        ''', (run_id, author), connection=connection)
         return {
             row['message_id']: {
                 'score': row['score'],
@@ -172,6 +174,10 @@ class LensFeedback:
             return True
 
     async def deliver_row(self, row):
+        if private_run(self.store, row['run_id']):
+            self.store.execute("UPDATE lens_feedback SET failed=1,comment='',last_error='private session suppressed' WHERE run_id=? AND message_id=? AND author=?",
+                               (row['run_id'], row['message_id'], row['author']))
+            return
         body = {
             'trace_id': row['trace_id'],
             'score': row['score'],

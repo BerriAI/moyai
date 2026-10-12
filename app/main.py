@@ -1,3 +1,4 @@
+from .session_privacy import SessionPrivacy
 import asyncio
 import hmac
 import json
@@ -92,6 +93,7 @@ class NewRun(BaseModel):
     mode: Literal["demo", "modal"] = "demo"
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
     environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
+    private_session: bool = Field(default=False, strict=True)
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list)
@@ -213,6 +215,8 @@ def create_app(settings: Settings | None = None):
 def _create_app(settings, store):
     user_roles = UserRoles(store, settings)
     security = Security(settings, user_roles)
+    privacy = SessionPrivacy(store, security)
+    store.session_privacy = security.session_privacy = privacy
     from .sandbox_settings import SandboxSettings
     sandbox_settings = SandboxSettings(store, settings, security)
     connectors = Connectors(store, security, settings)
@@ -276,6 +280,8 @@ def _create_app(settings, store):
     from .message_queue import MessageQueue
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
     identities = SlackIdentities(store, connectors, settings, security, checkpoints, credentials.same_requester)
+    personal_slack = connectors.personal_slack
+    credentials.personal_slack = personal_slack
     connectors.slack_identities = identities
     slack.identities = identities
     manager.prepare_context = slack.prepare
@@ -473,6 +479,10 @@ def _create_app(settings, store):
         from .broker_ownership import BrokerOwnershipMiddleware
         app.add_middleware(BrokerOwnershipMiddleware, owner=broker_requests)
     app.state.broker_requests = broker_requests
+    app.state.personal_slack = personal_slack
+    personal_slack.same_requester = credentials.same_requester
+    personal_slack_callback = personal_slack.routes(app, checkpoints=checkpoints)
+    app.state.session_privacy = privacy
     app.state.session_lifecycle = session_lifecycle
     app.state.session_maintenance = session_maintenance
     app.state.lens_feedback = lens_feedback
@@ -776,7 +786,7 @@ def _create_app(settings, store):
         memberships = session_folders.memberships(owner)
         pins = session_folders.pins(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
-        parent_id = store.root_id(selected['id']) if selected else ''
+        parent_id = store.root_id(selected['id']) if privacy.can_access(selected, owner) else ''
         search = search.strip().lower()
         ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, *pins, parent_id],
                                     archive_owner=owner, archived=archived, pin_owner=owner,
@@ -795,7 +805,7 @@ def _create_app(settings, store):
                            'folder_id': memberships.get(run_id), 'children': []}
         nodes = dict(runs)
         for child in store.subtrees(list(runs), sidebar=True):
-            if child['id'] not in runs and not child['deleted_at']:
+            if child['id'] not in runs and not child['deleted_at'] and privacy.can_access(child, owner):
                 visible = public_run(child)
                 nodes[child['id']] = {**{key: visible[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at', 'active_message_id')},
                                      'archived': runs[child['ancestor_id']]['archived'], 'can_delete': False, 'children': []}
@@ -821,6 +831,9 @@ def _create_app(settings, store):
     async def create(body: NewRun, request: Request):
         received_at = now()
         await database(security.require, request, mutation=True)
+        private_owner_id = await database(privacy.individual_owner, request) if body.private_session else ''
+        if body.private_session and (body.side_chat_of or body.swarm or not body.chat_enabled):
+            raise HTTPException(422, 'Private sessions require a direct chat without derivation or swarms.')
         if body.swarm and (not settings.temporal_enabled or body.mode != 'modal'):
             raise HTTPException(422, 'Swarm mode requires the durable cloud runtime.')
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
@@ -829,6 +842,8 @@ def _create_app(settings, store):
             parent = await database(store.run, body.side_chat_of)
             if not parent or parent['deleted_at']:
                 raise HTTPException(404, 'Original session not found.')
+            await database(privacy.require_request, request, parent)
+            privacy.require_no_export(parent)
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
@@ -841,6 +856,8 @@ def _create_app(settings, store):
             if missing_cloud():
                 raise HTTPException(503, "Cloud setup is incomplete. See Runtime for the missing settings.")
             connected = {item["id"] for item in await database(connectors.list) if item["connected"] and item["enabled"]}
+            if private_owner_id and await database(personal_slack.configured, private_owner_id) and (await database(connectors.policy, 'slack'))['enabled']:
+                connected.add('slack')
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
         if body.mode == 'modal' and not metadata_request and (body.repo_url or body.github_repository_id):
@@ -860,7 +877,7 @@ def _create_app(settings, store):
                                    attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request,
                                    swarm_budget_seconds=body.swarm.budget_seconds if body.swarm else None,
                                    durable_submit=manager.submit_in if body.swarm else None,
-                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None, received_at=received_at)
+                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None, received_at=received_at, private_owner_id=private_owner_id)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -896,7 +913,8 @@ def _create_app(settings, store):
         return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
     def load_run_details(run_id, request, activity):
-        security.require(request)
+        # The route dependency authenticates and checks live-session access.
+        # Recheck ownership below against the same snapshot as the content.
         from .activity_history import projection
         actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
         if actor is None:
@@ -910,6 +928,7 @@ def _create_app(settings, store):
             run = store.run(run_id, connection=connection)
             if not run or run['deleted_at']:
                 raise HTTPException(404, "Task not found")
+            privacy.require_owner(run, actor)
             messages = public_messages(run, store.messages(run_id, connection=connection))
             activity_data = projection(connection, run, messages) if activity == 'summary' and run['chat_enabled'] else {
                 'events': store.events(run_id, limit=10000, connection=connection)}
@@ -917,9 +936,15 @@ def _create_app(settings, store):
             approvals = store.approvals(run_id, connection=connection)
             goal = store.goal(run_id, connection=connection)
             agents = coordinator.view(run_id, include_costs=admin, connection=connection)
+            feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'], connection=connection)
+            has_artifact = store.artifacts.info(run_id + '.zip', connection) is not None
+            # This returns only availability, not a capture listing. Use the
+            # authorized conversation snapshot and its existing pool slot.
+            capture_prefix = captures.directory(settings, run_id).name + '/'
+            has_captures = any(captures.valid_name(row['name'].removeprefix(capture_prefix))
+                               for row in store.artifacts.listing(capture_prefix, connection))
         project = environments.context(run)
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, metadata['feedback_author'])
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = metadata['workflow_root_id']
@@ -927,7 +952,7 @@ def _create_app(settings, store):
         archives = {sidebar_id} if metadata['archived'] else set()
         return {**public_run(run), **session_lifecycle.metadata(run, actor, admin, archives, root_id=sidebar_id),
                 **metadata['sidebar'],
-                'feedback_enabled': lens_feedback.enabled,
+                'feedback_enabled': lens_feedback.enabled and not privacy.is_private(run),
                 **activity_data, "approvals": approvals, "messages": messages,
                 'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
@@ -935,7 +960,7 @@ def _create_app(settings, store):
                 "agents": agents,
                 "credential_requests": credentials.pending(run,actor,admin),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": has_artifact, "has_captures": has_captures, "has_published_artifacts": metadata['has_published_artifacts'], "slack_source": store.slack_source(run_id)}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
@@ -1019,7 +1044,7 @@ def _create_app(settings, store):
         received_at = now()
         # Validation and the enqueue transaction stay off the event loop so a
         # slow database cannot stall other conversations' streams and pages.
-        security.require(request, mutation=True)
+        await run_in_threadpool(security.require, request, mutation=True)
         run = await run_in_threadpool(store.run, run_id)
         if run and run.get('swarm') and not settings.temporal_enabled:
             raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
@@ -1267,6 +1292,8 @@ def _create_app(settings, store):
 
     @app.get("/oauth/{provider}/callback")
     async def oauth_callback(provider: Provider, request: Request, state: str = "", code: str = "", error: str = ""):
+        if provider == 'slack' and personal_slack.is_oauth_state(state):
+            return await personal_slack_callback(request, state=state, code=code, error=error)
         sid = security.require(request, admin=True)
         with store.connect() as conn:
             rows = conn.execute("DELETE FROM oauth_states WHERE state_hash=? AND provider=? AND session_id=? AND expires>? RETURNING state_hash",
@@ -1299,6 +1326,8 @@ def _create_app(settings, store):
         if (not run or run['deleted_at'] or run['deletion_requested_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
+        if privacy.is_private(run) and run['active_user_id'] != run['private_owner_id']:
+            raise HTTPException(403, 'Private session requester changed.')
         if enforce_swarm_time and (run.get('swarm') or run['parent_run_id']):
             # Admission reads current root policy even if its execution worker
             # is offline. An extension keeps the same authenticated capability;
@@ -1390,8 +1419,9 @@ def _create_app(settings, store):
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
-                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
+        listed = [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name, run)]
+        return [tool for tool in listed if privacy.allow_tool(run, tool["name"], TOOLS.get(tool["name"], (None, False))[1])]
 
     @app.get("/broker/{run_id}/tools")
     def tool_list(run_id: str, request: Request):
@@ -1431,6 +1461,8 @@ def _create_app(settings, store):
             if not await asyncio.to_thread(accepts_input):
                 return {'isError': True, 'outcome': 'cancelled', 'dispatched': False,
                         'error': 'Cancelled before dispatch because the request changed.'}
+        if not privacy.allow_tool(run, body.name, TOOLS.get(body.name, (None, False))[1]):
+            privacy.require_no_export(run)
         if body.name == 'computer_operation_read':
             if computer_operations is None:
                 raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
@@ -1581,7 +1613,14 @@ def _create_app(settings, store):
                     'outcome_uncertain': False, 'retryable': False,
                     'fields': [{'path': list(error['loc']), 'code': error['type']}
                                for error in exc.errors(include_input=False, include_context=False)]}
-        if not connectors.allowed(body.name):
+        if body.name in {'slack_search', 'slack_thread', 'slack_channel'} and not arguments.get('as_bot'):
+            try:
+                owner = personal_slack.selected_owner(run)
+                if personal_slack.configured(owner):
+                    personal_slack.eligible(run, owner)
+            except ConnectorError as exc:
+                return ConnectorError(str(exc), code='access_denied', dispatched=False).receipt(write=write)
+        if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return ConnectorError("This operation is disabled by the organization's connection policy.",
                                   code='access_denied', dispatched=False).receipt(write=write)
         if provider == 'github':
@@ -1593,7 +1632,7 @@ def _create_app(settings, store):
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)
-        if not connectors.allowed(body.name):
+        if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return ConnectorError('The organization connection changed. No action was sent.',
                                   code='access_changed', dispatched=False).receipt(write=write)
         try:
@@ -1614,6 +1653,7 @@ def _create_app(settings, store):
     @app.post('/broker/{run_id}/credentials/materialize')
     async def credential_materialize(run_id: str, request: Request):
         run = require_run(run_id, request)
+        privacy.require_no_export(run)
         if not credentials.tools(run):
             raise HTTPException(403, 'Credential access requires a durable chat session.')
         try:
@@ -1844,7 +1884,7 @@ def _create_app(settings, store):
                     if not capture.done:
                         raise HTTPException(502, 'Model gateway returned an invalid completion.')
                     status = 'completed'
-                    trace_response = json.loads(raw_response)
+                    trace_response = json.loads(raw_response) if not privacy.is_private(run) else {}
             except httpx.HTTPError as exc:
                 error = model_error(exc)
                 raise HTTPException(502, 'Model gateway could not be reached.',
@@ -1862,8 +1902,9 @@ def _create_app(settings, store):
                 spend.finish(request_id, capture, status)
                 if status == 'completed':
                     context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
-                tracing.model(run, request_id, trace_started, body['messages'],
-                              {**trace_response, **capture.response}, status, gateway_id=gateway_id, error=error)
+                if not privacy.is_private(run):
+                    tracing.model(run, request_id, trace_started, body['messages'],
+                                  {**trace_response, **capture.response}, status, gateway_id=gateway_id, error=error)
                 await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:

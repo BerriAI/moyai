@@ -1,4 +1,5 @@
 """Durable Slack thread routing and a bounded, non-replaying reply outbox."""
+from .private_sinks import private_run
 import asyncio
 import html
 import json
@@ -109,7 +110,8 @@ class SlackChat:
         return f"<{self.settings.public_url.rstrip('/')}/#run={run_id}|Open session>"
 
     def mirroring(self, run_id):
-        rows = self.store.rows('SELECT paused,team_id FROM slack_threads WHERE run_id=?', (run_id,))
+        rows = self.store.rows('''SELECT t.paused,t.team_id FROM slack_threads t
+            JOIN runs r ON r.id=t.run_id WHERE t.run_id=? AND r.private_owner_id='' ''', (run_id,))
         if not rows or not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']:
             return None
         if rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id'):
@@ -117,6 +119,8 @@ class SlackChat:
         return 'paused' if rows[0]['paused'] else 'active'
 
     def queue(self, conn, run_id, key, kind, text, metadata=None, *, status='pending'):
+        if private_run(self.store, run_id, conn):
+            return
         conn.execute('INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata,status) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {}), status))
 
@@ -396,6 +400,8 @@ class SlackChat:
         return frozenset(found - {self.owner.connectors.slack_installation().get('user_id')})
 
     def collect_progress_in(self, conn, binding, allowed):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         turn_id = self.progress_turn_in(conn, run_id)
         # Completed-turn progress is obsolete; its final answer is authoritative.
@@ -432,6 +438,8 @@ class SlackChat:
             self.collect_progress_in(conn, binding, allowed)
 
     def collect_answers_in(self, conn, binding, allowed):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
         for message in messages:
@@ -488,6 +496,8 @@ class SlackChat:
 
     def collect_settlements_in(self, conn, binding, allowed):
         """Settle an already-published answer without replaying its text."""
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         if not allowed or binding['paused']:
             conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='answer_settlement' AND status='waiting'", (run_id,))
@@ -527,6 +537,9 @@ class SlackChat:
             self.collect_thread(row['run_id'])
 
     def collect_thread(self, run_id):
+        if private_run(self.store, run_id):
+            self.store.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))
+            return
         with self.store.connect() as conn:
             conn.begin_write()
             # Re-read the binding and policy after acquiring the lock: it may
@@ -572,6 +585,9 @@ class SlackChat:
     def next_delivery(self, *, media=None):
         """Inspect durable candidates while the caller holds delivery_claim."""
         self.reconcile_sending()
+        self.store.execute("""UPDATE slack_outbox SET status='skipped',text='',metadata='{}'
+            WHERE run_id IN (SELECT id FROM runs WHERE COALESCE(private_owner_id,'')<>'')
+            AND status IN ('pending','waiting','uncertain','skipped')""")
         lane = (" AND o.dedupe_key LIKE 'answer:%:media'" if media else
                 " AND o.dedupe_key NOT LIKE 'answer:%:media'") if media is not None else ''
         for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending'" + lane + " ORDER BY o.id LIMIT 100"):
@@ -631,6 +647,9 @@ class SlackChat:
             # Persist before external side effects. Ambiguous sends are
             # marked uncertain and never replayed automatically.
             await self.owner.checkpoints.flush()
+            if await database(private_run, self.store, row['run_id']):
+                await database(self.store.execute, "UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE id=?", (row['id'],))
+                return
             if await database(self.skip_stale_progress, row):
                 return
             if row['kind'] == 'reaction':
