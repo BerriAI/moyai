@@ -1292,7 +1292,8 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
     assert set(scope.split(',')) == {'app_mentions:read','chat:write','im:write','channels:history','groups:history','im:history','reactions:write','assistant:write','files:write','files:read','users:read','users:read.email'}
 
 
-def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):
+@pytest.mark.parametrize('clear_after_answer', [False, True])
+def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, clear_after_answer):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     client.post('/hooks/slack/events', **signed(event('EvDuplicateType', type='message')))
@@ -1304,7 +1305,19 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):
     finish(app, run_id, 'Here is the answer.')
     app.state.slack.chat.last_post.clear()
     client.portal.call(app.state.slack.chat.deliver_one)
-    assert slack_app[3][-1]['text'].startswith('Here is the answer.')
+    # The watcher can own the send, and a native status clear can follow it.
+    # Assert the saved receipt and actual chat replies, not the last API call.
+    wait_for(lambda: app.state.store.rows(
+        "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' AND status='sent'",
+        (run_id,),
+    ))
+    if clear_after_answer:
+        client.portal.call(app.state.slack.chat.activity.sync)
+        assert [message['status'] for message in slack_app[3] if 'status' in message][-1] == ''
+    replies = [message for message in slack_app[3] if 'text' in message]
+    assert len(replies) == 1
+    assert replies[0]['text'].startswith('Here is the answer.')
+    assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind IN ('ack','progress','control')")
 
 
 def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
