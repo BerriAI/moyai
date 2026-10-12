@@ -4,6 +4,7 @@ All methods run under DurableRunner's session lease. Runtime and computer have
 separate identities, but goals, inference, steering and answer settlement retain
 the original turn and its capability.
 """
+import hashlib
 import json
 import time
 
@@ -127,15 +128,45 @@ class IndependentRuntime:
                 return False
             result = outcome['result']
             if result.get('error') or result.get('isError') or not result.get('workspace'):
+                run = await database(r.store.run, run_id)
+                if (run['harness'] == 'deepagents-temporal' and computer.get('preparation_input_id') !=
+                        await database(self.preparation_input, run_id, state['message_id'])):
+                    # The old job has ended. Only now can the corrected request
+                    # start a fresh preparation in this same workspace.
+                    computer.pop('preparation_input_id', None)
+                    await database(r.save, run_id, state)
+                    return False
                 raise HTTPException(503, result.get('error') or 'Computer preparation could not be confirmed.')
             computer.update(phase='ready', workspace=result['workspace'])
             await database(r.save, run_id, state)
         return computer['phase'] == 'ready'
 
+    def preparation_input(self, run_id, turn_id):
+        inputs = self.runner.store.rows("""SELECT id FROM messages
+            WHERE run_id=? AND steering_parent_id=? AND status='injected'
+            ORDER BY started_at DESC,id DESC LIMIT 1""", (run_id, turn_id))
+        return inputs[0]['id'] if inputs else turn_id
+
     async def job(self, run_id, state, sandbox, identity, fields):
         r = self.runner
         run = await database(r.store.run, run_id)
         spec = await database(r.spec, {**run, 'message_id': state['message_id']})
+        if run['harness'] == 'deepagents-temporal' and identity != 'finish':
+            if identity == 'prepare':
+                computer = state.setdefault('computer', {})
+                if not computer.get('preparation_input_id'):
+                    computer['preparation_input_id'] = await database(self.preparation_input, run_id, state['message_id'])
+                    await database(r.save, run_id, state)
+                input_id = computer['preparation_input_id']
+                # A cancelled preparation may resume under the new input, but
+                # a launched job must keep its original immutable specification.
+                identity = f'prepare-{input_id}'
+                parent = f"{run_id}:{state['message_id']}:{state['segment']}:{state.get('computer_generation', 0)}:{identity}"
+                request_id = hashlib.sha256(parent.encode()).hexdigest()[:32]
+            else:
+                input_id = await database(self.operations.input_id, run_id, identity)
+                request_id = identity
+            spec['broker_tool_scope'] = {'input_id': input_id, 'request_id': request_id}
         spec.update(independent_runtime=False, computer_operation=True,
                     workspace=state.get('computer', {}).get('workspace', '/workspace'), **fields)
         directory = (f"/session/computer-operations/{state['message_id']}-{state['segment']}-"

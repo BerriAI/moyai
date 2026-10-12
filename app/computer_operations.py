@@ -11,6 +11,8 @@ from fastapi import HTTPException
 from agent.tools.remote_computer import LOCAL_TOOLS
 from agent.tools.mcp_bridge import BROWSER_TOOLS
 
+from .db import now
+
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
@@ -92,8 +94,20 @@ class ComputerOperations:
                     conn.execute("UPDATE computer_operations SET status='cancelled',result=? WHERE run_id=? AND request_id=?",
                                  (encoded(result), run['id'], identity))
                     return {'request_id': identity, 'status': 'cancelled', 'result': result}
+                # Keep the originating input for nested broker calls after a
+                # worker replacement. Never adopt a later correction's scope.
+                conn.execute("""INSERT INTO events(run_id,kind,message,data,created_at)
+                    VALUES(?,'computer_input','Computer input scope saved.',?,?)""",
+                    (run['id'], encoded({'request_id': identity, 'input_id': body['input_id']}), now()))
             self.submit(conn, run)
             return {'request_id': identity, 'status': 'queued', 'result': {}}
+
+    def input_id(self, run_id, request_id):
+        rows = self.store.rows("""SELECT data FROM events WHERE run_id=? AND kind='computer_input'
+            AND json_text(data,'request_id')=? LIMIT 1""", (run_id, request_id))
+        if not rows:
+            raise HTTPException(409, 'The computer input scope is unavailable. No nested action was sent.')
+        return json.loads(rows[0]['data'])['input_id']
 
     def pending(self, run_id):
         rows = self.store.rows("SELECT * FROM computer_operations WHERE run_id=? AND status IN ('queued','dispatched') ORDER BY seq LIMIT 1", (run_id,))

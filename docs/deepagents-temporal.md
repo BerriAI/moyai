@@ -104,6 +104,12 @@ while the running call completes; its factual outcome is saved even after Stop.
 The existing event journal records dispatch/outcome metadata without raw tool
 payloads. Duplicate identities never replay an action, including after a lost
 response or broker replacement; uncertain outcomes require reconciliation.
+Computer operations retain their originating input in the same event journal.
+Nested broker calls (including GitHub checkout/publication and artifact reads)
+inherit that input and derive stable child identities before payload chunking.
+A worker replacement must not attach a later correction's authority to an older
+computer operation. Computer preparation gets a fresh job identity after a
+correction, so a cancelled preparation does not poison the next request.
 
 The full public journal is independent of working-context compaction and remains
 readable with `history_read`. Raw provider reasoning and private tool payloads are

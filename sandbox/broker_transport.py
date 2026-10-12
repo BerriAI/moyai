@@ -7,12 +7,26 @@ after the broker authenticates the short-lived, run-scoped capability.
 import base64
 import hashlib
 import json
+from itertools import count
 
 from cryptography.fernet import Fernet, InvalidToken
 
 CONTENT_TYPE = 'application/vnd.moyai.broker-v1'
 MAX_BODY = 5 * 1024 * 1024
 MAX_WIRE = 7 * 1024 * 1024
+
+
+def scoped_tools(send, scope):
+    """Bind nested calls before payload chunking; transport retries keep the ID."""
+    if not scope:
+        return send
+    sequence = count()
+    def invoke(path, body=None):
+        if path == '/tools/call' and body is not None:
+            identity = hashlib.sha256(f"{scope['request_id']}:{next(sequence)}".encode()).hexdigest()[:32]
+            body = {**body, 'input_id': scope['input_id'], 'request_id': identity}
+        return send(path, body)
+    return invoke
 
 
 def send_payload(path, body, send):

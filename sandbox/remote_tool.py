@@ -9,6 +9,7 @@ if __package__ in (None, ''):
 
 from agent.tools.mcp_bridge import call_tool
 from sandbox.broker_relay import BrokerRelay
+from sandbox.broker_transport import scoped_tools
 
 
 def run(spec):
@@ -16,6 +17,8 @@ def run(spec):
     os.environ['MOYAI_WORKSPACE'] = spec['workspace']
     os.environ.pop('MOYAI_REMOTE_COMPUTER', None)
     relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN']).start()
+    original_broker = bridge.broker
+    bridge.broker = scoped_tools(original_broker, spec.get('broker_tool_scope'))
     try:
         os.environ['MOYAI_CREDENTIAL_PROXY_URL'] = relay.url + '/credentials'
         bridge.BROKER = bridge.GIT_BROKER = relay.url
@@ -45,6 +48,7 @@ def run(spec):
         print('WORKSPACE_EVENT '+json.dumps({'kind': 'final', 'message': '', 'tool_result': result}), flush=True)
         return 0
     finally:
+        bridge.broker = original_broker
         relay.close()
 
 
