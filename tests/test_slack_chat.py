@@ -1292,8 +1292,11 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
     assert set(scope.split(',')) == {'app_mentions:read','chat:write','im:write','channels:history','groups:history','im:history','reactions:write','assistant:write','files:write','files:read','users:read','users:read.email'}
 
 
+@pytest.mark.parametrize('background_claim', [False, True])
 @pytest.mark.parametrize('clear_after_answer', [False, True])
-def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, clear_after_answer):
+def test_acknowledgment_is_native_status_without_periodic_chatter(
+    slack_app, monkeypatch, background_claim, clear_after_answer,
+):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     client.post('/hooks/slack/events', **signed(event('EvDuplicateType', type='message')))
@@ -1302,9 +1305,38 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, cle
     assert len(slack_app[3]) == 1
     assert slack_app[3][0]['status'] == 'is getting ready…'
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind IN ('ack','progress','control')")
+    chat = app.state.slack.chat
+    claimed, release = asyncio.Event(), asyncio.Event()
+    if background_claim:
+        # Join any claim already awaiting database work before installing the
+        # hook, so no existing watcher can bypass the claimed event.
+        client.portal.call(chat.shutdown)
+        original_claim = chat.claim_delivery
+
+        async def hold_background_claim(*, media=None):
+            row = await original_claim(media=media)
+            if media is False and row is not None:
+                claimed.set()
+                await release.wait()
+            return row
+
+        monkeypatch.setattr(chat, 'claim_delivery', hold_background_claim)
     finish(app, run_id, 'Here is the answer.')
-    app.state.slack.chat.last_post.clear()
-    client.portal.call(app.state.slack.chat.deliver_one)
+    chat.last_post.clear()
+    if background_claim:
+        client.portal.call(chat.recover)
+
+    async def deliver():
+        try:
+            if background_claim:
+                await asyncio.wait_for(claimed.wait(), 3)
+            await chat.deliver_one()
+            if background_claim:
+                assert not any('text' in message for message in slack_app[3])
+        finally:
+            release.set()
+
+    client.portal.call(deliver)
     # The watcher can own the send, and a native status clear can follow it.
     # Assert the saved receipt and actual chat replies, not the last API call.
     wait_for(lambda: app.state.store.rows(
@@ -1312,7 +1344,7 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, cle
         (run_id,),
     ))
     if clear_after_answer:
-        client.portal.call(app.state.slack.chat.activity.sync)
+        client.portal.call(chat.activity.sync)
         # The background watcher can already own the clear. Its durable attempt
         # makes this sync a no-op while the actual Slack request is in flight.
         wait_for(lambda: [message['status'] for message in slack_app[3] if 'status' in message][-1] == '')
