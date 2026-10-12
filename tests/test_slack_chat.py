@@ -1313,6 +1313,9 @@ def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app, cle
     ))
     if clear_after_answer:
         client.portal.call(app.state.slack.chat.activity.sync)
+        # The background watcher can already own the clear. Its durable attempt
+        # makes this sync a no-op while the actual Slack request is in flight.
+        wait_for(lambda: [message['status'] for message in slack_app[3] if 'status' in message][-1] == '')
         assert [message['status'] for message in slack_app[3] if 'status' in message][-1] == ''
     replies = [message for message in slack_app[3] if 'text' in message]
     assert len(replies) == 1
