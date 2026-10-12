@@ -959,6 +959,47 @@ def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(
     assert answer['blocks'][0]['text']['text'].startswith('Credit to <@U0B1TDTHL4Q>')
 
 
+@pytest.mark.parametrize('mention_source', ['initial', 'followup', 'other_thread'])
+def test_progress_uses_thread_mentions_without_expanding_ping_scope(slack_app, mention_source):
+    app, client, runs, sent = slack_app
+    prompt = '<@U99999999> Please investigate'
+    if mention_source == 'initial':
+        prompt += ' and ask <@U22222222> to review'
+    assert client.post('/hooks/slack/events', **signed(event(text=prompt))).status_code == 200
+    run_id = runs[0]['id']
+    if mention_source == 'followup':
+        finish(app, run_id, 'Ready for the reviewer.')
+        send(client, 1, '<@U99999999> Ask <@U22222222> to review')
+    elif mention_source == 'other_thread':
+        assert client.post('/hooks/slack/events', **signed(event(
+            'EvOtherThread', ts='1790720000.123456',
+            text='<@U99999999> Ask <@U22222222> to review'))).status_code == 200
+    message = app.state.store.claim_message(run_id)
+    assert message
+    app.state.store.update_run(run_id, status='running')
+    text = ('Review progress: <@U22222222>. Unknown <@U33333333>; bot <@U99999999>; '
+            '<!channel> <!here>; `<@U22222222>`\n```\n<@U22222222>\n```')
+    app.state.store.event(run_id, 'message', text, {'phase': 'commentary', 'activity_id': 'review-progress'})
+    app.state.slack.chat.collect()
+    wait_for(lambda: any(item.get('text', '').startswith('Review progress:') for item in sent))
+    posted = next(item for item in sent if item.get('text', '').startswith('Review progress:'))
+    expected = '<@U22222222>' if mention_source != 'other_thread' else '&lt;@U22222222&gt;'
+    for rendered in (posted['text'], posted['blocks'][0]['text']['text']):
+        assert rendered.startswith('Review progress: ' + expected + '.')
+        assert 'Unknown &lt;@U33333333&gt;; bot &lt;@U99999999&gt;;' in rendered
+        assert '&lt;!channel&gt; &lt;!here&gt;' in rendered
+        assert '`&lt;@U22222222&gt;`' in rendered
+        assert '```\n&lt;@U22222222&gt;\n```' in rendered
+    assert posted['channel'] == 'C12345678' and posted['thread_ts'] == ROOT
+    assert posted['parse'] == 'none' and posted['link_names'] is False
+    # Recollection neither duplicates delivery nor rewrites canonical commentary.
+    app.state.slack.chat.collect()
+    rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='progress'", (run_id,))
+    assert len(rows) == 1
+    events = [e for e in app.state.store.events(run_id) if e['data'].get('activity_id') == 'review-progress']
+    assert len(events) == 1 and events[0]['message'] == text
+
+
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))

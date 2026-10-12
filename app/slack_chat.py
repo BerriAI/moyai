@@ -412,7 +412,7 @@ class SlackChat:
             AND json_number(data,'turn_id')=? ORDER BY id""",
                               (run_id, turn_id)).fetchall()
         for event in events:
-            text = slack_text(self.scrub(event['message']))
+            text = slack_text(self.scrub(event['message']), self.mentionable_in(conn, run_id))
             chunks = split_reply(text)
             for index, chunk in enumerate(chunks):
                 key = f"progress:{event['id']}" + (f':part:{index}' if index else '')
