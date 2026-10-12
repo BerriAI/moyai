@@ -83,7 +83,7 @@ jobs:
         if: matrix.group == 'agent'
         run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_budget.py tests/test_context_recovery.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_claude_message_buffer.py tests/test_claude_native_compaction.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py tests/test_goals.py tests/test_continuation.py
       - name: Test default Deep Agents execution and real Temporal recovery
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_deepagents_runtime.py
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_deepagents_runtime.py tests/test_deepagents_publication.py
       - name: Test cloud diagnostics and durable recovery
         if: matrix.group == 'recovery'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_broker_transport.py tests/test_startup_recovery.py tests/test_startup_overlap.py tests/test_durable.py tests/test_temporal_integration.py tests/test_redeploy_recovery.py tests/test_scheduling_diagnostics.py

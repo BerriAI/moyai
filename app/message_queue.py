@@ -130,6 +130,15 @@ class MessageQueue:
             AND status='injected' ORDER BY started_at DESC,id DESC LIMIT 1""", (run_id, turn_id)).fetchone()
         return input_id == (row['id'] if row else turn_id)
 
+    @staticmethod
+    def pending_input(conn, run_id, turn_id):
+        """Prioritized input awaiting the next control poll, including a handoff."""
+        return bool(conn.execute("""SELECT 1 FROM runs r JOIN messages m ON m.run_id=r.id
+            WHERE r.id=? AND r.active_message_id=? AND m.id!=? AND m.status='queued'
+            AND (m.id=r.steer_message_id OR m.send_immediately=1 OR EXISTS (
+                SELECT 1 FROM slack_receipts s WHERE s.run_id=m.run_id AND s.message_id=m.id))
+            LIMIT 1""", (run_id, turn_id, turn_id)).fetchone())
+
     def live_control(self, run_id, turn_id, applied, *, checkpointed=False):
         self.acknowledge(run_id, turn_id, applied)
         target = self.accept_steer(run_id, turn_id)

@@ -78,8 +78,10 @@ async def test_cancelled_activity_keeps_acquisition_owned_until_late_machine_is_
     contender = asyncio.create_task(manager.advance(run_id))
     try:
         await asyncio.sleep(.02)
-        assert not task.done() and not contender.done()
+        assert not task.done()
+        assert await asyncio.wait_for(contender, 1) == {'retry_seconds': .25}
         assert manager.locks[run_id].locked()
+        assert not cloud.machines and not cloud.launches
     finally:
         release.set()
         with pytest.raises(asyncio.CancelledError):
@@ -253,7 +255,9 @@ async def test_two_postgres_workers_share_acquisition_and_context_barrier(durabl
     competing = asyncio.create_task(second.advance(run_id))
     try:
         await asyncio.sleep(.05)
-        assert not competing.done() and not cloud.launches
+        assert await asyncio.wait_for(competing, 1) == {'retry_seconds': .25}
+        assert not initial.done() and not cloud.launches
+        assert calls == [run_id] and len(cloud.machines) == 1
     finally:
         release.set()
         await asyncio.wait_for(asyncio.gather(initial, competing), 4)

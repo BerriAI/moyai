@@ -57,8 +57,8 @@ class DurableRunner(RunManager):
         from .independent_runtime import IndependentRuntime
         self.agent_runtime = IndependentRuntime(self)
 
-    def state(self, run_id):
-        rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,))
+    def state(self, run_id, *, connection=None):
+        rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,), connection=connection)
         return json.loads(rows[0]['state']) if rows else {}
 
     def save(self, run_id, state):

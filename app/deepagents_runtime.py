@@ -70,9 +70,10 @@ class DeepAgentsRuntime:
         self.broker_transport = None
         self.journal = SessionJournal(runner.store)
 
-    def current(self, scope):
+    def current(self, scope, *, connection=None):
         r = self.runner
-        run, state = r.store.run(scope.run_id), r.state(scope.run_id)
+        run = r.store.run(scope.run_id, connection=connection)
+        state = r.state(scope.run_id, connection=connection)
         if (not run or run['deleted_at'] or run['deletion_requested_at']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                 or run['harness'] != 'deepagents-temporal'
@@ -195,7 +196,12 @@ class DeepAgentsRuntime:
                     'input_id': input_id, 'activity_id': f'deepagents:{scope.message_id}:{scope.segment}:{identity}'}
         with self.runner.store.connect(write_scope=scope.run_id) as conn:
             conn.begin_write()
-            if not self.runner.message_queue.current_input(conn, scope.run_id, scope.message_id, input_id):
+            try:
+                self.current(scope, connection=conn)
+            except ApplicationError:
+                return
+            if (not self.runner.message_queue.current_input(conn, scope.run_id, scope.message_id, input_id)
+                    or self.runner.message_queue.pending_input(conn, scope.run_id, scope.message_id)):
                 return
             conn.execute("""INSERT INTO events(run_id,kind,message,data,created_at)
                 SELECT id,'message',?,?,? FROM runs WHERE id=? AND token_hash=? AND active_message_id=?
@@ -360,7 +366,8 @@ class DeepAgentsRuntime:
                       'under its current permissions. Inspect uncertain actions before retrying.\n' + resumed_context(spec))
         await database(self.append, scope, [{'id': f'user:{scope.message_id}',
             'message': {'role': 'user', 'content': conversation_prompt(spec)}}])
-        instructions = system_prompt(spec) + '\n' + goal_instructions(None)
+        goal = await self.broker(scope, '/goal', {'action': 'get'})
+        instructions = system_prompt(spec) + '\n' + goal_instructions(goal.get('goal'))
         if spec.get('workspace_warning'):
             prompt = 'Workspace recovery warning: ' + spec['workspace_warning'] + '\nInspect saved files before relying on them.\n' + prompt
         if run.get('swarm') or run.get('parent_run_id'):
@@ -371,12 +378,32 @@ class DeepAgentsRuntime:
 
     @activity.defn(name='deepagents_publish_v1')
     async def publish(self, scope: TurnScope, identity: str, text: str, input_id: int = 0) -> None:
+        await database(self.publish_text, scope, identity, text, input_id or scope.message_id)
+
+    def publish_text(self, scope, identity, text, input_id):
+        from .progress import record
         _, text = split_focus(text)
-        await database(self.append, scope, [{'id': f'deepagents:{scope.message_id}:{scope.segment}:{identity}',
-            'message': {'role': 'assistant', 'content': text}}])
-        await database(self.runner.store.event, scope.run_id, 'message', public_text(text, None),
-            {'phase': 'commentary', 'activity_version': 1, 'input_id': input_id or scope.message_id,
-             'activity_id': f'deepagents:{scope.message_id}:{scope.segment}:{identity}'})
+        identity = f'deepagents:{scope.message_id}:{scope.segment}:{identity}'
+        r = self.runner
+        # The same transaction fences current scope/input, journal visibility,
+        # and downstream delivery. A cancelled/lost activity ACK can retry this
+        # stable identity without duplicating either record.
+        with r.store.connect(write_scope=scope.run_id) as conn:
+            conn.begin_write()
+            try:
+                run = self.current(scope, connection=conn)
+            except ApplicationError:
+                return
+            if (not r.message_queue.current_input(conn, scope.run_id, scope.message_id, input_id)
+                    or r.message_queue.pending_input(conn, scope.run_id, scope.message_id)):
+                return
+            self.journal.exchange_in(conn, run, {'action': 'append', 'entries': [
+                {'id': identity, 'message': {'role': 'assistant', 'content': text}}]})
+            record(conn, scope.run_id, public_text(text, None),
+                   {'phase': 'commentary', 'activity_version': 1, 'input_id': input_id,
+                    'activity_id': identity}, now())
+            if r.store.public_delivery:
+                r.store.public_delivery(conn, scope.run_id)
 
     @activity.defn(name='deepagents_boundary_v1')
     async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None, receipt_only: bool = False) -> dict:

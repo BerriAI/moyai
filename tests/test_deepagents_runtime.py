@@ -447,16 +447,43 @@ async def test_default_engine_uses_real_broker_skills_and_settles_answer_without
         assert store.rows('SELECT 1 FROM session_items WHERE run_id=?', (run['id'],))
 
 
-async def test_discovered_tools_acquire_one_computer_and_preserve_file_receipts(durable_app, tmp_path, monkeypatch):
+@pytest.mark.parametrize('provider_name', ['modal', 'substrate', 'lambda'])
+async def test_discovered_tools_acquire_one_computer_and_preserve_file_receipts(durable_app, tmp_path, monkeypatch, provider_name):
     from agent.tools.computer_tools import call as computer_call
     from test_durable import Cloud
 
     manager, store = durable_app.state.manager, durable_app.state.store
     manager.settings.sandbox_idle_seconds = 0
     run = store.create_run('Discover tools, write the requested file, and verify it.', '', 'modal', [],
-        chat_enabled=True, harness='deepagents-temporal', model='test-model', user_id='owner')
+        chat_enabled=True, harness='deepagents-temporal', model='test-model', user_id='owner', sandbox_provider=provider_name)
     cloud = Cloud(monkeypatch, store, run['id'])
     cloud.attach(manager)
+    selected = []
+    provider = manager.provider
+
+    async def create_machine(**kwargs):
+        machine = await cloud.create(**kwargs)
+        if provider_name != 'modal':
+            machine.object_id = provider_name + ':' + machine.object_id
+        return machine
+
+    async def find_machine(name, **kwargs):
+        return await cloud.from_name('fixture', name)
+
+    def selected_provider(*args, **kwargs):
+        backend = provider(*args, **kwargs)
+        selected.append(backend.name)
+        assert backend.name == provider_name
+        # Control only the external transport; retain the actual provider
+        # factory, persisted selection, and identity-based recovery routing.
+        backend.create, backend.find, backend.get = create_machine, find_machine, cloud.from_id
+        return backend
+
+    def no_control_guest():
+        pytest.fail('Deep Agents must never provision a Modal control guest')
+
+    monkeypatch.setattr(manager, 'provider', selected_provider)
+    monkeypatch.setattr(manager.agent_runtime, 'provider', no_control_guest)
     workspace = tmp_path / 'computer'
     workspace.mkdir()
     executions, calls = [], []
@@ -511,6 +538,7 @@ async def test_discovered_tools_acquire_one_computer_and_preserve_file_receipts(
         async with manager.make_worker(manager.temporal), manager.make_agent_worker(manager.temporal):
             await drive_session(manager, run['id'])
     assert executions == ['computer_write_file', 'computer_read_file']
+    assert selected and set(selected) == {provider_name}
     assert len({s.message_id for s in calls}) == 1
     assert cloud.snapshots == 1 and all(not machine.alive for machine in cloud.machines)
     current = store.run(run['id'])

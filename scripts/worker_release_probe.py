@@ -1,7 +1,8 @@
 """Real worker processes, PostgreSQL and Temporal under continuous HTTP submissions.
 
 Workers run Moyai's demo mode; the long model stream uses a local HTTP fixture.
-The candidate changes demo response text. No cloud, S3 or paid model is used.
+The candidate changes demo response text. S3 uses a local HTTP fixture; no cloud
+or paid model is used.
 Use --all-roles for the complete worker/broker/coordinator/API replacement.
 This is a local protocol rehearsal; Render routing is not exercised.
 """
@@ -23,17 +24,23 @@ import tempfile
 import threading
 import time
 from uuid import uuid4
+from types import SimpleNamespace
 
 from cryptography.fernet import Fernet
 import httpx
 import psycopg
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
+from temporalio.converter import DataConverter
 
+from app.blob_storage import ObjectStorage
+from app.config import Settings
 from app.db import Store
 from app.security import digest
 from app.session_workflow import SessionWorkflow
+from app.temporal_payloads import PrivatePayloads, PrivatePayloadCodec
 from scripts.broker_restart_probe import ROOT, server, source_build, stop, wait_for
+from scripts.shared_storage_smoke import object_service
 
 WORKER_FIXTURE = '''
 import asyncio, os
@@ -95,7 +102,7 @@ def candidate_sources(root, environment):
     return compatible, rejected
 
 
-def probe(url, temporal_address, output, all_roles=False):
+def probe(url, temporal_address, output, storage_settings, all_roles=False):
     started, events = time.monotonic(), []
     report = {'status': 'failed', 'production_changed': False}
 
@@ -142,7 +149,7 @@ def probe(url, temporal_address, output, all_roles=False):
             environment = {
                 'PATH': os.environ.get('PATH', ''), 'PYTHONPATH': str(ROOT), 'PYTHONUNBUFFERED': '1',
                 'PUBLIC_URL': 'http://127.0.0.1:8787', 'SESSION_SECRET': 'synthetic-worker-probe-session',
-                'ENCRYPTION_KEY': Fernet.generate_key().decode(), 'AGENT_HARNESS': 'hermes',
+                'ENCRYPTION_KEY': storage_settings.encryption_key, 'AGENT_HARNESS': 'hermes',
                 'AGENT_MODEL': 'openai/gpt-6-astra', 'DEMO_STEP_SECONDS': '.01',
                 'MODEL_CONTEXT_LIMITS': json.dumps({'openai/gpt-6-astra': {
                     'context_window': 128000, 'max_input_tokens': 120000, 'max_output_tokens': 8000}}),
@@ -150,6 +157,7 @@ def probe(url, temporal_address, output, all_roles=False):
                 'MOYAI_DATABASE_INITIALIZE': 'true', 'MOYAI_SCHEMA_MODE': 'verify',
                 'MOYAI_BUILD_SHA': source_build(ROOT), 'MOYAI_SEPARATE_BROKER': 'true',
                 'OBJECT_STORAGE_BUCKET': 'synthetic-worker-probe',
+                'OBJECT_STORAGE_ENDPOINT': storage_settings.object_storage_endpoint,
                 'OBJECT_STORAGE_ACCESS_KEY_ID': 'synthetic', 'OBJECT_STORAGE_SECRET_ACCESS_KEY': 'synthetic',
                 'TEMPORAL_ENABLED': 'true', 'TEMPORAL_TLS': 'false', 'TEMPORAL_ADDRESS': temporal_address,
                 'TEMPORAL_TASK_QUEUE': 'worker-probe-' + uuid4().hex,
@@ -227,8 +235,12 @@ def probe(url, temporal_address, output, all_roles=False):
                     with httpx.Client(base_url=api.base_url, cookies=api.cookies, headers=api.headers, timeout=10) as client:
                         count = 0
                         while not traffic_stop.is_set():
-                            count += 1
-                            submit(client, f'Continuous submission {count}')
+                            # Keep a continuous bounded workload. One activity
+                            # slot plus encrypted payload I/O must not create an
+                            # unbounded queue that hides the handoff being tested.
+                            if sum(answer(run_id) is None for run_id in list(submissions)) < 4:
+                                count += 1
+                                submit(client, f'Continuous submission {count}')
                             traffic_stop.wait(.5)
                 except Exception as exc:
                     failures.append(type(exc).__name__)
@@ -370,6 +382,7 @@ def probe(url, temporal_address, output, all_roles=False):
                 api_coordinator_broker_pids_unchanged=not all_roles, runtime_policy_unchanged=True,
                 all_roles_replaced=all_roles, broker_stream_drained=all_roles, signed_hooks_delivered=20 if all_roles else 0,
                 http_submissions=len(submissions), http_errors=failures, http_max_latency_ms=max(latencies),
+                background_submission_window=4,
                 provider_calls=len(calls), stream_completed=True, one_answer_per_submission=True,
                 sandbox='demo_mode', upstream='local_fixture', workflow_ids=['moyai-session-' + r for r in submissions])
     finally:
@@ -401,23 +414,34 @@ async def main():
     url = os.environ.get('MOYAI_TEST_POSTGRES_URL')
     if not url:
         parser.error('Set MOYAI_TEST_POSTGRES_URL to a disposable local PostgreSQL database.')
-    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as temporal:
-        report = await asyncio.to_thread(probe, url, temporal.client.service_client.config.target_host, args.output, args.all_roles)
-        try:
-            for identity in report.pop('workflow_ids'):
-                handle = temporal.client.get_workflow_handle(identity)
-                await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
-                await handle.terminate('Synthetic worker release probe complete')
-        except BaseException:
-            report.update(status='failed', failure_stage='workflow_replay')
+    with object_service() as (endpoint, requests), tempfile.TemporaryDirectory(prefix='moyai-probe-replay-') as directory:
+        settings = Settings(_env_file=None, data_dir=Path(directory), encryption_key=Fernet.generate_key().decode(),
+            object_storage_endpoint=endpoint, object_storage_bucket='synthetic-worker-probe',
+            object_storage_access_key_id='synthetic', object_storage_secret_access_key='synthetic')
+        payloads = PrivatePayloads(SimpleNamespace(objects=ObjectStorage(settings)), settings)
+        conversion = DataConverter(payload_codec=PrivatePayloadCodec(payloads))
+        async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as temporal:
+            report = await asyncio.to_thread(probe, url, temporal.client.service_client.config.target_host,
+                                            args.output, settings, args.all_roles)
+            try:
+                for identity in report.pop('workflow_ids'):
+                    print('REPLAY ' + identity, flush=True)
+                    handle = temporal.client.get_workflow_handle(identity)
+                    await asyncio.wait_for(Replayer(workflows=[SessionWorkflow], data_converter=conversion)
+                                           .replay_workflow(await handle.fetch_history()), timeout=30)
+                    await handle.terminate('Synthetic worker release probe complete')
+                assert 'PUT' in requests and 'GET' in requests
+            except BaseException:
+                report.update(status='failed', failure_stage='workflow_replay')
+                if args.output:
+                    (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+                raise
+            report['status'] = 'passed'
+            report['workflow_histories_replayed'] = report['http_submissions']
+            report['encrypted_payload_storage'] = 'local_s3_fixture'
             if args.output:
                 (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-            raise
-        report['status'] = 'passed'
-        report['workflow_histories_replayed'] = report['http_submissions']
-        if args.output:
-            (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-        print(json.dumps(report), flush=True)
+            print(json.dumps(report), flush=True)
 
 
 if __name__ == '__main__':

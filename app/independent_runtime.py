@@ -29,6 +29,9 @@ class IndependentRuntime:
 
     def supports(self, run):
         if run['harness'] == 'deepagents-temporal':
+            # The graph runs on workers for every computer provider. Only
+            # Codex uses the Modal control guest below; ensure_computer routes
+            # Deep Agents tools through DurableRunner's selected provider.
             return run['mode'] == 'modal'
         return (self.runner.settings.independent_agent_runtime and run['mode'] == 'modal'
                 and run['harness'] == 'codex'

@@ -168,6 +168,9 @@ async def test_send_now_during_answer_publication_stays_in_the_same_turn(durable
         assert {turn for turn, _ in contexts} == {original}
         assert len(contexts) == 2 and 'Answer the original question.' in contexts[-1][1]
         assert store.messages(run_id)[1]['steering_parent_id'] == original
+        assert 'Original answer.' not in str(store.rows('SELECT * FROM session_items WHERE run_id=?', (run_id,)))
+        assert 'Original answer.' not in str(store.events(run_id, limit=1000))
+        assert 'Original answer.' not in str(store.messages(run_id))
 
 
 async def test_tool_wait_accepts_steer_and_keeps_unrelated_chat_responsive(durable_app, monkeypatch):
