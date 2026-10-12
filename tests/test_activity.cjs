@@ -574,3 +574,38 @@ test('failure details belong to the saved answer input and do not expose raw pay
   data.messages.push({id:4,role:'user',status:'queued'});
   assert.equal(failureDetails(data),'');
 });
+
+test('failure details never attribute a recovered broker request to the final answer',()=>{
+  const {failureDetails}=require('../app/static/activity.js');
+  const answer={id:12,role:'assistant',status:'failed',response_to_id:1};
+  const data={chat_enabled:true,status:'failed',messages:[answer],events:[
+    {id:1,kind:'error',data:{phase:'broker_failure',turn_id:1,error_code:'cancelled',
+      exception_type:'CancelledError',http_status:200,request_id:'recovered-model-request'}},
+    ...Array.from({length:9},(_,index)=>({id:index+2,kind:'message',data:{turn_id:1,phase:'commentary'},message:'Continued working.'})),
+  ]};
+  assert.equal(failureDetails(data,answer),'');
+  assert.equal(failureDetails({...data,chat_enabled:false,active_message_id:1,messages:[]}),'');
+  data.events.push({id:11,kind:'error',data:{phase:'sdk_failure',turn_id:1,sdk:'deepagents-temporal',
+    source:'workflow_failure',activity_type:'deepagents.invoke_tool',exception_type:'BrokerRejected',http_status:500}});
+  const html=failureDetails(data,answer);
+  assert.match(html,/Recorded when the agent stopped/);
+  assert.match(html,/deepagents-temporal/);
+  assert.match(html,/Activity<\/dt><dd>deepagents.invoke_tool/);
+  assert.match(html,/Exception type<\/dt><dd>BrokerRejected/);
+  assert.match(html,/HTTP status<\/dt><dd>500/);
+  assert.doesNotMatch(html,/cancelled|CancelledError|recovered-model-request|200/);
+  assert.equal(failureDetails(data,{...answer,response_to_id:2}),'');
+});
+
+test('terminal diagnostics win over later unrelated broker failures without exposing arbitrary fields',()=>{
+  const {failureDetails}=require('../app/static/activity.js');
+  const answer={id:3,role:'assistant',status:'failed',response_to_id:1};
+  const data={chat_enabled:true,messages:[answer],events:[
+    {id:1,kind:'error',data:{phase:'sdk_failure',turn_id:1,sdk:'deepagents-temporal',
+      exception_type:'UncertainToolOutcome',activity_type:'<script>PRIVATE</script>',message:'PRIVATE',details:'PRIVATE'}},
+    {id:2,kind:'error',data:{phase:'broker_failure',turn_id:1,error_code:'cancelled',request_id:'not-terminal'}},
+  ]};
+  const html=failureDetails(data,answer);
+  assert.match(html,/UncertainToolOutcome/);
+  assert.doesNotMatch(html,/PRIVATE|not-terminal|cancelled/);
+});

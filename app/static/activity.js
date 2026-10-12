@@ -45,15 +45,15 @@
     // turn from event recency, queued inputs or the run's retained summary.
     const turn=answer?.response_to_id||(!run.chat_enabled?run.active_message_id:null);
     if(answer&&!turn)return '';
-    const events=(run.events||[]).filter(e=>e.kind==='error'&&['sdk_failure','broker_failure'].includes(e.data?.phase)&&
+    const events=(run.events||[]).filter(e=>e.kind==='error'&&e.data?.phase==='sdk_failure'&&
       (turn?String(e.data.turn_id)===String(turn):!e.data.turn_id)).sort((a,b)=>Number(a.id)-Number(b.id));
-    const event=events.findLast(e=>e.data.phase==='sdk_failure')||events.at(-1);
+    const event=events.at(-1);
     if(!event)return '';
     const data=event.data,values=[];
     const add=(label,value)=>{if(value!==undefined&&value!==null&&value!=='')values.push(`<dt>${label}</dt><dd>${esc(value)}</dd>`);};
     const token=value=>typeof value==='string'&&/^[A-Za-z0-9._:/-]{1,128}$/.test(value)?value:'';
     for(const [key,label] of [['sdk','Agent'],['sdk_error','SDK category'],['code','SDK category'],['error_code','Provider code'],['stage','Stage'],
-      ['native_status','SDK result'],['terminal_reason','Stop reason'],['exception_type','Exception type'],['route','Endpoint'],
+      ['native_status','SDK result'],['terminal_reason','Stop reason'],['exception_type','Exception type'],['activity_type','Activity'],['route','Endpoint'],
       ['request_id','Broker request'],['broker_request_id','Broker request'],['model_request_id','Model request']])add(label,token(data[key]));
     for(const [key,label] of [['http_status','HTTP status'],['response_status','HTTP response'],['upstream_status','Upstream status'],['pending_tools','Unresolved tools']]){
       if(Number.isInteger(data[key])&&data[key]>=0)add(key==='http_status'&&data[key]<400?'HTTP response':label,data[key]);
@@ -62,7 +62,7 @@
       if(name!=='x-moyai-model-request-id'||!data.model_request_id)add(label,token(data.request_ids?.[name]));
     }
     if(!values.length)return '';
-    return `<details class="failure-details"><summary>Failure details</summary><p>${data.phase==='sdk_failure'?'Recorded when the agent stopped.':'Last recorded request failure for this turn.'} Private request and response contents are omitted.</p><dl>${values.join('')}</dl></details>`;
+    return `<details class="failure-details"><summary>Failure details</summary><p>Recorded when the agent stopped. Private request and response contents are omitted.</p><dl>${values.join('')}</dl></details>`;
   }
   function duration(start,end=Date.now()){
     const seconds=Math.max(0,Math.floor((Number(end)-Number(start))/1000))||0;

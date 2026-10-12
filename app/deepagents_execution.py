@@ -10,6 +10,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from .db import database
+from .deepagents_diagnostics import workflow_failure
 from .deepagents_workflow import DeepAgentsTurnWorkflow, TurnScope, TurnResult
 from .security import digest
 from .model_selection import gateway_model
@@ -66,7 +67,9 @@ class DeepAgentsExecution:
             return {'retry_seconds': 1}
         try:
             completed = await handle.result()
-        except WorkflowFailureError:
+        except WorkflowFailureError as exc:
+            await database(r.store.event, run_id, 'error', 'Durable agent workflow failed.',
+                {'phase': 'sdk_failure', **workflow_failure(exc)}, turn_id=state['message_id'])
             await database(r.fail, run_id, state,
                 'The durable agent could not continue. Completed results are saved. '
                 'Inspect saved action receipts before retrying any unconfirmed write.')
