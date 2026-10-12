@@ -59,13 +59,14 @@ def start(personal):
     assert response.status_code == 200, response.text
     query = parse_qs(urlparse(response.json()['url']).query)
     assert 'scope' not in query
-    assert query['redirect_uri'][0].endswith('/oauth/slack/personal/callback')
+    assert query['redirect_uri'][0].endswith('/oauth/slack/callback')
+    assert query['state'][0].startswith('personal-slack:')
     return query['state'][0]
 
 
 def connect(personal):
     state = start(personal)
-    response = personal[1].get('/oauth/slack/personal/callback', params={'state': state, 'code': 'code'}, follow_redirects=False)
+    response = personal[1].get('/oauth/slack/callback', params={'state': state, 'code': 'code'}, follow_redirects=False)
     assert response.status_code == 303, response.text
     return state
 
@@ -90,13 +91,13 @@ def test_oauth_owner_csrf_replay_and_encryption(personal):
     assert client.post('/api/connections/slack/personal/oauth', headers={'X-CSRF-Token': ''}).status_code == 403
     state = start(personal)
     sign_in(app, client, 'bob', 'bob@berri.ai')
-    assert client.get('/oauth/slack/personal/callback', params={'state': state, 'code': 'code'}).status_code == 400
+    assert client.get('/oauth/slack/callback', params={'state': state, 'code': 'code'}).status_code == 400
     assert not requests
     sign_in(app, client)
     # New sign-in has a distinct session: cannot redeem old browser state.
-    assert client.get('/oauth/slack/personal/callback', params={'state': state, 'code': 'code'}).status_code == 400
+    assert client.get('/oauth/slack/callback', params={'state': state, 'code': 'code'}).status_code == 400
     state = connect(personal)
-    assert client.get('/oauth/slack/personal/callback', params={'state': state, 'code': 'code'}).status_code == 400
+    assert client.get('/oauth/slack/callback', params={'state': state, 'code': 'code'}).status_code == 400
     status = client.get('/api/connections/slack/personal')
     assert status.json()['effective_source'] == 'personal'
     assert PERSONAL not in status.text
@@ -105,6 +106,47 @@ def test_oauth_owner_csrf_replay_and_encryption(personal):
     sign_in(app, client, 'bob', 'bob@berri.ai')
     assert not client.get('/api/connections/slack/personal').json()['connected']
     assert client.delete('/api/connections/slack/personal').status_code == 200
+    assert service.configured('google:alice')
+
+
+def test_member_oauth_reuses_callback_without_changing_organization(personal):
+    app, client, service, requests, _ = personal
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    assert client.get('/api/session').json()['role'] == 'member'
+    before = app.state.store.rows("SELECT * FROM connections WHERE provider='slack'")
+    state = connect(personal)
+    assert service.configured('google:bob')
+    assert not service.configured('google:alice')
+    exchange = next(q for q in requests if q.url.path.endswith('/oauth.v2.access'))
+    assert parse_qs(exchange.content.decode())['redirect_uri'] == [app.state.connectors.redirect_uri('slack')]
+    assert app.state.store.rows("SELECT * FROM connections WHERE provider='slack'") == before
+    assert client.get('/oauth/slack/callback', params={'state': state, 'code': 'code'}).status_code == 400
+    assert client.post('/api/connections/slack/oauth').status_code == 403
+    assert client.get('/oauth/slack/callback', params={'state': 'organization-state', 'code': 'code'}).status_code == 403
+
+
+def test_callback_states_cannot_cross_authorization_scopes(personal):
+    app, client, service, requests, _ = personal
+    personal_state = start(personal)
+    result = client.post('/api/connections/slack/oauth')
+    assert result.status_code == 200
+    org_state = parse_qs(urlparse(result.json()['url']).query)['state'][0]
+    assert ':' not in org_state
+    before = app.state.store.rows("SELECT * FROM connections WHERE provider='slack'")
+    for state in ('personal-slack:' + org_state, personal_state.removeprefix('personal-slack:'), 'personal-slack:invalid'):
+        response = client.get('/oauth/slack/callback', params={'state': state, 'code': 'code'})
+        assert response.status_code == 400, response.text
+    assert not requests
+    assert not service.configured('google:alice')
+    assert app.state.store.rows("SELECT * FROM connections WHERE provider='slack'") == before
+    # Neither state was consumed by a request for the other scope.
+    response = client.get('/oauth/slack/callback', params={'state': org_state, 'code': 'code'}, follow_redirects=False)
+    assert response.status_code == 303, response.text
+    assert response.headers['location'].endswith('#connections')
+    assert not service.configured('google:alice')
+    response = client.get('/oauth/slack/callback', params={'state': personal_state, 'code': 'code'}, follow_redirects=False)
+    assert response.status_code == 303, response.text
+    assert response.headers['location'].endswith('#personal-slack')
     assert service.configured('google:alice')
 
 
@@ -203,7 +245,7 @@ def test_oauth_disconnect_during_exchange_cannot_resurrect(personal):
     _, client, service, _, state = personal
     token = start(personal)
     state['hook'] = lambda endpoint: service.disconnect('google:alice') if endpoint == 'oauth.v2.access' else None
-    response = client.get('/oauth/slack/personal/callback', params={'state': token, 'code': 'code'}, follow_redirects=False)
+    response = client.get('/oauth/slack/callback', params={'state': token, 'code': 'code'}, follow_redirects=False)
     assert response.status_code == 409
     assert not service.configured('google:alice')
 
@@ -244,13 +286,13 @@ def test_rejection_and_expired_state_preserve_grant(personal):
     connect(personal)
     revision = service.row('google:alice')['revision']
     state = start(personal)
-    rejected = client.get('/oauth/slack/personal/callback', params={'state': state, 'error': 'access_denied'}, follow_redirects=False)
+    rejected = client.get('/oauth/slack/callback', params={'state': state, 'error': 'access_denied'}, follow_redirects=False)
     assert rejected.status_code == 303
     assert service.row('google:alice')['revision'] == revision
-    assert client.get('/oauth/slack/personal/callback', params={'state': state, 'code': 'code'}).status_code == 400
+    assert client.get('/oauth/slack/callback', params={'state': state, 'code': 'code'}).status_code == 400
     state = start(personal)
     app.state.store.execute('UPDATE personal_slack_states SET expires=0')
-    assert client.get('/oauth/slack/personal/callback', params={'state': state, 'code': 'code'}).status_code == 400
+    assert client.get('/oauth/slack/callback', params={'state': state, 'code': 'code'}).status_code == 400
     assert service.row('google:alice')['revision'] == revision
 
 

@@ -480,7 +480,7 @@ def _create_app(settings, store):
     app.state.broker_requests = broker_requests
     app.state.personal_slack = personal_slack
     personal_slack.same_requester = credentials.same_requester
-    personal_slack.routes(app, checkpoints=checkpoints)
+    personal_slack_callback = personal_slack.routes(app, checkpoints=checkpoints)
     app.state.session_privacy = privacy
     app.state.session_lifecycle = session_lifecycle
     app.state.session_maintenance = session_maintenance
@@ -1291,6 +1291,8 @@ def _create_app(settings, store):
 
     @app.get("/oauth/{provider}/callback")
     async def oauth_callback(provider: Provider, request: Request, state: str = "", code: str = "", error: str = ""):
+        if provider == 'slack' and personal_slack.is_oauth_state(state):
+            return await personal_slack_callback(request, state=state, code=code, error=error)
         sid = security.require(request, admin=True)
         with store.connect() as conn:
             rows = conn.execute("DELETE FROM oauth_states WHERE state_hash=? AND provider=? AND session_id=? AND expires>? RETURNING state_hash",

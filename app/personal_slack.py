@@ -15,6 +15,7 @@ from .security import digest
 LIMITATION = 'Personal Slack reads require your private web chat. Start a private chat, or disconnect personal Slack in Settings > Personal Slack to use organization access.'
 FAILURE = 'Personal Slack access failed. Retry, or reconnect personal Slack in Settings > Personal Slack. Organization access was not used.'
 KEYS = ('active_user_id', 'active_message_id', 'owner_id', 'private_owner_id', 'chat_enabled', 'token_hash', 'status', 'plugins', 'parent_run_id', 'deleted_at', 'deletion_requested_at')
+OAUTH_STATE_PREFIX = 'personal-slack:'
 
 
 @dataclass
@@ -185,7 +186,13 @@ class PersonalSlack:
                 raise ConnectorError(FAILURE) from None
 
     def redirect_uri(self):
-        return self.settings.public_url.rstrip('/') + '/oauth/slack/personal/callback'
+        return self.connectors.redirect_uri('slack')
+
+    @staticmethod
+    def is_oauth_state(state):
+        # Organization states use token_urlsafe, which cannot contain ':'.
+        # The prefix selects the handler; its stored hash still authorizes it.
+        return state.startswith(OAUTH_STATE_PREFIX)
 
     def status(self, owner):
         row = self.row(owner)
@@ -221,7 +228,7 @@ class PersonalSlack:
             sid, owner = actor(request, True)
             if not self.connectors.configured_oauth('slack'):
                 raise HTTPException(409, 'Configure the Slack OAuth client first.')
-            state = secrets.token_urlsafe(32)
+            state = OAUTH_STATE_PREFIX + secrets.token_urlsafe(32)
             self.store.execute('INSERT INTO personal_slack_states VALUES(?,?,?,?,?)',
                 (digest(state), digest(sid), owner, self.revision(owner), time.time() + 600))
             await flush()
@@ -229,7 +236,6 @@ class PersonalSlack:
                 'client_id': self.settings.slack_client_id, 'redirect_uri': self.redirect_uri(), 'state': state,
                 'user_scope': 'search:read,channels:history,groups:history,im:history,mpim:history'})}
 
-        @app.get('/oauth/slack/personal/callback')
         async def callback(request: Request, state: str = '', code: str = '', error: str = ''):
             sid, owner = actor(request)
             with self.store.connect() as conn:
@@ -273,6 +279,8 @@ class PersonalSlack:
                 raise HTTPException(409, FAILURE) from None
             await flush()
             return self.status(owner)
+
+        return callback
 
 
 def initialize_schema(store):

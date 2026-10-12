@@ -61,8 +61,10 @@ with tempfile.TemporaryDirectory() as data_dir:
         with client_for('alice') as alice, client_for('bob') as bob:
             start = alice.post('/api/connections/slack/personal/oauth')
             assert start.status_code == 200
-            state = parse_qs(urlparse(start.json()['url']).query)['state'][0]
-            callback = alice.get('/oauth/slack/personal/callback', params={'state': state, 'code': 'synthetic'})
+            query = parse_qs(urlparse(start.json()['url']).query)
+            assert query['redirect_uri'] == [base + '/oauth/slack/callback']
+            state = query['state'][0]
+            callback = alice.get(query['redirect_uri'][0], params={'state': state, 'code': 'synthetic'})
             assert callback.status_code == 303
             created = alice.post('/api/runs', json={'prompt': 'socket-private-sentinel', 'private_session': True, 'plugins': ['slack']})
             assert created.status_code == 201, created.text

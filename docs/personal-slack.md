@@ -12,11 +12,13 @@ Deploy the release using the [coordinated schema migration](schema-migrations.md
 before enabling private sessions. This release requires schema and compatibility
 revision 19 on every serving role; an older API or worker must not serve these sessions.
 
-Keep the existing Slack OAuth client configuration. Add this redirect URL to the
-Slack app's OAuth settings, substituting the deployed Moyai origin:
+Personal connections reuse the existing Slack OAuth client and organization
+callback. If organization OAuth already works, no Slack app configuration change
+is needed. For a new Slack app, register this redirect URL in its OAuth settings,
+substituting the deployed Moyai origin:
 
 ```
-https://<moyai-origin>/oauth/slack/personal/callback
+https://<moyai-origin>/oauth/slack/callback
 ```
 
 The personal flow requests user scopes `search:read`, `channels:history`,
