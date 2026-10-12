@@ -7,6 +7,7 @@ const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
 const arg=(name,fallback)=>process.argv.includes(name)?process.argv[process.argv.indexOf(name)+1]:fallback;
 const root=path.resolve(arg('--root',path.join(__dirname,'../app/static'))),port=Number(arg('--port','8840'));
 const delayMs=Math.max(0,Number(arg('--delay-ms','0'))||0);
+const computerHandoff=require('./computer_handoff_preview.cjs').create(arg('--computer-frame',null));
 const stamp='2026-10-07T15:00:00Z';
 const agentSession=(number,prompt,status='idle',children=[])=>({id:number.toString(16).padStart(32,'0'),prompt,status,children,updated_at:stamp,created_at:stamp});
 const agentSessions=[
@@ -148,6 +149,7 @@ const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
  if(p==='/'){
   const previousFixture=fixture;fixture=url.searchParams.get('fixture')||'populated';
+  if(fixture==='computer-handoff')computerHandoff.reset();
   accountLinkPolls=0;
   personalConnected=['personal-connected','personal-error','personal-chat'].includes(fixture);
   privateRuns.clear();
@@ -160,6 +162,7 @@ const server=http.createServer(async(req,res)=>{
   res.writeHead(200,{'Content-Type':{'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.png':'image/png'}[path.extname(file)]||'application/octet-stream','Cache-Control':'no-store'});return res.end(fs.readFileSync(file));
  }
  const role=(fixture==='member'||fixture.startsWith('personal-'))?'member':'admin',empty=fixture==='empty';
+ if((fixture==='computer-handoff'||p==='/demo/sign-in')&&await computerHandoff.route(req,res,url))return;
  if(delayMs&&req.method==='GET'&&p.startsWith('/api/'))await new Promise(resolve=>setTimeout(resolve,delayMs));
  let body={};if(req.method!=='GET'){const chunks=[];for await(const chunk of req)chunks.push(chunk);try{body=JSON.parse(Buffer.concat(chunks).toString()||'{}');}catch{return json(res,400,{detail:'Invalid JSON'});}}
  const swarmPreview=fixture.startsWith('swarm');

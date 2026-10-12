@@ -52,6 +52,14 @@ test('the first stream starts after the summary snapshot without refetching or r
   assert.deepEqual(b.live.filter(update=>update.event).map(update=>update.event.id),[101]);
 });
 
+test('a new handoff refreshes the current conversation, including reconnect replay',()=>{
+  const b=browser();
+  b.sources[0].onmessage({data:JSON.stringify({id:11,kind:'computer'})});
+  assert.deepEqual(b.refreshes,['chat-a']);
+  b.sources[0].onmessage({data:JSON.stringify({id:11,kind:'computer'})});
+  assert.deepEqual(b.refreshes,['chat-a']);
+});
+
 test('reconnect replays from the last received event even when detail refresh has a newer snapshot cursor',()=>{
   const b=browser({id:'chat-a',events:[{id:10}],activity_cursor:100});
   b.sources[0].onopen();b.sources[0].onmessage({data:JSON.stringify({id:101,kind:'tool'})});

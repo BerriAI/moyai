@@ -612,7 +612,7 @@ function connectChatStream(run){
       if(!current())return;
       const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;renderLiveWork(event,false);
       if(event.data?.phase==='goal'&&event.data.goal_version===1){state.chatRun.goal=event.data.goal;MoyaiGoal.render($('#goal-status'),state.chatRun,esc);}
-      if(['chat','approval','artifact','context','agents','credential'].includes(event.kind)||(event.data?.phase==='steering'&&event.data?.message_id)||
+      if(['chat','approval','artifact','context','agents','credential','computer'].includes(event.kind)||(event.data?.phase==='steering'&&event.data?.message_id)||
         (event.data?.live_status===true&&MoyaiActivity.isFocus(event)&&String(event.data.input_id)!==String(MoyaiActivity.current(state.chatRun).input)))refreshChat(id).catch(showError);
     };
     source.addEventListener('deleted',()=>{if(current())showUnavailableSession(id).catch(showError);});

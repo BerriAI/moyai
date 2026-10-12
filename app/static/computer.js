@@ -4,6 +4,7 @@ window.MoyaiComputer = {
     let dialog, runId, timer, leaseTimer, inputTimer, compositionTimer, current;
     let busy=false, inputInFlight=false, polling=null, changingControl=false, active=false, composing=false, closing=false, browserTab='', version=0, revision=0;
     let queue=[], pointer=null, inputError='', wakeError='', releasing=Promise.resolve(), pending=Promise.resolve();
+    let wakeRequested=false;
     const q=selector=>dialog.querySelector(selector);
     const own=()=>!!(current?.controller && current.controller===current.actor && (current.controller_tab||'')===browserTab);
     const surface=()=>browserTab?'browser':'desktop';
@@ -21,7 +22,7 @@ window.MoyaiComputer = {
     }
     function close(){
       const wasActive=active, id=runId, tab=browserTab;
-      active=false;version++;revision++;discardInput();clearTimeout(timer);clearInterval(leaseTimer);
+      active=false;wakeRequested=false;version++;revision++;discardInput();clearTimeout(timer);clearInterval(leaseTimer);
       if(wasActive)releasing=Promise.all([releasing,pending]).then(()=>api(`/api/runs/${id}/computer`,{
         method:'POST',body:JSON.stringify({action:'release',tab})
       })).catch(()=>{});
@@ -73,7 +74,17 @@ window.MoyaiComputer = {
     async function poll(){
       clearTimeout(timer);if(!active||document.hidden||(busy&&!inputInFlight)||changingControl||closing||polling===version)return;
       const v=version, r=revision, started=performance.now();polling=v;
-      try{const data=await api(`/api/runs/${runId}/computer${browserTab?'?tab='+encodeURIComponent(browserTab):''}`);if(v===version&&r===revision&&active)render(data);}
+      try{
+        const data=await api(`/api/runs/${runId}/computer${browserTab?'?tab='+encodeURIComponent(browserTab):''}`);
+        if(v===version&&r===revision&&active){
+          render(data);
+          // Wait through agent shutdown/startup; consume one automatic attempt.
+          // A failed wake remains visible and retryable through the normal button.
+          if(wakeRequested&&!document.hidden&&!data.has_sandbox&&data.can_wake&&!data.waking&&!data.shutting_down){
+            wakeRequested=false;await command('wake');
+          }
+        }
+      }
       catch(error){if(v===version&&r===revision)q('[data-notice]').textContent=error.message;}
       finally{
         if(polling===v)polling=null;
@@ -186,11 +197,12 @@ window.MoyaiComputer = {
     });
     async function open(id,host,options={}){
       close();runId=id;const opening=++version;await releasing;if(opening!==version)return;
-      busy=false;current=null;browserTab=options.tab||'';active=true;
+      busy=false;current=null;browserTab=options.tab||'';active=true;wakeRequested=options.wake===true;
       dialog=document.createElement('section');dialog.className='computer-view';dialog.setAttribute('aria-label','Sandbox computer');host.append(dialog);
       const control='<button type="button" data-control disabled>Take control</button>';
       const controls=browserTab?`<div><a class="computer-github-link" href="${esc(browserTab)}" target="_blank" rel="noopener noreferrer">Open in GitHub ↗</a>${control}</div>`:control;
       MoyaiUI.render(dialog, `<header class="computer-heading"><div><h2>${browserTab?'Pull request':'Computer'}</h2><span data-status>Connecting…</span></div>${controls}</header>
+        ${options.reason?`<p class="computer-handoff" role="status">${esc(options.reason)}</p>`:''}
         ${browserTab?'<div class="computer-address"><span data-address>Sandbox browser</span></div>':''}
         <div class="computer-stage"><img data-screen alt="Live ${surface()}. Take control to click and type." draggable="false" hidden><textarea data-keyboard class="computer-keyboard" aria-label="${browserTab?'Browser':'Desktop'} keyboard" aria-describedby="computer-input-hint" autocomplete="off" autocapitalize="off" spellcheck="false" tabindex="-1" readonly></textarea><div data-empty class="computer-empty"><span aria-hidden="true">▧</span><h3>Your ${browserTab?'browser':'computer'} in the cloud</h3><p data-empty-text>Connecting to the workspace…</p><button type="button" data-wake hidden>Wake up to see live</button><button type="button" data-open hidden>Open ${surface()}</button></div></div>
         <div class="computer-toolbar"><div>${browserTab?'<button type="button" data-action="back" disabled>← Back</button>':'<button type="button" data-action="open" disabled>Open browser</button>'}<button type="button" data-action="screenshot" disabled>Screenshot</button><button type="button" data-action="record" data-record disabled>● Record flow</button></div><button type="button" data-saved-captures>Saved captures</button><p id="computer-input-hint" data-notice role="status">Connecting…</p></div>`);
