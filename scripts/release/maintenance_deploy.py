@@ -1,0 +1,428 @@
+"""Explicit four-role maintenance transition through a verified zero-owner boundary.
+
+No policy or compatibility row is edited here. Normal coordinator startup admits
+its new contracts only after every old owner has retired. Ambiguous control-plane
+writes are recorded once and never retried or automatically rolled back.
+"""
+from copy import deepcopy
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from scripts.release.deploy import (ACTIVE_DEPLOYS, BROKER, COORDINATOR, WORKER,
+    MUTABLE, Release, ReleaseError, SHARED_DEFAULTS, SHARED_KEYS)
+from scripts.release.rolling_deploy import (RollingRelease, candidate_migration_plan,
+    valid_contract, valid_schema_support)
+
+COUNTS = ('unsafe_sessions', 'executing_sessions', 'legacy_active_sessions',
+          'model_requests', 'live_leases')
+INVENTORIES = ('owners', 'coordinators', 'brokers', 'broker_leaders')
+
+
+def maintenance_contract(environment):
+    """Inspect the candidate using each preserved environment, without clients."""
+    source = '''import json
+from scripts.release.rolling_contract import contract
+from app.config import Settings
+from app.database import runtime_fingerprint
+from app.schema_migrations import SCHEMA_REVISION
+from pathlib import Path
+import app.schema_migrations
+value = contract()
+settings = Settings(_env_file=None)
+value.update(source_policy=runtime_fingerprint(settings), default_harness=settings.default_harness(),
+    source_schema_digest=json.loads(Path(app.schema_migrations.__file__).with_name('schema_versions.json').read_text())[str(SCHEMA_REVISION)])
+print(json.dumps(value))
+'''
+    try:
+        result = subprocess.run([sys.executable, '-c', source],
+            cwd=Path(__file__).resolve().parents[2], env={**environment, 'PATH': os.defpath},
+            capture_output=True, text=True, timeout=30)
+        value = json.loads(result.stdout)
+        if result.returncode or not valid_maintenance_contract(value):
+            raise ValueError()
+        return value
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise ReleaseError('Candidate maintenance contracts could not be verified; no changes made.') from None
+
+
+def valid_maintenance_contract(value):
+    return (isinstance(value, dict)
+        and set(value) == {'schema', 'schema_support', 'contracts', 'source_policy', 'default_harness', 'source_schema_digest'}
+        and valid_contract({key: value[key] for key in ('schema', 'schema_support', 'contracts')})
+        and isinstance(value['source_policy'], str) and re.fullmatch('[0-9a-f]{64}', value['source_policy'])
+        and isinstance(value['default_harness'], str)
+        and isinstance(value['source_schema_digest'], str)
+        and re.fullmatch('[0-9a-f]{64}', value['source_schema_digest']))
+
+
+class MaintenanceRelease(RollingRelease):
+    def __init__(self, *args, contract=maintenance_contract,
+                 migration_plan=candidate_migration_plan, offline_migrate=None, **kwargs):
+        super().__init__(*args, contract=contract, migration_plan=migration_plan, **kwargs)
+        self.offline_migrate = offline_migrate
+        self.running = {}
+        self.sources = {}
+        self.drained = False
+        self.candidate_policy_active = False
+        self.retired = set()
+
+    def source(self, service):
+        return (self.candidate if service.sha == self.record['commit'] else self.sources[service.id])
+
+    def check_source(self, service, state, *, require_ready=True):
+        source = self.source(service)
+        if (state.get('staged') is not (service.env['RENDER_MIGRATION_STAGE'] == 'true')
+                or state.get('drain') is not (service.env['MAINTENANCE_DRAIN'] == 'true')
+                or state.get('source_schema') != source['schema']
+                or state.get('source_schema_digest') != source['source_schema_digest']
+                or state.get('source_contracts') != source['contracts']
+                or state.get('source_policy') != source['source_policy']
+                or state.get('default_harness') != source['default_harness']
+                or state.get('schema_support') != source.get('schema_support')):
+            raise ReleaseError('Running source, maintenance flags or effective harness changed; release stopped.')
+        if type(state.get('ready')) is not bool or (require_ready and not state['ready']):
+            raise ReleaseError('A verified maintenance service lost readiness.')
+        if type(state.get('schema_compatible')) is not bool or (not state['staged'] and not state['schema_compatible']):
+            raise ReleaseError('An active service lacks verified schema compatibility.')
+        if state['staged']:
+            if state.get('identity') is not None:
+                raise ReleaseError('A staged service unexpectedly owns runtime work.')
+        elif not isinstance(state.get('identity'), str) or not state['identity']:
+            raise ReleaseError('An active service did not report its exact runtime identity.')
+
+    def check_state(self, state, *, settled=False, schema=None):
+        if not isinstance(state, dict) or state.get('ok') is not True:
+            raise ReleaseError('Runtime probe did not return verified state; release stopped.')
+        if any(not isinstance(state.get(key), list)
+               or any(not isinstance(v, str) or not v for v in state[key])
+               or len(state[key]) != len(set(state[key])) for key in INVENTORIES):
+            raise ReleaseError('Incomplete or duplicate runtime ownership inventory.')
+        if any(type(state.get(key)) is not int or state[key] < 0 for key in COUNTS):
+            raise ReleaseError('Incomplete maintenance drain inventory.')
+        changes_contract = self.candidate['contracts']['coordinator'] != self.baseline['contracts']['coordinator']
+        expected_policy = (self.candidate['source_policy'] if self.candidate_policy_active and changes_contract
+                           else self.baseline['policy'])
+        expected_contracts = self.candidate['contracts'] if self.candidate_policy_active else self.baseline['contracts']
+        if (state.get('schema') != (self.baseline['schema'] if schema is None else schema)
+                or state.get('policy') != expected_policy or state.get('contracts') != expected_contracts):
+            raise ReleaseError('Cluster policy, schema or contracts changed outside the verified maintenance boundary.')
+        if self.drained and any(state[key] for key in COUNTS):
+            raise ReleaseError('Execution or leases reappeared after the maintenance drain.')
+        owners = set(state['owners'])
+        fixed = {identity for sid, identity in self.identities.items() if sid != self.selected}
+        old = self.identities.get(self.selected)
+        extra = {self.replacement} if self.replacement else set()
+        allowed = fixed | ({old} if old else set()) | extra
+        if (not fixed <= owners or not owners <= allowed
+                or (not self.selected and owners != allowed)
+                or (settled and owners != fixed | extra)):
+            raise ReleaseError('Unexpected runtime owner appeared or a required owner disappeared.')
+        if owners & self.retired:
+            raise ReleaseError('A retired runtime owner reappeared.')
+        coordinator = ({self.identities[COORDINATOR]} if COORDINATOR in self.identities else set())
+        broker = ({self.identities[BROKER]} if BROKER in self.identities else set())
+        if self.selected == COORDINATOR:
+            coordinator |= extra
+        if self.selected == BROKER:
+            broker |= extra
+        actual_coordinators, actual_brokers, leaders = (set(state[k]) for k in INVENTORIES[1:])
+        if (not actual_coordinators <= (coordinator & owners) or len(actual_coordinators) > 1
+                or actual_brokers != (broker & owners) or not leaders <= actual_brokers or len(leaders) > 1):
+            raise ReleaseError('Coordinator or broker ownership moved outside the selected role.')
+        if self.selected != COORDINATOR and actual_coordinators != coordinator:
+            raise ReleaseError('The expected coordinator leader disappeared.')
+        if self.selected != BROKER and leaders != broker:
+            raise ReleaseError('The expected broker maintenance leader disappeared.')
+        if settled:
+            expected_coordinator = extra if self.selected == COORDINATOR else coordinator
+            expected_broker = extra if self.selected == BROKER else broker
+            if actual_coordinators != expected_coordinator or leaders != expected_broker:
+                raise ReleaseError('Selected role leadership did not settle.')
+
+    def check_unaffected(self):
+        for sid, service in self.running.items():
+            if sid == self.selected:
+                continue
+            state = self.required_state(service)
+            self.check_state(state)
+            self.check_source(service, state)
+            if state.get('identity') != self.identities.get(sid):
+                raise ReleaseError('An unaffected service changed its process identity.')
+
+    def configure(self, service, changes):
+        # Check again before every individual PUT, not merely before a group.
+        for key, value in changes.items():
+            if key not in MUTABLE:
+                raise ReleaseError('Refusing an unapproved environment change.')
+            Release.configure(self, service, {key: value})
+
+    def plan_schema(self, states):
+        current, target = self.baseline['schema'], self.candidate['schema']
+        if target == current:
+            return None
+        support = self.candidate.get('schema_support')
+        if target < current or not valid_schema_support(support):
+            raise ReleaseError('Maintenance schema downgrade or invalid capability is not supported; no changes made.')
+        compatible = all(valid_schema_support(state.get('schema_support'))
+            and state['schema_support']['compatibility'] == support['compatibility']
+            and state['schema_support']['required'] <= current for state in states.values())
+        if compatible:
+            return super().plan_schema(states)
+        if self.offline_migrate is None:
+            raise ReleaseError('An incompatible schema requires the explicit offline maintenance migration transport; no changes made.')
+        return {'mode': 'offline', 'from_revision': current, 'to_revision': target,
+                'source_digest': self.candidate['source_schema_digest']}
+
+    def migrate_offline(self, plan):
+        self.unchanged()
+        if self.identities or not all(service.env['RENDER_MIGRATION_STAGE'] == 'true'
+                                      for service in self.running.values()):
+            raise ReleaseError('Offline migration requires all four services staged and every owner retired.')
+        expected = {key: deepcopy(self.baseline[key]) for key in ('schema', 'policy', 'contracts')}
+        expected.update({key: [] for key in INVENTORIES})
+        expected.update(sha=self.record['commit'], source_schema=self.candidate['schema'],
+                        source_schema_digest=self.candidate['source_schema_digest'])
+        entry = self.record['schema_migration']
+        entry.update(status='requested', confirmed=False)
+        self.phase('Apply installed candidate schema migration with all runtime owners stopped')
+        receipt = self.offline_migrate(self.expected[COORDINATOR], expected)
+        wanted = {'status': 'applied', **{key: plan[key] for key in
+                                        ('from_revision', 'to_revision', 'source_digest')}}
+        if not isinstance(receipt, dict) or receipt != wanted:
+            raise ReleaseError('Offline schema migration result is uncertain or mismatched; no activation was attempted.')
+        entry.update(status='applied', confirmed=True)
+        self.save()
+        self.check_control_plane()
+        for service in self.running.values():
+            state = self.required_state(service)
+            self.check_state(state, schema=plan['to_revision'])
+            self.check_source(service, state)
+        self.baseline['schema'] = plan['to_revision']
+        self.record['schema_revision'] = plan['to_revision']
+        entry['verified'] = True
+        self.save()
+        self.unchanged()
+
+    def migrate_schema(self, plan):
+        # Existing transport verifies the same old four owners/contracts inside
+        # the DDL transaction and never retries an uncertain schema write.
+        super().migrate_schema(plan)
+
+    def transition_service(self, service, sha, changes, *, release_drain=False):
+        self.unchanged()
+        self.configure(service, changes)
+        self.unchanged()
+        target = deepcopy(service)
+        target.sha = sha
+        staged = target.env['RENDER_MIGRATION_STAGE'] == 'true'
+        old = self.identities.get(service.id)
+        # Persist intent before POST. From this point an ambiguous answer stops.
+        self.selected, self.replacement = service.id, None
+        self.rotate_probe(service)
+        entry = {'service': service.id, 'role': service.role, 'sha': sha,
+                 'staged': staged, 'drain': target.env['MAINTENANCE_DRAIN'] == 'true',
+                 'id': None, 'status': 'requested', 'old_owner': old}
+        self.record['deploys'].append(entry)
+        self.save()
+        result = self.render.call('POST', f'/services/{service.id}/deploys',
+                                  {'commitId': sha, 'clearCache': 'do_not_clear'})
+        identity = result.get('id') if isinstance(result, dict) else None
+        if not isinstance(identity, str) or not re.fullmatch('dep-[a-z0-9]+', identity):
+            raise ReleaseError('Render returned an invalid deployment identity; inspect the recorded intent.')
+        self.active_deploy = entry['id'] = identity
+        if release_drain:
+            self.drained = False  # Only this accepted deployment may resume execution.
+        self.save()
+
+        def live():
+            self.check_control_plane()
+            value = self.render.call('GET', f'/services/{service.id}/deploys/{identity}')
+            if value.get('commit', {}).get('id') != sha:
+                raise ReleaseError('Render selected a different commit; release stopped.')
+            entry['status'] = value.get('status')
+            self.save()
+            if entry['status'] not in ACTIVE_DEPLOYS | {'live'}:
+                raise ReleaseError('Candidate deployment failed or returned an unknown state; no automatic rollback was attempted.')
+            return entry['status'] == 'live'
+        self.wait(live, 'Render deployment timed out; inspect its status before retrying.', self.deploy_timeout)
+        target.deploy_id = service.deploy_id = identity
+        service.sha = sha
+        activating = service.id == COORDINATOR and not staged and not old
+
+        def ready():
+            self.check_control_plane()
+            state = self.candidate_state(target, 'maintenance_readiness')
+            if state is None:
+                return False
+            # Identify this exact HTTP process before permitting a new owner.
+            owner = state.get('identity')
+            if staged:
+                if owner is not None:
+                    raise ReleaseError('Staged candidate acquired a runtime owner.')
+            else:
+                if not isinstance(owner, str) or not owner or owner == old:
+                    self.rotate_probe(target)
+                    return False
+                if owner in self.identities.values() or owner in self.retired:
+                    raise ReleaseError('Candidate claimed an existing or retired process identity.')
+                if self.replacement is not None and self.replacement != owner:
+                    raise ReleaseError('Candidate process identity changed unexpectedly.')
+                self.replacement = owner
+            if activating:
+                # Normal coordinator startup may publish the new fingerprints
+                # only from the zero-owner state checked before this POST.
+                self.candidate_policy_active = True
+            self.check_state(state)
+            self.check_source(target, state, require_ready=False)
+            self.check_unaffected()
+            if not state['ready']:
+                return False
+            if old and old in state['owners']:
+                return False
+            self.check_state(state, settled=True)
+            if not staged and service.role == 'coordinator' and state.get('coordinator_state') != 'leader':
+                return False
+            if not staged and service.role == 'broker' and state.get('broker_draining') is not False:
+                return False
+            return True
+        self.wait(ready, 'Candidate readiness or exact old-owner retirement was not confirmed; release stopped.',
+                  self.readiness_timeout + self.retirement_timeout)
+        if old:
+            self.retired.add(old)
+        if self.replacement:
+            self.identities[service.id] = self.replacement
+        else:
+            self.identities.pop(service.id, None)
+        self.running[service.id] = deepcopy(target)
+        self.schema_supports[service.id] = deepcopy(self.source(target).get('schema_support'))
+        entry.update(status='verified', new_owner=self.replacement, old_owner_retired=bool(old))
+        self.record.setdefault('replacements', []).append(deepcopy(entry))
+        self.selected = self.replacement = self.active_deploy = None
+        self.save()
+        self.unchanged()
+
+    def preflight(self):
+        if (not re.fullmatch('srv-[a-z0-9]+', self.api_service_id)
+                or self.api_service_id in {COORDINATOR, WORKER, BROKER}):
+            raise ReleaseError('Set MOYAI_API_SERVICE_ID to the activated dedicated API service; no changes made.')
+        sha = self.github.candidate()
+        self.record.update(commit=sha, topology='maintenance_four_service', release_type='maintenance', replacements=[])
+        self.phase('Check exact selected main CI and all four maintenance services')
+        self.wait(lambda: self.github.rolling_ready(sha), 'Required runtime and release CI did not finish; no changes made.', 1800)
+        coordinator, owner = self.inspect(COORDINATOR, 'coordinator')
+        for sid, role in ((WORKER, 'worker'), (BROKER, 'broker'), (self.api_service_id, 'api')):
+            item, item_owner = self.inspect(sid, role)
+            if (item_owner != owner or item.sha != coordinator.sha or any(
+                    item.env.get(key, SHARED_DEFAULTS.get(key, '')) !=
+                    coordinator.env.get(key, SHARED_DEFAULTS.get(key, '')) for key in SHARED_KEYS)):
+                raise ReleaseError('Maintenance requires four matching builds and preserved shared configuration.')
+        states = {sid: self.required_state(service) for sid, service in self.expected.items()}
+        self.baseline = deepcopy(states[COORDINATOR])
+        if (not valid_contract({key: self.baseline.get(key) for key in ('schema', 'contracts')})
+                or not isinstance(self.baseline.get('policy'), str)
+                or not re.fullmatch('[0-9a-f]{64}', self.baseline['policy'])):
+            raise ReleaseError('Preflight runtime policy or schema inventory is incomplete; no changes made.')
+        self.identities = {sid: state.get('identity') for sid, state in states.items()}
+        if (any(not isinstance(v, str) or not v for v in self.identities.values())
+                or len(set(self.identities.values())) != 4):
+            raise ReleaseError('Preflight requires four distinct active runtime owners.')
+        for sid, service in self.expected.items():
+            state = states[sid]
+            self.sources[sid] = {'schema': state.get('source_schema'), 'contracts': state.get('source_contracts'),
+                'source_policy': state.get('source_policy'), 'default_harness': state.get('default_harness'),
+                'source_schema_digest': state.get('source_schema_digest'),
+                **({'schema_support': state['schema_support']} if 'schema_support' in state else {})}
+            if (not valid_maintenance_contract(self.sources[sid])
+                    or self.sources[sid]['contracts'] != self.baseline['contracts']):
+                raise ReleaseError('Preflight installed-source contracts are incomplete or incompatible; no changes made.')
+            self.schema_supports[sid] = deepcopy(state.get('schema_support'))
+            self.github.forward_from(service.sha, sha)
+            candidate = self.contract({**service.env, 'MOYAI_BUILD_SHA': sha})
+            if not valid_maintenance_contract(candidate) or (self.candidate is not None and self.candidate != candidate):
+                raise ReleaseError('Candidate contracts differ across preserved role settings; no changes made.')
+            if candidate['default_harness'] != 'deepagents-temporal':
+                raise ReleaseError('Preserved AGENT_HARNESS would retain a native engine. Review that setting explicitly before the Deep Agents maintenance release; no settings were changed.')
+            self.candidate = deepcopy(candidate)
+            self.running[sid] = deepcopy(service)
+        for sid, state in states.items():
+            self.check_state(state)
+            self.check_source(self.running[sid], state)
+        if (states[COORDINATOR].get('coordinator_state') != 'leader'
+                or states[BROKER].get('broker_draining') is not False):
+            raise ReleaseError('Preflight requires healthy coordinator and broker leadership.')
+        if (self.candidate['contracts']['coordinator'] == self.baseline['contracts']['coordinator']
+                and self.candidate['contracts'] != self.baseline['contracts']):
+            raise ReleaseError('A changed role contract requires coordinator compatibility to change as well; no changes made.')
+        plan = self.plan_schema(states)
+        self.record.update(previous={sid: {'role': service.role, 'sha': service.sha,
+            'deploy_id': service.deploy_id, 'owner': self.identities[sid],
+            'default_harness': states[sid]['default_harness']} for sid, service in self.expected.items()},
+            cluster_policy=self.baseline['policy'], contracts=deepcopy(self.baseline['contracts']),
+            candidate_contracts=deepcopy(self.candidate['contracts']),
+            candidate_default_harness=self.candidate['default_harness'],
+            schema_revision=self.baseline['schema'], schema_migration=(
+                {'plan': plan, 'status': 'planned', 'confirmed': False, 'verified': False} if plan else None))
+        self.unchanged()
+        return sha, plan
+
+    def run(self):
+        try:
+            sha, plan = self.preflight()
+            if self.preflight_only:
+                for _ in range(2):
+                    self.unchanged()
+                self.record.update(status='preflight_passed', transport_check_rounds=3)
+                self.phase('Four-role maintenance preflight passed; no changes made')
+                return
+            if all(service.sha == sha for service in self.expected.values()):
+                self.record['status'] = 'success'
+                self.phase('Selected build is already active on all four roles')
+                return
+            self.record['status'] = 'running'
+            if plan and plan.get('mode') != 'offline':
+                self.migrate_schema(plan)
+            worker = self.expected[WORKER]
+            self.phase('Pause new execution on the existing worker build')
+            self.transition_service(worker, worker.sha, {'MAINTENANCE_DRAIN': 'true'})
+            self.phase('Wait for saved work, model requests and execution leases to drain')
+            def drained():
+                self.unchanged()
+                states = [self.required_state(service) for service in self.running.values()]
+                for state in states:
+                    self.check_state(state)
+                return all(state[key] == 0 for state in states for key in COUNTS)
+            self.wait(drained, 'Drain timed out; new execution remains paused and no sessions were cancelled.', self.drain_timeout)
+            self.drained = True
+            self.record['drain_verified'] = True
+            self.save()
+            # Staging API first gates intake during the incompatible transition.
+            for sid in (self.api_service_id, WORKER, BROKER, COORDINATOR):
+                service = self.expected[sid]
+                self.phase('Stage candidate ' + service.role + ' and retire its old runtime owner')
+                self.transition_service(service, sha, {'RENDER_MIGRATION_STAGE': 'true', 'MOYAI_BUILD_SHA': sha})
+            self.unchanged()
+            if self.identities:
+                raise ReleaseError('Old runtime owners remain; candidate coordinator was not activated.')
+            self.record['zero_owner_boundary_verified'] = True
+            self.save()
+            if plan and plan.get('mode') == 'offline':
+                self.migrate_offline(plan)
+            for sid in (COORDINATOR, BROKER, WORKER, self.api_service_id):
+                service = self.expected[sid]
+                self.phase('Activate matching candidate ' + service.role + ' while execution remains drained')
+                self.transition_service(service, sha, {'RENDER_MIGRATION_STAGE': 'false'})
+            self.unchanged()
+            self.phase('Release worker drain after all four candidate roles are verified')
+            self.transition_service(worker, sha, {'MAINTENANCE_DRAIN': 'false'}, release_drain=True)
+            self.unchanged()
+            self.record['status'] = 'success'
+            self.phase('All four roles match; prior owners retired and queued execution resumed')
+        except BaseException as exc:
+            self.record['status'] = 'failed'
+            self.record['reason'] = str(exc) if isinstance(exc, ReleaseError) else 'Release interrupted or unexpected response; inspect the recorded intent.'
+            self.save()
+            raise

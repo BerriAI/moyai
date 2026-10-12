@@ -49,3 +49,30 @@ argparse.ArgumentParser.parse_args = parse_args
     }
     assert result.stderr.strip() == expected[source]
     assert 'private-' not in result.stderr
+
+
+def test_maintenance_entrypoint_selects_packaged_probe_and_single_shot_migrator(tmp_path, monkeypatch):
+    from scripts.release import deploy, maintenance_deploy
+    from scripts.release.maintenance_probe import SSHMaintenanceProbe
+    from scripts.release.maintenance_migration import SSHMaintenanceMigration
+    calls = []
+    class Controller:
+        def __init__(self, render, github, probe, receipt, **kwargs):
+            assert isinstance(probe, SSHMaintenanceProbe)
+            assert isinstance(kwargs['offline_migrate'], SSHMaintenanceMigration)
+            assert kwargs['preflight_only'] is True
+            assert kwargs['api_service_id'] == 'srv-syntheticapi'
+            self.record = {'status': 'preflight_passed', 'phase': 'synthetic preflight'}
+        def run(self):
+            calls.append('maintenance')
+    monkeypatch.setattr(maintenance_deploy, 'MaintenanceRelease', Controller)
+    for key, value in {'GITHUB_REPOSITORY': 'BerriAI/moyai', 'GITHUB_REF': 'refs/heads/main',
+        'GITHUB_SHA': 'a' * 40, 'GITHUB_RUN_ID': '1', 'RENDER_DEPLOY_SSH_KEY': 'synthetic-key',
+        'RENDER_DEPLOY_API_KEY': 'synthetic-render-token', 'GH_TOKEN': 'synthetic-gh-token',
+        'MOYAI_API_SERVICE_ID': 'srv-syntheticapi'}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('GITHUB_STEP_SUMMARY', raising=False)
+    monkeypatch.setattr(sys, 'argv', ['deploy', '--release-type', 'maintenance', '--preflight',
+                                    '--receipt', str(tmp_path / 'receipt.json')])
+    deploy.main()
+    assert calls == ['maintenance']

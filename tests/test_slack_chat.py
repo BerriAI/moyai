@@ -927,7 +927,10 @@ def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app
     finish(app, run_id, 'Hello <!channel> <@U12345678>. The key is model-test-key.\n```python\nprint("hello")\n```')
     app.state.slack.chat.last_post.clear()
     client.portal.call(app.state.slack.chat.deliver_one)
-    sent = slack_app[3][-1]
+    # Activity/status calls can finish after the answer. Verify the answer's
+    # destination and escaping, independent of concurrent request completion.
+    wait_for(lambda: any(item.get('text', '').startswith('Hello ') for item in slack_app[3]))
+    sent = next(item for item in slack_app[3] if item.get('text', '').startswith('Hello '))
     assert sent['channel'] == 'C12345678' and sent['thread_ts'] == ROOT
     assert '<!channel>' not in sent['text'] and '<@U12345678>' not in sent['text']
     assert 'model-test-key' not in sent['text'] and '[redacted]' in sent['text']
