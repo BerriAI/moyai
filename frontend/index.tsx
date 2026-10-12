@@ -7,3 +7,5 @@ export const isOpen = (host: HTMLElement) => host.dataset.open === "true"
 
 initializeShell()
 observeRemovals()
+
+export { mountSculpture } from "./moyai-sculpture"
