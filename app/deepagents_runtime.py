@@ -187,6 +187,13 @@ class DeepAgentsRuntime:
                 raise ApplicationError('Model transport failed; no tool action was replayed.',
                                        type=type(exc).__name__) from None
         await database(self.current, scope)
+        # Text/tool deltas are provisional until Responses confirms completion.
+        # LangChain also returns an AIMessage when the stream simply ends or
+        # reports response.incomplete; neither authorizes tools or a final answer.
+        if result.response_metadata.get('status') != 'completed':
+            raise ApplicationError('The model response ended before completion. Completed tool results remain saved.',
+                type='ModelResponseIncomplete',
+                non_retryable=result.response_metadata.get('status') == 'incomplete')
         return result
 
     def stream_text(self, scope, identity, input_id, text):

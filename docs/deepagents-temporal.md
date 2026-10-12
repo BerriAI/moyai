@@ -60,6 +60,10 @@ The broker still rejects an input that cannot safely be reduced to fit.
 
 Completed Temporal activities are reused on replay. Model requests have three
 attempts; a lost provider acknowledgment can still cause another inference charge.
+Streaming text and tool arguments remain provisional until the Responses API
+confirms completion. A truncated stream uses the bounded model retry budget;
+an explicit incomplete response fails without retry. Neither can publish a final
+answer or dispatch its proposed tools, and prior completed tool results stay saved.
 Arbitrary tool writes have one activity attempt. A failure after dispatch stops
 with an explicit reconciliation message rather than automatically repeating an
 external action. Existing broker outboxes and computer receipts remain authoritative.
