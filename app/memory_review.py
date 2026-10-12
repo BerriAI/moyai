@@ -107,7 +107,7 @@ class MemoryReview:
                 or source['deleted_at'] or source['automated'] or source['mode'] == 'demo'):
             return None
         try:
-            current_owner = self.memory.owner(source['user_id'])
+            current_owner = self.memory.owner(source['user_id'], conn)
         except HTTPException:
             return None
         prefs = self.memory.preferences(current_owner, conn)
@@ -180,11 +180,11 @@ class MemoryReview:
                     self.current = None
             await asyncio.sleep(1 if processed else 5)
 
-    def inputs(self, job):
+    def inputs(self, job, conn=None):
         sources = []
         for row in self.store.rows('''SELECT id,content FROM messages WHERE run_id=? AND user_id=? AND role='user' AND input_kind='user'
             AND status='completed' AND (id=? OR steering_parent_id=?) ORDER BY id''',
-                (job['run_id'], job['actor_id'], job['message_id'], job['message_id'])):
+                (job['run_id'], job['actor_id'], job['message_id'], job['message_id']), connection=conn):
             text = row['content']
             try:
                 check_content(text)
@@ -314,10 +314,10 @@ class MemoryReview:
                     or fresh['user_id'] != job['actor_id'] or fresh['repo_url'] != source['repo_url']):
                 conn.execute("UPDATE memory_reviews SET status='skipped',updated_at=? WHERE message_id=?", (now(), job['message_id']))
                 return
-            if self.inputs(job) != sources:
+            if self.inputs(job, conn) != sources:
                 raise ValueError('Memory source changed')
             repo = Note.repository(source['repo_url']) if source['repo_url'] else ''
-            current = {(n['id'], n['revision']) for n in self.memory.listing(job['owner_id'])
+            current = {(n['id'], n['revision']) for n in self.memory.listing(job['owner_id'], conn)
                        if not n['repo_url'] or n['repo_url'] == repo}
             if current != {(n['id'], n['revision']) for n in notes}:
                 raise ValueError('Memory library changed during review')

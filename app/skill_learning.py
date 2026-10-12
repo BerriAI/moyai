@@ -138,7 +138,7 @@ class SkillLearning:
                         (source['run_id'], source['user_id'])).fetchone():
             return False
         try:
-            if self.memory.owner(source['user_id']) != owner:
+            if self.memory.owner(source['user_id'], conn) != owner:
                 return False
         except HTTPException:
             return False
@@ -153,7 +153,7 @@ class SkillLearning:
         if not source:
             return
         try:
-            owner = self.memory.owner(source['user_id'])
+            owner = self.memory.owner(source['user_id'], conn)
         except HTTPException:
             return
         prefs = self.preferences_in(conn, owner)

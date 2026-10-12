@@ -146,6 +146,8 @@ jobs:
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py tests/test_slack_notifications.py tests/test_session_events.py
       - name: Verify chat snapshots reuse PostgreSQL pool connections
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_message_snapshot_pool.py tests/test_conversation_metadata.py tests/test_slack_mentions.py tests/test_attachments.py
+      - name: Verify memory and skill review transactions reuse PostgreSQL pool connections
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_memory_review_pool.py
 
   handoffs:
     # The database-backed handoff suite needs its own runtime budget: running
