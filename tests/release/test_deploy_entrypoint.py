@@ -74,5 +74,13 @@ def test_maintenance_entrypoint_selects_packaged_probe_and_single_shot_migrator(
     monkeypatch.delenv('GITHUB_STEP_SUMMARY', raising=False)
     monkeypatch.setattr(sys, 'argv', ['deploy', '--release-type', 'maintenance', '--preflight',
                                     '--receipt', str(tmp_path / 'receipt.json')])
-    deploy.main()
+    handlers = {signum: deploy.signal.getsignal(signum)
+                for signum in (deploy.signal.SIGINT, deploy.signal.SIGTERM)}
+    try:
+        deploy.main()
+    finally:
+        # main normally exits its process. This in-process wiring check must
+        # not leave the release cancellation handler installed for other tests.
+        for signum, handler in handlers.items():
+            deploy.signal.signal(signum, handler)
     assert calls == ['maintenance']

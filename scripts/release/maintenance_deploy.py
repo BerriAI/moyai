@@ -20,6 +20,7 @@ from scripts.release.rolling_deploy import (RollingRelease, candidate_migration_
 COUNTS = ('unsafe_sessions', 'executing_sessions', 'legacy_active_sessions',
           'model_requests', 'live_leases')
 INVENTORIES = ('owners', 'coordinators', 'brokers', 'broker_leaders')
+DEFAULT_HARNESS = 'deepagents-temporal'
 
 
 def maintenance_contract(environment):
@@ -66,12 +67,15 @@ class MaintenanceRelease(RollingRelease):
         self.offline_migrate = offline_migrate
         self.running = {}
         self.sources = {}
+        self.harness_changes = {}
         self.drained = False
         self.candidate_policy_active = False
         self.retired = set()
 
     def source(self, service):
-        return (self.candidate if service.sha == self.record['commit'] else self.sources[service.id])
+        candidate_settings = service.env.get('AGENT_HARNESS', DEFAULT_HARNESS) == DEFAULT_HARNESS
+        return (self.candidate if service.sha == self.record['commit'] and candidate_settings
+                else self.sources[service.id])
 
     def check_source(self, service, state, *, require_ready=True):
         source = self.source(service)
@@ -160,6 +164,33 @@ class MaintenanceRelease(RollingRelease):
                 raise ReleaseError('Refusing an unapproved environment change.')
             Release.configure(self, service, {key: value})
 
+    def migrate_default_harness(self, service):
+        """The one reviewed settings migration; generic release writes stay fixed."""
+        previous = self.harness_changes.get(service.id)
+        if previous is None:
+            return
+        if (not self.drained or self.selected is not None
+                or self.expected.get(service.id) is not service
+                or service.env.get('RENDER_MIGRATION_STAGE') != 'true'
+                or service.env.get('MOYAI_BUILD_SHA') != self.record['commit']
+                or service.env.get('AGENT_HARNESS') != previous
+                or self.candidate['default_harness'] != DEFAULT_HARNESS):
+            raise ReleaseError('Default harness may change only for a drained, staged candidate; release stopped.')
+        self.unchanged()
+        entry = {'service': service.id, 'key': 'AGENT_HARNESS', 'previous': previous,
+                 'value': DEFAULT_HARNESS, 'confirmed': False}
+        self.record['changes'].append(entry)
+        self.save()
+        self.render.call('PUT', f'/services/{service.id}/env-vars/AGENT_HARNESS', {'value': DEFAULT_HARNESS})
+        service.env['AGENT_HARNESS'] = DEFAULT_HARNESS
+        if self.environment(service.id) != service.env:
+            raise ReleaseError('Saved environment did not match the reviewed default harness change; release stopped.')
+        # The new candidate must verify the changed non-secret env digest. The
+        # already-running process keeps its independent original env snapshot.
+        service.original['AGENT_HARNESS'] = DEFAULT_HARNESS
+        entry['confirmed'] = True
+        self.save()
+
     def plan_schema(self, states):
         current, target = self.baseline['schema'], self.candidate['schema']
         if target == current:
@@ -215,6 +246,9 @@ class MaintenanceRelease(RollingRelease):
     def transition_service(self, service, sha, changes, *, release_drain=False):
         self.unchanged()
         self.configure(service, changes)
+        if (sha == self.record['commit'] and service.env['RENDER_MIGRATION_STAGE'] == 'true'
+                and service.env.get('AGENT_HARNESS') != DEFAULT_HARNESS):
+            self.migrate_default_harness(service)
         self.unchanged()
         target = deepcopy(service)
         target.sha = sha
@@ -341,11 +375,15 @@ class MaintenanceRelease(RollingRelease):
                 raise ReleaseError('Preflight installed-source contracts are incomplete or incompatible; no changes made.')
             self.schema_supports[sid] = deepcopy(state.get('schema_support'))
             self.github.forward_from(service.sha, sha)
-            candidate = self.contract({**service.env, 'MOYAI_BUILD_SHA': sha})
+            candidate_env = {**service.env, 'MOYAI_BUILD_SHA': sha}
+            if 'AGENT_HARNESS' in candidate_env and candidate_env['AGENT_HARNESS'] != DEFAULT_HARNESS:
+                self.harness_changes[sid] = candidate_env['AGENT_HARNESS']
+                candidate_env['AGENT_HARNESS'] = DEFAULT_HARNESS
+            candidate = self.contract(candidate_env)
             if not valid_maintenance_contract(candidate) or (self.candidate is not None and self.candidate != candidate):
                 raise ReleaseError('Candidate contracts differ across preserved role settings; no changes made.')
-            if candidate['default_harness'] != 'deepagents-temporal':
-                raise ReleaseError('Preserved AGENT_HARNESS would retain a native engine. Review that setting explicitly before the Deep Agents maintenance release; no settings were changed.')
+            if candidate['default_harness'] != DEFAULT_HARNESS:
+                raise ReleaseError('Candidate settings did not select the reviewed Deep Agents default; no changes made.')
             self.candidate = deepcopy(candidate)
             self.running[sid] = deepcopy(service)
         for sid, state in states.items():
@@ -364,6 +402,8 @@ class MaintenanceRelease(RollingRelease):
             cluster_policy=self.baseline['policy'], contracts=deepcopy(self.baseline['contracts']),
             candidate_contracts=deepcopy(self.candidate['contracts']),
             candidate_default_harness=self.candidate['default_harness'],
+            default_harness_migration=[{'service': sid, 'role': self.expected[sid].role,
+                'previous': value, 'value': DEFAULT_HARNESS} for sid, value in self.harness_changes.items()],
             schema_revision=self.baseline['schema'], schema_migration=(
                 {'plan': plan, 'status': 'planned', 'confirmed': False, 'verified': False} if plan else None))
         self.unchanged()
@@ -378,7 +418,7 @@ class MaintenanceRelease(RollingRelease):
                 self.record.update(status='preflight_passed', transport_check_rounds=3)
                 self.phase('Four-role maintenance preflight passed; no changes made')
                 return
-            if all(service.sha == sha for service in self.expected.values()):
+            if not self.harness_changes and all(service.sha == sha for service in self.expected.values()):
                 self.record['status'] = 'success'
                 self.phase('Selected build is already active on all four roles')
                 return

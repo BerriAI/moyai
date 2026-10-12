@@ -339,6 +339,8 @@ def test_demo_runs_real_controller_and_records_all_safety_scenarios(tmp_path):
     result = rehearse(tmp_path, log=lambda *args, **kwargs: None)
     assert [(v['status'], v['migration_attempts']) for v in result] == [
         ('success', 1), ('failed', 0), ('failed', 1)]
+    assert all(v['confirmed_default_changes'] == 4 and v['old_worker_drain_default'] == 'codex'
+               and v['candidate_default'] == 'deepagents-temporal' for v in result)
 
 
 def test_compatible_coordinator_preserves_existing_cluster_policy(setup, monkeypatch):
@@ -356,3 +358,156 @@ def test_changed_role_contract_cannot_rely_on_unchanged_coordinator(setup, monke
     with pytest.raises(ReleaseError, match='coordinator compatibility'):
         release.run()
     assert not render.calls
+
+
+def explicit_harnesses(release, render, values):
+    """Model immutable process environments separately from saved Render env."""
+    import hashlib
+    import json
+    from scripts.release.deploy import MUTABLE
+    for sid, value in values.items():
+        render.env[sid]['AGENT_HARNESS'] = value
+        render.installed[sid]['AGENT_HARNESS'] = value
+    original_probe, original_call = release.probe, render.call
+    contract_environments = []
+    def contract(env):
+        contract_environments.append(deepcopy(env))
+        return {**deepcopy(CANDIDATE), 'default_harness': env.get('AGENT_HARNESS', 'deepagents-temporal')}
+    def probe(service):
+        options = service.probe_options()
+        actual = {key: render.installed[service.id].get(key) for key in options['env_keys']}
+        if hashlib.sha256(json.dumps(actual, sort_keys=True).encode()).hexdigest() != options['env_digest']:
+            return {'ok': False, 'reason': 'runtime_validation_failed', 'stage': 'environment'}
+        state = original_probe(service)
+        state['default_harness'] = render.installed[service.id].get('AGENT_HARNESS', state['default_harness'])
+        return state
+    def call(method, path, body=None):
+        sid = path.split('/')[2]
+        if method != 'PUT' or not path.endswith('/AGENT_HARNESS'):
+            return original_call(method, path, body)
+        assert 'AGENT_HARNESS' not in MUTABLE
+        assert body == {'value': 'deepagents-temporal'}
+        assert render.env[sid]['RENDER_MIGRATION_STAGE'] == 'true'
+        assert render.env[sid]['MOYAI_BUILD_SHA'] == NEW
+        assert release.drained and not release.selected
+        assert render.installed[sid]['AGENT_HARNESS'] == values[sid]
+        assert release.running[sid].original['AGENT_HARNESS'] == values[sid]
+        assert release.record['changes'][-1] == {'service': sid, 'key': 'AGENT_HARNESS',
+            'previous': values[sid], 'value': 'deepagents-temporal', 'confirmed': False}
+        render.before_write(method, sid, body)
+        render.calls.append((method, sid, 'AGENT_HARNESS', body['value']))
+        render.env[sid]['AGENT_HARNESS'] = body['value']
+        render.after_write(method, sid, body)
+        if render.unknown_put:
+            raise ReleaseError('Synthetic lost default harness response')
+        return {'key': 'AGENT_HARNESS', 'value': body['value']}
+    release.contract, release.probe, render.call = contract, probe, call
+    return contract_environments
+
+
+@pytest.mark.parametrize('harness', ['codex', 'claude-agent-sdk'])
+def test_explicit_native_default_changes_only_for_each_staged_candidate(setup, harness):
+    release, render, _ = setup
+    values = {sid: harness for sid in render.env}
+    contract_envs = explicit_harnesses(release, render, values)
+    original = deepcopy(render.env)
+    release.run()
+    assert len(contract_envs) == 4
+    assert all(env['AGENT_HARNESS'] == 'deepagents-temporal' for env in contract_envs)
+    changes = [call for call in render.calls if call[0] == 'PUT' and call[2] == 'AGENT_HARNESS']
+    assert [call[1] for call in changes] == [API_ID, WORKER, BROKER, COORDINATOR]
+    assert render.history[0]['env']['AGENT_HARNESS'] == harness  # Drain redeploy remains the old engine.
+    assert all(history['env']['AGENT_HARNESS'] == 'deepagents-temporal' for history in render.history[1:])
+    for sid, env in original.items():
+        assert render.env[sid] == {**env, 'MOYAI_BUILD_SHA': NEW, 'AGENT_HARNESS': 'deepagents-temporal'}
+    assert all(entry['confirmed'] and entry['previous'] == harness
+               for entry in release.record['changes'] if entry['key'] == 'AGENT_HARNESS')
+    assert release.record['status'] == 'success'
+
+
+def test_explicit_default_migration_preflight_is_read_only_and_reviewable(setup):
+    release, render, _ = setup
+    explicit_harnesses(release, render, {sid: 'codex' for sid in render.env})
+    release.preflight_only = True
+    release.run()
+    assert not render.calls
+    assert len(release.record['default_harness_migration']) == 4
+    assert all(entry['previous'] == 'codex' and entry['value'] == 'deepagents-temporal'
+               for entry in release.record['default_harness_migration'])
+    assert all(env['AGENT_HARNESS'] == 'codex' for env in render.env.values())
+
+
+def test_mixed_native_defaults_are_normalized_without_creating_absent_keys(setup):
+    release, render, _ = setup
+    values = {API_ID: 'codex', WORKER: 'claude-agent-sdk', BROKER: 'deepagents-temporal'}
+    explicit_harnesses(release, render, values)
+    release.run()
+    changes = [call[1] for call in render.calls if call[0] == 'PUT' and call[2] == 'AGENT_HARNESS']
+    assert changes == [API_ID, WORKER]
+    assert 'AGENT_HARNESS' not in render.env[COORDINATOR]
+    assert len(release.record['default_harness_migration']) == 2
+
+
+def test_already_deepagents_override_is_not_rewritten(setup):
+    release, render, _ = setup
+    explicit_harnesses(release, render, {sid: 'deepagents-temporal' for sid in render.env})
+    release.run()
+    assert not [call for call in render.calls if call[0] == 'PUT' and call[2] == 'AGENT_HARNESS']
+    assert release.record['default_harness_migration'] == []
+
+
+@pytest.mark.parametrize('sid', [API_ID, WORKER, BROKER, COORDINATOR])
+def test_ambiguous_default_write_never_retries_or_launches_candidate(setup, sid):
+    release, render, _ = setup
+    explicit_harnesses(release, render, {service: 'codex' for service in render.env})
+    def after(method, target, body):
+        if method == 'PUT' and target == sid and body['value'] == 'deepagents-temporal':
+            render.unknown_put = True
+    render.after_write = after
+    with pytest.raises(ReleaseError, match='lost default harness'):
+        release.run()
+    assert len([call for call in render.calls if call[:3] == ('PUT', sid, 'AGENT_HARNESS')]) == 1
+    assert render.installed[sid]['AGENT_HARNESS'] == 'codex'
+    assert release.record['changes'][-1]['confirmed'] is False
+    assert len(render.history) == 1 + [API_ID, WORKER, BROKER, COORDINATOR].index(sid)
+
+
+def test_default_write_response_cannot_hide_other_environment_drift(setup):
+    release, render, _ = setup
+    explicit_harnesses(release, render, {sid: 'codex' for sid in render.env})
+    def after(method, sid, body):
+        if method == 'PUT' and body['value'] == 'deepagents-temporal':
+            render.env[sid]['SESSION_SECRET'] = 'external-change'
+    render.after_write = after
+    with pytest.raises(ReleaseError, match='Saved environment'):
+        release.run()
+    assert len(render.history) == 1
+    assert release.record['changes'][-1]['confirmed'] is False
+
+
+@pytest.mark.parametrize('boundary', ['drain', 'staged', 'candidate_sha'])
+def test_default_migration_refuses_outside_exact_candidate_staging_boundary(setup, boundary):
+    release, render, _ = setup
+    explicit_harnesses(release, render, {sid: 'codex' for sid in render.env})
+    release.preflight()
+    service = release.expected[API_ID]
+    release.drained = boundary != 'drain'
+    service.env['RENDER_MIGRATION_STAGE'] = 'false' if boundary == 'staged' else 'true'
+    service.env['MOYAI_BUILD_SHA'] = OLD if boundary == 'candidate_sha' else NEW
+    with pytest.raises(ReleaseError, match='only for a drained, staged candidate'):
+        release.migrate_default_harness(service)
+    assert not render.calls
+
+
+def test_same_build_with_native_override_is_not_a_noop(setup):
+    release, render, _ = setup
+    render.policy, render.contracts = CANDIDATE['source_policy'], deepcopy(CANDIDATE['contracts'])
+    for sid in render.env:
+        render.env[sid]['MOYAI_BUILD_SHA'] = NEW
+        render.installed[sid]['MOYAI_BUILD_SHA'] = NEW
+        render.live[sid]['commit']['id'] = NEW
+    explicit_harnesses(release, render, {sid: 'codex' for sid in render.env})
+    release.run()
+    assert len(render.history) == 10
+    assert all(env['AGENT_HARNESS'] == 'deepagents-temporal' for env in render.env.values())
+    assert release.record['status'] == 'success'
