@@ -561,20 +561,26 @@ async def test_large_global_limit_does_not_multiply_during_overlap(verified):
     assert slots[0].snapshot()['active'] == 0
 
 
-async def test_cross_process_capacity_and_crash_recovery(verified):
+@pytest.mark.parametrize('startup_delay', [0, 6])
+async def test_cross_process_capacity_and_crash_recovery(verified, startup_delay):
     import json
     import os
-    import subprocess
     import sys
+    import tempfile
 
     broker, settings = verified
     survivor = broker()
     child_settings = settings.model_copy(update={'moyai_runtime_role': 'broker', 'data_dir': settings.data_dir / 'child'})
     source = '''
-import asyncio, json, os
+import asyncio, faulthandler, json, os, time
+faulthandler.dump_traceback_later(25)
+# Exercise slow process startup independently of the capacity/recovery budget.
+time.sleep(float(os.environ['BROKER_TEST_STARTUP_DELAY']))
 from app.config import Settings
 from app.main import create_app
 app = create_app(Settings.model_validate_json(os.environ['BROKER_TEST_SETTINGS']))
+faulthandler.cancel_dump_traceback_later()
+print('READY', flush=True)
 async def run():
     first = await app.state.model_slots.acquire()
     second = await app.state.model_slots.acquire()
@@ -584,30 +590,45 @@ async def run():
     await asyncio.Event().wait()
 asyncio.run(run())
 '''
-    child = subprocess.Popen([sys.executable, '-c', source], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, env={**os.environ, 'BROKER_TEST_SETTINGS': child_settings.model_dump_json()})
-    try:
-        line = await asyncio.wait_for(asyncio.to_thread(child.stdout.readline), 5)
-        assert line, 'Child broker did not become ready'
-        request = json.loads(line)['request']
-        assert survivor.state.model_slots.locked()
-        assert survivor.state.broker_requests.work.recover() == 0
-        assert status(survivor, 'model_requests', 'id', request) == 'pending'
-        child.kill()
-        await asyncio.to_thread(child.wait, 5)
-        async with asyncio.timeout(3):
-            while survivor.state.model_slots.locked():
-                await asyncio.sleep(.02)
-        assert survivor.state.broker_requests.work.recover() == 1
-        assert status(survivor, 'model_requests', 'id', request) == 'interrupted'
-        permit = await survivor.state.model_slots.acquire()
-        survivor.state.model_slots.release(permit)
-    finally:
-        if child.poll() is None:
+    # A file cannot fill a stderr pipe and stall startup; retain diagnostics on
+    # failures instead of discarding the child's exception or startup stack.
+    with tempfile.TemporaryFile() as diagnostics:
+        child = await asyncio.create_subprocess_exec(sys.executable, '-c', source,
+            stdout=asyncio.subprocess.PIPE, stderr=diagnostics,
+            env={**os.environ, 'BROKER_TEST_SETTINGS': child_settings.model_dump_json(),
+                 'BROKER_TEST_STARTUP_DELAY': str(startup_delay)})
+        phase = 'app startup'
+        try:
+            # Cold imports and verified app construction are not a recovery SLA.
+            # Leave time for the startup stack dump before reporting a timeout.
+            assert await asyncio.wait_for(child.stdout.readline(), 30) == b'READY\n'
+            phase = 'capacity and request setup'
+            line = await asyncio.wait_for(child.stdout.readline(), 5)
+            assert line, 'Child broker exited before creating its request'
+            request = json.loads(line)['request']
+            phase = 'live ownership'
+            assert survivor.state.model_slots.locked()
+            assert survivor.state.broker_requests.work.recover() == 0
+            assert status(survivor, 'model_requests', 'id', request) == 'pending'
             child.kill()
-            await asyncio.to_thread(child.wait, 5)
-        child.stdout.close()
-        child.stderr.close()
+            await asyncio.wait_for(child.wait(), 5)
+            phase = 'crash recovery'
+            async with asyncio.timeout(3):
+                while survivor.state.model_slots.locked():
+                    await asyncio.sleep(.02)
+            assert survivor.state.broker_requests.work.recover() == 1
+            assert status(survivor, 'model_requests', 'id', request) == 'interrupted'
+            permit = await survivor.state.model_slots.acquire()
+            survivor.state.model_slots.release(permit)
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await asyncio.wait_for(child.wait(), 5)
+            if sys.exc_info()[0] is not None:
+                diagnostics.seek(0, os.SEEK_END)
+                diagnostics.seek(max(0, diagnostics.tell() - 16_384))
+                print(f'Child broker failed during {phase}; exit={child.returncode}')
+                print(diagnostics.read().decode(errors='replace'))
 
 
 @pytest.mark.parametrize('verified', [0, 2], indirect=True)
