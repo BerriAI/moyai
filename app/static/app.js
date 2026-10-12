@@ -388,8 +388,18 @@ async function renderHome(initialConfig,recent=false){
   document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;saveDraft();autoSize($('#prompt'));$('#prompt').focus();});
 }
 function renderSessionSubmission(body, message='Creating session…', failed=false) {
-  MoyaiUI.render($('#content'), `<div class="chat-layout"><section class="chat-panel"><div class="conversation" role="log" aria-label="Conversation"><article class="chat-message user"><div class="message-content" style="white-space:pre-wrap">${esc(body.prompt)}</div>${body.attachment_ids.length?`<small>${body.attachment_ids.length} attachment${body.attachment_ids.length===1?'':'s'}</small>`:''}</article></div><div class="chat-bottom"><p role="${failed?'alert':'status'}">${esc(message)}</p>${failed?'<button id="retry-create" class="primary">Retry sending</button><button id="edit-create" class="quiet">Edit message</button>':''}</div></section></div>`);
+  // Use the real session shell without binding a run, stream, or upload draft
+  // before the server acknowledges it. Retrying keeps the original submission.
+  renderChatShell({...body,id:'',events:[],plugins:body.plugins||[],private_owner_id:body.private_session?state.userId:null});
+  const input=bindSkillEditor($('#followup'),$('#message-form'));
+  input.id='pending-followup';input.contentEditable='false';input.setAttribute('aria-disabled','true');
+  autoSize(input);
+  $('#message-form').inert=true;
+  document.querySelectorAll('#header-actions button, #header-actions select, #message-form button, #message-form select, #message-form textarea').forEach(control=>control.disabled=true);
+  $('#stop-response').hidden=true;
+  MoyaiUI.render($('#conversation'), `<div class="conversation-inner"><article class="chat-message user"><div class="message-label">You</div><div class="message-content plain-text">${esc(body.prompt)}</div>${body.attachment_ids.length?`<small>${body.attachment_ids.length} attachment${body.attachment_ids.length===1?'':'s'}</small>`:''}</article><div class="${failed?'error-banner':'chat-working busy'}" role="${failed?'alert':'status'}">${esc(message)}</div>${failed?'<div class="approval-actions"><button id="retry-create" class="primary">Retry sending</button><button id="edit-create" class="quiet">Edit message</button></div>':''}</div>`);
 }
+
 async function submitTask(e){
   e.preventDefault();if(state.sending.has('new'))return;
   const files=state.attachments;let attachment_ids;
@@ -437,7 +447,7 @@ async function openRun(id,hash='#run='+id,submission=null){
   const targetHash=link?.runId===id?link.hash:'#run='+id;
   history.replaceState(null,'',targetHash);
   const cachedTitle=sessionRows(state.runs).find(run=>run.id===id);
-  setView('chat',cachedTitle?sessionTitle(cachedTitle):'Loading conversation');
+  setView('chat',cachedTitle?sessionTitle(cachedTitle):submission?sessionTitle(submission):'Loading conversation');
   const path=`/api/runs/${id}?activity=summary`;
   // A recent same-tab snapshot can paint immediately while the mandatory read
   // checks for new messages. Keep the preview bounded independently of reuse.
@@ -530,13 +540,17 @@ async function openLinkedFile(link,version){
     await savedFiles.open(file,link.fileRef);
   }catch(error){if(current()){workspacePanel?.open('files');toast(error.message);}}
 }
-function renderChat(run){
+function renderChatShell(run){
   const id=run.id;
-  state.activityHistoryLimit=5;
   const icon=(name,size=17)=>globalThis.MoyaiIcon?.(name,size)||'';
   MoyaiUI.render($('#header-actions'), `${run.private_owner_id?'<span class="session-privacy-badge">Private · Only you</span>':''}${(run.parent_run_id||run.side_chat_of)?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id||run.side_chat_of)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span><div class="swarm-view-switch" role="group" aria-label="Session view"><button type="button" class="quiet" data-session-view="chat" aria-pressed="true">Chat</button><button type="button" class="quiet" data-session-view="space" aria-pressed="false">Space</button></div>${run.swarm?'<button type="button" class="quiet" id="swarm-time" aria-label="Change swarm duration">Duration</button><button type="button" class="quiet" id="swarm-pause" hidden>Pause</button>':''}${run.mode==='modal'?`<button id="computer-button" class="quiet details-toggle header-icon" aria-label="Computer" title="Computer" aria-controls="workspace-panel">${icon('monitor')}</button>`:''}<button id="files-button" class="quiet details-toggle" aria-controls="workspace-panel" hidden>Files</button><button id="pull-requests-button" class="quiet details-toggle header-icon" aria-label="Pull requests" title="Pull requests" aria-controls="workspace-panel" hidden>${icon('pull')}</button><button id="subagents-button" class="quiet details-toggle header-icon" aria-label="Subagents" title="Subagents" aria-controls="workspace-panel" hidden>${icon('participants')}</button><button id="toggle-details" class="quiet details-toggle header-icon" aria-label="Activity" title="Activity" aria-expanded="false" aria-controls="session-details">${icon('list')}</button><button id="workspace-panel-toggle" class="quiet details-toggle header-icon" aria-label="Show workspace panel" title="Workspace panel" aria-controls="workspace-panel" aria-expanded="false">${icon('panel')}</button>`);
   MoyaiUI.render($('#content'), `<div class="chat-layout"><section class="chat-panel">${run.private_owner_id?'<p class="session-privacy-notice">Private session · Only you. This session stays private and cannot be shared or delegated.</p>':''}<section id="swarm-space" class="swarm-space" aria-label="Agent space" hidden></section><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div id="pr-write-access"></div><div class="chat-working" id="chat-working" role="status"></div><section id="message-queue" class="message-queue" aria-label="Queued messages" hidden></section><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai</label><textarea id="followup" required rows="1" placeholder="Respond to Moyai or ask something else"></textarea><div class="composer-toolbar"><button type="button" class="quiet skill-picker-button" data-skill-picker="followup" aria-label="Choose a skill" title="Skills · or type /">${icon('slash',16)}</button>${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model,false,run.harness)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message">${icon('up',18)}</button><button type="submit" data-send-now hidden>Send now</button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>↑ / ↓ for history at text boundaries · Type / for skills · Shift + Enter for a new line</span></div></div></section>
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}${run.project_environment?.name?`<div class="detail-row"><span>Project environment</span><span>${esc(run.project_environment.name)} · ${esc(run.project_environment.commit_sha.slice(0,8))}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`);
+}
+function renderChat(run){
+  const id=run.id;
+  state.activityHistoryLimit=5;
+  renderChatShell(run);
   bindSessionHeaderActions(run);
   workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,statusFor:sessionStatus,user:state.userId||'shared:local:admin',models:harnessModels(run.harness),toast,onActivity:loadAllActivity,onCreated:()=>refreshRuns().catch(showError)});
   state.sessionViews??=new Map();

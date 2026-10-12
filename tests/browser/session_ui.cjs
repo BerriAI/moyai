@@ -342,3 +342,41 @@ test('submission is visible before save and opening never waits for a held sideb
   assert.equal(await page.locator('.chat-message.user').count(),1);
   sidebar();
 });
+
+for(const width of [1440,768,320])test(`new session keeps the conversation layout while saving and opening at ${width}px`,async t=>{
+  const page=await setup(t),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.setViewportSize({width,height:900});
+  let save,open;
+  const saving=new Promise(resolve=>{save=resolve;}),opening=new Promise(resolve=>{open=resolve;});
+  t.after(()=>{save();open();});
+  await page.route('**/api/runs',async route=>{if(route.request().method()==='POST')await saving;await route.continue();});
+  await page.route('**/api/runs/*?activity=summary',async route=>{await opening;await route.continue();});
+  await page.locator('#prompt').fill('Hello from a stable conversation');
+  await page.locator('#prompt').press('Enter');
+  await page.getByRole('status').filter({hasText:'Creating session'}).waitFor();
+  assert.equal(await page.locator('.reply-composer').count(),1,'normal composer is present before save');
+  assert.equal(await page.locator('.reply-composer').isVisible(),true);
+  assert.equal(await page.locator('#pending-followup').isDisabled(),true);
+  const geometry=()=>page.evaluate(()=>{
+    const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
+    return {column:rect('.conversation-inner'),bubble:rect('.chat-message.user'),composer:rect('.reply-composer'),header:rect('.topbar')};
+  });
+  const pending=await geometry();
+  assert.ok(pending.column.width<=760);
+  assert.ok(pending.composer.y+pending.composer.height<=900);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  save();
+  await page.getByRole('status').filter({hasText:'Opening conversation'}).waitFor();
+  assert.deepEqual(await geometry(),pending,'acknowledgement does not move the layout');
+  assert.equal(await page.locator('#page-title').textContent(),'Hello from a stable conversation');
+  open();
+  await page.waitForFunction(()=>document.querySelector('#followup')&&!document.querySelector('#followup').disabled);
+  const ready=await geometry();
+  for(const key of ['column','bubble','composer','header']){
+    for(const axis of ['x','width'])assert.ok(Math.abs(ready[key][axis]-pending[key][axis])<2,`${key} ${axis} remains aligned`);
+  }
+  assert.ok(Math.abs(ready.composer.y-pending.composer.y)<2,`composer does not jump vertically: ${JSON.stringify({pending:pending.composer,ready:ready.composer})}`);
+  assert.equal(await page.locator('.chat-message.user').count(),1);
+  assert.deepEqual(errors,[]);
+});
