@@ -22,12 +22,16 @@ Merging this tooling alone does not deploy anything.
 - Keep Render auto-deploy disabled. One release owner must avoid dashboard edits
   and separate manual deployments until the workflow finishes.
 - Preserve database, object storage, signing/encryption keys, Temporal settings,
-  permissions and capacity configuration. Only `MOYAI_BUILD_SHA`,
-  `MAINTENANCE_DRAIN` and `RENDER_MIGRATION_STAGE` are changed.
+  permissions and capacity configuration. The deployment changes `MOYAI_BUILD_SHA`,
+  `MAINTENANCE_DRAIN` and `RENDER_MIGRATION_STAGE`. Maintenance also migrates an
+  existing `AGENT_HARNESS` override to `deepagents-temporal` for candidate staging.
 - The candidate's effective default must be `deepagents-temporal` on every role.
-  A stored `AGENT_HARNESS` override retaining a native engine stops preflight;
-  review that configuration explicitly before retrying. Saved sessions retain
-  their own harness selections.
+  Preflight records any stored `AGENT_HARNESS` value that will change, without
+  writing it. The old worker's drain deployment keeps its original setting.
+  Only after saving staging and the selected candidate build does maintenance
+  change the override, verify the saved environment and launch that candidate.
+  An absent override stays absent and uses the candidate's default. Saved sessions
+  retain their own harness selections. Rolling deployments cannot change this setting.
 - Arrange database recovery according to the existing backup policy before an
   offline schema change. The controller does not create a backup or provide an
   automatic downgrade path.
@@ -37,7 +41,9 @@ Merging this tooling alone does not deploy anything.
 1. Redeploy the existing worker build with drain enabled. Wait for saved execution
    boundaries, no pending/running model requests, and no live execution leases.
    Queued messages remain saved; the controller does not cancel user work.
-2. Stage the candidate API, worker, broker and coordinator, in that order. Each
+2. Stage the candidate API, worker, broker and coordinator, in that order. Apply
+   any planned default-harness change only at each candidate staging boundary,
+   retaining the old running process's environment until its replacement. Each
    staged service serves maintenance health without running the application.
    Verify each old process has retired using its database PID and start time.
    The API is unavailable during staging; callers must retain and retry their
@@ -69,6 +75,7 @@ automatically rolls back, cancels sessions or resumes a staged worker on failure
 | --- | --- |
 | CI/preflight, no mutations | Fix the failed check or configuration. Production is unchanged. |
 | Worker drain | New execution may be paused on the old build. Inspect active work and leases; do not cancel work to force the drain. |
+| Default harness write | Compare the receipt's previous/new setting with Render's saved environment and the installed process. An ambiguous response may have changed the saved setting without launching the candidate; do not restart the old build with that setting. |
 | Role staging | Verify which old processes remain and which services are staged. Keep incompatible candidate roles inactive until every old owner is gone. |
 | Offline migration | Inspect the schema revision and dirty marker on the private database. An unconfirmed response must be reconciled even if Render reports healthy staging. Do not rerun the deployment blindly. |
 | Candidate activation | Keep the worker drained. Determine the actual schema, installed source and activated contracts, then finish activation with the receipt's exact candidate commit. |

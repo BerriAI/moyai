@@ -62,7 +62,16 @@ class MaintenanceRender(APIRender):
         if method in {'POST', 'PUT'}:
             self.before_write(method, sid, body)
         if method == 'PUT':
-            value = super().call(method, path, body)
+            if path.endswith('/env-vars/AGENT_HARNESS'):
+                assert body == {'value': 'deepagents-temporal'}
+                assert 'AGENT_HARNESS' in self.env[sid]
+                assert self.env[sid]['RENDER_MIGRATION_STAGE'] == 'true'
+                assert self.env[sid]['MOYAI_BUILD_SHA'] == NEW
+                self.calls.append((method, sid, 'AGENT_HARNESS', body['value']))
+                self.env[sid]['AGENT_HARNESS'] = body['value']
+                value = {'key': 'AGENT_HARNESS', 'value': body['value']}
+            else:
+                value = super().call(method, path, body)
             self.after_write(method, sid, body)
             if self.unknown_put:
                 raise ReleaseError('Synthetic lost environment write response')
@@ -110,7 +119,8 @@ class MaintenanceRender(APIRender):
             'drain': self.installed[service.id]['MAINTENANCE_DRAIN'] == 'true',
             'source_schema': source['schema'], 'source_policy': source['source_policy'],
             'source_schema_digest': source['source_schema_digest'],
-            'source_contracts': deepcopy(source['contracts']), 'default_harness': source['default_harness'],
+            'source_contracts': deepcopy(source['contracts']),
+            'default_harness': self.installed[service.id].get('AGENT_HARNESS', source['default_harness']),
             'schema_support': deepcopy(source['schema_support']),
             'schema_compatible': source['schema_support']['compatibility'] <= self.schema,
             'policy': self.policy, 'contracts': deepcopy(self.contracts), 'schema': self.schema,
@@ -139,6 +149,9 @@ def rehearse(output, *, pace=0, log=print):
                      'source_schema_digest': 'b' * 64}
         render, github, elapsed = MaintenanceRender(old_contract=old, candidate_contract=candidate), Candidate(), [0]
         github.rolling_ready = github.ready
+        for sid in render.env:
+            render.env[sid]['AGENT_HARNESS'] = 'codex'
+            render.installed[sid]['AGENT_HARNESS'] = 'codex'
         migrations = []
         def migration(service, expected):
             assert service.env['RENDER_MIGRATION_STAGE'] == 'true'
@@ -167,20 +180,29 @@ def rehearse(output, *, pace=0, log=print):
         except ReleaseError as error:
             assert scenario != 'success'
             say('EXPECTED SAFE STOP | ' + str(error))
+        harness_receipts = [entry for entry in release.record['changes'] if entry['key'] == 'AGENT_HARNESS']
+        assert len(harness_receipts) == 4 and all(entry['confirmed'] and entry['previous'] == 'codex'
+            and entry['value'] == 'deepagents-temporal' for entry in harness_receipts)
+        assert render.history[0]['env']['AGENT_HARNESS'] == 'codex'
+        assert all(entry['env']['AGENT_HARNESS'] == 'deepagents-temporal' for entry in render.history[1:])
+        say('DEFAULT MIGRATION | Old worker drained with Codex; four recorded overrides changed only for candidate staging')
         if scenario == 'success':
             assert release.record['status'] == 'success' and len(render.history) == 10
             assert len(migrations) == 1 and all(len(owners) == 1 for owners in render.owners.values())
             assert all(env['MOYAI_BUILD_SHA'] == NEW and env['RENDER_MIGRATION_STAGE'] == 'false'
-                       for env in render.env.values())
+                       and env['AGENT_HARNESS'] == 'deepagents-temporal' for env in render.env.values())
             assert render.env[WORKER]['MAINTENANCE_DRAIN'] == 'false'
-            say('VERIFIED | Four matching roles; six replaced process identities retired; execution resumed')
+            say('VERIFIED | Four matching roles default to Deep Agents; six old identities retired; execution resumed')
         else:
             assert release.record['status'] == 'failed' and len(render.history) == 5
             assert all(env['RENDER_MIGRATION_STAGE'] == 'true' for env in render.env.values())
             assert len(migrations) == (1 if scenario == 'lost migration response' else 0)
             say('VERIFIED | No activation, retry, rollback, or resumed execution')
         evidence.append({'scenario': scenario, 'status': release.record['status'],
-                         'deployments': len(render.history), 'migration_attempts': len(migrations)})
+                         'deployments': len(render.history), 'migration_attempts': len(migrations),
+                         'confirmed_default_changes': len(harness_receipts),
+                         'old_worker_drain_default': render.history[0]['env']['AGENT_HARNESS'],
+                         'candidate_default': 'deepagents-temporal'})
     (output / 'results.json').write_text(json.dumps({'synthetic': True, 'scenarios': evidence}, indent=2) + '\n')
     return evidence
 
