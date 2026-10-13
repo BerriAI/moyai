@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -329,13 +330,27 @@ async def test_older_build_does_not_publish_over_a_newer_recipe(workspace, monke
 
 def test_project_startup_omits_agent_capabilities(monkeypatch, tmp_path):
     from sandbox.project_environment import prepare_project
-    monkeypatch.setattr('sandbox.project_environment.Path', lambda _: tmp_path)
+    subprocess.run(['git', 'init', str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(tmp_path), 'remote', 'add', 'origin', 'https://github.com/org/project.git'],
+                   check=True, capture_output=True)
+    monkeypatch.setattr('sandbox.project_environment.Path', lambda value: tmp_path if value == '/workspace/repo' else Path(value))
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'private-broker-token')
     monkeypatch.setenv('OPENAI_API_KEY', 'private-model-token')
-    calls = []
-    monkeypatch.setattr('sandbox.project_environment.subprocess.run', lambda *a, **kw: calls.append(kw))
-    prepare_project({'project_environment': {'name': 'Project', 'commit_sha': 'a' * 40, 'startup': 'true'}}, lambda *a: None)
-    assert 'WORKSPACE_RUN_TOKEN' not in calls[0]['env'] and 'OPENAI_API_KEY' not in calls[0]['env']
+    monkeypatch.setenv('OPENAI_BASE_URL', 'private-model-endpoint')
+    monkeypatch.setenv('MOYAI_CREDENTIAL_PROXY_URL', 'private-credential-endpoint')
+    monkeypatch.setenv('PATH', os.environ['PATH'])
+    calls, run = [], subprocess.run
+
+    def command(arguments, **kwargs):
+        calls.append(kwargs)
+        return run(arguments, **kwargs)
+
+    monkeypatch.setattr('sandbox.project_environment.subprocess.run', command)
+    health = prepare_project({'project_environment': {'name': 'Project', 'repository': 'org/project',
+        'commit_sha': 'a' * 40, 'startup': 'true'}}, lambda *args: None)
+    assert health['status'] == 'ready' and len(calls) == 3
+    for call in calls:
+        assert not {'WORKSPACE_RUN_TOKEN', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'MOYAI_CREDENTIAL_PROXY_URL'} & call['env'].keys()
 
 
 def test_clone_token_is_not_available_to_setup_or_saved_config(monkeypatch, tmp_path):

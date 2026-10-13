@@ -380,6 +380,8 @@ def test_installation_scope_validation(workspace, monkeypatch, bad):
 def test_git_read_only_stream_and_no_header_or_redirect_leak(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = connected(app)
+    app.state.store.execute('UPDATE runs SET github_repository_id=101,repo_url=? WHERE id=?',
+                            ('https://github.com/BerriAI/litellm', run_id))
     github = app.state.connectors.github
     async def token(*args, **kwargs):
         return 'installation-secret'
@@ -452,7 +454,8 @@ def test_repository_routing_and_no_implicit_access_expansion(workspace, monkeypa
     GitHubAPI(github, monkeypatch)
     with pytest.raises(ConnectorError, match='not selected'):
         asyncio.run(github.selected_target({}, 'BerriAI/moyai'))
-    assert asyncio.run(github.selected_target({})) == 101
+    with pytest.raises(ConnectorError, match='github_repositories.*explicit repository_id'):
+        asyncio.run(github.selected_target({}))
     connect_multiple(app)
     api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai')
     run = {**app.state.store.run(run_id), 'repo_url': 'https://github.com/BerriAI/moyai.git'}

@@ -245,7 +245,7 @@ class Workflow(PRWrite):
 
 # One explicit schema per operation. No caller-selected HTTP paths or GraphQL.
 READS = {
-    'github_capabilities': (Repository, 'Inspect registered GitHub tools, connection policy and current installation permissions for a selected repository. Read-only; never changes access. PR grants, head checks and repository rules still apply.'),
+    'github_capabilities': (Repository, 'Inspect registered GitHub tools, connection policy and current installation permissions. Without an explicit or session repository, report installation capabilities and authorized repository choices without selecting one. Read-only; never changes access or the session repository. PR grants, head checks and repository rules still apply.'),
     'github_publication_status': (PublicationStatus, 'Read the current session’s publication receipt and look for its exact branch/commit on GitHub using the original request_key. Never creates branches/PRs, repeats a write or grants PR access. An empty readback remains uncertain after dispatch.'),
     'github_search': (Search, 'Search code, issues, PRs or commits in one selected repository. Follow next_page; provider_incomplete means GitHub did not expose all matches.'),
     'github_issues': (Issues, 'List issues, excluding PRs. Pages may be empty after filtering; follow next_page.'),
@@ -303,14 +303,22 @@ class GitHubCoding:
                 or any(current[key] != run[key] for key in ('token_hash', 'active_message_id', 'active_user_id'))
                 or version != self.connection_version() or not self.connectors.allowed(name)):
             raise ConnectorError('GitHub access or the active session changed.', dispatched=False)
-        self.target(target)
+        if name != 'github_capabilities' or target is not None:
+            self.target(target)
+        else:
+            self.connected_ids(self.saved_credentials())
         if name in WRITES:
             self.ensure_publish_allowed(run, version, name)
 
     async def coding_call(self, run, name, arguments):
         args = TOOLS[name][2].model_validate(arguments)
         version = run.get('github_connection_version') or self.connection_version()
-        target = await self.selected_target(run, args.repository, args.repository_id)
+        target = None
+        if (name == 'github_capabilities' and not args.repository and args.repository_id is None
+                and not run.get('github_repository_id') and not run.get('repo_url')):
+            await self.ensure_connection()
+        else:
+            target = await self.selected_target(run, args.repository, args.repository_id)
         self.coding_authority(run, name, version, target)
         if name in WRITES:
             async with self.write_lock:

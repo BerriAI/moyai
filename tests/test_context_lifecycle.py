@@ -44,8 +44,9 @@ def test_native_plaintext_is_removed_before_attachments_and_project_start(tmp_pa
         raise RuntimeError('Stop the fixture before running user code')
     monkeypatch.setattr(lifecycle, 'prepare_project', project)
     monkeypatch.setattr(lifecycle, 'emit', lambda *a, **k: None)
-    result = lifecycle.run_agent({'harness': 'codex', 'repo_url': '', 'fresh_child': fresh_child}, SimpleNamespace())
-    assert result == 1 and order == ['attachments', 'project']
+    with pytest.raises(RuntimeError, match='Stop the fixture before running user code'):
+        lifecycle.run_agent({'harness': 'codex', 'repo_url': '', 'fresh_child': fresh_child}, SimpleNamespace())
+    assert order == ['attachments', 'project']
     assert not root.exists() and all(path.exists() for path in project_temporaries)
     assert tempfile.tempdir == os.environ['TMPDIR'] == str(old_temp)
     assert unrelated.exists()

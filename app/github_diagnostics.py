@@ -41,7 +41,7 @@ async def read_diagnostic(github, run, name, args, version, target):
     from .github import TOOLS, supports_permissions
     check = lambda: github.coding_authority(run, name, version, target)
     check()
-    result = {'repository_id': target, 'repository': github.repository_name(target)}
+    result = {'repository_id': target, 'repository': github.repository_name(target) if target is not None else None}
     if name == 'github_capabilities':
         credentials = github.saved_credentials()
         installed = await github.request('GET', f'/app/installations/{credentials["installation_id"]}',
@@ -67,7 +67,10 @@ async def read_diagnostic(github, run, name, args, version, target):
                 'policy_allowed': github.connectors.allowed(tool), 'required_permissions': required,
                 'missing_permissions': missing, 'installation_active': active,
                 **({'requirements_by_kind': conditional} if conditional else {})})
-        return {**result, 'tools': entries, 'installation_active': active,
+        return {**result, 'scope': 'repository' if target is not None else 'installation',
+            'repositories': github.repository_options(credentials), 'tools': entries, 'installation_active': active,
+            'instruction': 'Use github_repositories to refresh authorized choices, then pass an explicit repository_id for repository operations. '
+                           'To work in another repository, use github_checkout with a fresh directory; do not move /workspace/repo or replace its prepared environment.',
             'workflow_file_permission': {'required': {'workflows': 'write'},
                                         'installed': supports_permissions(permissions, {'workflows': 'write'})},
             'prohibited_operations': ['merge', 'auto_merge', 'approve_review'],

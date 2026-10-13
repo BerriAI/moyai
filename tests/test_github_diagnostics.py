@@ -7,6 +7,8 @@ import httpx
 import pytest
 
 from test_github_coding import coding
+from test_github import select
+from test_github_identity import identity, call as identity_call
 from test_workspace import workspace
 from scripts.github_coding_fixture import COMMIT, PREFIX
 
@@ -109,6 +111,74 @@ def test_capabilities_reports_real_missing_scopes_and_policy_without_writes(codi
     assert result['prohibited_operations'] == ['merge', 'auto_merge', 'approve_review']
     assert not provider.dispatches and all(scope == {'metadata': 'read'} for scope in provider.minted)
     assert 'fixture-jwt' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('ids', [(101,), (202, 101)])
+def test_untargeted_capabilities_report_installation_choices_without_binding(identity, ids):
+    app, client, run, headers, github, provider = identity
+    select(app, ids)
+    before = app.state.store.run(run)
+    result = identity_call(client, run, headers, 'github_capabilities')
+    after = app.state.store.run(run)
+    assert all(after[key] == before[key] for key in ('github_repository_id', 'repo_url', 'environment_id', 'environment_build_id'))
+    assert result['scope'] == 'installation'
+    assert result['repository_id'] is None and result['repository'] is None
+    assert result['repositories'] == github.repository_options()
+    assert [item['id'] for item in result['repositories']] == list(ids)
+    assert result['installation_active'] and result['tools']
+    assert provider.calls == [('GET', '/app/installations/10', None)]
+    assert not app.state.store.rows('SELECT 1 FROM environment_builds')
+    assert not app.state.store.rows('SELECT 1 FROM github_publications')
+
+
+@pytest.mark.parametrize('selection', ['explicit', 'saved_id', 'saved_name'])
+def test_capabilities_respects_explicit_and_saved_repository(identity, selection):
+    app, client, run, headers, github, _ = identity
+    select(app, (101, 202))
+    arguments = {'repository_id': 202} if selection == 'explicit' else {}
+    if selection != 'explicit':
+        app.state.store.execute('UPDATE runs SET github_repository_id=?,repo_url=? WHERE id=?',
+                                (202 if selection == 'saved_id' else None, 'https://github.com/BerriAI/moyai', run))
+    result = identity_call(client, run, headers, 'github_capabilities', **arguments)
+    assert result['scope'] == 'repository'
+    assert result['repository_id'] == 202 and result['repository'] == 'BerriAI/moyai'
+    current = app.state.store.run(run)
+    assert current['github_repository_id'] == (None if selection == 'explicit' else 202)
+    assert current['repo_url'] == ('' if selection == 'explicit' else 'https://github.com/BerriAI/moyai')
+    assert github.saved_credentials()['repository_ids'] == [101, 202]
+
+
+@pytest.mark.parametrize('selection', ['explicit', 'saved'])
+def test_capabilities_rejects_unauthorized_target_instead_of_installation_fallback(identity, selection):
+    app, client, run, headers, _, provider = identity
+    arguments = {'repository_id': 202} if selection == 'explicit' else {}
+    if selection == 'saved':
+        app.state.store.execute('UPDATE runs SET github_repository_id=202 WHERE id=?', (run,))
+    result = identity_call(client, run, headers, 'github_capabilities', **arguments)
+    assert 'not selected' in result['error']
+    assert 'repositories' not in result and not provider.calls
+
+
+@pytest.mark.parametrize('change', ['actor', 'capability', 'message', 'status', 'plugins', 'deleted', 'connection', 'policy'])
+def test_untargeted_capabilities_rechecks_authority_after_installation_read(identity, change):
+    app, client, run, headers, _, provider = identity
+    select(app, (101, 202))
+    def revoke(method, path):
+        if method != 'GET' or path != '/app/installations/10':
+            return
+        if change == 'connection':
+            select(app, (101,))
+        elif change == 'policy':
+            app.state.store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('github',0)")
+        else:
+            field, value = {'actor': ('active_user_id', 'different-user'), 'capability': ('token_hash', 'different-token'),
+                'message': ('active_message_id', 999), 'status': ('status', 'idle'), 'plugins': ('plugins', '[]'),
+                'deleted': ('deleted_at', 'deleted')}[change]
+            app.state.store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (value, run))
+    provider.on_request = revoke
+    result = identity_call(client, run, headers, 'github_capabilities')
+    assert 'error' in result and 'repositories' not in result
+    assert provider.calls == [('GET', '/app/installations/10', None)]
 
 
 @pytest.mark.parametrize('restriction', ['foreign', 'head', 'merged', 'scope', 'readonly'])

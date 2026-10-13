@@ -250,7 +250,7 @@ def test_broker_exposes_followups_without_approval_and_reads_feedback(published)
         assert response.json()['items'][0]['body'].startswith('@review-bot review')
         assert response.json()['next_page'] is None
     api.comments *= 30
-    result = asyncio.run(github.call(run, 'github_pull_request_comments', {'number': 100, 'page': 2}))
+    result = asyncio.run(github.call(run, 'github_pull_request_comments', {'repository_id': 101, 'number': 100, 'page': 2}))
     assert result['next_page'] == 3 and api.calls[-1][2]['params']['page'] == 2
 
 

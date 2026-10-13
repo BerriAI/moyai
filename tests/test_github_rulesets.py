@@ -111,7 +111,7 @@ def rules(workspace, monkeypatch):
                         lambda **kwargs: original(transport=httpx.MockTransport(provider.handle), **kwargs))
     def call(name, args=None):
         return client.post(f'/broker/{run_id}/tools/call', headers=headers,
-                           json={'name': name, 'arguments': args or {}})
+                           json={'name': name, 'arguments': {'repository': REPO, **(args or {})}})
     return app, client, run_id, headers, github, provider, call
 
 
