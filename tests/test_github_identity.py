@@ -80,6 +80,63 @@ def test_repeatable_broker_metadata_preserves_selection_and_never_publishes(iden
     assert not app.state.store.rows('SELECT 1 FROM github_followups')
 
 
+@pytest.mark.parametrize('ids', [(101,), (202, 101)])
+@pytest.mark.parametrize('repository', ['', None])
+def test_empty_target_never_defaults_to_a_connected_repository(identity, ids, repository):
+    app, _, _, _, github, provider = identity
+    select(app, ids)
+    with pytest.raises(ConnectorError, match='github_repositories.*explicit repository_id'):
+        github.target(repository)
+    assert not provider.calls
+
+
+@pytest.mark.parametrize('name,arguments', [
+    ('github_repository', {}),
+    ('github_checkout', {}),
+    ('github_issues', {}),
+    ('github_ci_checks', {'head_sha': 'a' * 40}),
+    ('github_publication_status', {'request_key': 'missing-target'}),
+    ('github_create_issue', {'title': 'Missing target', 'request_key': 'missing-target'}),
+])
+def test_repo_specific_operations_require_target_without_discovery_or_binding(identity, name, arguments):
+    app, client, run, headers, github, provider = identity
+    select(app, (202, 101))
+    result = call(client, run, headers, name, **arguments)
+    assert 'github_repositories' in result['error'] and 'explicit repository_id' in result['error']
+    assert result['dispatched'] is False and not result['outcome_uncertain']
+    current = app.state.store.run(run)
+    assert current['github_repository_id'] is None and current['repo_url'] == ''
+    assert current['environment_build_id'] == ''
+    assert not provider.calls
+
+
+def test_selected_target_does_not_restore_selection_cleared_during_lookup(identity):
+    app, _, run_id, _, github, provider = identity
+    app.state.store.execute('UPDATE runs SET github_repository_id=101,repo_url=? WHERE id=?',
+                            ('https://github.com/BerriAI/litellm', run_id))
+    asyncio.run(github.ensure_connection())
+    run = app.state.store.run(run_id)
+    def clear_selection(method, path):
+        if method == 'GET' and path == '/repositories/101':
+            app.state.store.execute("UPDATE runs SET github_repository_id=NULL,repo_url='' WHERE id=?", (run_id,))
+    provider.on_request = clear_selection
+    assert asyncio.run(github.selected_target(run)) == 101
+    current = app.state.store.run(run_id)
+    assert current['github_repository_id'] is None and current['repo_url'] == ''
+
+
+@pytest.mark.parametrize('name', ['github_repository', 'github_checkout'])
+def test_explicit_repository_read_leaves_unselected_run_unbound(identity, name):
+    app, client, run, headers, github, provider = identity
+    select(app, (101, 202))
+    result = call(client, run, headers, name, repository_id=202)
+    assert result['repository_id'] == 202
+    current = app.state.store.run(run)
+    assert current['github_repository_id'] is None and current['repo_url'] == ''
+    assert all(body['repository_ids'] == [202] for method, path, body in provider.calls if method == 'POST')
+    assert github.saved_credentials()['repository_ids'] == [101, 202]
+
+
 def test_legacy_migration_preserves_subset_and_resolves_redirect_once(identity):
     app, client, run, headers, github, provider = identity
     github.save_app({'id': 123, 'slug': 'fixture', 'pem': 'fixture-key'})

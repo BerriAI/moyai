@@ -48,7 +48,7 @@ class GitHubRepositories:
         credentials = credentials if credentials is not None else self.saved_credentials()
         ids = self.connected_ids(credentials)
         if repository in ('', None):
-            return ids[0]
+            raise ConnectorError('No repository is selected. Use github_repositories, then pass an explicit repository_id.', dispatched=False)
         if positive_id(repository):
             if repository in ids:
                 return repository
@@ -199,7 +199,7 @@ class GitHubRepositories:
         try:
             target = self.target(requested, credentials)
         except ConnectorError:
-            if repository_id is not None or positive_id(requested):
+            if not requested or repository_id is not None or positive_id(requested):
                 raise
             # A new spelling may be a rename of one of the already selected IDs.
             for identity in self.connected_ids(credentials):
@@ -210,9 +210,6 @@ class GitHubRepositories:
             raise ConnectorError('The GitHub connection changed during repository lookup. Retry the operation.')
         if repository_id is not None and repository and self.target(repository, credentials) != target:
             raise ConnectorError('The repository name and ID identify different repositories.')
-        if run.get('id') and not repository and repository_id is None:
-            self.store.execute('UPDATE runs SET github_repository_id=?,repo_url=? WHERE id=?',
-                               (target, 'https://github.com/' + self.repository_name(target), run['id']))
         if self.references_dirty:
             self.migrate_references(credentials)
         return target

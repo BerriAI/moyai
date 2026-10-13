@@ -237,6 +237,10 @@ def test_advertised_update_packages_local_files():
     props = updated['github_update_pull_request']['inputSchema']['properties']
     assert set(props) == {'directory', 'number', 'title', 'request_key'}
     assert 'number' in updated['github_checkout']['inputSchema']['properties']
+    checkout_properties = updated['github_checkout']['inputSchema']['properties']
+    assert 'explicit repository_id' in checkout_properties['repository']['description']
+    assert 'fresh directory' in checkout_properties['directory']['description']
+    assert 'Do not move /workspace/repo or replace its prepared environment' in checkout_properties['directory']['description']
 
 
 @pytest.mark.parametrize('failure', [OSError, ValueError, local.GitHubToolError])

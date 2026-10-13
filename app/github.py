@@ -54,7 +54,7 @@ class Args(BaseModel):
 class Repository(Args):
     repository_id: int | None = Field(default=None, gt=0, strict=True, description='Permanent GitHub repository ID returned by github_repositories.')
     repository: str = Field(default='', pattern='^(?:' + REPOSITORY + ')?$',
-                            description='An allowed owner/repository. Defaults to the session repository, then the first connected repository.')
+                            description='An allowed owner/repository. Defaults only to the saved session repository; otherwise pass a repository_id from github_repositories.')
 
 
 class PullRequest(Repository):

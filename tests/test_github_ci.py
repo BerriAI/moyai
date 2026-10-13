@@ -72,7 +72,7 @@ def ci(workspace, monkeypatch):
                         lambda **kwargs: original(transport=httpx.MockTransport(provider.handle), **kwargs))
     def call(name, **args):
         return client.post(f'/broker/{run_id}/tools/call', headers=headers,
-                           json={'name': name, 'arguments': args})
+                           json={'name': name, 'arguments': {'repository_id': 101, **args}})
     return app, client, run_id, headers, github, provider, call
 
 

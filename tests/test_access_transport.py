@@ -323,8 +323,9 @@ def test_real_mcp_git_checkout_and_publication_through_access(
                 program = ('import json, sys; from pathlib import Path; '
                            'from agent.tools import github_tools; '
                            'github_tools.ROOT = Path(json.loads(sys.argv[1])["workspace"]); '
-                           'from sandbox.remote_tool import run; '
-                           'run(json.loads(sys.argv[1]))')
+                           'from sandbox import remote_tool; '
+                           'remote_tool.WORKSPACE_ROOT = github_tools.ROOT; '
+                           'remote_tool.run(json.loads(sys.argv[1]))')
                 spec = {'workspace': str(workspace), 'broker_url': remote,
                         'name': name, 'arguments': args}
                 execution = subprocess.run([sys.executable, '-c', program, json.dumps(spec)],

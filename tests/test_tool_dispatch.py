@@ -251,6 +251,7 @@ async def test_computer_artifact_fetch_preserves_nested_dispatch_scope(broker, t
     from agent.tools import mcp_bridge
     from sandbox import remote_tool
     from test_published_artifacts import save
+    monkeypatch.setattr(remote_tool, 'WORKSPACE_ROOT', tmp_path)
     app, manager, store, scope, _ = broker
     raw = b'original saved bytes' * 70000
     artifact = save(app.state.published_artifacts, store.run(scope.run_id), raw)
@@ -395,6 +396,7 @@ async def test_repository_preparation_uses_the_same_scoped_broker(broker, tmp_pa
     monkeypatch.setattr(agent, 'prepare_project', lambda *a: None)
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture')
     def checkout(send, remote, token, **kwargs):
+        (tmp_path / 'workspace/repo').mkdir()
         return send('/tools/call', {'name': 'github_checkout', 'arguments': kwargs})
     monkeypatch.setattr(agent, 'github_checkout', checkout)
     def upstream(request, timeout):

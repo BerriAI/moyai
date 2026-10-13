@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from agent.tools import mcp_bridge, remote_computer
 from test_codex_sdk import codex_agent
 from test_session_journal import journal
 from test_durable import durable, drive
+from test_shared_environment import project_checkout, project_spec
 
 
 @pytest.fixture
@@ -270,11 +272,12 @@ def test_computer_launch_freezes_spec_before_lost_ack_retry(tmp_path, monkeypatc
     assert all(json.loads(Path(args[-1]).read_text()) == {'name': 'original'} for args in calls)
 
 
-def test_remote_commands_activate_project_without_restarting_services(tmp_path, monkeypatch):
+def test_remote_commands_activate_project_without_restarting_services(tmp_path, project_checkout, monkeypatch):
     from sandbox import remote_tool, project_environment
     from agent.tools import computer_tools
-    root = tmp_path/'repo'
+    root = project_checkout
     (root/'.venv/bin').mkdir(parents=True)
+    monkeypatch.setattr(remote_tool, 'WORKSPACE_ROOT', root.parent)
     # Map only the known project location, preserving normal path behavior.
     monkeypatch.setattr(project_environment, 'Path', lambda value: root if value == '/workspace/repo' else Path(value))
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'scoped-capability')
@@ -282,7 +285,14 @@ def test_remote_commands_activate_project_without_restarting_services(tmp_path, 
     monkeypatch.setattr(remote_tool, 'BrokerRelay', lambda *a: SimpleNamespace(
         start=lambda: SimpleNamespace(url='http://relay', close=lambda: None)))
     monkeypatch.setattr('sandbox.attachments.prepare_attachments', lambda *a: None)
-    monkeypatch.setattr(project_environment.subprocess, 'run', lambda *a, **kw: pytest.fail('Services restarted for a tool'))
+    run, probes = subprocess.run, []
+
+    def command(arguments, **kwargs):
+        assert arguments[0] == 'git', 'Services restarted for a tool'
+        probes.append(arguments)
+        return run(arguments, **kwargs)
+
+    monkeypatch.setattr(project_environment.subprocess, 'run', command)
     monkeypatch.setattr(mcp_bridge, 'BROKER', '')
     monkeypatch.setattr(mcp_bridge, 'GIT_BROKER', '')
     monkeypatch.setattr(mcp_bridge, 'TOKEN', '')
@@ -291,13 +301,235 @@ def test_remote_commands_activate_project_without_restarting_services(tmp_path, 
     monkeypatch.chdir(tmp_path)
     def execute(params, _, *, relay):
         assert relay.url == 'http://relay'
-        assert os.getcwd() == str(root)
+        assert os.getcwd() == str(root.parent)
         assert str(root/'.venv/bin') in os.environ['PATH'].split(os.pathsep)
         assert os.environ['MOYAI_CREDENTIAL_PROXY_URL'] == 'http://relay/credentials'
         return {'content': [], 'isError': False}
     monkeypatch.setattr(remote_tool, 'call_tool', execute)
-    assert remote_tool.run({'workspace': str(root), 'broker_url': 'http://broker',
-        'project_environment': {'startup': 'must not run'}, 'name': 'computer_terminal', 'arguments': {}}) == 0
+    assert remote_tool.run({**project_spec(startup='must not run'), 'workspace': str(root),
+                           'name': 'computer_terminal', 'arguments': {}}) == 0
+    assert len(probes) == 2
+
+
+@pytest.fixture
+def remote_workspace(project_checkout, monkeypatch, capsys):
+    from sandbox import remote_tool
+    monkeypatch.setattr(remote_tool, 'WORKSPACE_ROOT', project_checkout.parent)
+    monkeypatch.setattr(remote_tool, 'BrokerRelay', lambda *args: SimpleNamespace(
+        start=lambda: SimpleNamespace(url='http://relay', close=lambda: None)))
+    monkeypatch.setattr('sandbox.attachments.prepare_attachments', lambda *args: None)
+    for field in ('BROKER', 'GIT_BROKER', 'TOKEN'):
+        monkeypatch.setattr(mcp_bridge, field, '')
+    for field in ('MOYAI_CREDENTIAL_PROXY_URL', 'MOYAI_WORKSPACE'):
+        monkeypatch.setenv(field, '')
+
+    def invoke(**fields):
+        assert remote_tool.run({**project_spec(), 'workspace': str(project_checkout), **fields}) == 0
+        events = [json.loads(line.removeprefix('WORKSPACE_EVENT ')) for line in capsys.readouterr().out.splitlines()
+                  if line.startswith('WORKSPACE_EVENT ')]
+        return events[-1]['tool_result']
+
+    return invoke
+
+
+@pytest.mark.parametrize('condition', ['healthy', 'missing', 'empty', 'wrong'])
+def test_sibling_checkout_guidance_and_files_share_the_computer_boundary(
+        project_checkout, remote_workspace, condition):
+    root = project_checkout
+    sibling = root.parent / 'second-repository'
+    sibling.mkdir()
+    (sibling / 'AGENTS.md').write_text('Preserve this repository guidance.')
+    (sibling / 'local-work.txt').write_text('Keep sibling changes.')
+    if condition != 'healthy':
+        root.rename(root.parent / 'preserved-project')
+        if condition in {'empty', 'wrong'}:
+            root.mkdir()
+        if condition == 'wrong':
+            subprocess.run(['git', 'init', str(root)], check=True, capture_output=True)
+            subprocess.run(['git', '-C', str(root), 'remote', 'add', 'origin', 'https://github.com/other/repo.git'],
+                           check=True, capture_output=True)
+    guidance = remote_workspace(name='repository_guidance', arguments={'paths': [str(sibling)]})
+    assert not guidance['isError']
+    data = json.loads(guidance['content'][0]['text'])
+    assert data['paths'][0]['guidance'][0]['content'] == 'Preserve this repository guidance.'
+    result = remote_workspace(name='computer_read_file', arguments={'path': str(sibling / 'local-work.txt')})
+    assert not result['isError'] and json.loads(result['content'][0]['text'])['text'] == 'Keep sibling changes.'
+    denied = remote_workspace(name='repository_guidance', arguments={'paths': [str(root.parent.parent)]})
+    assert denied['isError']
+
+
+def test_remote_checkpoint_saves_sibling_files_with_legacy_checkout_scope(
+        project_checkout, remote_workspace, monkeypatch):
+    import zipfile
+    root = project_checkout
+    subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+                    'commit', '--allow-empty', '-m', 'fixture'], check=True, capture_output=True)
+    sibling = root.parent / 'second-repository'
+    sibling.mkdir()
+    (sibling / 'local-work.txt').write_text('Keep sibling changes.')
+    monkeypatch.setattr('sandbox.computer.request', lambda *args, **kwargs: {})
+    assert remote_workspace(finish_computer=True, response='Saved') == {'saved': True}
+    with zipfile.ZipFile(root.parent.parent / 'artifacts/result.zip') as archive:
+        assert archive.read('new-files/second-repository/local-work.txt') == b'Keep sibling changes.'
+        assert archive.read('new-files/repo/uncommitted.txt') == b'Keep this unfinished work.'
+
+
+@pytest.mark.parametrize('prepared', [False, True])
+@pytest.mark.parametrize('tool', ['computer_read_file', 'computer_write_file', 'computer_terminal'])
+def test_moved_remote_cwd_falls_back_without_recreating_checkout(project_checkout, remote_workspace, prepared, tool):
+    root = project_checkout
+    preserved = root.parent / 'preserved-project'
+    root.rename(preserved)
+    arguments = {
+        'computer_read_file': {'path': 'preserved-project/uncommitted.txt'},
+        'computer_write_file': {'path': 'preserved-project/repair.txt', 'text': 'Repair allowed.'},
+        'computer_terminal': {'command': 'pwd; cat preserved-project/uncommitted.txt', 'yield_ms': 3000},
+    }[tool]
+    result = remote_workspace(name=tool, arguments=arguments,
+                              **({} if prepared else {'project_environment': {}}))
+    assert not result['isError']
+    data = json.loads(result['content'][0]['text'])
+    assert os.environ['MOYAI_WORKSPACE'] == os.getcwd() == str(root.parent)
+    assert not root.exists()
+    if tool == 'computer_read_file':
+        assert data['text'] == 'Keep this unfinished work.'
+    elif tool == 'computer_write_file':
+        assert (preserved / 'repair.txt').read_text() == 'Repair allowed.'
+    else:
+        assert data['status'] == 'completed' and data['exit_code'] == 0
+        assert str(root.parent) in data['output'] and 'Keep this unfinished work.' in data['output']
+    if prepared:
+        assert result['project_health'] == {'status': 'needs_repair', 'phase': 'root', 'error_type': 'MissingProjectRoot'}
+        assert json.loads(result['content'][-1]['text'])['project_health'] == result['project_health']
+    else:
+        assert 'project_health' not in result
+
+
+@pytest.mark.parametrize('replacement', [False, True])
+def test_terminal_repairs_restored_root_and_retains_uncommitted_files(project_checkout, remote_workspace, replacement):
+    root = project_checkout
+    (root / '.moyai-ready').touch()
+    root.rename(root.parent / 'preserved-project')
+    if replacement:
+        root.mkdir()
+    result = remote_workspace(name='computer_terminal', arguments={'command':
+        f'cd "{root.parent}" && if [ -d repo ]; then rmdir repo; fi && mv preserved-project repo '
+        '&& test -f repo/.moyai-ready && cat repo/uncommitted.txt', 'yield_ms': 3000},
+        project_health={'status': 'ready', 'phase': 'verify'})
+    assert not result['isError']
+    data = json.loads(result['content'][0]['text'])
+    assert data['status'] == 'completed' and data['exit_code'] == 0
+    assert data['output'] == 'Keep this unfinished work.'
+    assert result['project_health']['status'] == 'needs_repair'
+    assert (root / 'uncommitted.txt').read_text() == 'Keep this unfinished work.'
+    assert not (root.parent / 'preserved-project').exists()
+
+
+@pytest.mark.parametrize('arguments', [{'path': '../escape', 'text': 'no'},
+                                        {'path': 'bad', 'text': 1}, {'path': 'bad', 'unexpected': True}])
+def test_repair_health_does_not_bypass_file_validation(project_checkout, remote_workspace, arguments):
+    root = project_checkout
+    root.rename(root.parent / 'preserved-project')
+    result = remote_workspace(name='computer_write_file', arguments=arguments)
+    assert result['isError'] and result['project_health']['status'] == 'needs_repair'
+    assert not (root.parent / 'bad').exists() and not (root.parent.parent / 'escape').exists()
+
+
+@pytest.mark.parametrize('authorized', [False, True])
+def test_repair_health_keeps_github_catalog_authorization(project_checkout, remote_workspace, monkeypatch, authorized):
+    root = project_checkout
+    root.rename(root.parent / 'preserved-project')
+    calls = []
+    monkeypatch.setattr(mcp_bridge, 'broker', lambda route, body=None:
+                        [{'name': 'github_checkout'}] if authorized else [])
+    monkeypatch.setattr(mcp_bridge.github_tools, 'call', lambda *args, **kwargs: calls.append(args) or {'directory': 'second'})
+    result = remote_workspace(name='github_checkout', arguments={'repository': 'org/second', 'directory': 'second'})
+    assert result['isError'] is not authorized
+    assert len(calls) == int(authorized)
+    assert not root.exists()
+
+
+def test_remote_prepare_returns_health_without_rejecting_computer(project_checkout, remote_workspace):
+    project_checkout.rename(project_checkout.parent / 'preserved-project')
+    result = remote_workspace(prepare_computer=True)
+    assert result['workspace'] == str(project_checkout.parent) and 'error' not in result
+    assert result['project_health']['status'] == 'needs_repair'
+
+
+@pytest.mark.parametrize('late_root_failure', [False, True])
+@pytest.mark.parametrize('health_event_failure', [False, True])
+async def test_repair_health_survives_controller_restart_and_dispatches_once(
+        runtime_durable, monkeypatch, late_root_failure, health_event_failure):
+    from app.independent_runtime import IndependentRuntime
+    manager, cloud, run_id = runtime_durable
+    await drive(manager, run_id, phase='monitor')
+    caller = manager.store.run(run_id)
+    body = request(arguments={'command': 'inspect and repair'})
+    service = manager.agent_runtime.operations
+    service.exchange(caller, body)
+    health = {'status': 'needs_repair', 'phase': 'verify', 'error_type': 'CalledProcessError', 'exit_code': 23}
+    prepared_health = health
+    if late_root_failure:
+        prepared_health = {'status': 'ready', 'phase': 'verify'}
+        health = {'status': 'needs_repair', 'phase': 'root', 'error_type': 'MissingProjectRoot'}
+    command = cloud.command
+    specs = []
+
+    async def reports(machine, action, directory, value, **kwargs):
+        response = await command(machine, action, directory, value, **kwargs)
+        if '/computer-operations/' in directory and action == 'read':
+            specs.append(dict(machine.spec))
+            if machine.spec.get('prepare_computer'):
+                result = {'workspace': '/workspace/repo', 'project_health': prepared_health}
+            else:
+                assert machine.spec['project_health'] == prepared_health
+                result = {'content': [{'type': 'text', 'text': 'Repair receipt'}], 'isError': False, 'project_health': health}
+            return json.dumps({'state': 'done', 'final': {'tool_result': result}})
+        return response
+
+    monkeypatch.setattr(manager, 'command', reports)
+    event = manager.store.event
+
+    def health_event(*args, **kwargs):
+        if health_event_failure and len(args) > 3 and isinstance(args[3], dict) and args[3].get('project_health'):
+            raise RuntimeError('Health activity storage unavailable')
+        return event(*args, **kwargs)
+
+    monkeypatch.setattr(manager.store, 'event', health_event)
+    for _ in range(4):
+        manager.agent_runtime = IndependentRuntime(manager)
+        state = manager.state(run_id)
+        await manager.agent_runtime.computer_step(run_id, state)
+    result = manager.agent_runtime.operations.read(caller, {'request_id': body['request_id']})
+    assert result['status'] == 'completed' and result['result']['project_health'] == health
+    state = manager.state(run_id)
+    assert state['computer']['phase'] == 'ready' and state['computer']['project_health'] == health
+    assert len(specs) == 2 and len([path for path in cloud.launches if '/computer-operations/' in path]) == 2
+    events = manager.store.rows("SELECT data FROM events WHERE run_id=? AND kind='status'", (run_id,))
+    assert any(json.loads(event['data']).get('project_health') == health for event in events) is not health_event_failure
+    current = manager.store.run(run_id)
+    for key in ('active_message_id', 'active_user_id', 'token_hash', 'snapshot_id', 'repo_url', 'environment_build_id'):
+        assert current[key] == caller[key]
+
+
+@pytest.mark.parametrize('report', [
+    {'state': 'uncertain'},
+    {'state': 'done', 'final': {}},
+    {'state': 'done', 'final': {'tool_result': {'error': 'Preparation rejected'}}},
+])
+async def test_unconfirmed_preparation_never_becomes_repair_ready(runtime_durable, monkeypatch, report):
+    manager, cloud, run_id = runtime_durable
+    await drive(manager, run_id, phase='monitor')
+    state = manager.state(run_id)
+    state['computer'] = {'phase': 'prepare', 'sandbox_id': cloud.machines[0].object_id}
+
+    async def command(*args, **kwargs):
+        return json.dumps(report)
+
+    monkeypatch.setattr(manager, 'command', command)
+    with pytest.raises(HTTPException, match='preparation|Preparation|supervisor|verified'):
+        await manager.agent_runtime.ensure_computer(run_id, state)
+    assert state['computer']['phase'] == 'prepare' and 'project_health' not in state['computer']
 
 
 async def test_runtime_restart_recovers_one_launch_and_stop_settles_pending(runtime_durable):
