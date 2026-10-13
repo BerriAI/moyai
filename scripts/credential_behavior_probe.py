@@ -61,6 +61,26 @@ async def wait_until(predicate, seconds):
             await asyncio.sleep(.1)
 
 
+def access_skill_reads(events):
+    reads = []
+    for event in events:
+        data = event['data']
+        if (event['kind'] != 'tool' or data.get('tool') != 'bundled_skill_read'
+                or data.get('phase') != 'completed'):
+            continue
+        output = data.get('output')
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except ValueError:
+                continue
+        if (isinstance(output, dict) and output.get('name') == 'access-discovery'
+                and output.get('path') == 'SKILL.md' and output.get('offset') == 0
+                and output.get('next_offset') is None and output.get('content')):
+            reads.append({'name': output['name'], 'revision': output['revision']})
+    return reads
+
+
 async def run_case(api, store, case, model, trial, observations, require_skill):
     started = time.monotonic()
     response = await api.post('/api/runs', json={
@@ -84,16 +104,7 @@ async def run_case(api, store, case, model, trial, observations, require_skill):
     events = store.events(run_id, limit=10000)
     tools = [event['data']['tool'] for event in events
              if event['kind'] == 'tool' and event['data'].get('phase') == 'started']
-    skill_reads = []
-    for event in events:
-        data = event['data']
-        output = data.get('output')
-        if (event['kind'] == 'tool' and data.get('tool') == 'bundled_skill_read'
-                and data.get('phase') == 'completed' and isinstance(output, dict)
-                and output.get('name') == 'access-discovery'
-                and output.get('path') == 'SKILL.md' and output.get('offset') == 0
-                and output.get('next_offset') is None and output.get('content')):
-            skill_reads.append({'name': output['name'], 'revision': output['revision']})
+    skill_reads = access_skill_reads(events)
     requests = store.rows('SELECT status,provider,name FROM credential_requests WHERE run_id=?', (run_id,))
     result.update(status=state['status'], answer=state['summary'], tools=tools,
                   credential_requests=requests, model_calls=state['model_calls'],
