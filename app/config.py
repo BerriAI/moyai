@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from .context_budget import ModelContextLimits
-from .model_selection import ASTRA_ULTRAFAST
+from .model_selection import ASTRA, ASTRA_ULTRAFAST
 
 
 # Keep picker IDs and labels in code so a stale deployment environment cannot
@@ -204,6 +204,8 @@ class Settings(BaseSettings):
     braintrust_parent: str = "project_name:moyai"
     agent_model: str = ""
     agent_harness: str = 'deepagents-temporal'
+    # Exact saved model IDs; other gateway/provider combinations must opt in.
+    native_web_search_models: list[str] = Field(default_factory=lambda: [ASTRA])
     sandbox_provider: Literal['modal', 'substrate', 'lambda'] = 'modal'
     lambda_region: str = 'us-east-1'
     lambda_image: str = ''

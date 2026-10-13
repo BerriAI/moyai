@@ -13,17 +13,21 @@ def response_stream(response):
         initial = copy.deepcopy(item)
         if item['type'] == 'message':
             initial.update(content=[], status='in_progress')
-        else:
+        elif item['type'] == 'function_call':
             initial['arguments'] = ''
         yield event('response.output_item.added', output_index=index, item=initial)
         if item['type'] == 'message':
             for part_index, part in enumerate(item['content']):
                 yield event('response.content_part.added', output_index=index, content_index=part_index,
-                            item_id=item['id'], part={**part, 'text': ''})
+                            item_id=item['id'], part={**part, 'text': '', 'annotations': []})
                 yield event('response.output_text.delta', output_index=index, content_index=part_index,
                             item_id=item['id'], delta=part['text'])
                 yield event('response.output_text.done', output_index=index, content_index=part_index,
                             item_id=item['id'], text=part['text'])
+                for annotation_index, annotation in enumerate(part.get('annotations', [])):
+                    yield event('response.output_text.annotation.added', output_index=index,
+                                content_index=part_index, item_id=item['id'],
+                                annotation_index=annotation_index, annotation=annotation)
                 yield event('response.content_part.done', output_index=index, content_index=part_index,
                             item_id=item['id'], part=part)
         elif item['type'] == 'function_call':
