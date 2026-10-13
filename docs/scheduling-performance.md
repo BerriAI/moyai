@@ -98,3 +98,26 @@ Other synchronous database/processing paths still share the event loop. The
 earlier production workflow-task timeout is evidence of a scheduling stall,
 but this local reproduction does not prove the control endpoint caused that
 specific incident.
+
+## Goal polling and native model streams
+
+Goal source lookup must use the transaction's existing connection, including
+table discovery for optional automation inputs. A nested `Store.table_names()`
+borrow can wait for the pool's ten-second admission timeout while the caller
+retains its session and shared schema locks. Queued global writers then delay
+other sessions. Increasing broker replicas does not remove that database lock
+dependency.
+
+Both internal goal polling and the public `get` action use a read-only snapshot.
+They do not take writer admission or update a goal's clock. Mutations still use
+the existing write transaction and revalidate the originating capability.
+Native Messages and Responses streams offload their per-chunk session-status
+read through `database()` so a busy pool does not freeze the event loop.
+
+`tests/test_goal_scheduling.py` exercises real PostgreSQL with a one-connection
+pool, goal mutation/review, and a concurrently held schema writer.
+`tests/test_harness_gateway.py -k streaming_pool_wait`, run with
+`--postgres-backend`, exhausts the real pool during each native protocol's
+stream and checks heartbeat responsiveness separately from response latency.
+The scheduling CI job runs both regressions. These checks establish the
+contention behavior; they do not establish a production throughput limit.

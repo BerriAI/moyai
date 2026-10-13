@@ -1,6 +1,9 @@
 import asyncio
 import inspect
 import json
+from contextlib import ExitStack
+import threading
+import time
 
 import httpx
 import pytest
@@ -10,6 +13,88 @@ from app.model_slots import ModelSlots
 from app.security import digest
 from test_workspace import workspace
 from test_tracing import Processor
+
+
+@pytest.mark.parametrize('route', ['messages', 'responses'])
+async def test_streaming_pool_wait_keeps_event_loop_responsive(workspace, monkeypatch, route):
+    """Hold real PostgreSQL connections only after admission/stream startup."""
+    from starlette.requests import Request
+    app, _ = workspace
+    store = app.state.store
+    if store.database is None:
+        pytest.skip('Pool contention requires --postgres-backend.')
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    run = store.create_run('Stream while another request uses the pool.', '', 'modal', [])
+    store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    held = threading.Event()
+    holding = None
+    errors, ticks = [], []
+
+    def hold_pool():
+        try:
+            with ExitStack() as stack:
+                for _ in range(store.database.pool.max_size):
+                    stack.enter_context(store.database.pool.connection())
+                held.set()
+                time.sleep(.6)
+        except Exception as exc:
+            errors.append(exc)
+            held.set()
+
+    class Streaming(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal holding
+            yield b'data: {}\n\n'
+            holding = threading.Thread(target=hold_pool)
+            holding.start()
+            assert await asyncio.to_thread(held.wait, 3)
+            assert not errors
+            value = ({'type': 'message_stop'} if route == 'messages' else
+                     {'type': 'response.completed', 'response': {'id': 'test', 'status': 'completed'}})
+            yield ('data: ' + json.dumps(value) + '\n\n').encode()
+
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=Streaming())), **kw))
+    scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'}, 'method': 'POST',
+             'path': f"/broker/{run['id']}/v1/{route}", 'query_string': b'',
+             'headers': [(b'authorization', b'Bearer cap'), (b'content-type', b'application/json'),
+                         (b'host', b'127.0.0.1')]}
+
+    async def receive():
+        return {'type': 'http.request', 'body': json.dumps(
+            {'messages': [], 'input': [], 'stream': True}).encode(), 'more_body': False}
+
+    async def heartbeat():
+        previous = time.monotonic()
+        while True:
+            await asyncio.sleep(.01)
+            current = time.monotonic()
+            ticks.append(current - previous - .01)
+            previous = current
+
+    endpoint = next(r.endpoint for r in app.routes
+                    if getattr(r, 'path', '') == '/broker/{run_id}/v1/' + route)
+    pulse = asyncio.create_task(heartbeat())
+    chunks = []
+    try:
+        response = await endpoint(run['id'], Request(scope, receive=receive))
+        started = time.monotonic()
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(.02)
+    finally:
+        pulse.cancel()
+        await asyncio.gather(pulse, return_exceptions=True)
+        if holding:
+            await asyncio.to_thread(holding.join)
+    assert not errors
+    assert held.is_set() and elapsed >= .5
+    assert max(ticks) < .3  # Baseline blocks the loop for the full 600ms hold.
+    assert len(chunks) == 2
+    assert store.rows('SELECT status FROM model_requests WHERE run_id=?', (run['id'],)) == [
+        {'status': 'completed'}]
 
 
 def test_deepagents_single_oversized_input_is_rejected_before_inference(workspace, monkeypatch):

@@ -20,6 +20,7 @@ from .broker_diagnostics import model_gateway_error, upstream_headers, model_err
 from sandbox.broker_failure import provider_error
 from sandbox.broker_transport import MAX_BODY
 from .model_selection import ASTRA_ULTRAFAST, gateway_payload
+from .db import database
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -450,7 +451,7 @@ class HarnessGateway:
             model_stage(request, stage)
             try:
                 async for chunk in upstream.aiter_bytes():
-                    current = self.store.run(run_id)
+                    current = await database(self.store.run, run_id)
                     if current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}:
                         status = 'interrupted'
                         break
