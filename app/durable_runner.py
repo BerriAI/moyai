@@ -704,6 +704,7 @@ class DurableRunner(RunManager):
     def wait_for_startup(self, run_id, state):
         state.setdefault('startup_deadline', time.time() + self.settings.startup_recovery_seconds)
         if time.time() >= state['startup_deadline']:
+            self.record_recovery(run_id, state, 'startup', 'deadline', state.get('startup_attempt', 0))
             self.fail(run_id, state, 'Workspace services did not reconnect after repeated startup attempts. '
                       'No new agent work was started. Your request and files are saved; try again when services recover.')
             return
@@ -716,23 +717,35 @@ class DurableRunner(RunManager):
                          {'activity_version': 1, 'phase': 'reconnecting', 'attempt': state['startup_attempt'],
                           **state['result']['startup_retry']})
         self.save(run_id, state)
+        self.record_recovery(run_id, state, 'startup', 'retrying', state['startup_attempt'])
 
     def wait_for_transport(self, run_id, state):
         # The process exited and its exact public receipts/files were saved.
         # This counter belongs to the original user turn, not an SDK segment.
         attempt = state.get('transport_attempt', 0) + 1
         if attempt > MAX_TRANSPORT_ATTEMPTS:
+            self.record_recovery(run_id, state, 'model_transport', 'exhausted', attempt - 1, MAX_TRANSPORT_ATTEMPTS)
             self.fail(run_id, state, 'The cloud connection did not recover after three continuation attempts. '
                       'Your request, completed tool receipts and error diagnostics are saved. '
                       'No completed tool calls were automatically replayed.')
             return
         state.update(phase='transport_wait', transport_attempt=attempt, retry_at=time.time() + 2 ** attempt)
         self.save(run_id, state)
+        self.record_recovery(run_id, state, 'model_transport', 'retrying', attempt, MAX_TRANSPORT_ATTEMPTS)
         self.running_status(run_id, 'reconnecting', '')
         self.store.update_run(run_id, summary='', pending_result='')
         self.store.event(run_id, 'status', 'Workspace saved. Reconnecting to continue from completed tool receipts.',
                          {'activity_version': 1, 'phase': 'reconnecting', 'attempt': attempt,
                           'request_id': state['result']['transport_retry']['failure'].get('request_id')})
+
+    def record_recovery(self, run_id, state, method, decision, attempts, limit=None):
+        try:
+            self.store.event(run_id, 'status', 'Recorded recovery decision.', {
+                'phase': 'recovery_decision', 'recovery': {
+                    'method': method, 'decision': decision, 'scheduled_retries': attempts,
+                    **({'limit': limit} if limit is not None else {})}}, turn_id=state['message_id'])
+        except Exception:
+            pass  # No additional recovery action is authorized by this record.
 
     async def command(self, sandbox, *args, token=None):
         # Pass capabilities only in the exec environment, never in a persisted
@@ -764,7 +777,8 @@ class DurableRunner(RunManager):
             if event.get('kind') == 'trace' and self.store.tracing:
                 self.store.tracing.tool(run_id, event.get('data'))
             if event.get('kind') in {'tool', 'status', 'error', 'message'}:
-                self.store.event(run_id, event['kind'], str(event.get('message', '')), event.get('data', {}))
+                self.store.event(run_id, event['kind'], str(event.get('message', '')),
+                                 event.get('data', {}), turn_id=state['message_id'])
             event_phase = event.get('data', {}).get('phase')
             if event_phase == 'execution_started':
                 state['execution_started'] = True

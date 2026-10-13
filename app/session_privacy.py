@@ -2,6 +2,10 @@
 from fastapi import HTTPException
 
 
+class PrivateExportDenied(HTTPException):
+    """Typed evidence of the existing export guard, not a retryable failure."""
+
+
 class SessionPrivacy:
     def __init__(self, store, security=None):
         self.store, self.security = store, security
@@ -41,7 +45,7 @@ class SessionPrivacy:
     @staticmethod
     def require_no_export(run):
         if SessionPrivacy.is_private(run):
-            raise HTTPException(403, 'Private sessions cannot export, share, automate, or delegate content.')
+            raise PrivateExportDenied(403, 'Private sessions cannot export, share, automate, or delegate content.')
 
     @staticmethod
     def allow_tool(run, name, write=False):

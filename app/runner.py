@@ -105,6 +105,23 @@ class RunManager:
             if run['pending_result'] == serialized:
                 return
             complete = completed_response(run, result)
+            if (result.get('completed') is True and result.get('message_id') == run.get('active_message_id')
+                    and type(result.get('message_id')) is int and isinstance(result.get('message'), str)
+                    and not result['message'].strip()
+                    and not any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry',
+                                                           'transport_retry', 'wait_group', 'wait_credential',
+                                                           'interrupted', 'partial'))):
+                # A diagnostic receipt only: preserve the existing result and
+                # lifecycle status, including legacy completed-empty outcomes.
+                diagnostic = {'phase': 'response_completion', 'code': 'missing_final_answer',
+                              'completed_marker': True, 'final_text_present': False,
+                              'turn_id': result['message_id']}
+                conn.execute("""INSERT INTO events(run_id,kind,message,data,created_at)
+                    SELECT ?,'error','Completion was reported without a final answer.',?,?
+                    WHERE NOT EXISTS(SELECT 1 FROM events WHERE run_id=?
+                        AND json_text(data,'phase')='response_completion'
+                        AND json_number(data,'turn_id')=?)""",
+                    (run_id, json.dumps(diagnostic), now(), run_id, result['message_id']))
             conn.execute('UPDATE runs SET summary=?,pending_result=?,updated_at=? WHERE id=?',
                          (str(result.get('message', '')), serialized, now(), run_id))
             if complete and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND id=? AND role='user' AND status='running'",

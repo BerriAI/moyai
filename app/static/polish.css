@@ -400,5 +400,7 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .failure-details summary{cursor:pointer;font-weight:500}
 .failure-details p{max-width:65ch;margin-block:12px}
 .failure-details dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:8px 16px}
-.failure-details dd{margin:0;overflow-wrap:anywhere;font-family:monospace}
+.failure-details dd{margin:0;overflow-wrap:anywhere}
+.failure-support dd{font-family:var(--font-mono,monospace)}
 .failure-details dt{font-weight:500}
+@media(max-width:480px){.failure-details dl{grid-template-columns:minmax(0,1fr);gap:4px}.failure-details dd{margin-bottom:8px}}

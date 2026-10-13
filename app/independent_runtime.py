@@ -268,7 +268,8 @@ class IndependentRuntime:
                     try:
                         await database(r.store.event, run_id, 'error', notice,
                                        {'stage': 'capture_sync', 'tool': operation['name'],
-                                        'request_id': operation['request_id'], **persistence})
+                                        'request_id': operation['request_id'], **persistence},
+                                       turn_id=operation['turn_id'])
                     except Exception:
                         pass  # The authoritative receipt already carries this warning.
             await database(self.operations.settle, operation, result['status'], result['result'])

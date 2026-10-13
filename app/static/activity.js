@@ -8,19 +8,22 @@
   const labels={reconnecting:'Reconnecting to workspace',running:'Reviewing the task',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',stopping:'Stopping',deleting:'Deleting session',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Earlier activity',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
   const isFocus=event=>event.kind==='status'&&event.data?.phase==='focus';
   function visibleEvents(events){
-    const phases=new Map(),seen=new Set();
-    const key=event=>JSON.stringify([event.data?.turn_id,event.data?.call_id]);
+    const failures=new Set(),failedCalls=new Set();
     for(const event of events){
-      const data=event.data||{},source=data.activity_id||event.id;
-      if(source!=null&&seen.has(source))continue;if(source!=null)seen.add(source);
-      if(event.kind!=='tool'||data.activity_version!==1||!data.call_id)continue;
-      if(phases.has(key(event))&&data.phase==='started')continue;
-      phases.set(key(event),data.phase);
+      const data=event.data||{};
+      if(event.kind==='tool'&&data.phase==='error'&&typeof data.call_id==='string'){
+        failures.add(JSON.stringify([data.turn_id,data.call_id.split(':')[0]]));
+        failedCalls.add(JSON.stringify([data.turn_id,data.call_id]));
+      }
     }
-    // Intermediate diagnostics stay in durable events/traces. The saved final
-    // response owns failure presentation; another error must not replace it.
-    return events.filter(event=>event.kind!=='error'&&!(event.kind==='tool'&&
-      (event.data?.phase==='error'||phases.get(key(event))==='error')));
+    // Failed operations belong in work history even when the response succeeds.
+    // A diagnostic for the same tool supplements its receipt, never a second row.
+    // Model/recovered errors remain separate from the authoritative final cause.
+    return events.filter(event=>!(event.kind==='tool'&&event.data?.phase==='started'&&
+      failedCalls.has(JSON.stringify([event.data.turn_id,event.data.call_id])))&&
+      (event.kind!=='error'||event.data?.turn_id&&(
+        ['slack_attachment_read','response_completion'].includes(event.data.phase)||event.data.stage==='capture_sync'||
+        event.data.phase==='tool_failure'&&!failures.has(JSON.stringify([event.data.turn_id,event.data.request_id])))));
   }
   function terminalAnswer(run){
     // The transcript moves unstarted inputs after answers. Persisted IDs retain
@@ -44,11 +47,14 @@
     // New answers name their input receipt explicitly. Never guess a previous
     // turn from event recency, queued inputs or the run's retained summary.
     const turn=answer?.response_to_id||(!run.chat_enabled?run.active_message_id:null);
-    if(answer&&!turn)return '';
+    if(answer&&!turn)return explanationHTML(null);
     const events=(run.events||[]).filter(e=>e.kind==='error'&&e.data?.phase==='sdk_failure'&&
       (turn?String(e.data.turn_id)===String(turn):!e.data.turn_id)).sort((a,b)=>Number(a.id)-Number(b.id));
     const event=events.at(-1);
-    if(!event)return '';
+    const recovery=(run.events||[]).filter(e=>e.kind==='status'&&e.data?.phase==='recovery_decision'&&
+      String(e.data.turn_id)===String(turn)&&(!event||Number(e.id)<Number(event.id)))
+      .sort((a,b)=>Number(a.id)-Number(b.id)).slice(-3).map(e=>e.data.recovery);
+    if(!event)return explanationHTML(null,'',recovery);
     const data=event.data,values=[];
     const add=(label,value)=>{if(value!==undefined&&value!==null&&value!=='')values.push(`<dt>${label}</dt><dd>${esc(value)}</dd>`);};
     const token=value=>typeof value==='string'&&/^[A-Za-z0-9._:/-]{1,128}$/.test(value)?value:'';
@@ -61,8 +67,49 @@
     for(const [name,label] of [['x-moyai-model-request-id','Model request'],['x-request-id','Provider request'],['x-litellm-call-id','Gateway request']]){
       if(name!=='x-moyai-model-request-id'||!data.model_request_id)add(label,token(data.request_ids?.[name]));
     }
-    if(!values.length)return '';
-    return `<details class="failure-details"><summary>Failure details</summary><p>Recorded when the agent stopped. Private request and response contents are omitted.</p><dl>${values.join('')}</dl></details>`;
+    return explanationHTML(event.failure_explanation,values.join(''),recovery);
+  }
+  const unknownExplanation={component:'Response',observed_cause:'Underlying cause unknown.',
+    stage:'Unknown — stage not recorded.',action:{dispatched:null,outcome:'unknown'},retryability:'unknown',
+    recovery:null,next_action:'Inspect saved receipts and the destination before deciding whether to retry.',support:{}};
+  function recoveryText(value){
+    const methods={catalog_read:'Tool catalog reads',startup:'Workspace startup',model_transport:'Model reconnection',context_transport:'Context reconnection',attachment_read:'Attachment read recovery'};
+    const decisions={retrying:'another attempt was scheduled',recovered:'recovered',exhausted:'attempt limit reached',
+      deadline:'recovery deadline reached',not_retryable:'the recorded failure was not retryable',
+      unconfirmed_action:'unconfirmed tool outcomes blocked automatic replay',unknown:'stop reason not recorded',
+      retry_after_unavailable:'no usable retry interval was supplied; no early retry was made',
+      retry_after_budget:'the required retry interval exceeded the remaining read budget; no early retry was made'};
+    if(!value||!Object.hasOwn(methods,value.method)||!Object.hasOwn(decisions,value.decision))return '';
+    const count=Number.isInteger(value.attempts)&&value.attempts>=0&&value.attempts<=10000?
+      `; ${value.method==='attachment_read'?'latest read-attempt index (not HTTP count)':'recorded attempts'}: ${value.attempts}`:'';
+    const scheduled=Number.isInteger(value.scheduled_retries)&&value.scheduled_retries>=0&&value.scheduled_retries<=10000?`; scheduled retries: ${value.scheduled_retries}`:'';
+    const limit=Number.isInteger(value.limit)&&value.limit>0&&value.limit<=10000?` (limit ${value.limit})`:'';
+    return `${methods[value.method]}: ${decisions[value.decision]}${count}${scheduled}${limit}.`;
+  }
+  function explanationHTML(value,support='',recoveries=[],{inline=false,key=''}={}){
+    const data=value?.version===1?value:unknownExplanation;
+    const text=value=>typeof value==='string'?value.slice(0,2000):'Unknown.';
+    const row=(label,value)=>`<dt>${label}</dt><dd>${esc(value)}</dd>`;
+    const action=data.action||{};
+    const outcomes={completed:'Completion receipt recorded',failed:'Failure receipt recorded',rejected:'Rejection recorded',cancelled:'Cancellation recorded',unknown:'Unknown — no confirmed outcome in this record'};
+    const retries={unknown:'Unknown — no decision recorded',not_retryable:'Not retryable for the recorded condition',
+      blocked_unknown_outcome:'Automatic replay blocked: outcome unknown',do_not_repeat:'Do not repeat the confirmed action',
+      bounded_recovery_stopped:'The recorded attempt or time limit stopped automatic recovery',
+      reported_retryable:'The tool reported retry eligibility; this is not authorization to replay a write'};
+    const recovery=[recoveryText(data.recovery),...recoveries.map(recoveryText)].filter(Boolean);
+    const rows=row('What failed',text(data.component))+row('Observed cause',text(data.observed_cause))+
+      row('Stage',text(data.stage))+row('Action dispatched',action.dispatched===true?'Yes':action.dispatched===false?'No':'Unknown — no dispatch receipt in this record')+
+      row('Action outcome',outcomes[action.outcome]||outcomes.unknown)+row('Retryability',retries[data.retryability]||retries.unknown)+
+      row('Recorded recovery in this turn',recovery.length?[...new Set(recovery)].join(' '):'No recovery attempt recorded. This does not prove none occurred.')+
+      row('Next safe action',text(data.next_action));
+    const sizes=Object.entries(data.measurements||{}).filter(([k,v])=>
+      ['declared_bytes','content_length_bytes','received_bytes'].includes(k)&&Number.isSafeInteger(v)&&v>=0||
+      k==='retry_after_seconds'&&Number.isFinite(v)&&v>=0&&v<=2**31-1)
+      .map(([k,v])=>row(({declared_bytes:'Declared bytes',content_length_bytes:'Advertised HTTP bytes',received_bytes:'Observed bytes',retry_after_seconds:'Required retry wait (seconds)'})[k],String(v))).join('');
+    const identifiers=Object.entries(data.support||{}).filter(([k,v])=>/^(request_id|broker_request_id|model_request_id|x-request-id|x-litellm-call-id|x-moyai-model-request-id)$/.test(k)&&typeof v==='string'&&/^[A-Za-z0-9._:-]{1,128}$/.test(v))
+      .map(([k,v])=>row(esc(k.replaceAll('_',' ')),v)).join('');
+    const detail=`<p>${inline?'Recorded for this operation; the final response keeps its own outcome.':'Recorded when the agent stopped. Action fields describe this record, not all work in the turn.'} Observations do not establish a root cause. Private request and response contents are omitted.</p><dl>${rows}${sizes}</dl>${support||identifiers?`<details class="failure-support"${key?` data-work-key="${esc(key)}:support"`:''}><summary>Support details</summary><dl>${support}${identifiers}</dl></details>`:''}`;
+    return inline?`<div class="failure-details">${detail}</div>`:`<details class="failure-details"${key?` data-work-key="${esc(key)}"`:''}><summary>Failure details</summary>${detail}</details>`;
   }
   function duration(start,end=Date.now()){
     const seconds=Math.max(0,Math.floor((Number(end)-Number(start))/1000))||0;
@@ -126,16 +173,17 @@
       turn.rows=[];const tools=new Map();
       for(const event of turn.events){
         const data=event.data||{};
-        if(isFocus(event)||data.phase==='goal')continue;
+        if(isFocus(event)||data.phase==='goal'||data.phase==='recovery_decision')continue;
         if(event.kind==='tool'&&data.activity_version===1&&data.call_id){
           let row=tools.get(data.call_id);
           if(!row){row={id:data.call_id,eventId:String(event.id),kind:'tool',start:event.created_at};tools.set(data.call_id,row);turn.rows.push(row);}
           // Replayed starts cannot undo a journaled completion.
           if(row.phase&&row.phase!=='started'&&data.phase==='started')continue;
-          Object.assign(row,{message:event.message,...data});
+          Object.assign(row,{message:event.message,...data,failure_explanation:event.failure_explanation});
           if(data.phase!=='started')row.finishedAt=event.created_at;
         }else if(data.phase!=='processing'){
           turn.rows.push({id:String(event.id),eventId:String(event.id),kind:event.kind,message:event.message,start:event.created_at,
+            failure_explanation:event.failure_explanation,
             phase:event.kind==='error'?'error':'recorded'});
         }
       }
@@ -176,7 +224,7 @@
       input(delivered);
       for(const event of turn.events){
         const data=event.data||{},at=Date.parse(event.created_at)||turn.start;
-        if(isFocus(event)||data.phase==='goal')continue;
+        if(isFocus(event)||data.phase==='goal'||data.phase==='recovery_decision')continue;
         if(data.phase==='steering'&&data.message_id){
           close(input(delivered),at);delivered=String(data.message_id);input(delivered);continue;
         }
@@ -281,6 +329,15 @@
     existing.forEach(node=>node.remove());
   }
   function rowHTML(row,turn){
+    if(row.phase==='error'){
+      const explanation=row.failure_explanation;
+      const title=explanation?.action?.outcome==='completed'?'Recording failed after tool completion':
+        `${explanation?.version===1?explanation.component:'Tool operation'} failed`;
+      return `<li class="work-action error"><details data-work-key="${esc(turn.id+':'+row.id)}"><summary>
+        <span class="work-icon" aria-hidden="true">!</span><span class="work-action-title">${esc(title)}</span>
+        <span class="work-action-state">Details</span><span class="work-tool-chevron" aria-hidden="true">›</span></summary>
+        <div class="work-action-detail">${explanationHTML(explanation,'',[],{inline:true,key:turn.id+':'+row.id})}</div></details></li>`;
+    }
     const icon={command:'⌘',file:'▤'}[row.category]||(row.kind==='tool'?'◇':'·');
     const status={running:'Running',completed:'Finished',backgrounded:'Moved to background',error:'Error',paused:'Paused',unconfirmed:'No completion received',disconnected:'Reconnecting'}[row.state]||'';
     const detail=row.command||row.path;
@@ -382,6 +439,6 @@
     });
     if(nearBottom)container.scrollTop=container.scrollHeight;
   }
-  const api={groups,current,isFocus,visibleEvents,terminalAnswer,terminalError,failureDetails,timeline,updates,completedHistory,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
+  const api={groups,current,isFocus,visibleEvents,terminalAnswer,terminalError,failureDetails,explanationHTML,timeline,updates,completedHistory,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
   if(typeof module!=='undefined')module.exports=api;
 })(typeof globalThis!=='undefined'?globalThis:window);

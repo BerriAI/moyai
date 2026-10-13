@@ -97,6 +97,19 @@ def failure_diagnostic(agent, sdk, details):
         if (http := status(broker.get('http_status'))) is not None:
             diagnostic.setdefault('http_status', http)
     diagnostic.update(safe_error({'http_status': diagnostic.pop('http_status', None)}))
+    attempts = getattr(agent, 'transport_attempt', None)
+    if type(attempts) is int and 0 <= attempts <= 3:
+        # This is the actual native recovery counter, not a guessed count from
+        # repeated errors. An earlier successful reconnect can precede this stop.
+        decision = 'unknown'
+        if diagnostic['pending_tools'] or isinstance(broker, dict) and broker.get('uncertain_tool') is True:
+            decision = 'unconfirmed_action'
+        elif diagnostic.get('error_code') in {'cyber_policy', 'content_policy_violation', 'invalid_request_error'}:
+            decision = 'not_retryable'
+        elif attempts == 3 and isinstance(broker, dict) and broker.get('transient') is True:
+            decision = 'exhausted'
+        diagnostic['recovery'] = {'method': 'model_transport', 'attempts': attempts,
+                                  'limit': 3, 'decision': decision}
     return diagnostic
 
 

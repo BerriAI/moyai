@@ -121,7 +121,7 @@ test('receipt-only answers keep a frozen work block and later failures remain vi
 
 test('parallel tools and journal replay pair once, even after rotation or reconnect',()=>{
   const data=run();data.events.push(tool(2,'segment1:a','started'),tool(3,'segment1:b','started'),tool(4,'segment1:b','completed'),tool(5,'segment1:a','error',{exit_code:1}),tool(6,'segment1:b','started'),tool(7,'segment2:a','started'),event(8,'message','Update',{activity_id:'same'}),event(9,'message','Update',{activity_id:'same'}));
-  const turn=groups(data).get('1');assert.equal(turn.count,2);assert.deepEqual(turn.rows.filter(row=>row.kind==='tool').map(row=>row.state),['completed','running']);
+  const turn=groups(data).get('1');assert.equal(turn.count,3);assert.deepEqual(turn.rows.filter(row=>row.kind==='tool').map(row=>row.state),['completed','error','running']);
   assert.equal(turn.rows.filter(row=>row.kind==='message').length,1);assert.doesNotMatch(html(turn),/Exit code 1/);
 });
 
@@ -474,7 +474,7 @@ test('runtime compaction notices render as quiet disclosures while ordinary pros
 });
 
 
-test('intermediate failures disappear during work and after success without deleting the log',()=>{
+test('failed operations remain concise in work history after success without dumping tool output',()=>{
   const data=run();data.events.push(tool(2,'rejected','started'));
   assert.equal(groups(data).get('1').count,1);
   data.events.push(tool(3,'rejected','error',{output:'Old 422 error'}),
@@ -484,17 +484,18 @@ test('intermediate failures disappear during work and after success without dele
     const snapshot={...data,status};
     if(status==='idle')snapshot.messages=data.messages.map(m=>({...m,status:'completed'}));
     const turn=groups(snapshot).get('1');
-    assert.equal(turn.count,1);assert.deepEqual(turn.rows.map(row=>row.id),['retry']);
-    assert.doesNotMatch(html(turn),/Old 422|Cloud request failed|1:rejected/);
-    assert(!timeline(snapshot).get('1').some(item=>item.block?.rows.some(row=>row.id==='rejected')));
+    assert.equal(turn.count,2);assert.deepEqual(turn.rows.map(row=>row.id),['rejected','retry']);
+    assert.doesNotMatch(html(turn),/Old 422|Cloud request failed/);
+    assert.match(html(turn),/Tool operation failed|Underlying cause unknown/);
+    assert(timeline(snapshot).get('1').some(item=>item.block?.rows.some(row=>row.id==='rejected')));
   }
   assert.equal(JSON.stringify(data),before);
   data.events.push(tool(6,'retry','completed'),tool(7,'rejected','started'));
-  assert.deepEqual(MoyaiActivity.visibleEvents(data.events).map(e=>e.id),[1,5,6]);
+  assert.deepEqual(MoyaiActivity.visibleEvents(data.events).map(e=>e.id),[1,3,5,6]);
   assert.deepEqual(groups(JSON.parse(JSON.stringify(data))),groups(data));
   data.events.push(tool(8,'rejected','completed',{turn_id:2}));
   assert.deepEqual(groups(data).get('2').rows.map(row=>row.state),['completed']);
-  assert.deepEqual(groups(data).get('1').rows.map(row=>row.id),['retry']);
+  assert.deepEqual(groups(data).get('1').rows.map(row=>row.id),['rejected','retry']);
 });
 
 test('stopped sessions show the terminal outcome without reviving intermediate failures',()=>{
@@ -531,7 +532,7 @@ test('an unclaimed follow-up shows its stop reason instead of the previous answe
 });
 
 
-test('legacy streaming removes failed starts while preserving other expanded activity',()=>{
+test('legacy streaming replaces failed starts with sanitized explanations and retains expanded activity',()=>{
   const script=readFileSync('app/static/app.js','utf8'),context={MoyaiActivity,esc:value=>String(value)};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncEventTimeline('),script.indexOf('function renderApprovals(')),context);
   const nodes=new Map(),removedRegions=[],target={querySelectorAll:()=>[...nodes.values()],insertAdjacentHTML(position,markup){
@@ -544,9 +545,9 @@ test('legacy streaming removes failed starts while preserving other expanded act
   events.push(tool(3,'failed','error'),event(4,'error','Temporary outage'));
   context.syncEventTimeline(target,events);
   assert.deepEqual(removedRegions,['1']);
-  assert.deepEqual([...nodes.keys()],['2']);assert.equal(nodes.get('2'),retained);assert.equal(retained.open,true);
+  assert.deepEqual([...nodes.keys()],['2','3']);assert.equal(nodes.get('2'),retained);assert.equal(retained.open,true);
   events.push(tool(5,'retry','completed'));context.syncEventTimeline(target,events);
-  assert.deepEqual([...nodes.keys()],['2','5']);assert.equal(events.length,6);
+  assert.deepEqual([...nodes.keys()],['2','3','5']);assert.equal(events.length,6);
 });
 
 
@@ -569,8 +570,8 @@ test('failure details belong to the saved answer input and do not expose raw pay
     assert.equal(failureDetails(data,{...answer,status}), '');
     assert.equal(failureDetails({...data,chat_enabled:false,status,messages:[],active_message_id:1}), '');
   }
-  assert.equal(failureDetails(data,{...answer,response_to_id:2}),'');
-  assert.equal(failureDetails(data,{...answer,response_to_id:null}),'');
+  assert.match(failureDetails(data,{...answer,response_to_id:2}),/Underlying cause unknown/);
+  assert.match(failureDetails(data,{...answer,response_to_id:null}),/Underlying cause unknown/);
   data.messages.push({id:4,role:'user',status:'queued'});
   assert.equal(failureDetails(data),'');
 });
@@ -583,8 +584,9 @@ test('failure details never attribute a recovered broker request to the final an
       exception_type:'CancelledError',http_status:200,request_id:'recovered-model-request'}},
     ...Array.from({length:9},(_,index)=>({id:index+2,kind:'message',data:{turn_id:1,phase:'commentary'},message:'Continued working.'})),
   ]};
-  assert.equal(failureDetails(data,answer),'');
-  assert.equal(failureDetails({...data,chat_enabled:false,active_message_id:1,messages:[]}),'');
+  assert.match(failureDetails(data,answer),/Underlying cause unknown/);
+  assert.doesNotMatch(failureDetails(data,answer),/CancelledError|recovered-model-request/);
+  assert.match(failureDetails({...data,chat_enabled:false,active_message_id:1,messages:[]}),/Underlying cause unknown/);
   data.events.push({id:11,kind:'error',data:{phase:'sdk_failure',turn_id:1,sdk:'deepagents-temporal',
     source:'workflow_failure',activity_type:'deepagents.invoke_tool',exception_type:'BrokerRejected',http_status:500}});
   const html=failureDetails(data,answer);
@@ -594,7 +596,7 @@ test('failure details never attribute a recovered broker request to the final an
   assert.match(html,/Exception type<\/dt><dd>BrokerRejected/);
   assert.match(html,/HTTP status<\/dt><dd>500/);
   assert.doesNotMatch(html,/cancelled|CancelledError|recovered-model-request|200/);
-  assert.equal(failureDetails(data,{...answer,response_to_id:2}),'');
+  assert.match(failureDetails(data,{...answer,response_to_id:2}),/Underlying cause unknown/);
 });
 
 test('terminal diagnostics win over later unrelated broker failures without exposing arbitrary fields',()=>{
@@ -608,4 +610,47 @@ test('terminal diagnostics win over later unrelated broker failures without expo
   const html=failureDetails(data,answer);
   assert.match(html,/UncertainToolOutcome/);
   assert.doesNotMatch(html,/PRIVATE|not-terminal|cancelled/);
+});
+
+test('Ready sessions keep scoped missing-answer, attachment and capture observations in history',()=>{
+  for(const data of [
+    {phase:'response_completion',code:'missing_final_answer'},
+    {phase:'slack_attachment_read',code:'metadata_size_mismatch'},
+    {stage:'capture_sync',status:'unconfirmed'},
+  ]){
+    const snapshot=run();snapshot.status='idle';snapshot.messages=[
+      {id:1,role:'user',status:'completed'},{id:2,role:'assistant',status:'completed',response_to_id:1,content:'Final answer'}];
+    const failure=event(2,'error','PRIVATE raw error',{turn_id:1,...data});
+    failure.failure_explanation={version:1,component:'Observed operation',
+      observed_cause:'Underlying cause unknown.',stage:'Recorded stage',
+      action:{outcome:data.stage==='capture_sync'?'completed':'unknown',dispatched:null},
+      retryability:data.stage==='capture_sync'?'do_not_repeat':'unknown',
+      next_action:'Inspect the receipt.',support:{},measurements:{declared_bytes:10}};
+    snapshot.events.push(failure,event(3,'chat','Response saved',{message_id:1}));
+    const before=JSON.stringify(snapshot),turn=groups(snapshot).get('1'),markup=html(turn);
+    assert.equal(turn.status,'completed');assert.match(markup,/Underlying cause unknown/);
+    assert.doesNotMatch(markup,/PRIVATE raw error|Observed bytes/);
+    assert.equal(MoyaiActivity.failureDetails(snapshot),'');
+    assert.equal(snapshot.messages.at(-1).content,'Final answer');
+    assert.equal(JSON.stringify(snapshot),before);
+    assert.deepEqual(groups(JSON.parse(before)),groups(snapshot));
+  }
+});
+
+test('saved recovery decisions retain turn boundaries and label read-attempt index honestly',()=>{
+  const answer={id:7,role:'assistant',status:'failed',response_to_id:1};
+  const snapshot={chat_enabled:true,messages:[answer],events:[
+    event(2,'status','read',{turn_id:1,phase:'recovery_decision',
+      recovery:{method:'attachment_read',decision:'unknown',attempts:2}}),
+    event(3,'status','other',{turn_id:9,phase:'recovery_decision',
+      recovery:{method:'catalog_read',decision:'exhausted',attempts:99}}),
+    event(4,'error','Failure',{turn_id:1,phase:'sdk_failure',exception_type:'TimeoutError'}),
+    event(5,'status','later',{turn_id:1,phase:'recovery_decision',
+      recovery:{method:'catalog_read',decision:'exhausted',attempts:88}}),
+  ]};
+  const markup=MoyaiActivity.failureDetails(snapshot,answer);
+  assert.match(markup,/latest read-attempt index \(not HTTP count\): 2/);
+  assert.doesNotMatch(markup,/99|88/);
+  assert.match(markup,/Underlying cause unknown/);
+  assert.match(MoyaiActivity.failureDetails({...snapshot,events:[]},answer),/No recovery attempt recorded/);
 });

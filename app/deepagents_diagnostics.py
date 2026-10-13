@@ -24,8 +24,17 @@ def workflow_failure(exc):
     exception_type = error.type if isinstance(error, ApplicationError) else type(error).__name__
     diagnostic['exception_type'] = safe_error({'exception_type': exception_type}).get(
         'exception_type', 'ApplicationError' if isinstance(error, ApplicationError) else 'Exception')
+    if isinstance(error, ApplicationError):
+        diagnostic['non_retryable'] = bool(error.non_retryable)
+        if error.details and isinstance(error.details[-1], dict):
+            if recovery := safe_error(error.details[-1]).get('recovery'):
+                diagnostic['recovery'] = recovery
+                if recovery['method'] == 'catalog_read':
+                    diagnostic['action'] = {'dispatched': False, 'outcome': 'rejected'}
     if isinstance(error, ApplicationError) and error.type == 'BrokerRejected' and error.details:
         diagnostic.update(safe_error({'http_status': error.details[0]}))
+    if isinstance(error, ApplicationError) and error.type == 'ModelRequestFailed' and error.details:
+        diagnostic.update(safe_error(error.details[0]))
     if isinstance(error, ApplicationError) and error.type == 'UncertainToolOutcome' and error.details:
         # These structured details were captured before suppressing the unsafe
         # exception chain; never deserialize messages or Temporal stack strings.

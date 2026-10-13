@@ -134,11 +134,13 @@ class ActivityReporter:
         self.emit('tool', data['label'], {**data, 'activity_version': 1,
                   'call_id': self.prefix + ':' + str(call_id), 'phase': 'started'})
 
-    def complete(self, call_id, name, args, result):
+    def complete(self, call_id, name, args, result, *, receipt_status=None):
+        from sandbox.broker_failure import tool_evidence
         with self.lock:
             started, data = self.starts.pop(str(call_id), (None, tool_summary(name, args)))
         phase, code = result_status(result)
         data = {**data, 'activity_version': 1, 'call_id': self.prefix + ':' + str(call_id), 'phase': phase}
+        data.update(tool_evidence(result, receipt_status=receipt_status))
         details, notice = formatted_details(data['tool'], result)
         if details is not None:
             data['output'] = details

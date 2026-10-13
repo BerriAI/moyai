@@ -2,6 +2,7 @@
 import json
 
 from fastapi import HTTPException
+from .failure_explanations import project_event
 
 
 def markers(connection, run_id, cursor):
@@ -119,4 +120,5 @@ def _history_page(connection, run_id, turn, receipts, after, until, limit):
     events = [dict(row) for row in rows[:limit]]
     for event in events:
         event['data'] = json.loads(event['data'])
-    return {'events': events, 'has_more': more, 'next_after': events[-1]['id'] if events else after, 'until': until}
+    return {'events': [project_event(event) for event in events], 'has_more': more,
+            'next_after': events[-1]['id'] if events else after, 'until': until}

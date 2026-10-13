@@ -1,4 +1,4 @@
-from .session_privacy import SessionPrivacy
+from .session_privacy import SessionPrivacy, PrivateExportDenied
 import asyncio
 import hmac
 import json
@@ -1471,6 +1471,16 @@ def _create_app(settings, store):
                 rejected = isinstance(exc, ToolRejected)
                 await database(dispatch.finish, {'dispatched': False} if rejected else None,
                                outcome='rejected' if rejected else 'unknown')
+            if isinstance(exc, (PrivateExportDenied, ToolRejected)):
+                from sandbox.broker_failure import exception_diagnostic
+                try:
+                    await database(store.event, run_id, 'error', 'Tool request rejected.', {
+                        'phase': 'tool_failure', 'tool': body.name,
+                        **exception_diagnostic(exc, stage='tool_dispatch', request_id=body.request_id),
+                        'action': {'dispatched': False, 'outcome': 'rejected', 'retryable': False}},
+                        turn_id=run['active_message_id'])
+                except Exception:
+                    pass  # Failure reporting must not replace the access denial.
             raise
         # Confirmed outcomes must survive cancellation during receipt persistence.
         if dispatch:

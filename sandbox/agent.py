@@ -17,6 +17,7 @@ from agent.context_store import ContextUnavailable
 from agent.harnesses.native_session import native_storage
 from agent.tools.github_tools import checkout as github_checkout
 from sandbox.broker_relay import BrokerRelay
+from sandbox.broker_failure import exception_diagnostic
 from sandbox.artifacts import collect_archive
 from sandbox.computer import request as computer_request
 from sandbox.attachments import prepare_attachments
@@ -65,6 +66,8 @@ def run(spec):
              startup_retry={'version': 1, 'stage': exc.stage, 'reason': exc.reason})
         return 75
     except ContextUnavailable as exc:
+        emit('error', 'Saved conversation could not be resumed.', {'phase': 'sdk_failure',
+             **exception_diagnostic(exc, stage='remote_prepare')})
         emit('final', str(exc), completed=False)
         return 1
     except DeadlineExpired as exc:
@@ -211,5 +214,6 @@ if __name__ == "__main__":
     except Exception as exc:
         import traceback
         traceback.print_exc(file=sys.stderr)
-        emit("error", f"Agent startup or execution failed ({type(exc).__name__}).")
+        emit("error", f"Agent startup or execution failed ({type(exc).__name__}).",
+             {'phase': 'sdk_failure', **exception_diagnostic(exc, stage='remote_setup')})
         sys.exit(1)

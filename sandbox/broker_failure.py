@@ -81,6 +81,11 @@ def _exception_diagnostic(exc, *, stage, request_id):
             if name == 'BrokerRejected' and exc.details:
                 for key, value in safe_error({'http_status': exc.details[0]}).items():
                     result.setdefault(key, value)
+            if exc.details and isinstance(exc.details[-1], dict):
+                if recovery := safe_recovery(exc.details[-1].get('recovery')):
+                    result.setdefault('recovery', recovery)
+        if recovery := safe_recovery(getattr(exc, 'moyai_recovery', None)):
+            result.setdefault('recovery', recovery)
         chain.append(name)
         if 'exception_type' not in result:
             result['exception_type'] = name
@@ -148,7 +153,47 @@ def safe_error(data):
                 result[key] = values
     if isinstance(data.get('request_ids'), dict):
         result['request_ids'] = request_ids(data['request_ids'])
+    if recovery := safe_recovery(data.get('recovery')):
+        result['recovery'] = recovery
     return result
+
+
+def safe_recovery(value):
+    if not isinstance(value, dict):
+        return None
+    method, decision = value.get('method'), value.get('decision')
+    if (method not in ('catalog_read', 'startup', 'model_transport', 'context_transport', 'attachment_read')
+            or decision not in ('retrying', 'recovered', 'exhausted', 'deadline', 'not_retryable',
+                                'unconfirmed_action', 'unknown', 'retry_after_unavailable', 'retry_after_budget')):
+        return None
+    result = {'method': method, 'decision': decision}
+    for key in ('attempts', 'limit', 'scheduled_retries'):
+        number = value.get(key)
+        if type(number) is int and 0 <= number <= 10000:
+            result[key] = number
+    return result
+
+
+def tool_evidence(value, *, receipt_status=None):
+    """Public receipt fields only; never treat tool prose as an outcome."""
+    if not isinstance(value, dict):
+        return {}
+    action = {}
+    for field in ('dispatched', 'retryable'):
+        if type(value.get(field)) is bool:
+            action[field] = value[field]
+    outcome = value.get('outcome')
+    if isinstance(outcome, str) and outcome in {'completed', 'failed', 'rejected', 'cancelled', 'unknown'}:
+        action['outcome'] = outcome
+    if value.get('outcome_uncertain') is True:
+        action['outcome'] = 'unknown'
+    # Only the computer adapter may supply this argument, never the tool body.
+    if isinstance(receipt_status, str) and receipt_status in {'unknown', 'cancelled', 'rejected'}:
+        action['outcome'] = receipt_status
+    diagnostic = safe_error(value.get('diagnostic'))
+    diagnostic.update(safe_error({'http_status': value.get('status_code')}))
+    return {**({'action': action} if action else {}),
+            **({'diagnostic': diagnostic} if diagnostic else {})}
 
 
 def provider_error(value):
