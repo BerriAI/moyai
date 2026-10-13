@@ -69,6 +69,24 @@ with an explicit reconciliation message rather than automatically repeating an
 external action. Existing broker outboxes and computer receipts remain authoritative.
 Temporal is not an exactly-once guarantee for external services.
 
+During a planned worker replacement, agent activities have up to 240 seconds to
+finish, leaving cleanup headroom inside Render's 300-second shutdown allowance.
+Computer activities allow three attempts, so Temporal can reconnect after worker
+shutdown or heartbeat loss using the original operation, turn and input identities.
+The existing computer receipt decides whether to resume observation or return a
+saved result; this does not create a second shell command or repeat an external
+effect. Explicit uncertain outcomes remain non-retryable, and arbitrary broker
+tools retain their single attempt. Stop and revoked capabilities still fence execution.
+
+Only the activity retry policy changes; workflow command order and tool inputs
+remain compatible with saved histories. The first deployment of this support must
+drain existing work or use the planned maintenance path: an old worker's
+one-second grace and an already scheduled single-attempt tool cannot be retroactively
+changed by a new image. Subsequent compatible replacements can use this handoff.
+Service health alone does not establish task continuity; release qualification
+must exercise an active tool, new task admission and the real ingress path across
+worker, broker, coordinator and API replacements.
+
 Before dispatch, catalog discovery retries transient broker HTTP failures, network
 interruptions and busy local database reads with at most three attempts, one- and
 two-second backoffs, and a 45-second overall deadline. Every attempt revalidates

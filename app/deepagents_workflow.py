@@ -25,6 +25,7 @@ with workflow.unsafe.imports_passed_through():
     from langchain_core.tools import InjectedToolArg, tool
     from pydantic import ValidationError
     from temporalio.deepagents import create_temporal_deep_agent, tool_as_activity
+    from agent.tools.remote_computer import requires_computer
     from .deepagents_context import current_runtime
 
 
@@ -98,18 +99,28 @@ async def workspace_call(name: str, arguments_json: str,
 
 TOOL_OPTIONS = {'heartbeat_timeout': timedelta(seconds=5),
                 'cancellation_type': ActivityCancellationType.WAIT_CANCELLATION_COMPLETED}
+
+
+def workspace_activity(queue, *, resume_computer=False):
+    # ComputerOperations and its supervisor own a durable receipt keyed by the
+    # injected call ID. A new activity attempt observes that same operation.
+    # Arbitrary broker writes retain their one-attempt reconciliation boundary.
+    return tool_as_activity(workspace_call, start_to_close_timeout=timedelta(hours=12),
+        activity_options={**TOOL_OPTIONS, 'task_queue': queue,
+                          'retry_policy': RetryPolicy(maximum_attempts=3 if resume_computer else 1)})
+
+
 def bridge_tools(queue):
     return [
         tool_as_activity(workspace_tools, start_to_close_timeout=timedelta(minutes=5),
                          activity_options={**TOOL_OPTIONS, 'task_queue': queue, 'retry_policy': RetryPolicy(maximum_attempts=3)}),
-        # A lost result for an app write is ambiguous. Never automatically repeat it.
-        tool_as_activity(workspace_call, start_to_close_timeout=timedelta(hours=12),
-                         activity_options={**TOOL_OPTIONS, 'task_queue': queue, 'retry_policy': RetryPolicy(maximum_attempts=1)}),
+        workspace_activity(queue),
     ]
 
 
 # Register the underlying tools on every worker process before polling.
 _REGISTERED_TOOLS = bridge_tools(None)
+
 
 def wait_marker(messages):
     for message in reversed(messages):
@@ -269,8 +280,14 @@ class MoyaiControl(AgentMiddleware):
             # Invoke the public wrapped-tool API with trusted injected fields.
             # ToolNode intentionally strips caller-supplied InjectedToolArg
             # values; passing these through its handler would discard scope.
-            result = await request.tool.ainvoke({**call, 'args': args, 'type': 'tool_call'},
-                                                config=request.runtime.config)
+            # The same injected call/input identity retrieves the computer's
+            # persisted operation and result after its observing worker exits.
+            # Other tools retain their one-attempt reconciliation boundary.
+            tool = request.tool
+            if call['name'] == 'workspace_call' and requires_computer(args['name']):
+                tool = workspace_activity(workflow.info().task_queue + '-tools', resume_computer=True)
+            result = await tool.ainvoke({**call, 'args': args, 'type': 'tool_call'},
+                                       config=request.runtime.config)
             if waiting := wait_marker([result]):
                 self.result = {'completed': False, 'continuation': True, 'message': '', **waiting}
             return result
@@ -317,7 +334,7 @@ class DeepAgentsTurnWorkflow:
                 await workflow.execute_activity('deepagents_computer_v1', scope,
                     task_queue=workflow.info().task_queue + '-tools',
                     start_to_close_timeout=timedelta(hours=12), **TOOL_OPTIONS,
-                    retry_policy=RetryPolicy(maximum_attempts=1))
+                    retry_policy=RetryPolicy(maximum_attempts=3))
 
         async def run_graph():
             result = {}
