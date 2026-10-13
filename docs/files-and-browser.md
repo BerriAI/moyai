@@ -99,17 +99,45 @@ mentions, direct messages and bound-thread replies retain every valid file ID,
 including image-only messages. AgentChat normalizes references in batches. Moyai
 then resolves live `files.info` access and streams from Slack's private file host
 with the bot's `files:read` credential, without following redirects or passing
-private URLs/tokens to the model. Metadata size is verified against received
-bytes. The live API response determines access, since saved scopes may be stale.
+private URLs/tokens to the model. Hosted-file metadata size is verified against
+received bytes. The live API response determines access, since saved scopes may be stale.
 A missing scope asks the user to reconnect Slack; other failures report the
 actual missing input without guessing its contents.
 
 Attachment reads request `Accept-Encoding: identity` and disable aiohttp's
 automatic decompression. An unexpected `Content-Encoding`, partial response,
-invalid length header, or mismatch with freshly fetched metadata is rejected;
+invalid length header, or hosted-file mismatch with freshly fetched metadata is rejected;
 unverified bytes never become an attachment. The configured storage budget is
 also enforced independently against actual streamed bytes, before writing each
 chunk. Compressed transfer data is not decoded as an alternative recovery path.
+
+Slack Canvases are a separate representation: metadata must identify
+`application/vnd.slack-docs`, `filetype=quip` and `mode=quip`. Slack returns
+generated HTML whose length can differ from the Canvas metadata `size`.
+Moyai retains that complete HTML as a downloadable `.html` attachment, recording
+its actual size and SHA. The export must be identity-encoded UTF-8 HTML with the
+observed `quip-canvas-content` wrapper and readable content. Hosted files retain
+their exact metadata-size checks. For Canvas, absent/malformed/zero metadata
+size is informational; the independent actual-byte storage cap and any HTTP
+`Content-Length` still bound and validate the transfer. Empty, inconsistent,
+partial or clearly wrong exports are rejected.
+
+Only validated Canvas attachments receive an inline model text preview. A
+non-executing HTML parser preserves headings, list entries and checklist states,
+including Slack's `data-section-style="7"`/`checked` markup. It does not execute
+HTML, resolve links or fetch embedded resources. Scripts, styles, hidden content
+and non-text embeds are omitted; form/password responses are rejected.
+The preview reads at most 256 KiB of the export and retains at most 8,000
+characters, explicitly marking truncation while retaining the full original.
+It is included as JSON-escaped, explicitly untrusted reference data on the
+attachment's existing authorized turn/history path. Ordinary text, HTML and
+image attachments do not gain automatic text injection.
+
+This behavior belongs to Moyai's streamed/durable attachment adapter.
+The pinned AgentChat `download_slack_file` implementation checks its independent
+`max_bytes` limit, not equality between metadata size and downloaded bytes.
+Moyai's prior universal equality check rejected valid generated Canvas exports;
+the Canvas exception is not a relaxation of hosted-binary validation.
 
 Each read makes at most two attempts within a 90-second transfer budget. A retry
 refreshes bot access and `files.info`, then starts a new temporary download.
@@ -149,7 +177,9 @@ settling the batch. Cancellation still stops preparation.
 [aiohttp documents automatic decompression and timeout controls](https://docs.aiohttp.org/en/stable/client_reference.html);
 its default decoding can make representation differences relevant to byte-count
 checks. This is a possible mismatch mechanism, not an established explanation
-for historical incidents. [Slack's rate-limit guidance](https://docs.slack.dev/apis/web-api/rate-limits/)
+for historical incidents. [Slack documents Canvas exports as HTML](https://slack.com/help/articles/220556107-How-to-read-Slack-data-exports);
+Canvas metadata size is not used as that generated representation's transfer length.
+[Slack's rate-limit guidance](https://docs.slack.dev/apis/web-api/rate-limits/)
 specifies waiting for `Retry-After` before retrying.
 [AWS's retry guidance](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)
 explains why bounded retries and jitter help avoid synchronized retry bursts.

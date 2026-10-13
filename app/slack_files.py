@@ -1,5 +1,6 @@
 """Durable Slack uploads, using the same attachment pipeline as web inputs."""
 import asyncio
+from email.message import Message
 import hashlib
 import json
 import math
@@ -15,6 +16,7 @@ from agentchat.channels.slack_files import slack_attachments
 from .audio import AUDIO_TYPES, AudioTranscriber, audio_type
 from .attachments import filename, inspect_file
 from .connector_errors import ConnectorError
+from .slack_canvas import CanvasFormatError, inspect_canvas, is_canvas
 
 
 READ_ATTEMPTS = 2
@@ -56,6 +58,8 @@ FAILURES = {
     'tls': ('The Slack attachment connection could not be verified.', 'Ask an administrator to check the network connection.'),
     'storage': ('The attachment could not be written to temporary storage.', 'Ask an administrator to check workspace storage.'),
     'inspection_timeout': ('The attachment could not be inspected within its time budget.', 'Send a smaller attachment or describe its contents.'),
+    'canvas_representation': ('Slack did not return a readable Canvas HTML export.', 'Retry the Canvas export or provide its text; the response was not used as document content.'),
+    'transfer_size_mismatch': ('The downloaded attachment did not match its HTTP Content-Length.', 'Retry later; incomplete or inconsistent transfer bytes were not retained.'),
 }
 
 
@@ -182,13 +186,18 @@ class SlackFiles:
         try:
             self.check_access(team)
             async with asyncio.timeout(INSPECTION_BUDGET_SECONDS):
-                inspected = await self.inspect(name, raw, claimed_type)
+                inspected = (await file_operation(inspect_canvas, raw) if state.get('representation') == 'canvas_html'
+                             else await self.inspect(name, raw, claimed_type))
             self.check_access(team)
             raw.seek(0)
             transferred = True
             return name, raw, inspected
         except TimeoutError:
             exc = SlackFileError('inspection_timeout')
+            exc.history = [*history, {**state, 'stage': 'inspection', 'code': exc.code}]
+            raise exc from None
+        except CanvasFormatError:
+            exc = SlackFileError('canvas_representation')
             exc.history = [*history, {**state, 'stage': 'inspection', 'code': exc.code}]
             raise exc from None
         except SlackFileError as exc:
@@ -224,11 +233,15 @@ class SlackFiles:
             if info.get('ok') is not True or not isinstance(file, dict) or file.get('id') != file_id or file.get('is_external'):
                 raise SlackFileError('unavailable')
             size = file.get('size')
-            if type(size) is not int or size <= 0:
+            canvas = is_canvas(file)
+            if not canvas and (type(size) is not int or size <= 0):
                 raise SlackFileError('invalid_size')
-            state['declared_bytes'] = size
+            if type(size) is int and size >= 0:
+                state['declared_bytes'] = size
+            if canvas:
+                state['representation'] = 'canvas_html'
             hard_limit = self.owner.settings.attachment_storage_limit_mb * 1024 * 1024
-            if size > hard_limit:
+            if not canvas and size > hard_limit:
                 raise SlackFileError('hard_limit')
             url = file.get('url_private_download') or file.get('url_private')
             try:
@@ -240,6 +253,8 @@ class SlackFiles:
             except ValueError:
                 raise SlackFileError('unsupported_location') from None
             name = filename(file.get('name') or 'attachment')
+            if canvas and not name.lower().endswith('.html'):
+                name = filename(name[:175] + '.html')
             state['stage'] = 'headers'
             self.check_rate_limit()
             # Compare file bytes, not aiohttp's implicitly decompressed transfer.
@@ -266,6 +281,12 @@ class SlackFiles:
                         raise SlackFileError('unavailable')
                     if state['content_encoding'] != 'identity':
                         raise SlackFileError('encoded_response', retryable=True)
+                    if canvas:
+                        content_type = Message()
+                        content_type['content-type'] = response.headers.get('Content-Type', '')
+                        if (content_type.get_content_type() != 'text/html'
+                                or content_type.get_content_charset() not in {None, 'utf-8', 'utf8'}):
+                            raise SlackFileError('canvas_representation')
                     length = response.headers.get('Content-Length')
                     if length is not None:
                         if not re.fullmatch(r'[0-9]{1,20}', length):
@@ -273,7 +294,7 @@ class SlackFiles:
                         state['content_length_bytes'] = int(length)
                         if int(length) > hard_limit:
                             raise SlackFileError('hard_limit')
-                        if int(length) != size:
+                        if not canvas and int(length) != size:
                             raise SlackFileError('metadata_size_mismatch', retryable=True)
                     state['stage'] = 'download'
                     raw = tempfile.TemporaryFile()
@@ -285,14 +306,20 @@ class SlackFiles:
                         # to consume more storage. Check before writing the chunk.
                         if state['received_bytes'] > hard_limit:
                             raise SlackFileError('hard_limit')
-                        if state['received_bytes'] > size:
+                        if length is not None and received > int(length):
+                            raise SlackFileError('transfer_size_mismatch', retryable=True)
+                        if not canvas and state['received_bytes'] > size:
                             raise SlackFileError('metadata_size_mismatch', retryable=True)
                         await file_operation(raw.write, chunk)
             # Zero is observed only after a clean empty body, not a headers-only
             # rejection, temporary-file failure or interrupted first read.
             state['received_bytes'] = received
-            if received != size:
+            if length is not None and received != int(length):
+                raise SlackFileError('truncated_stream', retryable=True)
+            if not canvas and received != size:
                 raise SlackFileError('metadata_size_mismatch', retryable=True)
+            if canvas and not received:
+                raise SlackFileError('canvas_representation')
             self.check_access(team)
             raw.seek(0)
             transferred = True
