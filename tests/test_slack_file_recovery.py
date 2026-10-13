@@ -1,0 +1,383 @@
+"""Bounded read recovery; controlled HTTP is supplementary, not live Slack proof."""
+import asyncio
+import gzip
+import json
+import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+import pytest
+
+from app import slack_files
+from app.connector_errors import ConnectorError
+from app.slack_files import SlackFileError, SlackFiles
+from test_slack import event, signed, slack_app
+from test_slack_files import FILE, provider
+
+
+TEAM = 'T12345678'
+CONTENT = b'Verified attachment bytes.'
+PRIVATE = 'private-response xoxb-secret https://files.slack.com/files-pri/private'
+
+
+def metadata(size=len(CONTENT), **extra):
+    return {'ok': True, 'file': {
+        'id': FILE['id'], 'name': 'note.txt', 'mimetype': 'text/plain', 'size': size,
+        'url_private_download': 'https://files.slack.com/files-pri/private', **extra}}
+
+
+@pytest.fixture
+def reader(monkeypatch):
+    connectors = SimpleNamespace(
+        slack_installation=lambda: {'team_id': TEAM},
+        slack_bot_token=AsyncMock(return_value='xoxb-secret'),
+        request=AsyncMock(return_value=metadata()))
+    owner = SimpleNamespace(connectors=connectors,
+        settings=SimpleNamespace(attachment_storage_limit_mb=1),
+        status=lambda: {'enabled': True})
+    files = SlackFiles(owner)
+    monkeypatch.setattr(slack_files, 'RETRY_DELAY_SECONDS', .001)
+    return files, connectors
+
+
+def downloads(monkeypatch, *responses):
+    calls, handles = [], []
+    original_file = slack_files.tempfile.TemporaryFile
+
+    def temporary():
+        raw = original_file()
+        handles.append(raw)
+        return raw
+
+    class Response:
+        def __init__(self, response):
+            self.status = response.get('status', 200)
+            self.headers = response.get('headers', {})
+            self.chunks = response.get('chunks', [CONTENT])
+            self.content = self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def iter_chunked(self, size):
+            for chunk in self.chunks:
+                if isinstance(chunk, BaseException):
+                    raise chunk
+                if isinstance(chunk, asyncio.Event):
+                    await chunk.wait()
+                else:
+                    yield chunk
+
+    class Session:
+        def __init__(self, **kwargs):
+            assert kwargs['auto_decompress'] is False
+            timeout = kwargs['timeout']
+            assert timeout.total == 45 and timeout.sock_read == 15 and timeout.sock_connect == 10
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def get(self, url, *, headers, allow_redirects):
+            assert url == 'https://files.slack.com/files-pri/private'
+            assert headers == {'Authorization': 'Bearer xoxb-secret', 'Accept-Encoding': 'identity'}
+            assert allow_redirects is False
+            response = responses[min(len(calls), len(responses)-1)]
+            calls.append(url)
+            return Response(response)
+
+    monkeypatch.setattr(slack_files.aiohttp, 'ClientSession', Session)
+    monkeypatch.setattr(slack_files.tempfile, 'TemporaryFile', temporary)
+    return calls, handles
+
+
+@pytest.mark.parametrize('first', [
+    {'headers': {'Content-Length': str(len(CONTENT))}},
+    {'chunks': [CONTENT]},
+])
+async def test_stale_size_gets_fresh_metadata_and_exact_complete_bytes(reader, monkeypatch, first):
+    files, connectors = reader
+    connectors.request.side_effect = [metadata(1), metadata()]
+    calls, handles = downloads(monkeypatch, first, {})
+    _, raw, inspected = await files.read(FILE['id'], TEAM)
+    try:
+        assert raw.read() == CONTENT and inspected[2] == CONTENT.decode()
+        assert len(calls) == connectors.request.await_count == connectors.slack_bot_token.await_count == 2
+        assert all(handle.closed for handle in handles[:-1])
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize('failure,code', [
+    (aiohttp.ClientPayloadError(PRIVATE), 'truncated_stream'),
+    (aiohttp.ClientConnectionError(PRIVATE), 'transport'),
+    (TimeoutError(PRIVATE), 'timeout'),
+])
+async def test_interrupted_download_restarts_from_zero_and_closes_prior_file(reader, monkeypatch, failure, code):
+    files, connectors = reader
+    calls, handles = downloads(monkeypatch, {'chunks': [b'Verified ', failure]}, {})
+    _, raw, _ = await files.read(FILE['id'], TEAM)
+    try:
+        assert raw.read() == CONTENT
+        assert len(calls) == connectors.request.await_count == 2
+        assert handles[0].closed
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize('response,code', [
+    ({'chunks': [b'short']}, 'metadata_size_mismatch'),
+    ({'chunks': [CONTENT, b'extra']}, 'metadata_size_mismatch'),
+    ({'chunks': [b'short', aiohttp.ClientPayloadError(PRIVATE)]}, 'truncated_stream'),
+    ({'headers': {'Content-Encoding': 'gzip'}}, 'encoded_response'),
+    ({'headers': {'Content-Length': 'private-header'}}, 'invalid_headers'),
+    ({'status': 206}, 'partial_response'),
+    ({'headers': {'Content-Range': 'bytes 0-3/100'}}, 'partial_response'),
+    ({'status': 503}, 'transient_http'),
+])
+async def test_unverifiable_read_stops_after_two_attempts_with_safe_detail(reader, monkeypatch, response, code):
+    files, connectors = reader
+    calls, handles = downloads(monkeypatch, response)
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    detail = caught.value.diagnostic()
+    assert detail['code'] == code and detail['attempts'] == 2
+    assert detail['declared_bytes'] == len(CONTENT)
+    assert len(calls) == connectors.request.await_count == 2
+    assert all(handle.closed for handle in handles)
+    for private in ('xoxb-secret', 'https://', 'private-header', 'private-response', CONTENT.decode()):
+        assert private not in str(caught.value) + json.dumps(detail)
+    assert detail['remaining_blocker'] and detail['next_action']
+
+
+@pytest.mark.parametrize('response,code', [
+    ({'status': 401}, 'authentication'),
+    ({'status': 403}, 'authentication'),
+    ({'status': 302, 'headers': {'Location': 'https://evil.example/private'}}, 'redirect'),
+    ({'status': 404}, 'unavailable'),
+    ({'headers': {'Content-Length': str(1024*1024+1)}}, 'hard_limit'),
+])
+async def test_permanent_header_failures_do_not_retry_or_read_body(reader, monkeypatch, response, code):
+    files, connectors = reader
+    response['chunks'] = [AssertionError('The rejected response body must not be read.')]
+    calls, handles = downloads(monkeypatch, response)
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    assert caught.value.code == code and caught.value.diagnostic()['attempts'] == 1
+    assert len(calls) == connectors.request.await_count == 1
+    assert not handles
+
+
+async def test_stream_actual_byte_limit_is_independent_of_content_length(reader, monkeypatch):
+    files, connectors = reader
+    connectors.request.return_value = metadata(1024*1024)
+    calls, handles = downloads(monkeypatch, {'chunks': [*[b'x'*(64*1024)]*16, b'overflow']})
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    assert caught.value.code == 'hard_limit'
+    assert caught.value.diagnostic()['received_bytes'] == 1024*1024+8
+    assert len(calls) == 1 and handles[0].closed
+
+
+@pytest.mark.parametrize('failure,code,retries', [
+    (ConnectorError(PRIVATE, code='invalid_auth'), 'authentication', 1),
+    (ConnectorError(PRIVATE, code='missing_scope'), 'missing_scope', 1),
+    (ConnectorError(PRIVATE, code='file_not_found'), 'unavailable', 1),
+    (ConnectorError(PRIVATE, status_code=503, retryable=True), 'transport', 2),
+])
+async def test_metadata_errors_are_classified_without_copying_provider_text(reader, monkeypatch, failure, code, retries):
+    files, connectors = reader
+    connectors.request.side_effect = failure
+    calls, handles = downloads(monkeypatch, {})
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    assert caught.value.code == code
+    assert caught.value.diagnostic()['stage'] == 'metadata'
+    assert connectors.request.await_count == retries
+    assert not calls and not handles
+    assert PRIVATE not in str(caught.value)
+
+
+@pytest.mark.parametrize('at', ['metadata', 'download'])
+async def test_retry_after_is_observed_before_fresh_request(reader, monkeypatch, at):
+    files, connectors = reader
+    loop = asyncio.get_running_loop()
+    requests = []
+
+    async def info(*args, **kwargs):
+        requests.append(loop.time())
+        if len(requests) == 1 and at == 'metadata':
+            raise ConnectorError(PRIVATE, status_code=429, retry_after=.03)
+        return metadata()
+
+    connectors.request.side_effect = info
+    calls, _ = downloads(monkeypatch,
+        *([{'status': 429, 'headers': {'Retry-After': '.03'}}, {}] if at == 'download' else [{}]))
+    _, raw, _ = await files.read(FILE['id'], TEAM)
+    raw.close()
+    assert len(requests) == 2 and requests[1]-requests[0] >= .03
+    assert len(calls) == (2 if at == 'download' else 1)
+
+
+@pytest.mark.parametrize('interval', [None, 'invalid', 'NaN', '-1', '99999'])
+async def test_unusable_or_over_budget_rate_limit_never_retries_early(reader, monkeypatch, interval):
+    files, connectors = reader
+    headers = {} if interval is None else {'Retry-After': interval}
+    calls, _ = downloads(monkeypatch, {'status': 429, 'headers': headers})
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    assert caught.value.code == 'rate_limited' and caught.value.diagnostic()['attempts'] == 1
+    assert len(calls) == connectors.request.await_count == 1
+    assert 'no early retry' in str(caught.value).lower()
+    if interval == '99999':
+        # A later file must also respect this reader's known cooldown.
+        with pytest.raises(SlackFileError, match='rate_limited'):
+            await files.read(FILE['id'], TEAM)
+        assert len(calls) == connectors.request.await_count == 1
+
+
+async def test_read_budget_bounds_a_stalled_stream_and_closes_file(reader, monkeypatch):
+    files, connectors = reader
+    monkeypatch.setattr(slack_files, 'READ_BUDGET_SECONDS', .03)
+    calls, handles = downloads(monkeypatch, {'chunks': [b'a', asyncio.Event()]})
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    assert caught.value.code == 'read_budget'
+    assert caught.value.diagnostic()['received_bytes'] == 1
+    assert len(calls) == connectors.request.await_count == 1 and handles[0].closed
+
+
+async def test_cancellation_is_not_a_retry_and_closes_file(reader, monkeypatch):
+    files, connectors = reader
+    calls, handles = downloads(monkeypatch, {'chunks': [b'a', asyncio.Event()]})
+    task = asyncio.create_task(files.read(FILE['id'], TEAM))
+    async with asyncio.timeout(2):
+        while not handles:
+            await asyncio.sleep(.001)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(calls) == connectors.request.await_count == 1 and handles[0].closed
+
+
+async def test_cancellation_drains_inspection_before_closing_file(reader, monkeypatch):
+    files, _ = reader
+    _, handles = downloads(monkeypatch, {})
+    entered, release = threading.Event(), threading.Event()
+
+    def inspect(raw):
+        entered.set()
+        assert release.wait(3)
+        assert not raw.closed
+        return 'text/plain', b'', raw.read().decode()
+
+    monkeypatch.setattr(slack_files, 'inspect_file', inspect)
+    task = asyncio.create_task(files.read(FILE['id'], TEAM))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(.01)
+        assert not task.done() and not handles[0].closed
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert handles[0].closed
+
+
+async def test_access_revocation_before_retry_does_not_fetch_again(reader, monkeypatch):
+    files, connectors = reader
+    calls, _ = downloads(monkeypatch, {'chunks': [b'wrong']})
+    original = connectors.request
+
+    async def info(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        # First post-metadata access check is allowed; the retry must recheck.
+        checks = 0
+        def installed():
+            nonlocal checks
+            checks += 1
+            return {'team_id': TEAM if checks == 1 else 'T87654321'}
+        connectors.slack_installation = installed
+        return result
+
+    connectors.request = info
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    assert caught.value.code == 'access_changed'
+    assert len(calls) == original.await_count == 1
+    assert caught.value.diagnostic()['attempts'] == 2
+
+
+@pytest.mark.parametrize('first', ['encoded', 'truncated'])
+async def test_real_aiohttp_transfer_failure_recovers_with_identity_request(reader, monkeypatch, first):
+    """Real HTTP framing/decompression; only the remote URL is redirected to loopback."""
+    files, connectors = reader
+    requests, options = [], []
+
+    async def serve(request):
+        requests.append(request.headers['Accept-Encoding'])
+        if len(requests) == 1:
+            if first == 'encoded':
+                return web.Response(body=gzip.compress(b'x'*(2*1024*1024)), headers={'Content-Encoding': 'gzip'})
+            response = web.StreamResponse(headers={'Content-Length': str(len(CONTENT))})
+            await response.prepare(request)
+            await response.write(CONTENT[:5])
+            request.transport.close()
+            return response
+        return web.Response(body=CONTENT)
+
+    app = web.Application()
+    app.router.add_get('/file', serve)
+    actual_session = aiohttp.ClientSession
+    async with TestServer(app) as server:
+        class LocalSession:
+            def __init__(self, **kwargs):
+                options.append(kwargs)
+                self.client = actual_session(**kwargs)
+            async def __aenter__(self):
+                await self.client.__aenter__()
+                return self
+            async def __aexit__(self, *args):
+                await self.client.__aexit__(*args)
+            def get(self, url, **kwargs):
+                assert url == 'https://files.slack.com/files-pri/private'
+                return self.client.get(server.make_url('/file'), **kwargs)
+        monkeypatch.setattr(slack_files.aiohttp, 'ClientSession', LocalSession)
+        _, raw, _ = await files.read(FILE['id'], TEAM)
+        try:
+            assert raw.read() == CONTENT
+        finally:
+            raw.close()
+    assert requests == ['identity', 'identity']
+    assert all(option['auto_decompress'] is False for option in options)
+    assert connectors.request.await_count == 2
+
+
+def test_failed_attachment_records_safe_attempt_history_on_existing_turn(slack_app, monkeypatch):
+    app, client, runs, _ = slack_app
+    monkeypatch.setattr(slack_files, 'RETRY_DELAY_SECONDS', .001)
+    provider(app, monkeypatch, raw=b'private file contents', metadata={'size': 1})
+    client.post('/hooks/slack/events', **signed(event(files=[FILE])))
+    run_id = runs[0]['id']
+    message = app.state.store.claim_message(run_id)
+    client.portal.call(app.state.slack.files.prepare, run_id)
+    row = app.state.store.messages(run_id)[0]
+    assert not row['attachments'] and 'Do not guess the missing content' in row['content']
+    failures = [entry for entry in app.state.store.events(run_id)
+                if entry['data'].get('phase') == 'slack_attachment_read']
+    assert len(failures) == 1
+    detail = failures[0]['data']
+    assert detail['turn_id'] == message['id'] and detail['attempts'] == 2
+    assert detail['code'] == 'metadata_size_mismatch' and detail['declared_bytes'] == 1
+    assert len(detail['attempt_history']) == 2
+    for private in ('bot-token', 'private file contents', 'https://', FILE['id']):
+        assert private not in str(failures) + row['content']

@@ -104,6 +104,41 @@ bytes. The live API response determines access, since saved scopes may be stale.
 A missing scope asks the user to reconnect Slack; other failures report the
 actual missing input without guessing its contents.
 
+Attachment reads request `Accept-Encoding: identity` and disable aiohttp's
+automatic decompression. An unexpected `Content-Encoding`, partial response,
+invalid length header, or mismatch with freshly fetched metadata is rejected;
+unverified bytes never become an attachment. The configured storage budget is
+also enforced independently against actual streamed bytes, before writing each
+chunk. Compressed transfer data is not decoded as an alternative recovery path.
+
+Each read makes at most two attempts within a 90-second transfer budget. A retry
+refreshes bot access and `files.info`, then starts a new temporary download.
+Transient connection/server failures, interrupted streams, and size/representation
+mismatches can retry once. Individual downloads have a 45-second total timeout,
+10-second connection timeout and 15-second socket-read timeout. Inspection has a
+separate 90-second budget; cancellation drains an in-flight file operation before
+closing its temporary file. Authentication, scope, location, redirect and hard
+storage-limit failures stop without retrying. Slack's numeric `Retry-After` is
+honored; missing/invalid intervals or intervals beyond the remaining budget stop
+the read instead of retrying early. A known cooldown also applies to subsequent
+attachment reads by the same process.
+
+If recovery fails, the existing turn records a safe error event and missing-input
+explanation: stage, fixed error code, declared/received byte counts when known,
+attempt history, remaining blocker and next action. Headers rejected before body
+consumption have no observed byte count; their advertised length is recorded
+separately. URLs, file identifiers/names, credentials, provider exception text
+and file contents are excluded from these diagnostics. A partial stream is
+distinguished from a complete stream whose byte count disagrees with metadata.
+No Slack sends or uploads are retried by this path.
+
+[Slack defines file size in bytes](https://docs.slack.dev/reference/objects/file-object/).
+[aiohttp documents automatic decompression and timeout controls](https://docs.aiohttp.org/en/stable/client_reference.html);
+its default decoding can make representation differences relevant to byte-count
+checks. This is a possible mismatch mechanism, not an established explanation
+for historical incidents. [Slack's rate-limit guidance](https://docs.slack.dev/apis/web-api/rate-limits/)
+specifies waiting for `Retry-After` before retrying.
+
 Initial context can recover files absent from an `app_mention` and files in the
 explicitly invoked thread. Nearby channel files and future queued replies are
 excluded. Direct-message history is not imported. Connection-policy and team

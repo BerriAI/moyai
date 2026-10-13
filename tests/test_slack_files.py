@@ -204,8 +204,8 @@ def test_slack_images_check_live_access_when_saved_scopes_are_stale(slack_app, m
 @pytest.mark.parametrize('saved_scope', ['', 'files:read'])
 @pytest.mark.parametrize('error,expected', [
     ('missing_scope', 'Reconnect Slack with files:read permission'),
-    ('file_not_found', 'Could not read this Slack attachment'),
-    ('invalid_auth', 'Could not read this Slack attachment'),
+    ('file_not_found', 'code=unavailable'),
+    ('invalid_auth', 'code=authentication'),
 ])
 def test_slack_file_access_errors_come_from_live_api(slack_app, monkeypatch, saved_scope, error, expected):
     app, client, runs, _ = slack_app
