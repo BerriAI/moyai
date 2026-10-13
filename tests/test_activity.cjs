@@ -606,10 +606,11 @@ test('terminal diagnostics win over later unrelated broker failures without expo
     {id:1,kind:'error',data:{phase:'sdk_failure',turn_id:1,sdk:'deepagents-temporal',
       exception_type:'UncertainToolOutcome',activity_type:'<script>PRIVATE</script>',message:'PRIVATE',details:'PRIVATE'}},
     {id:2,kind:'error',data:{phase:'broker_failure',turn_id:1,error_code:'cancelled',request_id:'not-terminal'}},
+    {id:3,kind:'error',data:{phase:'supervisor_failure',turn_id:1,exception_type:'CleanupError',request_id:'cleanup-only'}},
   ]};
   const html=failureDetails(data,answer);
   assert.match(html,/UncertainToolOutcome/);
-  assert.doesNotMatch(html,/PRIVATE|not-terminal|cancelled/);
+  assert.doesNotMatch(html,/PRIVATE|not-terminal|cancelled|CleanupError|cleanup-only/);
 });
 
 test('Ready sessions keep scoped missing-answer, attachment and capture observations in history',()=>{

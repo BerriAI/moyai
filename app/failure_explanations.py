@@ -31,6 +31,7 @@ TOOLS = {
     'slack_file': 'attachment', 'slack_file_read': 'attachment',
 }
 STAGES = {
+    'runtime_entrypoint': 'Agent entrypoint — exact operation not recorded',
     'tool_catalog': 'Reading the tool catalog', 'tool_activity': 'Recording tool activity',
     'tool_dispatch': 'Calling the tool', 'computer_poll': 'Reading the computer receipt',
     'computer_step': 'Preparing or running computer work', 'tool_receipt': 'Saving the tool receipt',

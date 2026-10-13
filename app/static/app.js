@@ -940,7 +940,7 @@ function syncEventTimeline(target,events){
 function eventHTML(event){
   if(MoyaiActivity.isFocus(event)||event.data?.phase==='recovery_decision')return '';
   if(event.kind==='tool'&&event.data?.phase==='error'||event.kind==='error'&&(
-    ['tool_failure','slack_attachment_read','response_completion'].includes(event.data?.phase)||event.data?.stage==='capture_sync'))
+    ['tool_failure','slack_attachment_read','response_completion','supervisor_failure'].includes(event.data?.phase)||event.data?.stage==='capture_sync'))
     return `<div class="event event-error" data-event-id="${esc(event.id)}">${MoyaiActivity.explanationHTML(event.failure_explanation)}</div>`;
   if(event.kind==='error')return '';
   const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});

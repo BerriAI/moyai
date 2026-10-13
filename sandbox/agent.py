@@ -215,5 +215,5 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc(file=sys.stderr)
         emit("error", f"Agent startup or execution failed ({type(exc).__name__}).",
-             {'phase': 'sdk_failure', **exception_diagnostic(exc, stage='remote_setup')})
+             {'phase': 'supervisor_failure', **exception_diagnostic(exc, stage='runtime_entrypoint')})
         sys.exit(1)

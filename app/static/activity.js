@@ -22,7 +22,7 @@
     return events.filter(event=>!(event.kind==='tool'&&event.data?.phase==='started'&&
       failedCalls.has(JSON.stringify([event.data.turn_id,event.data.call_id])))&&
       (event.kind!=='error'||event.data?.turn_id&&(
-        ['slack_attachment_read','response_completion'].includes(event.data.phase)||event.data.stage==='capture_sync'||
+        ['slack_attachment_read','response_completion','supervisor_failure'].includes(event.data.phase)||event.data.stage==='capture_sync'||
         event.data.phase==='tool_failure'&&!failures.has(JSON.stringify([event.data.turn_id,event.data.request_id])))));
   }
   function terminalAnswer(run){

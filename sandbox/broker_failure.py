@@ -44,6 +44,7 @@ CLAUDE_RESULTS = {'success', 'error_during_execution', 'error_max_turns',
 CLAUDE_TERMINAL_REASONS = {'completed', 'max_turns', 'max_budget_usd',
                           'aborted_streaming', 'aborted_tools', 'error'}
 FAILURE_STAGES = {
+    'runtime_entrypoint',
     'tool_catalog', 'tool_activity', 'tool_dispatch', 'computer_poll', 'computer_step',
     'tool_receipt', 'tool_journal', 'supervisor_launch', 'supervisor_events', 'supervisor_wait',
     'remote_setup', 'remote_prepare', 'remote_finish', 'remote_activate', 'remote_attachments',
