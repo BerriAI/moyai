@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent.goal_state import OPEN, advance, create, fallback_report, verdict, reporting_due, checkpoint_report
-from .db import now
+from .db import database, now
 from .session_journal import SessionJournal, encoded
 
 
@@ -247,6 +247,7 @@ class Goals:
 
     def review_snapshot(self, caller, args):
         with self.store.connect(write_scope=caller['id']) as conn:
+            conn.begin_read()
             self.require(conn, caller)
             state = self.current(conn, caller['id'])
             if not state or state['status'] != 'active':
@@ -258,7 +259,7 @@ class Goals:
                     'trigger': args.action, 'claim': args.note, 'remaining': args.remaining}
 
     async def review(self, caller, args, assess):
-        snapshot = self.review_snapshot(caller, args)
+        snapshot = await database(self.review_snapshot, caller, args)
         journal = SessionJournal(self.store)
         records = {}
         reads = [{'seq': seq} for seq in args.evidence]
@@ -266,7 +267,7 @@ class Goals:
         # is returned to the worker; it is not a reason to stop the goal.
         while True:
             for read in reads:
-                entry = journal.exchange(caller, {'action': 'read', **read})['entry']
+                entry = (await database(journal.exchange, caller, {'action': 'read', **read}))['entry']
                 records[encoded(read)] = entry
             try:
                 result = json.loads(await assess(REVIEW_SYSTEM, {**snapshot, 'records': list(records.values())}))
@@ -285,6 +286,9 @@ class Goals:
                 break
         if result['verdict'] == 'complete' and args.action != 'complete':
             result['verdict'] = 'continue'
+        return await database(self.apply_review, caller, snapshot, result)
+
+    def apply_review(self, caller, snapshot, result):
         with self.store.connect(write_scope=caller['id']) as conn:
             conn.begin_write()
             self.require(conn, caller)

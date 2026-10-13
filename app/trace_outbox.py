@@ -1,5 +1,6 @@
 """Persist sanitized OTLP spans before sending them; retry with unchanged IDs."""
 from .private_sinks import private_run
+from .db import database
 import asyncio
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -114,41 +115,62 @@ class TraceOutbox:
             except asyncio.TimeoutError:
                 pass
 
+    def collect(self):
+        pending = self.store.rows(f'''SELECT trace_id,span_id,length(payload) AS payload_bytes
+            FROM {self.table} WHERE delivered_at IS NULL AND next_attempt_at<=?
+            ORDER BY created_at,trace_id,span_id LIMIT 64''', (time.time(),))
+        queue_ids, size = [], 0
+        for row in pending:
+            row_size = row['payload_bytes'] + self.batch_row_overhead
+            if queue_ids and size + row_size > MAX_BATCH_BYTES:
+                break
+            # An existing oversized span is still attempted unchanged by
+            # itself. Do not strand it or silently discard trace content.
+            queue_ids.append((row['trace_id'], row['span_id']))
+            size += row_size
+        if not queue_ids:
+            return [], False
+        # Read payloads only after selecting a byte-bounded batch; 64 large
+        # spans must not all be loaded into memory to send just a few.
+        rows = self.store.rows(f'''SELECT * FROM {self.table}
+            WHERE (trace_id,span_id) IN (VALUES {','.join('(?,?)' for _ in queue_ids)}) ORDER BY created_at,trace_id,span_id''', tuple(value for pair in queue_ids for value in pair))
+        allowed = []
+        for row in rows:
+            if any(private_run(self.store, run_id) for run_id in self.payload_run_ids(row['payload'])):
+                self.store.execute(f"UPDATE {self.table} SET payload=NULL,delivered_at=?,last_error='private session suppressed' WHERE trace_id=? AND span_id=?",
+                                   (time.time(), row['trace_id'], row['span_id']))
+            else:
+                allowed.append(row)
+        if not allowed:
+            return [], bool(rows)
+        return allowed, False
+
+    def record_delivery(self, rows, error, retry_after):
+        stamp = time.time()
+        with self.store.connect() as conn:
+            for row in rows:
+                if error:
+                    delay = max(retry_after, min(300, 2 ** min(row['attempts'] + 1, 9)))
+                    conn.execute(f'''UPDATE {self.table} SET attempts=attempts+1,
+                        next_attempt_at=?,last_error=? WHERE trace_id=? AND span_id=?''',
+                        (stamp + delay, error, row['trace_id'], row['span_id']))
+                else:
+                    # Retain a small receipt so journal replay cannot enqueue
+                    # an acknowledged span again. Drop its sensitive payload.
+                    conn.execute(f'''UPDATE {self.table} SET delivered_at=?,payload=NULL,
+                        attempts=attempts+1,last_error='' WHERE trace_id=? AND span_id=?''',
+                        (stamp, row['trace_id'], row['span_id']))
+
     async def export_once(self):
         async with self.lock:
-            pending = self.store.rows(f'''SELECT trace_id,span_id,length(payload) AS payload_bytes
-                FROM {self.table} WHERE delivered_at IS NULL AND next_attempt_at<=?
-                ORDER BY created_at,trace_id,span_id LIMIT 64''', (time.time(),))
-            queue_ids, size = [], 0
-            for row in pending:
-                row_size = row['payload_bytes'] + self.batch_row_overhead
-                if queue_ids and size + row_size > MAX_BATCH_BYTES:
-                    break
-                # An existing oversized span is still attempted unchanged by
-                # itself. Do not strand it or silently discard trace content.
-                queue_ids.append((row['trace_id'], row['span_id']))
-                size += row_size
-            if not queue_ids:
-                return False
-            # Read payloads only after selecting a byte-bounded batch; 64 large
-            # spans must not all be loaded into memory to send just a few.
-            rows = self.store.rows(f'''SELECT * FROM {self.table}
-                WHERE (trace_id,span_id) IN (VALUES {','.join('(?,?)' for _ in queue_ids)}) ORDER BY created_at,trace_id,span_id''', tuple(value for pair in queue_ids for value in pair))
-            allowed = []
-            for row in rows:
-                if any(private_run(self.store, run_id) for run_id in self.payload_run_ids(row['payload'])):
-                    self.store.execute(f"UPDATE {self.table} SET payload=NULL,delivered_at=?,last_error='private session suppressed' WHERE trace_id=? AND span_id=?",
-                                       (time.time(), row['trace_id'], row['span_id']))
-                else:
-                    allowed.append(row)
-            if not allowed:
-                return bool(rows)
-            rows = allowed
+            rows, suppressed = await database(self.collect)
+            if not rows:
+                return suppressed
             error = ''
             retry_after = 0
             try:
                 response = await self.client.post(self.endpoint, headers=self.headers,
-                                                  content=self.encode_batch(rows))
+                                                  content=await database(self.encode_batch, rows))
                 error = self.response_error(response)
                 hint = response.headers.get('retry-after', '')
                 if error and hint:
@@ -159,20 +181,7 @@ class TraceOutbox:
                         pass
             except Exception as exc:
                 error = type(exc).__name__
-            stamp = time.time()
-            with self.store.connect() as conn:
-                for row in rows:
-                    if error:
-                        delay = max(retry_after, min(300, 2 ** min(row['attempts'] + 1, 9)))
-                        conn.execute(f'''UPDATE {self.table} SET attempts=attempts+1,
-                            next_attempt_at=?,last_error=? WHERE trace_id=? AND span_id=?''',
-                            (stamp + delay, error, row['trace_id'], row['span_id']))
-                    else:
-                        # Retain a small receipt so journal replay cannot enqueue
-                        # an acknowledged span again. Drop its sensitive payload.
-                        conn.execute(f'''UPDATE {self.table} SET delivered_at=?,payload=NULL,
-                            attempts=attempts+1,last_error='' WHERE trace_id=? AND span_id=?''',
-                            (stamp, row['trace_id'], row['span_id']))
+            await database(self.record_delivery, rows, error, retry_after)
             if error:
                 log.warning('Trace delivery to %s will retry (%s)', self.table, error)
             return not error

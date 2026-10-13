@@ -268,7 +268,8 @@ class SlackChat:
                     if pending >= self.settings.max_pending_runs and command != 'session-id':
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
-                    plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
+                    enabled = self.owner.connectors.enabled_providers(connection=conn)
+                    plugins = [provider for provider in ('linear', 'slack', 'notion', 'github') if provider in enabled]
                     model = preferred_model(conn, self.settings, actor_id)
                     if selected_model:
                         try:

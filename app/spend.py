@@ -1,6 +1,7 @@
 """Durable, server-attributed gateway usage; monetary values remain decimal strings."""
 import json
 from collections.abc import Mapping
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -180,12 +181,13 @@ class Spend:
     def gateway_scope(self) -> str:
         return gateway_scope(self.settings.litellm_api_base)
 
-    def begin(self, run, model, *, startup=False):
-        request_id = str(uuid4())
+    def begin(self, run, model, *, startup=False, request_id=None, connection=None):
+        request_id = request_id or str(uuid4())
         user_id = run['active_user_id'] if run['chat_enabled'] else run['owner_id']
         retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
-        with self.store.connect() as conn:
-            conn.begin_write()
+        with (self.store.connect() if connection is None else nullcontext(connection)) as conn:
+            if connection is None:
+                conn.begin_write()
             started_at = now()
             conn.execute('INSERT INTO model_requests(id,key_hash,run_id,message_id,user_id,model,created_at,gateway_scope,cost_next_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)',
                          (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, started_at, self.gateway_scope, retry_at))
@@ -212,11 +214,12 @@ class Spend:
             return value if type(value) is int and value >= 0 else None
         cost = capture.cost if capture else None
         with self.store.connect() as conn:
-            conn.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=?,cache_read_input_tokens=?,cache_creation_input_tokens=? WHERE id=?',
+            changed = conn.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=?,cache_read_input_tokens=?,cache_creation_input_tokens=? WHERE id=?',
                          (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'),
-                          tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id))
-            if owner := getattr(self.store, 'broker_work', None):
+                          tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id)).rowcount
+            if changed and (owner := getattr(self.store, 'broker_work', None)):
                 owner.release_in(conn, 'model', request_id)
+        return bool(changed)
 
     def settle_receipt(self, request_id: str, key_hash: str, gateway_scope: str,
                        receipt_id: str, cost: str) -> bool:

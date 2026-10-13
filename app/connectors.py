@@ -202,8 +202,8 @@ class Connectors:
                                      for name, spec in TOOLS.items() if spec[0] == provider]})
         return result
 
-    def policy(self, provider):
-        rows = self.store.rows("SELECT enabled,read_only,checked_at,check_status FROM connection_policies WHERE provider=?", (provider,))
+    def policy(self, provider, *, connection=None):
+        rows = self.store.rows("SELECT enabled,read_only,checked_at,check_status FROM connection_policies WHERE provider=?", (provider,), connection=connection)
         row = rows[0] if rows else {"enabled": True, "read_only": False, "checked_at": None, "check_status": None}
         return {**row, "enabled": bool(row["enabled"]), "read_only": bool(row["read_only"])}
 
@@ -218,8 +218,21 @@ class Connectors:
                     return policy['enabled'] and ('plugins' not in run or 'slack' in run['plugins'])
             except ConnectorError:
                 return False
+        return self.organization_allowed(name, policy=policy)
+
+    def organization_allowed(self, name, *, connection=None, policy=None):
+        """Organization catalog policy, without personal-account selection."""
+        provider, write, _, _ = TOOLS[name]
+        policy = policy if policy is not None else self.policy(provider, connection=connection)
         return policy["enabled"] and (not write or not policy["read_only"]) and bool(
-            self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,)))
+            self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,), connection=connection))
+
+    def enabled_providers(self, *, connection=None):
+        """Admission needs provider state, not decrypted UI metadata."""
+        return {row['provider'] for row in self.store.rows(
+            """SELECT c.provider FROM connections c LEFT JOIN connection_policies p ON p.provider=c.provider
+                WHERE c.provider IN ('linear','slack','notion','github') AND coalesce(p.enabled,1)=1""",
+            connection=connection)}
 
     def audit(self, provider, action):
         self.store.execute("INSERT INTO connection_audit(provider,action,actor,created_at) VALUES(?,?,?,?)",
@@ -256,8 +269,8 @@ class Connectors:
                 return fresh
             return credentials
 
-    def slack_installation(self):
-        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='slack'")
+    def slack_installation(self, *, connection=None):
+        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='slack'", connection=connection)
         if not rows:
             return {}
         credentials = json.loads(self.security.decrypt(rows[0]["encrypted"]))

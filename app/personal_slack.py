@@ -66,12 +66,12 @@ class PersonalSlack:
             return self.owner(candidates[0])
         return None
 
-    def row(self, owner):
-        rows = self.store.rows('SELECT * FROM personal_slack_grants WHERE owner_id=?', (owner,)) if owner else []
+    def row(self, owner, *, connection=None):
+        rows = self.store.rows('SELECT * FROM personal_slack_grants WHERE owner_id=?', (owner,), connection=connection) if owner else []
         return rows[0] if rows else None
 
-    def configured(self, owner):
-        row = self.row(owner)
+    def configured(self, owner, *, connection=None):
+        row = self.row(owner, connection=connection)
         return bool(row and row['encrypted'] is not None)
 
     def revision(self, owner):

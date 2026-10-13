@@ -90,8 +90,8 @@ async def test_cancelled_publication_drains_transaction_and_retry_does_not_dupli
     manager, store, scope = active
     entered, release = threading.Event(), threading.Event()
     exchange = manager.deepagents_runtime.journal.exchange_in
-    def held(conn, caller, body):
-        result = exchange(conn, caller, body)
+    def held(conn, caller, body, **kwargs):
+        result = exchange(conn, caller, body, **kwargs)
         entered.set()
         assert release.wait(5)
         return result

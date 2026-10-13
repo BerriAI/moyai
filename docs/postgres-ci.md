@@ -1,10 +1,11 @@
 # PostgreSQL CI coverage
 
-`PostgreSQL runtime` runs six focused jobs on relevant pull requests and every
+`PostgreSQL runtime` runs focused jobs on relevant pull requests and every
 push to main. The job IDs and workflow filename stay stable for release checks.
 
 | Job | What must stay on the PR path |
 | --- | --- |
+| `boundaries` | Single-connection helper reuse, nested-checkout rejection, slow object storage without held database locks, event-loop responsiveness, and cancellation-safe accounting/maintenance cleanup. |
 | `runtime` | SQL bindings, rollback, constraints, atomic message claims, concurrent schema initialization, ownership fencing, imports, authentication during writes, and real HTTP persistence across a server restart. SQLite admission is also retained. |
 | `storage` | Payload maintenance and migration, with recovery from shared storage in a replacement process. |
 | `scheduling` | Database writer/pool contention, responsive scheduling, and real Temporal restart behavior. |

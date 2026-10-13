@@ -225,18 +225,24 @@ class PostgresModelSlots(ModelSlots):
             return token
 
     async def _claim_async(self, current):
-        from .db import database
+        from .db import database, drain
 
         operation = asyncio.create_task(asyncio.to_thread(self._claim, current))
         try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError:
+            return await drain(operation)
+        except asyncio.CancelledError as cancelled:
             # A cancellation may arrive after PostgreSQL granted the lock but
             # before this task received its token. Drain then release that token.
-            permit = await operation
+            try:
+                permit = operation.result()
+            except BaseException as exc:
+                raise cancelled from exc
             if permit:
-                await database(self.release, permit, counted=False)
-            raise
+                try:
+                    await database(self.release, permit, counted=False)
+                except BaseException as exc:
+                    raise cancelled from exc
+            raise cancelled
 
     async def acquire(self):
         current = asyncio.current_task()

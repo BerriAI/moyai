@@ -1,6 +1,7 @@
 """Credential prompts must follow authorized saved access and source lookup."""
 import json
 
+from fastapi import HTTPException
 import httpx
 import pytest
 
@@ -33,7 +34,8 @@ def test_filtered_miss_cannot_masquerade_as_an_empty_access_inventory(workspace)
     assert complete['discovery']['available']['capability_verification'] == 'not_assessed'
 
 
-def test_turn_discovery_counts_only_current_requesters_active_authorized_access(workspace):
+@pytest.mark.parametrize('status', ['queued', 'provisioning', 'running'])
+def test_turn_discovery_counts_only_current_requesters_active_authorized_access(workspace, status):
     app, client = workspace
     sign_in(app, client)
     app.state.settings.temporal_enabled = True
@@ -43,6 +45,8 @@ def test_turn_discovery_counts_only_current_requesters_active_authorized_access(
     expired = save(client, 'organization', provider='anthropic', suffix='expired').json()['id']
     app.state.store.execute("UPDATE provider_secrets SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?", (expired,))
     run = active(app)
+    app.state.store.update_run(run['id'], status=status)
+    run = app.state.store.run(run['id'])
     sign_in(app, client, sub='bob', email='bob@berri.ai')
     foreign = save(client, provider='together', suffix='bob').json()['id']
     foreign_source = shared(client, scope='personal', suffix='bob')
@@ -54,6 +58,10 @@ def test_turn_discovery_counts_only_current_requesters_active_authorized_access(
     }
     snapshot = app.state.manager.spec(run)['credential_discovery']
     assert snapshot == expected
+    if status != 'running':
+        with pytest.raises(HTTPException) as denied:
+            app.state.credentials.inventory(run, ListCredentials())
+        assert denied.value.status_code == 409
     assert not any(value in json.dumps(snapshot) for value in (KEY, personal, organization, source, foreign, foreign_source))
     assert not app.state.store.rows('SELECT * FROM credential_requests')
     # Every newly built spec uses current grants, not a cached previous turn.
@@ -74,7 +82,14 @@ def test_turn_discovery_respects_session_lifetime_and_disabled_credential_tools(
     assert app.state.credentials.discovery_context(first)['shared_vault_sources'] == 1
     assert app.state.credentials.discovery_context(other)['shared_vault_sources'] == 0
     assert source not in json.dumps(app.state.credentials.discovery_context(first))
-    assert app.state.credentials.discovery_context({**first, 'active_user_id': ''})['shared_vault_sources'] == 0
+    with pytest.raises(HTTPException) as denied:
+        app.state.credentials.discovery_context({**first, 'active_user_id': ''})
+    assert denied.value.status_code == 409
+    anonymous = active(app, user='')
+    assert app.state.credentials.discovery_context(anonymous) == {
+        'saved_personal_connections': 0, 'saved_organization_connections': 0,
+        'shared_vault_sources': 0, 'capability_verification': 'not_assessed',
+    }
     assert app.state.credentials.discovery_context({**first, 'chat_enabled': False}) is None
     app.state.settings.temporal_enabled = False
     assert app.state.credentials.discovery_context(first) is None
@@ -240,7 +255,11 @@ def test_source_checks_cannot_survive_turn_or_revision_change(workspace, change)
     if change == 'new_run':
         run = active(app)
     elif change == 'new_turn':
-        run = {**run, 'active_message_id': run['active_message_id'] + 100}
+        vault.store.finish_message(run['id'], run['active_message_id'], 'Finished')
+        vault.store.enqueue_message(run['id'], 'Next authenticated request', 'next-source-turn',
+                                    user_id=run['active_user_id'])
+        vault.store.claim_message(run['id'])
+        run = vault.store.run(run['id'])
     else:
         vault.store.execute('UPDATE provider_secrets SET revision=revision+1 WHERE id=?', (source_id,))
     if change == 'rotation':
@@ -250,6 +269,21 @@ def test_source_checks_cannot_survive_turn_or_revision_change(workspace, change)
     else:
         with pytest.raises(ValueError, match='this turn'):
             vault.request(run, provider_request(source_checks=[check]))
+
+
+@pytest.mark.parametrize('field,value', [
+    ('active_user_id', 'google:replacement'), ('token_hash', 'replacement-capability'),
+])
+def test_credential_admission_rechecks_the_captured_requester(workspace, field, value):
+    from fastapi import HTTPException
+    app, client = workspace
+    sign_in(app, client)
+    vault, run = app.state.credentials, active(app)
+    vault.store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (value, run['id']))
+    with pytest.raises(HTTPException) as denied:
+        vault.request(run, provider_request())
+    assert denied.value.status_code == 409
+    assert not vault.store.rows('SELECT * FROM credential_requests')
 
 
 @pytest.mark.parametrize('selection', ['foreign', 'wrong_capability', 'expired'])

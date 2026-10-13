@@ -54,21 +54,21 @@ class AutomationEvents:
         if self.store.schema_updates:
             initialize_schema(self.store)
 
-    def source_ready(self, row, event):
+    def source_ready(self, row, event, *, connection=None):
         if event.provider == 'session':
             return True
         if event.provider == 'slack':
             c = self.automations.connectors
-            bot = c.slack_installation()
+            bot = c.slack_installation(connection=connection)
             scopes = {'reactions:read'} if event.event == 'reaction.added' else (
                 {'groups:history'} if event.channel_id.startswith('G') else {'channels:history'} if event.channel_id else {'channels:history', 'groups:history'})
             return bool(self.automations.settings.slack_signing_secret and self.automations.settings.slack_bot_enabled
                         and self.automations.settings.slack_session_users and bot.get('installed') and scopes <= set(bot.get('scopes', []))
-                        and c.policy('slack')['enabled'])
-        return bool(self.store.rows('SELECT 1 FROM automation_webhooks WHERE automation_id=? AND provider=?', (row['id'], event.provider)))
+                        and c.policy('slack', connection=connection)['enabled'])
+        return bool(self.store.rows('SELECT 1 FROM automation_webhooks WHERE automation_id=? AND provider=?', (row['id'], event.provider), connection=connection))
 
-    def ready(self, row):
-        return all(self.source_ready(row, event) for _, event in sources(row))
+    def ready(self, row, *, connection=None):
+        return all(self.source_ready(row, event, connection=connection) for _, event in sources(row))
 
     def public(self, row, actor):
         configured = sources(row)

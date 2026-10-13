@@ -7,6 +7,7 @@ from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 
 from sandbox.broker_transport import CONTENT_TYPE
+from .db import database
 
 
 def encoded(value):
@@ -135,11 +136,16 @@ class NativeSessions:
         return saved['state'], 'resumed'
 
     async def exchange(self, run_id, request):
-        admitted = self.require_run(run_id, request)
+        admitted = await database(self.require_run, run_id, request)
         if request.headers.get('content-type') != CONTENT_TYPE:
             raise HTTPException(415, 'Use an encrypted broker envelope for native state.')
         body = await self.read_body(request, '/context/native')
         self.validate(body)
+        result = await database(self.apply, run_id, admitted, body)
+        await self.checkpoints.flush()
+        return result
+
+    def apply(self, run_id, admitted, body):
         lease, action = body['lease'], body['action']
         with self.store.connect() as conn:
             conn.begin_write()
@@ -205,5 +211,4 @@ class NativeSessions:
                 conn.execute('UPDATE native_sessions SET encrypted=?,lease=? WHERE run_id=? AND lease=?',
                              (encrypted, '' if action == 'invalidate' else lease, run_id, lease))
                 result = {'lease': lease, 'saved': saved, 'reason': reason}
-        await self.checkpoints.flush()
         return result

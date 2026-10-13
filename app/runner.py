@@ -239,6 +239,10 @@ class RunManager:
     async def client(self):
         return await self.modal_clients.get(self.settings)
 
+    async def submit_async(self, run):
+        # Local execution registers asyncio tasks on its owning event loop.
+        self.submit(run)
+
     def submit(self, run):
         if self.closing or run.get('deleted_at') or run.get('deletion_requested_at') or run["id"] in self.jobs:
             return
