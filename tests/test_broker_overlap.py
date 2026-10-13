@@ -1,6 +1,7 @@
 """Verified broker generations share real PostgreSQL ownership and capacity."""
 import asyncio
-from contextlib import AsyncExitStack, ExitStack
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -53,6 +54,48 @@ def pending(app, label):
 
 def status(app, table, key, value):
     return app.state.store.rows(f'SELECT status FROM {table} WHERE {key}=?', (value,))[0]['status']
+
+
+@asynccontextmanager
+async def held_schema_writer(store, *, write_scope=None):
+    from app.db import database
+
+    ready, release = threading.Event(), threading.Event()
+    errors = []
+
+    def hold():
+        try:
+            # Keep the connection scope in an independent thread. The async
+            # recovery caller must not inherit this transaction's ownership.
+            with store.connect(write_scope=write_scope) as writer:
+                writer.begin_write()
+                ready.set()
+                assert release.wait(10), 'The test did not release its schema writer.'
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            ready.set()
+
+    def assert_pressure():
+        with store.connect() as probe:
+            locked = probe.execute(
+                'SELECT pg_try_advisory_xact_lock(726941, ?::regnamespace::oid::int)',
+                (store.database.schema,)).fetchone()[0]
+            assert not locked, 'Expected real schema writer contention.'
+
+    holder = threading.Thread(target=hold, name='broker-test-schema-writer')
+    holder.start()
+    try:
+        assert await asyncio.to_thread(ready.wait, 5), 'Schema writer did not acquire its lock.'
+        assert not errors, errors
+        await database(assert_pressure)
+        yield
+        await database(assert_pressure)
+    finally:
+        release.set()
+        await asyncio.to_thread(holder.join, 5)
+        assert not holder.is_alive(), 'Schema writer did not release its connection.'
+        assert not errors, errors
 
 
 async def test_replacement_start_preserves_live_work_and_recovers_only_dead_owner(verified):
@@ -279,8 +322,7 @@ async def test_noop_recovery_does_not_wait_for_the_schema_writer(verified, live_
         pending(app, 'owned work')
     recovering = None
     try:
-        with app.state.store.connect() as writer:
-            writer.begin_write()
+        async with held_schema_writer(app.state.store):
             # A real exclusive schema lock must not block a healthy scan.
             recovering = asyncio.create_task(database(app.state.broker_requests.work.recover))
             assert await asyncio.wait_for(asyncio.shield(recovering), 2) == 0
@@ -301,8 +343,7 @@ async def test_dead_recovery_skips_busy_schema_without_blocking_other_sessions(v
     independent = store.create_run('unrelated writer', '', 'modal', [])['id']
     recovering = None
     try:
-        with store.connect(write_scope=held) as writer:
-            writer.begin_write()
+        async with held_schema_writer(store, write_scope=held):
             recovering = asyncio.create_task(database(replacement.state.broker_requests.work.recover))
             assert await asyncio.wait_for(asyncio.shield(recovering), 2) == 0
             # Recovery must not queue an exclusive lock ahead of this second

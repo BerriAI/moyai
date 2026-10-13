@@ -730,11 +730,11 @@ async def test_sidebar_pr_lookup_batches_large_pinned_lists_and_tolerates_bad_co
     responses[100] = pr_response()
     original = store.rows
     sizes = []
-    def rows(query, parameters=()):
+    def rows(query, parameters=(), *, connection=None):
         if 'FROM github_publications p' in query:
             sizes.append(len(parameters))
             assert len(parameters) <= 800
-        return original(query, parameters)
+        return original(query, parameters, connection=connection)
     monkeypatch.setattr(store, 'rows', rows)
     selected = [str(number) for number in range(1000)] + [run_id]
     assert (await refreshed(service, selected))[run_id]['open'] == 1

@@ -211,8 +211,8 @@ class Automations:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
 
-    def row(self, automation_id):
-        rows = self.store.rows('SELECT * FROM automations WHERE id=?', (automation_id,))
+    def row(self, automation_id, *, connection=None):
+        rows = self.store.rows('SELECT * FROM automations WHERE id=?', (automation_id,), connection=connection)
         if not rows:
             raise HTTPException(404, 'Automation not found.')
         return rows[0]
@@ -224,11 +224,11 @@ class Automations:
         if row['owner_id'] != self.actor(request) and not (pausing and self.security.role(request) == 'admin'):
             raise HTTPException(403, 'Only the owner can edit or run this automation. Administrators can pause it.')
 
-    def validate_execution(self, definition, owner_id):
+    def validate_execution(self, definition, owner_id, *, connection=None):
         # Re-evaluate access at every launch; saved workflows confer no new rights.
-        if 'slack' in definition.plugins and self.connectors.personal_slack.configured(owner_id):
+        if 'slack' in definition.plugins and self.connectors.personal_slack.configured(owner_id, connection=connection):
             raise HTTPException(409, 'Personal Slack is not supported in automations. Use a private web chat, or disconnect personal Slack in Connections.')
-        owners = self.store.rows('SELECT * FROM users WHERE id=?', (owner_id,))
+        owners = self.store.rows('SELECT * FROM users WHERE id=?', (owner_id,), connection=connection)
         if not owners or (owners[0]['kind'] in {'google', 'cloudflare'} and (not self.settings.person_login_enabled() or owners[0]['email'].rpartition('@')[2] not in self.settings.google_domains())):
             raise HTTPException(409, 'The automation owner no longer has workspace access.')
         if owners[0]['kind'] == 'shared' and not (self.security.local_preview() or self.settings.password_login_enabled):
@@ -237,11 +237,11 @@ class Automations:
             return
         if self.settings.missing_sandbox() or not all((self.settings.litellm_api_base, self.settings.litellm_api_key)):
             raise HTTPException(409, 'Cloud setup is incomplete. Check Runtime before running this automation.')
-        enabled = {c['id'] for c in self.connectors.list() if c['connected'] and c['enabled']}
+        enabled = self.connectors.enabled_providers(connection=connection)
         if not set(definition.plugins) <= enabled:
             raise HTTPException(409, 'Connect and enable the selected apps before running this automation.')
         self.settings.harness_model(definition.harness, definition.model)
-        self.environments.choose(definition.environment_id, definition.repo_url, definition.github_repository_id)
+        self.environments.choose(definition.environment_id, definition.repo_url, definition.github_repository_id, connection=connection)
 
     def public(self, row, actor):
         result = {key: row[key] for key in ('id', 'owner_id', 'revision', 'synced_revision', 'paused', 'sync_error', 'created_at', 'updated_at')}
@@ -287,16 +287,16 @@ class Automations:
                 event.repository_id, event.repository = identity, github.repository_name(identity)
 
     def save(self, body, owner_id, automation_id=None, *, connection=None, preserve_state=False):
-        if 'slack' in body.definition.plugins and self.connectors.personal_slack.configured(owner_id):
+        if 'slack' in body.definition.plugins and self.connectors.personal_slack.configured(owner_id, connection=connection):
             raise HTTPException(409, 'Personal Slack is not supported in automations. Use a private web chat, or disconnect personal Slack in Settings > Personal Slack.')
         harness = body.definition.harness
         if 'harness' not in body.definition.model_fields_set:
-            harness = (Definition.model_validate_json(self.row(automation_id)['definition']).harness
+            harness = (Definition.model_validate_json(self.row(automation_id, connection=connection)['definition']).harness
                        if automation_id else self.settings.default_harness(body.definition.model or None))
         definition = body.definition.model_copy(update={'harness': harness,
                                                       'model': self.settings.harness_model(harness, body.definition.model or None),
                                                       'plugins': sorted(set(body.definition.plugins))})
-        old_triggers = {t.id:t for t in Definition.model_validate_json(self.row(automation_id)['definition']).triggers} if automation_id else {}
+        old_triggers = {t.id:t for t in Definition.model_validate_json(self.row(automation_id, connection=connection)['definition']).triggers} if automation_id else {}
         for trigger in definition.triggers:
             if (trigger.schedule and trigger.schedule.frequency == 'once' and trigger.schedule.run_at <= datetime.now(timezone.utc)
                     and not (old_triggers.get(trigger.id) and old_triggers[trigger.id].schedule
@@ -346,9 +346,9 @@ class Automations:
             if not body.paused:
                 if not self.settings.temporal_enabled:
                     raise HTTPException(409, 'Enable Temporal before enabling automatic runs.')
-                if not self.events.ready(row):
+                if not self.events.ready(row, connection=conn):
                     raise HTTPException(409, 'Configure the webhook or Slack connection before enabling this trigger.')
-                self.validate_execution(Definition.model_validate_json(row['definition']), row['owner_id'])
+                self.validate_execution(Definition.model_validate_json(row['definition']), row['owner_id'], connection=conn)
                 if any(t.event and t.event.provider == 'session' for t in Definition.model_validate_json(row['definition']).triggers):
                     self.events.seed_session_cursor(conn, automation_id)
             conn.execute("UPDATE automations SET paused=?,revision=revision+1,updated_at=?,sync_error='' WHERE id=?",

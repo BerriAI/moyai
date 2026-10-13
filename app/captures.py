@@ -46,15 +46,15 @@ def listing(settings, run_id, *, store, actor=""):
     return result
 
 
-def read(path: Path, *, store, actor="") -> tuple[bytes, str]:
+def read(path: Path, *, store, actor="", connection=None) -> tuple[bytes, str]:
     """Read bounded media without following a replaced file's symlink."""
     name = path.relative_to(store.path.parent / 'artifacts').as_posix()
-    require_owner(store, path.parent.name.removesuffix('-captures'), actor)
+    require_owner(store, path.parent.name.removesuffix('-captures'), actor, connection)
     try:
-        raw = store.artifacts.read(name, MAX_FILE)
+        raw = store.artifacts.read(name, MAX_FILE, connection=connection)
     except FileNotFoundError:
         raise HTTPException(404, 'Capture not found.') from None
-    require_owner(store, path.parent.name.removesuffix('-captures'), actor)
+    require_owner(store, path.parent.name.removesuffix('-captures'), actor, connection)
     return raw, media_type(path.name, raw)
 
 

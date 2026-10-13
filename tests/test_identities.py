@@ -13,6 +13,7 @@ from app.config import Settings
 from app.db import Store
 from app.main import create_app
 from app.memory import Note
+from app.security import digest
 from test_slack import event, signed, slack_app, wait_for
 from test_spend import sign_in
 
@@ -403,7 +404,10 @@ def memory_profiles(profiles, monkeypatch):
     app.state.settings.google_client_secret = 'test-secret'
     google(app.state.store)
     actor = sender(app.state.store)
-    run = app.state.store.run(app.state.store.rows('SELECT id FROM runs')[0]['id'])
+    run_id = app.state.store.rows('SELECT id FROM runs')[0]['id']
+    # Claiming assigns the input; memory tools require admitted execution.
+    app.state.store.update_run(run_id, status='running', token_hash=digest('memory-profile-capability'))
+    run = app.state.store.run(run_id)
     sync(app)
     assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
     app.state.memory.save('google:alice', Note(key='response-style', title='Response style',

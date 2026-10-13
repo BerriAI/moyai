@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .database import PostgresDatabase, sqlite_connection
+from .database import PostgresDatabase, sqlite_connection, connection_scope
 from .attachments import Attachments
 from .blob_storage import ArtifactStore, ObjectStorage
 from .slack_mentions import SlackMentions
@@ -39,20 +39,34 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def drain[T](task: asyncio.Task[T]) -> T:
+    """Join owned work despite repeated cancellation, then propagate its cause."""
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if cancelled is None:
+                cancelled = exc
+        except BaseException as exc:
+            if cancelled is not None:
+                raise cancelled from exc
+            raise
+    try:
+        result = task.result()
+    except BaseException as exc:
+        if cancelled is not None:
+            raise cancelled from exc
+        raise
+    if cancelled is not None:
+        raise cancelled
+    return result
+
+
 async def database[**P, T](operation: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
     # Connections are opened and closed within the operation's thread. Finish
     # an outstanding write before propagating cancellation to its caller.
-    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancelled:
-        try:
-            await task
-        except Exception as exc:
-            # A failed, drained operation must not turn shutdown into an
-            # ordinary retry. Preserve both the cancellation and its cause.
-            raise cancelled from exc
-        raise
+    return await drain(asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs)))
 
 
 def require_database_owner(path: Path) -> None:
@@ -363,19 +377,23 @@ class Store:
                     callback()
                 return
             require_database_owner(self.path)
-            conn = sqlite_connection(self.path)
-            conn.commit_callbacks = []
-            try:
-                with conn:
-                    yield conn
-                if conn.total_changes:
-                    self.generation += 1
-                    for listener in tuple(self.commit_listeners):
-                        listener()
-                for callback in conn.commit_callbacks:
-                    callback()
-            finally:
-                conn.close()
+            with connection_scope(self):
+                conn = sqlite_connection(self.path)
+                conn.commit_callbacks = []
+                try:
+                    with conn:
+                        yield conn
+                    changed, callbacks = conn.total_changes, tuple(conn.commit_callbacks)
+                finally:
+                    conn.close()
+            # Callbacks may start a new transaction, after the old checkout
+            # and its scope have both ended.
+            if changed:
+                self.generation += 1
+                for listener in tuple(self.commit_listeners):
+                    listener()
+            for callback in callbacks:
+                callback()
         finally:
             # Include pool acquisition, lock waits, commit/rollback and close
             # for either backend, including failed connection attempts.
@@ -619,7 +637,7 @@ class Store:
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
-                    return self.run(previous['run_id'])
+                    return self.run(previous['run_id'], connection=conn)
             context = ''
             if side_chat_of:
                 parent = conn.execute("SELECT prompt,summary,private_owner_id FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''", (side_chat_of,)).fetchone()

@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from .connector_errors import ConnectorError
-from .db import now
+from .db import database, now
 
 
 class WriteDecision(BaseModel):
@@ -31,11 +31,11 @@ class GitHubWriteAccess:
             raise ConnectorError('PR write approval requires this direct chat’s active requester.')
         return current['active_user_id']
 
-    def same_write_requester(self, left, right):
+    def same_write_requester(self, left, right, *, connection=None):
         if left == right:
             return bool(left)
         match = getattr(self.connectors, 'github_requester_match', None)
-        return bool(match and (match(left, right) or match(right, left)))
+        return bool(match and (match(left, right, connection=connection) or match(right, left, connection=connection)))
 
     def find_access(self, run, actor, version, target, number):
         rows = self.store.rows('''SELECT * FROM github_write_access WHERE run_id=?
@@ -43,11 +43,11 @@ class GitHubWriteAccess:
             (run['id'], version, target, number))
         return self.effective_access(rows, actor)
 
-    def effective_access(self, rows, actor):
+    def effective_access(self, rows, actor, *, connection=None):
         # Identity verification can link previously independent requests later.
         # A terminal decision must win; a pending alias must not shadow consent.
         priority = {'revoked': 0, 'denied': 1, 'approved': 2, 'pending': 3}
-        matches = [row for row in rows if self.same_write_requester(row['actor_id'], actor)]
+        matches = [row for row in rows if self.same_write_requester(row['actor_id'], actor, connection=connection)]
         return min(matches, key=lambda row: priority[row['status']], default=None)
 
     def access_id(self, run, actor, version, target, number):
@@ -122,21 +122,24 @@ class GitHubWriteAccess:
                 if r['connection_version'] == version and self.same_write_requester(r['actor_id'], actor)]
 
     async def decide_write_access(self, run_id, identity, actor, decision):
+        return await database(self.record_write_access, run_id, identity, actor, decision)
+
+    def record_write_access(self, run_id, identity, actor, decision):
         with self.store.connect() as conn:
             conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             row = conn.execute('SELECT * FROM github_write_access WHERE id=? AND run_id=?', (identity, run_id)).fetchone()
-            if not row or not run or not self.same_write_requester(row['actor_id'], actor) or not self.same_write_requester(run['active_user_id'], actor):
+            if not row or not run or not self.same_write_requester(row['actor_id'], actor, connection=conn) or not self.same_write_requester(run['active_user_id'], actor, connection=conn):
                 raise HTTPException(403, 'Only this request’s active requester can decide.')
             if decision == 'approve' and (run['deleted_at'] or run['status'] in {'stopping', 'cancelled'} or run['parent_run_id']
-                    or row['connection_version'] != self.connection_version()
-                    or not self.connectors.allowed('github_request_pull_request_write_access')):
+                    or row['connection_version'] != self.connection_version(connection=conn)
+                    or not self.connectors.organization_allowed('github_request_pull_request_write_access', connection=conn)):
                 raise HTTPException(409, 'The chat or GitHub connection no longer permits this approval.')
             aliases = conn.execute('''SELECT * FROM github_write_access WHERE run_id=?
                 AND connection_version=? AND repository_id=? AND number=?''',
                 (run_id, row['connection_version'], row['repository_id'], row['number'])).fetchall()
-            aliases = [item for item in aliases if self.same_write_requester(item['actor_id'], actor)]
-            effective = self.effective_access(aliases, actor)
+            aliases = [item for item in aliases if self.same_write_requester(item['actor_id'], actor, connection=conn)]
+            effective = self.effective_access(aliases, actor, connection=conn)
             desired = {'approve': 'approved', 'deny': 'denied', 'revoke': 'revoked'}[decision]
             if desired == 'approved' and effective['status'] in {'denied', 'revoked'}:
                 raise HTTPException(409, 'This decision is final; access cannot be regranted.')

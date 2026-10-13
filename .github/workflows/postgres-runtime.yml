@@ -11,6 +11,36 @@ concurrency:
   # Superseded PR revisions need no result; retain checks for every main commit.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  boundaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-boundary-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-boundary-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify connection ownership, storage isolation and cancellation on both backends
+        run: |
+          uv run --frozen --python 3.13 pytest -q --tb=short tests/test_database_boundaries.py tests/test_connection_reuse.py tests/test_database_storage_boundaries.py tests/test_model_request_lifecycle.py tests/test_context_cleanup.py tests/test_background_database_latency.py tests/test_async_authorization.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_database_boundaries.py tests/test_connection_reuse.py tests/test_database_storage_boundaries.py tests/test_model_request_lifecycle.py tests/test_context_cleanup.py tests/test_background_database_latency.py tests/test_async_authorization.py
+      - name: Verify all model routes preserve cancellation when cleanup fails
+        run: |
+          uv run --frozen --python 3.13 pytest -q --tb=short tests/test_harness_gateway.py -k 'admitted_request_is_finalized or cancelled_request_preserves'
+          uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_harness_gateway.py -k 'admitted_request_is_finalized or cancelled_request_preserves'
+      - name: Verify Slack file preparation yields during pool waits and drains publication
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_slack_files.py -k 'pool_wait_yields or cancelled_file_publication'
   storage:
     runs-on: ubuntu-latest
     timeout-minutes: 10

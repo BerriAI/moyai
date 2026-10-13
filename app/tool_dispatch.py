@@ -21,6 +21,7 @@ class ToolDispatch:
         self.store, self.caller, self.body = store, caller, body
         self.event_id = None
         self.metadata = {}
+        self.confirmed = None
 
     def claim(self):
         caller, body = self.caller, self.body
@@ -60,9 +61,8 @@ class ToolDispatch:
                  json.dumps(self.metadata), now())).fetchone()[0]
         return None
 
-    def finish(self, result=None, *, outcome=None):
-        if self.event_id is None:
-            return
+    @staticmethod
+    def result_outcome(result, outcome=None):
         if outcome is None:
             outcome = 'completed'
             if isinstance(result, dict) and (result.get('error') or result.get('isError')):
@@ -71,9 +71,20 @@ class ToolDispatch:
                     outcome = 'failed'
         if outcome not in {'completed', 'failed', 'rejected', 'cancelled', 'unknown'}:
             outcome = 'unknown'
+        return outcome, not (isinstance(result, dict) and result.get('dispatched') is False)
+
+    def confirm(self, result):
+        # Capture only safe receipt metadata before any logging/checkpoint await.
+        # An already received outcome cannot become ambiguous on cancellation.
+        if self.confirmed is None:
+            self.confirmed = self.result_outcome(result)
+
+    def finish(self, result=None, *, outcome=None):
+        if self.event_id is None:
+            return
+        outcome, dispatched = self.confirmed or self.result_outcome(result, outcome)
         # Save factual outcomes even if Stop or a correction changed the turn.
         # Never store tool arguments, credentials or raw results in this receipt.
-        dispatched = not (isinstance(result, dict) and result.get('dispatched') is False)
         self.store.execute("UPDATE events SET message=?,data=? WHERE id=? AND run_id=?",
             (self.body.name + ': ' + outcome, json.dumps({**self.metadata, 'outcome': outcome, 'dispatched': dispatched}),
              self.event_id, self.caller['id']), write_scope=self.caller['id'])

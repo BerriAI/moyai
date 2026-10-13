@@ -13,6 +13,7 @@ import re
 import time
 
 import httpx
+from fastapi import HTTPException
 from openai import AsyncOpenAI, APIStatusError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, message_chunk_to_message, messages_to_dict
@@ -240,19 +241,40 @@ class DeepAgentsRuntime:
 
     def original_input(self, scope, spec):
         """The first recorded input also owns retries and pre-upgrade resumes."""
-        with self.runner.store.connect(write_scope=scope.run_id) as conn:
-            conn.begin_write()
+        store = self.runner.store
+        identity = f'user:{scope.message_id}'
+        with store.connect() as conn:
+            conn.begin_read()
             run = self.current(scope, connection=conn)
-            identity = f'user:{scope.message_id}'
+            epoch = self.journal.epoch_in(conn, scope.run_id)
             item = conn.execute('SELECT seq FROM session_items WHERE run_id=? AND item_id=?',
                                 (scope.run_id, identity)).fetchone()
-            if item:
-                saved = self.journal.exchange_in(conn, run, {'action': 'read', 'seq': item['seq']})
-                return json.loads(saved['entry']['text'])['content']
+        if item is None:
             content = conversation_prompt({**spec, 'slack_source': None})
-            self.journal.exchange_in(conn, run, {'action': 'append', 'entries': [
-                {'id': identity, 'message': {'role': 'user', 'content': content}}]})
-            return content
+            entries = [{'id': identity, 'message': {'role': 'user', 'content': content}}]
+            prepared = self.journal.prepare_entries(entries)
+            with store.connect(write_scope=scope.run_id) as conn:
+                conn.begin_write()
+                run = self.current(scope, connection=conn)
+                self.journal.require_epoch(conn, scope.run_id, epoch)
+                # A competing preparer may have recorded a different candidate
+                # while storage was pending. All callers adopt its saved input.
+                item = conn.execute('SELECT seq FROM session_items WHERE run_id=? AND item_id=?',
+                                    (scope.run_id, identity)).fetchone()
+                if item is None:
+                    self.journal.exchange_in(conn, run, {'action': 'append', 'entries': entries},
+                                             prepared_entries=prepared, expected_epoch=epoch)
+                    return content
+        # Stored input can live in remote object storage. Read outside the
+        # transaction, then fence the complete execution scope and journal epoch.
+        saved = self.journal.exchange(run, {'action': 'read', 'seq': item['seq']})
+        with store.connect() as conn:
+            conn.begin_read()
+            self.current(scope, connection=conn)
+            self.journal.require_epoch(conn, scope.run_id, epoch)
+            if saved['epoch'] != epoch or saved['entry']['id'] != identity:
+                raise HTTPException(409, 'The original input changed while reading. Reload the conversation.')
+        return json.loads(saved['entry']['text'])['content']
 
     async def call_tool(self, scope, call_id, name, arguments):
         async with self.work_clock(scope):
@@ -488,6 +510,19 @@ class DeepAgentsRuntime:
         _, text = split_focus(text)
         identity = f'deepagents:{scope.message_id}:{scope.segment}:{identity}'
         r = self.runner
+        entries = [{'id': identity, 'message': {'role': 'assistant', 'content': text}}]
+        with r.store.connect() as conn:
+            conn.begin_read()
+            try:
+                self.current(scope, connection=conn)
+            except ApplicationError:
+                return
+            if (not r.message_queue.current_input(conn, scope.run_id, scope.message_id, input_id)
+                    or r.message_queue.pending_input(conn, scope.run_id, scope.message_id)):
+                return
+            expected_epoch = self.journal.epoch_in(conn, scope.run_id)
+            known = self.journal.known_entries(conn, scope.run_id, entries)
+        prepared = self.journal.prepare_entries(entries, known=known)
         # The same transaction fences current scope/input, journal visibility,
         # and downstream delivery. A cancelled/lost activity ACK can retry this
         # stable identity without duplicating either record.
@@ -500,8 +535,8 @@ class DeepAgentsRuntime:
             if (not r.message_queue.current_input(conn, scope.run_id, scope.message_id, input_id)
                     or r.message_queue.pending_input(conn, scope.run_id, scope.message_id)):
                 return
-            self.journal.exchange_in(conn, run, {'action': 'append', 'entries': [
-                {'id': identity, 'message': {'role': 'assistant', 'content': text}}]})
+            self.journal.exchange_in(conn, run, {'action': 'append', 'entries': entries},
+                                     prepared_entries=prepared, expected_epoch=expected_epoch)
             record(conn, scope.run_id, public_text(text, None),
                    {'phase': 'commentary', 'activity_version': 1, 'input_id': input_id,
                     'activity_id': identity}, now())

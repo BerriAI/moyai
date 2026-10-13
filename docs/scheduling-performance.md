@@ -121,3 +121,64 @@ pool, goal mutation/review, and a concurrently held schema writer.
 stream and checks heartbeat responsiveness separately from response latency.
 The scheduling CI job runs both regressions. These checks establish the
 contention behavior; they do not establish a production throughput limit.
+
+## Connection and transaction ownership
+
+An operation holding a connection must pass that connection to every database
+helper it calls. `Store.rows(..., connection=conn)` and service helpers with a
+`connection` argument reuse it. Do not open another `Store.connect()` or call a
+helper that borrows internally, even for a read. A second connection may wait
+for the caller's own transaction or exhaust a one-connection pool.
+
+`NestedDatabaseConnectionError` rejects this programming error before pool
+admission on both backends. The error names the two code locations without SQL,
+parameters or secrets; it is not a transient busy response and must not trigger
+a write retry. Scope ownership follows offloaded work, while independent
+threads/stores and callbacks after commit can borrow normally.
+
+Use `await database(operation, ...)` for synchronous database work from async
+request or background code. The whole transaction opens and closes in that
+operation's thread. The helper drains its worker even after repeated
+cancellation, then preserves the first cancellation and any operation failure.
+It does not make an unavailable pool available: the waiting request still waits,
+but heartbeats and unrelated async work can run.
+
+Storage reads/writes and provider HTTP calls belong outside database transactions.
+Artifact and journal publication stage bytes first, then take a short transaction
+to revalidate the capability, immutable upload inventory and current journal
+epoch before publishing receipts. Retried acknowledgements use their existing
+receipt even during an object-store outage. Journal delivery, answer events and
+steering checks still commit together.
+
+Model admission allocates its receipt ID before offload, then commits the request
+counter, spend row and broker claim atomically. Finalization has one retained
+owner: transport close failures do not skip accounting or checkpoints, confirmed
+completion cannot be downgraded by late cancellation, and a cancelled route
+remains cancelled if cleanup also fails. Context maintenance similarly retains
+admission, generator and fallback-cleanup ownership through shutdown, including
+jobs cancelled before their coroutine starts.
+
+The `boundaries` CI job exercises these contracts with SQLite and real PostgreSQL.
+The one-connection tests cover credentials, skills, memory, automation, GitHub
+consent, Slack publication/card callbacks, retained session deletion and duplicate
+submissions. Storage tests hold I/O while another writer progresses
+and race revocation/inventory changes against publication. Background contention
+tests measure heartbeat latency separately from request duration, including
+deletion cleanup. Contention fixtures hold their competing transaction in an
+independent thread so they exercise another operation, rather than an accidental
+nested checkout in the test itself.
+
+For a live intake check, start the actual application against an isolated local
+PostgreSQL schema with `MOYAI_DATABASE_POOL_SIZE=1` and workspace authentication
+enabled. Set `MOYAI_PROBE_PASSWORD` privately, then run:
+
+```
+uv run python scripts/database_boundary_probe.py --url http://127.0.0.1:8787 --output /tmp/database-boundary.json
+```
+
+The probe creates a session using the built-in `/session-id` command, replays the
+same submission ID, and starts an independent session concurrently. It checks
+that the replay returns the original session promptly and leaves exactly one
+user input and one answer. The command is handled by Moyai itself without a
+model or sandbox; this is a live HTTP intake/receipt test, not inference proof.
+It leaves two safe test sessions in the local app.

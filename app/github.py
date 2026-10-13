@@ -240,8 +240,8 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             initialize_schema(store)
         self.context_index = RepositoryContext(self)
 
-    def app_config(self):
-        rows = self.store.rows('SELECT encrypted FROM github_app WHERE id=1')
+    def app_config(self, *, connection=None):
+        rows = self.store.rows('SELECT encrypted FROM github_app WHERE id=1', connection=connection)
         return json.loads(self.security.decrypt(rows[0]['encrypted'])) if rows else {}
 
     def save_app(self, config):
@@ -558,11 +558,11 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             value['url'] = current + value['url'][len(previous):]
         return {**value, 'repository_id': target, 'repository': self.repository_name(target)}
 
-    def connection_version(self):
-        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='github'")
+    def connection_version(self, *, connection=None):
+        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='github'", connection=connection)
         # Hash authorization, not mutable names or labels. Legacy migration
         # enriches the app owner before upgrading completed publication receipts.
-        config = self.app_config()
+        config = self.app_config(connection=connection)
         app_identity = json.dumps({k: config.get(k) for k in ('id', 'pem', 'owner_id')}, sort_keys=True)
         return hashlib.sha256(((rows[0]['encrypted'] if rows else '') + app_identity).encode()).hexdigest()
 

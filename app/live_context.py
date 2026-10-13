@@ -8,6 +8,7 @@ import time
 from fastapi import HTTPException
 
 from .context_budget import Budget, ContextBudget, ContextPressure
+from .db import database
 
 
 START_FRACTION = .75
@@ -204,6 +205,8 @@ class LiveContext:
             raise HTTPException(409, 'The originating model is no longer available.') from None
         if self.scope(current, selected) != self.scope(run, model):
             raise HTTPException(409, 'The originating response or model has changed.')
+        if state is not None and state.retired.is_set():
+            raise HTTPException(409, 'The originating context is no longer active.')
         return current
 
     async def watch(self) -> None:
@@ -213,7 +216,7 @@ class LiveContext:
             await asyncio.sleep(1)
             for key, state in list(self.states.items()):
                 try:
-                    run = self.gateway.require_run(key[0], state.request)
+                    run = await database(self.gateway.require_run, key[0], state.request)
                     model = self.gateway.settings.resolve_model(fallback=run['active_model'] or run['model'])
                     valid = self.scope(run, model) == state.scope
                 except Exception:
@@ -268,7 +271,7 @@ class LiveContext:
                        route: str, model: str) -> None:
         try:
             text = await self.gateway.summarize_private(run, request, captured.history, model)
-            current = self.gateway.require_run(run['id'], request)
+            current = await database(self.gateway.require_run, run['id'], request)
             current_model = self.gateway.settings.resolve_model(fallback=current['active_model'] or current['model'])
             if (self.closed or self.scope(current, current_model) != state.scope
                     or not any(value is state for value in self.states.values())):
@@ -319,22 +322,30 @@ class LiveContext:
         if self.closed or not isinstance(original, list) or not all(isinstance(item, dict) for item in original):
             return payload, await self.gateway.context_budget.check(payload, scope=run['id'] + route)
         hashes = tuple(part[0] for part in ContextBudget.fingerprint({field_name: original})[1])
-        self.require_current(run, request, payload['model'])
+        await database(self.require_current, run, request, payload['model'])
         state = self.state(run, route, payload['model'], request)
         if state is None:
             budget = await self.gateway.context_budget.check(payload, scope=run['id'] + route)
-            self.require_current(run, request, payload['model'])
+            await database(self.require_current, run, request, payload['model'])
             return payload, budget
         state.borrowers += 1
         try:
             for attempt in range(4):
-                self.require_current(run, request, payload['model'], state)
+                await database(self.require_current, run, request, payload['model'], state)
                 matching = [value for value in state.projections if hashes[:len(value.hashes)] == value.hashes]
                 previous = max(matching, key=lambda value: len(value.hashes), default=None)
                 items = previous.replacement + original[len(previous.hashes):] if previous else original
                 projected = {**payload, field_name: items}
                 budget = await self.gateway.context_budget.measure(projected, scope=run['id'] + route)
-                self.require_current(run, request, payload['model'], state)
+                await database(self.require_current, run, request, payload['model'], state)
+                # A summary can finish during token counting or the database
+                # recheck. Re-measure that projection instead of scheduling the
+                # already completed prefix again from this stale snapshot.
+                latest = max((value for value in state.projections
+                    if hashes[:len(value.hashes)] == value.hashes),
+                    key=lambda value: len(value.hashes), default=None)
+                if latest is not previous:
+                    continue
                 pressured = budget.input_tokens > budget.input_budget
                 if budget.input_tokens < budget.input_budget * START_FRACTION:
                     return projected, budget
@@ -362,7 +373,7 @@ class LiveContext:
                     # room, then schedule our own prefix; never adopt its summary.
                     waiting = state.pending.values() if len(state.pending) >= MAX_PENDING else self.tasks
                     await self.wait(state, list(waiting))
-                    self.require_current(run, request, payload['model'], state)
+                    await database(self.require_current, run, request, payload['model'], state)
                     continue
                 if not pending or attempt == 3:
                     raise ContextPressure(budget.public())

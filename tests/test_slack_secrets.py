@@ -147,11 +147,34 @@ def test_broker_discovers_and_executes_personal_reads(personal, workspace, monke
     assert result.json() == {'ok': True, 'messages': {'matches': []}}
 
 
-async def test_session_lifetime_is_enforced(personal):
+@pytest.mark.parametrize('scope', ['matching', 'different', 'changed_during_request'])
+async def test_session_lifetime_is_enforced(personal, monkeypatch, scope):
     app, run, request_id, secret_id = personal
-    app.state.store.execute("UPDATE provider_secrets SET lifetime='session',root_id='different-root' WHERE id=?", (secret_id,))
-    with pytest.raises(HTTPException):
-        await app.state.credentials.call(run, 'slack_personal_search', {'request_id': request_id, 'query': 'private'})
+    store = app.state.store
+    store.execute("UPDATE provider_secrets SET lifetime='session',root_id=? WHERE id=?",
+                  ('different-root' if scope == 'different' else run['id'], secret_id))
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        assert request.headers['authorization'] == 'Bearer ' + TOKEN
+        if scope == 'changed_during_request':
+            store.execute("UPDATE provider_secrets SET root_id='different-root' WHERE id=?", (secret_id,))
+        return httpx.Response(200, json={'ok': True, 'messages': [{'text': 'private message'}]})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr('app.slack_secrets.httpx.AsyncClient', lambda **kw: original(
+        transport=httpx.MockTransport(respond), **kw))
+    if scope == 'matching':
+        result = await app.state.credentials.call(
+            run, 'slack_personal_search', {'request_id': request_id, 'query': 'private'})
+        assert result == {'ok': True, 'messages': [{'text': 'private message'}]}
+    else:
+        with pytest.raises(HTTPException) as denied:
+            await app.state.credentials.call(
+                run, 'slack_personal_search', {'request_id': request_id, 'query': 'private'})
+        assert denied.value.status_code == 403
+    assert len(calls) == (0 if scope == 'different' else 1)
 
 
 @pytest.mark.parametrize('change', ['requester', 'policy', 'rotation'])

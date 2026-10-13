@@ -5,6 +5,8 @@ has a manifest and explicit commit, so a missing checkpoint cannot bless a
 partial import. Provider/private state remains in native_sessions.
 """
 import base64
+from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 import json
 from uuid import uuid4
@@ -13,6 +15,9 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.memory_history import scrub_memory_history
+
+
+_UNSPECIFIED = object()
 
 
 class ReadHistory(BaseModel):
@@ -58,29 +63,237 @@ def initialize_schema(store):
         PRIMARY KEY(run_id,upload_id))''')
 
 
+@dataclass(frozen=True)
+class PreparedEntry:
+    item_id: str
+    raw: bytes
+    digest: str
+    reference: str
+
+
 class SessionJournal:
     def __init__(self, store):
         self.store = store
         if store.schema_updates:
             initialize_schema(store)
 
-    def exchange(self, caller, body):
-        with self.store.connect(write_scope=caller['id']) as conn:
-            conn.begin_write()
-            return self.exchange_in(conn, caller, body)
-
-    def exchange_in(self, conn, caller, body):
-        """Use an existing write transaction to couple publication to its receipt."""
-        if not isinstance(body, dict):
-            raise HTTPException(422, 'Expected a conversation request object.')
+    def require(self, conn, caller):
         current = conn.execute('SELECT * FROM runs WHERE id=?', (caller['id'],)).fetchone()
         if (not current or current['deleted_at'] or current['deletion_requested_at'] or
                 current['status'] not in {'running', 'reconnecting', 'awaiting_approval'} or
                 any(current[key] != caller[key] for key in ('token_hash', 'active_message_id', 'active_user_id'))):
             raise HTTPException(409, 'The execution owner changed. Reload the active conversation.')
-        return self._exchange(conn, caller['id'], body)
 
-    def _exchange(self, conn, run_id, body):
+    @staticmethod
+    def entry_id(entry):
+        if (not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or not entry['id'] or
+                not isinstance(entry.get('message'), dict) or
+                entry['message'].get('role') not in {'user', 'assistant', 'tool', 'system', 'developer'}):
+            raise HTTPException(422, 'Each item needs a stable id and a typed message.')
+        return entry['id']
+
+    def known_entries(self, conn, run_id, entries):
+        if not isinstance(entries, list):
+            raise HTTPException(422, 'entries must be a list of identified conversation items.')
+        identities = list(dict.fromkeys(self.entry_id(entry) for entry in entries))
+        known = {}
+        for offset in range(0, len(identities), 400):
+            selected = identities[offset:offset + 400]
+            for row in conn.execute(
+                    'SELECT item_id,reference,digest FROM session_items WHERE run_id=? AND item_id IN ('
+                    + ','.join('?' for _ in selected) + ')', (run_id, *selected)):
+                known[row['item_id']] = dict(row)
+        return known
+
+    def prepare_entries(self, entries, *, known=None):
+        """Stage immutable bytes before opening the publication transaction."""
+        if not isinstance(entries, list):
+            raise HTTPException(422, 'entries must be a list of identified conversation items.')
+        prepared = []
+        available = dict(known or {})
+        for entry in entries:
+            item_id = self.entry_id(entry)
+            raw = encoded(scrub_memory_history([entry['message']])[0]).encode()
+            digest = hashlib.sha256(raw).hexdigest()
+            previous = available.get(item_id)
+            if previous and previous['digest'] != digest:
+                raise HTTPException(409, 'This item identity already records different content.')
+            reference = (previous['reference'] if previous else
+                         self.store.objects.put(raw) if self.store.objects.enabled else '')
+            prepared.append(PreparedEntry(item_id, raw, digest, reference))
+            available[item_id] = {'digest': digest, 'reference': reference}
+        return tuple(prepared)
+
+    @staticmethod
+    def epoch_in(conn, run_id):
+        row = conn.execute('SELECT epoch FROM session_journals WHERE run_id=?', (run_id,)).fetchone()
+        return row['epoch'] if row else None
+
+    def require_epoch(self, conn, run_id, expected):
+        if self.epoch_in(conn, run_id) != expected:
+            raise HTTPException(409, 'The conversation journal changed while preparing its contents. Reload it.')
+
+    def exchange(self, caller, body):
+        if not isinstance(body, dict):
+            raise HTTPException(422, 'Expected a conversation request object.')
+        body = deepcopy(body)
+        if body.get('action') in {'read', 'state'}:
+            return self.read(caller, body)
+        if body.get('action') == 'commit_upload':
+            return self.commit_upload(caller, body)
+        prepared = None
+        expected_epoch = _UNSPECIFIED
+        if body.get('action') in {'append', 'import'}:
+            with self.store.connect() as conn:
+                conn.begin_read()
+                self.require(conn, caller)
+                journal = conn.execute('SELECT * FROM session_journals WHERE run_id=?', (caller['id'],)).fetchone()
+                expected_epoch = journal['epoch'] if journal else None
+                if not isinstance(body.get('entries'), list):
+                    raise HTTPException(422, 'entries must be a list of identified conversation items.')
+                if body['action'] == 'import' and journal and journal['imported']:
+                    return self.state(conn, caller['id'], journal)
+                if body['action'] == 'append' and (not journal or not journal['imported']):
+                    raise HTTPException(409, 'Finish the legacy conversation import before appending new work.')
+                known = self.known_entries(conn, caller['id'], body['entries'])
+            prepared = self.prepare_entries(body['entries'], known=known)
+        with self.store.connect(write_scope=caller['id']) as conn:
+            conn.begin_write()
+            return self.exchange_in(conn, caller, body, prepared_entries=prepared, expected_epoch=expected_epoch)
+
+    def exchange_in(self, conn, caller, body, *, prepared_entries=None, expected_epoch=_UNSPECIFIED):
+        """Couple staged publication to a receipt without storage I/O in the transaction."""
+        if not isinstance(body, dict):
+            raise HTTPException(422, 'Expected a conversation request object.')
+        self.require(conn, caller)
+        if expected_epoch is not _UNSPECIFIED:
+            self.require_epoch(conn, caller['id'], expected_epoch)
+        return self._exchange(conn, caller['id'], body, prepared_entries=prepared_entries)
+
+    @staticmethod
+    def upload_receipt(conn, run_id, upload, digest):
+        receipt = conn.execute('SELECT * FROM session_upload_receipts WHERE run_id=? AND upload_id=?',
+                               (run_id, upload)).fetchone()
+        if receipt and receipt['digest'] != digest:
+            raise HTTPException(409, 'This upload identity already records different content.')
+        return json.loads(receipt['response']) if receipt else None
+
+    @staticmethod
+    def upload_parts(conn, run_id, upload):
+        return [(row['part'], row['data']) for row in conn.execute(
+            'SELECT part,data FROM session_uploads WHERE run_id=? AND upload_id=? ORDER BY part', (run_id, upload))]
+
+    def commit_upload(self, caller, body):
+        upload, count, digest = body.get('id'), body.get('parts'), body.get('sha256')
+        if not isinstance(upload, str) or type(count) is not int or count < 1 or not isinstance(digest, str):
+            raise HTTPException(422, 'Invalid conversation upload manifest.')
+        with self.store.connect() as conn:
+            conn.begin_read()
+            self.require(conn, caller)
+            receipt = self.upload_receipt(conn, caller['id'], upload, digest)
+            if receipt is not None:
+                return receipt
+            expected_epoch = self.epoch_in(conn, caller['id'])
+            parts = self.upload_parts(conn, caller['id'], upload)
+        if [number for number, _ in parts] != list(range(count)):
+            raise HTTPException(409, 'Conversation upload is incomplete. Resend its parts.')
+        raw = b''.join(base64.b64decode(data) for _, data in parts)
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise HTTPException(409, 'Conversation upload failed integrity verification.')
+        try:
+            request = json.loads(raw)
+        except ValueError:
+            raise HTTPException(422, 'Invalid uploaded conversation JSON.') from None
+        if not isinstance(request, dict) or request.get('action') not in {'append', 'import'}:
+            raise HTTPException(422, 'Only conversation items can be uploaded.')
+        with self.store.connect() as conn:
+            conn.begin_read()
+            self.require(conn, caller)
+            self.require_epoch(conn, caller['id'], expected_epoch)
+            journal = conn.execute('SELECT * FROM session_journals WHERE run_id=?', (caller['id'],)).fetchone()
+            imported = request['action'] == 'import' and journal and journal['imported']
+            known = {} if imported else self.known_entries(conn, caller['id'], request.get('entries'))
+        prepared = None if imported else self.prepare_entries(request.get('entries'), known=known)
+        with self.store.connect(write_scope=caller['id']) as conn:
+            conn.begin_write()
+            self.require(conn, caller)
+            receipt = self.upload_receipt(conn, caller['id'], upload, digest)
+            if receipt is not None:
+                return receipt
+            if self.upload_parts(conn, caller['id'], upload) != parts:
+                raise HTTPException(409, 'Conversation upload changed while preparing its contents. Retry the commit.')
+            result = self.exchange_in(conn, caller, request, prepared_entries=prepared, expected_epoch=expected_epoch)
+            conn.execute('INSERT INTO session_upload_receipts VALUES(?,?,?,?)',
+                         (caller['id'], upload, digest, encoded(result)))
+            conn.execute('DELETE FROM session_uploads WHERE run_id=? AND upload_id=?', (caller['id'], upload))
+            return result
+
+    def read(self, caller, body):
+        run_id, action = caller['id'], body['action']
+        with self.store.connect() as conn:
+            conn.begin_read()
+            self.require(conn, caller)
+            journal = conn.execute('SELECT * FROM session_journals WHERE run_id=?', (run_id,)).fetchone()
+            if journal is not None:
+                state = self.state(conn, run_id, journal)
+                if action == 'state':
+                    return state
+                if not journal['imported']:
+                    raise HTTPException(409, 'The legacy conversation import is incomplete.')
+                after, limit = body.get('after', 0), body.get('limit', 100)
+                if type(after) is not int or after < 0 or type(limit) is not int or limit < 1:
+                    raise HTTPException(422, 'Use a nonnegative cursor and a positive page size.')
+                single = body.get('seq') is not None
+                if single:
+                    seq, offset, characters = body['seq'], body.get('offset', 0), body.get('characters')
+                    if (type(seq) is not int or seq < 1 or type(offset) is not int or offset < 0 or
+                            (characters is not None and (type(characters) is not int or characters < 1))):
+                        raise HTTPException(422, 'Use a positive sequence and range size with a nonnegative offset.')
+                    item = conn.execute('SELECT * FROM session_items WHERE run_id=? AND seq=?', (run_id, seq)).fetchone()
+                    if not item:
+                        raise HTTPException(404, 'Conversation item not found.')
+                    rows = [dict(item)]
+                else:
+                    rows = [dict(row) for row in conn.execute(
+                        'SELECT * FROM session_items WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?',
+                        (run_id, after, limit + 1))]
+                    state['next'] = rows[limit - 1]['seq'] if len(rows) > limit else None
+                    rows = rows[:limit]
+                epoch = journal['epoch']
+        if journal is None:
+            if action == 'read':
+                raise HTTPException(409, 'The legacy conversation import is incomplete.')
+            # The only write needed for state discovery is lazy initialization.
+            with self.store.connect(write_scope=run_id) as conn:
+                conn.begin_write()
+                return self.exchange_in(conn, caller, body)
+        values = [self.store.objects.read(row['reference'], row['size']).decode()
+                  if row['reference'] else row['message'] for row in rows]
+        # Storage can be slow. Revalidate authority and the immutable inventory
+        # after the fetch, without retaining a transaction or pool slot for I/O.
+        with self.store.connect() as conn:
+            conn.begin_read()
+            self.require(conn, caller)
+            current = conn.execute('SELECT epoch,imported FROM session_journals WHERE run_id=?', (run_id,)).fetchone()
+            if not current or current['epoch'] != epoch or not current['imported']:
+                raise HTTPException(409, 'The conversation journal changed while reading.')
+            latest = [dict(row) for row in conn.execute(
+                'SELECT * FROM session_items WHERE run_id=? AND seq>=? AND seq<=? ORDER BY seq',
+                (run_id, rows[0]['seq'], rows[-1]['seq']))] if rows else []
+            if latest != rows:
+                raise HTTPException(409, 'Conversation items changed while reading. Retry the read.')
+        if single:
+            item, raw = rows[0], values[0]
+            text = raw[offset:offset + characters] if characters else raw[offset:]
+            state['entry'] = {'seq': item['seq'], 'id': item['item_id'], 'text': text, 'offset': offset,
+                'characters': len(raw), 'sha256': item['digest'],
+                'next_offset': offset + len(text) if offset + len(text) < len(raw) else None}
+        else:
+            state['entries'] = [{'seq': row['seq'], 'id': row['item_id'], 'message': json.loads(raw)}
+                                for row, raw in zip(rows, values)]
+        return state
+
+    def _exchange(self, conn, run_id, body, *, prepared_entries=None):
         action = body.get('action')
         if action == 'upload':
             upload, part, data = body.get('id'), body.get('part'), body.get('data')
@@ -98,33 +311,7 @@ class SessionJournal:
                 raise HTTPException(409, 'An upload part already records different content.')
             conn.execute('INSERT INTO session_uploads VALUES(?,?,?,?) ON CONFLICT DO NOTHING', (run_id, upload, part, data))
             return {'uploaded': part}
-        if action == 'commit_upload':
-            upload, count, digest = body.get('id'), body.get('parts'), body.get('sha256')
-            if not isinstance(upload, str) or type(count) is not int or count < 1 or not isinstance(digest, str):
-                raise HTTPException(422, 'Invalid conversation upload manifest.')
-            receipt = conn.execute('SELECT * FROM session_upload_receipts WHERE run_id=? AND upload_id=?', (run_id, upload)).fetchone()
-            if receipt:
-                if receipt['digest'] != digest:
-                    raise HTTPException(409, 'This upload identity already records different content.')
-                return json.loads(receipt['response'])
-            rows = conn.execute('SELECT part,data FROM session_uploads WHERE run_id=? AND upload_id=? ORDER BY part',
-                                (run_id, upload)).fetchall()
-            if [row['part'] for row in rows] != list(range(count)):
-                raise HTTPException(409, 'Conversation upload is incomplete. Resend its parts.')
-            raw = b''.join(base64.b64decode(row['data']) for row in rows)
-            if hashlib.sha256(raw).hexdigest() != digest:
-                raise HTTPException(409, 'Conversation upload failed integrity verification.')
-            try:
-                request = json.loads(raw)
-            except ValueError:
-                raise HTTPException(422, 'Invalid uploaded conversation JSON.') from None
-            if not isinstance(request, dict) or request.get('action') not in {'append', 'import'}:
-                raise HTTPException(422, 'Only conversation items can be uploaded.')
-            result = self._exchange(conn, run_id, request)
-            conn.execute('INSERT INTO session_upload_receipts VALUES(?,?,?,?)', (run_id, upload, digest, encoded(result)))
-            conn.execute('DELETE FROM session_uploads WHERE run_id=? AND upload_id=?', (run_id, upload))
-            return result
-        if action not in {'state', 'import', 'append', 'read'}:
+        if action not in {'state', 'import', 'append'}:
             raise HTTPException(422, 'Choose state, import, append, or read.')
         row = conn.execute('SELECT * FROM session_journals WHERE run_id=?', (run_id,)).fetchone()
         if row is None:
@@ -148,57 +335,28 @@ class SessionJournal:
                 row = {**dict(row), 'import_id': manifest['id'], 'import_count': manifest['count']}
             elif not row['imported']:
                 raise HTTPException(409, 'Finish the legacy conversation import before appending new work.')
-            for entry in entries:
-                if (not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or not entry['id'] or
-                        not isinstance(entry.get('message'), dict) or
-                        entry['message'].get('role') not in {'user', 'assistant', 'tool', 'system', 'developer'}):
-                    raise HTTPException(422, 'Each item needs a stable id and a typed message.')
-                raw = encoded(scrub_memory_history([entry['message']])[0]).encode()
-                digest = hashlib.sha256(raw).hexdigest()
-                old = conn.execute('SELECT digest FROM session_items WHERE run_id=? AND item_id=?', (run_id, entry['id'])).fetchone()
+            if prepared_entries is None or len(prepared_entries) != len(entries):
+                raise ValueError('Prepare journal entries before opening a publication transaction.')
+            for source, entry in zip(entries, prepared_entries):
+                if source.get('id') != entry.item_id:
+                    raise ValueError('Prepared journal entry identity changed.')
+                old = conn.execute('SELECT digest FROM session_items WHERE run_id=? AND item_id=?',
+                                   (run_id, entry.item_id)).fetchone()
                 if old:
-                    if old['digest'] != digest:
+                    if old['digest'] != entry.digest:
                         raise HTTPException(409, 'This item identity already records different content.')
                     continue
                 seq = conn.execute('SELECT coalesce(max(seq),0)+1 FROM session_items WHERE run_id=?', (run_id,)).fetchone()[0]
-                # Object storage is the production payload owner. Local/eval
-                # mode uses the same contract with the database as its backend.
-                reference = self.store.objects.put(raw) if self.store.objects.enabled else ''
                 conn.execute('INSERT INTO session_items VALUES(?,?,?,?,?,?,?)',
-                             (run_id, seq, entry['id'], '' if reference else raw.decode(), reference, len(raw), digest))
+                             (run_id, seq, entry.item_id, '' if entry.reference else entry.raw.decode(),
+                              entry.reference, len(entry.raw), entry.digest))
             if action == 'import' and body.get('complete') is True:
                 count = conn.execute('SELECT count(*) FROM session_items WHERE run_id=?', (run_id,)).fetchone()[0]
                 if count != row['import_count']:
                     raise HTTPException(409, 'Legacy conversation import is incomplete.')
                 conn.execute('UPDATE session_journals SET imported=1 WHERE run_id=?', (run_id,))
                 row = {**dict(row), 'imported': 1}
-        state = self.state(conn, run_id, row)
-        if action == 'read':
-            if not row['imported']:
-                raise HTTPException(409, 'The legacy conversation import is incomplete.')
-            after, limit = body.get('after', 0), body.get('limit', 100)
-            if type(after) is not int or after < 0 or type(limit) is not int or limit < 1:
-                raise HTTPException(422, 'Use a nonnegative cursor and a positive page size.')
-            if body.get('seq') is not None:
-                seq, offset, characters = body['seq'], body.get('offset', 0), body.get('characters')
-                if (type(seq) is not int or seq < 1 or type(offset) is not int or offset < 0 or
-                        (characters is not None and (type(characters) is not int or characters < 1))):
-                    raise HTTPException(422, 'Use a positive sequence and range size with a nonnegative offset.')
-                item = conn.execute('SELECT * FROM session_items WHERE run_id=? AND seq=?', (run_id, seq)).fetchone()
-                if not item:
-                    raise HTTPException(404, 'Conversation item not found.')
-                raw = self.store.objects.read(item['reference'], item['size']).decode() if item['reference'] else item['message']
-                text = raw[offset:offset + characters] if characters else raw[offset:]
-                state['entry'] = {'seq': seq, 'id': item['item_id'], 'text': text, 'offset': offset,
-                    'characters': len(raw), 'sha256': item['digest'],
-                    'next_offset': offset + len(text) if offset + len(text) < len(raw) else None}
-            else:
-                rows = conn.execute('SELECT * FROM session_items WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?',
-                                    (run_id, after, limit + 1)).fetchall()
-                state['entries'] = [{'seq': r['seq'], 'id': r['item_id'], 'message': json.loads(
-                    self.store.objects.read(r['reference'], r['size']) if r['reference'] else r['message'])} for r in rows[:limit]]
-                state['next'] = rows[limit - 1]['seq'] if len(rows) > limit else None
-        return state
+        return self.state(conn, run_id, row)
 
     @staticmethod
     def state(conn, run_id, row):

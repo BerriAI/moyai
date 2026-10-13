@@ -35,12 +35,12 @@ def metadata(size=len(CONTENT), **extra):
 @pytest.fixture
 def reader(monkeypatch):
     connectors = SimpleNamespace(
-        slack_installation=lambda: {'team_id': TEAM},
+        slack_installation=lambda *, connection=None: {'team_id': TEAM},
         slack_bot_token=AsyncMock(return_value='xoxb-secret'),
         request=AsyncMock(return_value=metadata()))
     owner = SimpleNamespace(connectors=connectors,
         settings=SimpleNamespace(attachment_storage_limit_mb=1),
-        status=lambda: {'enabled': True})
+        status=lambda *, connection=None: {'enabled': True})
     files = SlackFiles(owner)
     monkeypatch.setattr(slack_files, 'RETRY_DELAY_SECONDS', .001)
     return files, connectors
@@ -349,7 +349,8 @@ async def test_cancellation_is_not_a_retry_and_closes_file(reader, monkeypatch):
     assert len(calls) == connectors.request.await_count == 1 and handles[0].closed
 
 
-async def test_cancellation_drains_inspection_before_closing_file(reader, monkeypatch):
+@pytest.mark.parametrize('cancellations', [1, 2])
+async def test_cancellation_drains_inspection_before_closing_file(reader, monkeypatch, cancellations):
     files, _ = reader
     _, handles = downloads(monkeypatch, {})
     entered, release = threading.Event(), threading.Event()
@@ -364,9 +365,10 @@ async def test_cancellation_drains_inspection_before_closing_file(reader, monkey
     task = asyncio.create_task(files.read(FILE['id'], TEAM))
     try:
         assert await asyncio.to_thread(entered.wait, 2)
-        task.cancel()
-        await asyncio.sleep(.01)
-        assert not task.done() and not handles[0].closed
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(.01)
+            assert not task.done() and not handles[0].closed
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
@@ -383,7 +385,7 @@ async def test_access_revocation_before_retry_does_not_fetch_again(reader, monke
         result = await original(*args, **kwargs)
         # First post-metadata access check is allowed; the retry must recheck.
         checks = 0
-        def installed():
+        def installed(*, connection=None):
             nonlocal checks
             checks += 1
             return {'team_id': TEAM if checks == 1 else 'T87654321'}
