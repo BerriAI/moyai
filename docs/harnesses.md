@@ -364,6 +364,38 @@ If a request cannot fit, it waits for relevant compaction before taking a model
 slot, then validates the resulting input again. Summary failure preserves the
 original history and the last valid projection. If reduction cannot make the
 request fit, the existing typed context-recovery path remains available.
+
+Private model-input summaries have no fixed byte-length target. A complete,
+nonempty, tool-free summary is eligible for adoption when it meaningfully reduces
+the captured span and fits the bounded projection cache. The next model request
+is counted again with the selected model's input/output allocation, all retained
+instructions and media, tool schemas, and the exact appended tail. Fitting requests
+continue; requests still over budget wait for further reduction rather than bypassing
+the context check. The 5 MiB transport safety ceiling and raw-response size bound
+remain in force. This is separate from the public journal's persisted summary-byte
+allocation and atomic cursor contract, which are unchanged.
+
+Do not turn a private summary's concision preference into an unrelated hard
+acceptance threshold. The October 11 incident returned complete summaries above
+6,000 bytes, but the old fixed ceiling rejected them before the actual projected
+request could be checked. Regression coverage exercises that failure with ASCII
+and multibyte summaries through authenticated HTTP, including background progress,
+hard-pressure waiting, exact tail preservation, accounting, and unchanged safety
+limits. Remaining summary failures expose only an allowlisted `compaction_reason`
+in structured diagnostics; private summary text and provider bodies remain omitted.
+
+The design follows documented context-management principles, not a claimed copy
+of another product's private implementation:
+
+- [Cognition's context engineering principles](https://cognition.com/blog/dont-build-multi-agents)
+  describe compressing action history while retaining important decisions and events.
+  They do not publish Devin's precise summary-size policy.
+- [Anthropic's context engineering guidance](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+  prioritizes recall of decisions and unresolved work over overly aggressive compression.
+- [LangChain's summarization middleware](https://docs.langchain.com/oss/python/langchain/middleware/built-in#summarization)
+  uses token/context thresholds and preserves recent messages. Moyai retains its
+  existing background scheduling rather than adding a second summarization owner.
+
 Summaries share ordinary model concurrency, request limits and usage accounting;
 foreground work can preempt maintenance. Output allowances are unchanged.
 

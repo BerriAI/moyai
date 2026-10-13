@@ -18,6 +18,7 @@ from .context_compaction import compaction_payload, private_compaction_payload, 
 from .context_budget import ContextPressure, provider_context_rejection
 from .broker_diagnostics import model_gateway_error, upstream_headers, model_error, model_stage
 from sandbox.broker_failure import provider_error
+from sandbox.broker_transport import MAX_BODY
 from .model_selection import ASTRA_ULTRAFAST, gateway_payload
 
 
@@ -165,9 +166,9 @@ class HarnessGateway:
             compaction_body={'system': system, 'data': data}, expected_run=dict(run))
         return json.loads(response.body)['text']
 
-    async def summarize_private(self, run, request, history: list[str], model: str, summary_bytes: int) -> str:
+    async def summarize_private(self, run, request, history: list[str], model: str) -> str:
         response = await self.summarize(run['id'], request,
-            {'history': history.copy(), 'summary_bytes': summary_bytes},
+            {'history': history.copy()},
             expected_run=dict(run), private=True, expected_model=model)
         return json.loads(response.body)['summary']
 
@@ -295,6 +296,8 @@ class HarnessGateway:
                 payload = {'model': model, 'stream': False, 'messages': [
                     {'role': 'system', 'content': body['system']},
                     {'role': 'user', 'content': json.dumps(body['data'], ensure_ascii=False)}]}
+            elif private:
+                payload = private_compaction_payload(body['history'], model, attempt)
             elif compact:
                 limits = await self.context_budget.limits(model)
                 allocation = max(1, min(limits.max_input_tokens, limits.context_window -
@@ -306,9 +309,8 @@ class HarnessGateway:
                     raise HTTPException(422, 'Summary allocation exceeds the selected model context budget.')
                 # Both summary paths omit injections and content tracing. Only
                 # the public journal protocol can return a durable partial cursor.
-                payload = (private_compaction_payload(body['history'], model, body['summary_bytes'], attempt)
-                           if private else compaction_payload(body, model, attempt))
-                partial_cursor = not private and type(body.get('cursor_protocol')) is int and body['cursor_protocol'] == 1
+                payload = compaction_payload(body, model, attempt)
+                partial_cursor = type(body.get('cursor_protocol')) is int and body['cursor_protocol'] == 1
             else:
                 if self.native_sessions is not None:
                     self.native_sessions.observe_scope(run)
@@ -414,7 +416,7 @@ class HarnessGateway:
                 capture.feed(bytes(raw))
                 capture.finish()
                 result = (JSONResponse({'text': compaction_result(raw)['summary']}) if assessment else
-                          JSONResponse({**compaction_result(raw, body['summary_bytes']),
+                          JSONResponse({**compaction_result(raw, MAX_BODY if private else body['summary_bytes']),
                                        **({} if private else {'through_seq': body['entries'][-1]['seq']})})
                           if compact else Response(bytes(raw), media_type='application/json',
                                                    headers=upstream_headers(request_id, upstream)))

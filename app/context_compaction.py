@@ -77,19 +77,17 @@ def compaction_payload(body, model, attempt=0):
                              {'previous_summary': body['summary'], 'new_records': entries}, ensure_ascii=False)}]}
 
 
-def private_compaction_payload(history: list[str], model: str, summary_bytes: int, attempt: int = 0) -> dict:
+def private_compaction_payload(history: list[str], model: str, attempt: int = 0) -> dict:
     """A complete private prefix, never a durable journal excerpt or partial cursor."""
     if not isinstance(history, list) or not history or not all(isinstance(item, str) for item in history):
         raise HTTPException(422, 'Expected a complete private history prefix.')
-    if type(summary_bytes) is not int or summary_bytes < 1:
-        raise HTTPException(422, 'Invalid private-summary budget.')
     try:
         content = json.dumps(history, ensure_ascii=False)
         if len(content.encode()) > MAX_BODY:
             raise ValueError('oversized')
     except (ValueError, UnicodeError):
         raise HTTPException(422, 'Private compaction input exceeded its limit.') from None
-    instructions = PRIVATE_INSTRUCTIONS + f'\nFit {summary_bytes} UTF-8 bytes. Aim for half that size.'
+    instructions = PRIVATE_INSTRUCTIONS
     if attempt:
         instructions += (f'\nRecovery attempt {attempt}: the previous generation was not accepted. '
                          'Rewrite the entire original prefix more concisely. '
