@@ -1,4 +1,5 @@
 """Load the same instructions for production and evaluations."""
+import json
 from pathlib import Path
 from agent.skills import catalog
 from agent.repository_guidance import resolve as repository_guidance
@@ -52,4 +53,10 @@ def system_prompt(spec, *, workspace=Path('/workspace'), session=Path('/session'
         )
     if spec.get('project_environment'):
         message += '\nPrepared project environment (admin configuration):\n' + component('Project environment instructions', spec['project_environment'].get('instructions', ''))
+    if spec.get('project_health'):
+        message += '\nProject health (last preparation check): ' + json.dumps(spec['project_health'])
+        if spec['project_health']['status'] == 'needs_repair':
+            message += ('\nProject readiness is not confirmed. Workspace files are preserved; use authorized terminal, file '
+                        'and GitHub tools to inspect and repair them. Do not assume the old recipe applies to another '
+                        'checkout or automatically retry uncertain operations.')
     return message

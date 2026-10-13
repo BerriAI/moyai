@@ -90,7 +90,10 @@ def test_native_pr_permanent_identity_needs_only_pr_token_header_and_files(nativ
     ({}, True),
 ])
 def test_broker_pr_reader_preserves_repository_lookup_shapes(native_pr, arguments, refresh_metadata):
-    _, client, run_id, _, _, _, calls = native_pr
+    app, client, run_id, _, _, _, calls = native_pr
+    if not arguments:
+        app.state.store.execute('UPDATE runs SET github_repository_id=?,repo_url=? WHERE id=?',
+                                (202, 'https://github.com/BerriAI/moyai', run_id))
     response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
                            json={'name': 'github_pull_request', 'arguments': {'number': 100, **arguments}})
     assert response.status_code == 200 and response.json()['repository_id'] == 202, response.text
