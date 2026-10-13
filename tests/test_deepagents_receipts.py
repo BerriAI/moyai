@@ -7,14 +7,19 @@ import httpx
 import pytest
 from temporalio.exceptions import ApplicationError
 
+from agent.activity import ActivityReporter
+from app.failure_explanations import explain
 from sandbox.broker_transport import unseal
 from test_deepagents_runtime import durable_app, traced_tool_runtime
 from test_trace_outbox import spans
 
 
-def broker(probe, receipt_status='completed', result=None, *, after_receipt=None, name='credentials_run'):
+DEFAULT_RESULT = object()
+
+
+def broker(probe, receipt_status='completed', result=DEFAULT_RESULT, *, after_receipt=None, name='credentials_run'):
     calls = []
-    result = {'saved': True} if result is None else result
+    result = {'saved': True} if result is DEFAULT_RESULT else result
 
     def respond(request):
         if request.method == 'GET':
@@ -68,6 +73,78 @@ async def test_terminal_receipt_enum_is_additive_to_result_and_canonical_diagnos
     assert not any(event['kind'] == 'trace' for event in probe.store.events(probe.scope.run_id))
 
 
+@pytest.mark.parametrize('receipt_status', ['unknown', 'rejected', 'cancelled'])
+@pytest.mark.parametrize('result', [
+    'private-result', ['private-result'], None, {'saved': True},
+    {'status': 'completed', 'outcome': 'completed', 'success': True, 'isError': False,
+     'receipt_status': 'completed', 'retryable': True, 'dispatched': False},
+    {'status': 'yielded_to_background'},
+], ids=['string', 'list', 'null', 'benign-dict', 'misleading-dict', 'backgrounded-dict'])
+@pytest.mark.parametrize('later_failure', [None, 'tool_receipt', 'tool_journal'])
+async def test_trusted_non_success_receipt_survives_body_shape_and_later_failure(
+        traced_tool_runtime, monkeypatch, receipt_status, result, later_failure):
+    probe = traced_tool_runtime
+    calls = broker(probe, receipt_status, result)
+    original = json.dumps(result)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('private-publication-error')
+
+    if later_failure == 'tool_receipt':
+        monkeypatch.setattr(ActivityReporter, 'complete', fail)
+    elif later_failure == 'tool_journal':
+        monkeypatch.setattr(probe.runtime, 'append', fail)
+    if later_failure:
+        with pytest.raises(RuntimeError, match='private-publication-error'):
+            await probe.runtime._call_tool(probe.scope, 'receipt-shape', 'credentials_run', {})
+    else:
+        assert await probe.runtime._call_tool(probe.scope, 'receipt-shape', 'credentials_run', {}) == {'result': result}
+    assert json.dumps(result) == original
+    assert len(calls) == 1
+    span, attrs, payload = captured(probe)
+    assert attrs['moyai.tool.receipt_status'] == receipt_status
+    assert attrs['moyai.status'] == 'error' and span.status.code == 2
+    events = probe.store.events(probe.scope.run_id)
+    activities = [event['data'] for event in events if event['kind'] == 'tool']
+    assert [data['phase'] for data in activities] == (
+        ['started'] if later_failure == 'tool_receipt' else ['started', 'error'])
+    records = [data for data in activities if data['phase'] == 'error']
+    if later_failure:
+        failure = next(event['data'] for event in events if event['data'].get('phase') == 'tool_failure')
+        assert failure['failure_stage'] == later_failure
+        records.append(failure)
+    for data in records:
+        assert data['turn_id'] == probe.scope.message_id
+        assert data['action']['outcome'] == receipt_status
+        explanation = explain(data)
+        assert explanation['action']['outcome'] == receipt_status
+        assert explanation['retryability'] == (
+            'blocked_unknown_outcome' if receipt_status == 'unknown' else 'not_retryable')
+    assert b'private-result' not in payload and b'private-publication-error' not in payload
+
+
+@pytest.mark.parametrize('result,expected_phase', [
+    ('ordinary result', 'completed'), (['ordinary result'], 'completed'), (None, 'completed'),
+    ({'isError': False, 'receipt_status': 'unknown'}, 'completed'),
+    ({'isError': True, 'receipt_status': 'completed'}, 'error'),
+    ({'exit_code': 1}, 'error'),
+])
+async def test_completed_receipt_preserves_body_level_success_or_error(
+        traced_tool_runtime, result, expected_phase):
+    probe = traced_tool_runtime
+    calls = broker(probe, 'completed', result)
+    assert await probe.runtime._call_tool(probe.scope, 'completed-shape', 'credentials_run', {}) == {'result': result}
+    assert len(calls) == 1
+    span, attrs, _ = captured(probe)
+    assert attrs['moyai.tool.receipt_status'] == 'completed'
+    assert attrs['moyai.status'] == expected_phase
+    assert span.status.code == (2 if expected_phase == 'error' else 1)
+    activity = [e['data'] for e in probe.store.events(probe.scope.run_id) if e['kind'] == 'tool'][-1]
+    assert activity['phase'] == expected_phase
+    if isinstance(result, dict) and 'exit_code' in result:
+        assert activity['exit_code'] == result['exit_code']
+
+
 @pytest.mark.parametrize('untrusted', ['queued', 'private-status', ['completed'], {'status': 'unknown'}, 200, True, None])
 async def test_receipt_attribute_accepts_only_terminal_enums(traced_tool_runtime, untrusted):
     probe = traced_tool_runtime
@@ -79,13 +156,18 @@ async def test_receipt_attribute_accepts_only_terminal_enums(traced_tool_runtime
     assert b'private-status' not in payload
 
 
-async def test_noncomputer_result_cannot_supply_computer_receipt_metadata(traced_tool_runtime):
+@pytest.mark.parametrize('spoof', ['unknown', 'rejected', 'cancelled', 'completed'])
+async def test_noncomputer_result_cannot_supply_computer_receipt_metadata(traced_tool_runtime, spoof):
     probe = traced_tool_runtime
-    result = {'saved': True, 'receipt_status': 'unknown'}
+    result = {'saved': True, 'receipt_status': spoof}
     calls = broker(probe, result=result, name='notion_append')
     assert await probe.runtime._call_tool(probe.scope, 'connector', 'notion_append', {}) == {'result': result}
     assert len(calls) == 1
-    assert 'moyai.tool.receipt_status' not in captured(probe)[1]
+    span, attrs, _ = captured(probe)
+    assert 'moyai.tool.receipt_status' not in attrs
+    assert attrs['moyai.status'] == 'completed' and span.status.code == 1
+    activity = [e['data'] for e in probe.store.events(probe.scope.run_id) if e['kind'] == 'tool'][-1]
+    assert activity['phase'] == 'completed'
 
 
 @pytest.mark.parametrize('omit_original', [False, True])

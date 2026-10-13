@@ -452,7 +452,8 @@ class DeepAgentsRuntime:
             # uncertainty to a retryable tool error that could repeat a write.
             raise ApplicationError('Tool outcome could not be confirmed. Inspect saved receipts before retrying.',
                                    diagnostic, type='UncertainToolOutcome', non_retryable=True) from None
-        observation.update(status=result_status(value)[0], end_ns=time.time_ns())
+        observation.update(status=result_status(value, receipt_status=observation.get('receipt_status'))[0],
+                           end_ns=time.time_ns())
         observation['evidence'] = tool_evidence(value, receipt_status=observation.get('receipt_status'))
         if observation['status'] == 'completed':
             observation['evidence']['action'] = {

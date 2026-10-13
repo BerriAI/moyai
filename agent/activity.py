@@ -38,8 +38,12 @@ def split_focus(text):
     return focus, prose.strip()
 
 
-def result_status(result):
+def result_status(result, *, receipt_status=None):
     """Read explicit machine status only; tool output may mention unrelated errors."""
+    # A trusted computer receipt outranks the body's apparent success, including
+    # primitive results. A completed receipt can still carry a tool-level error.
+    if isinstance(receipt_status, str) and receipt_status in {'unknown', 'cancelled', 'rejected'}:
+        return 'error', result_status(result)[1]
     if isinstance(result, str):
         try:
             result = json.loads(result)
@@ -138,7 +142,7 @@ class ActivityReporter:
         from sandbox.broker_failure import tool_evidence
         with self.lock:
             started, data = self.starts.pop(str(call_id), (None, tool_summary(name, args)))
-        phase, code = result_status(result)
+        phase, code = result_status(result, receipt_status=receipt_status)
         data = {**data, 'activity_version': 1, 'call_id': self.prefix + ':' + str(call_id), 'phase': phase}
         data.update(tool_evidence(result, receipt_status=receipt_status))
         details, notice = formatted_details(data['tool'], result)

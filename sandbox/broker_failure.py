@@ -223,8 +223,7 @@ def tool_rejection_diagnostic(headers, request_id):
 
 def tool_evidence(value, *, receipt_status=None):
     """Public receipt fields only; never treat tool prose as an outcome."""
-    if not isinstance(value, dict):
-        return {}
+    value = value if isinstance(value, dict) else {}
     action = {}
     for field in ('dispatched', 'retryable'):
         if type(value.get(field)) is bool:
@@ -236,10 +235,11 @@ def tool_evidence(value, *, receipt_status=None):
         action['outcome'] = 'unknown'
     # Only the computer adapter may supply this argument, never the tool body.
     if isinstance(receipt_status, str) and receipt_status in {'unknown', 'cancelled', 'rejected'}:
-        action['outcome'] = receipt_status
+        action.update(outcome=receipt_status, retryable=False)
     diagnostic = safe_error(value.get('diagnostic'))
     diagnostic.update(safe_error({'http_status': value.get('status_code')}))
     return {**({'action': action} if action else {}),
+            **({'outcome_type': 'UncertainToolOutcome'} if receipt_status == 'unknown' else {}),
             **({'diagnostic': diagnostic} if diagnostic else {})}
 
 
