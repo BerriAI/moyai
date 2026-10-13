@@ -127,8 +127,9 @@ non-executing HTML parser preserves headings, list entries and checklist states,
 including Slack's `data-section-style="7"`/`checked` markup. It does not execute
 HTML, resolve links or fetch embedded resources. Scripts, styles, hidden content
 and non-text embeds are omitted; form/password responses are rejected.
-The preview reads at most 256 KiB of the export and retains at most 8,000
-characters, explicitly marking truncation while retaining the full original.
+The preview reads at most 256 KiB of the export, limits HTML nesting to 256
+elements, and retains at most 8,000 characters, explicitly marking truncation
+while retaining the full original.
 It is included as JSON-escaped, explicitly untrusted reference data on the
 attachment's existing authorized turn/history path. Ordinary text, HTML and
 image attachments do not gain automatic text injection.

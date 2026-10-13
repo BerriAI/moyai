@@ -8,6 +8,7 @@ CANVAS_MIME = 'application/vnd.slack-docs'
 PREVIEW_CHARACTERS = 8000
 PREVIEW_SOURCE_BYTES = 256 * 1024
 PARSE_CHUNK_BYTES = 16 * 1024
+MAX_NESTING = 256
 TRUNCATION_NOTICE = '\n\n[Canvas text preview truncated. The complete original HTML is retained in the attachment.]'
 VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}
 IGNORED = {'head', 'script', 'style', 'noscript', 'template', 'iframe', 'object', 'svg', 'math', 'canvas', 'form'}
@@ -61,6 +62,8 @@ class CanvasText(HTMLParser):
                 self.root_depth = len(self.frames)+1
         inside = self.root_depth is not None and not self.root_closed and len(self.frames)+1 >= self.root_depth
         if tag not in VOID:
+            if len(self.frames) >= MAX_NESTING:
+                raise CanvasFormatError('The Canvas export exceeded the HTML nesting limit.')
             self.frames.append((tag, hidden, checklist))
         if inside and (tag == 'form' or (tag == 'input' and attrs.get('type', '').lower() == 'password')):
             self.invalid = True

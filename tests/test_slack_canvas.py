@@ -152,6 +152,27 @@ def test_preview_decodes_across_multibyte_and_entity_boundaries(monkeypatch):
     assert raw.tell() == 0
 
 
+async def test_deep_unmatched_tags_are_rejected_without_retaining_an_attachment(reader, monkeypatch):
+    files, connectors = reader
+    connectors.request.return_value = canvas_metadata()
+    malformed = (b'<div class="quip-canvas-content">' + b'<b>' * 2048
+                 + b'PRIVATE_NESTED_TEXT' + b'</i>' * 2048 + b'</div>')
+    calls, handles = downloads(monkeypatch, {
+        'headers': {'Content-Type': 'text/html'}, 'chunks': [malformed]})
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], 'T12345678')
+    assert caught.value.code == 'canvas_representation' and len(calls) == 1
+    assert 'PRIVATE_NESTED_TEXT' not in str(caught.value)
+    assert handles[0].closed
+
+
+def test_normal_nested_canvas_content_is_preserved():
+    raw = BytesIO(b'<div class="quip-canvas-content">' + b'<b>' * 32
+                  + b'Observed' + b'</b>' * 32 + b'</div>')
+    assert inspect_canvas(raw)[2] == 'Observed'
+    assert raw.tell() == 0
+
+
 def test_large_canvas_retains_original_and_marks_bounded_preview(monkeypatch):
     raw_bytes = b'<div class="quip-canvas-content"><h1>Title</h1><p>'+('猫🪨 ' * 6000).encode()+b'</p></div>'
     monkeypatch.setattr(slack_canvas, 'PREVIEW_SOURCE_BYTES', 4096)
