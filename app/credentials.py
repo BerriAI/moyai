@@ -262,7 +262,7 @@ ONEPASSWORD_GUIDANCE = (
 
 TOOLS = {
     **slack_secrets.TOOLS,
-    'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
+    'credentials_list': (ListCredentials, 'Before declaring access blocked or asking for it, list without filters to discover authorized personal and organization access and credential_sources. A filtered miss is not proof that access is missing; inspect discovery before concluding. Returns metadata and pending request IDs/generations, never secret values. Shared vault sources remain visible with a provider filter; inspect an available source before asking for another provider key.'),
     'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
     'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication. ' + ONEPASSWORD_GUIDANCE),
@@ -344,7 +344,7 @@ class Credentials:
         authorized = [row for row in rows if self.permitted(row, run, run['active_user_id'])]
         with self.store.connect() as conn:
             pending = self.pending_rows(conn, run['id'])
-        return {'credentials': [self.metadata(row, run['active_user_id'], False) for row in authorized
+        result = {'credentials': [self.metadata(row, run['active_user_id'], False) for row in authorized
                 if (not args.provider or row['provider'] == args.provider)
                 and (not args.name or row['name'] == args.name.strip().lower())],
                 'credential_sources': [self.metadata(row, run['active_user_id'], False) for row in authorized
@@ -355,6 +355,31 @@ class Credentials:
                         or self.same_requester(run['active_user_id'], row['actor_id']))
                 and (not args.provider or row['provider'] == args.provider)
                 and (not args.name or row['name'] == args.name.strip().lower())]}
+        active = [row for row in authorized if self.status(row) == 'active']
+        source_ids = {row['id'] for row in result['credential_sources']}
+        saved = [row for row in active if row['id'] not in source_ids]
+        result['discovery'] = {
+            'filter_applied': bool(args.provider or args.name),
+            'available': {
+                'saved_personal_connections': sum(row['scope'] != 'organization' for row in saved),
+                'saved_organization_connections': sum(row['scope'] == 'organization' for row in saved),
+                'shared_vault_sources': len(source_ids),
+                'capability_verification': 'not_assessed',
+            },
+            'next_step': (
+                'This is a filtered inventory, not a complete access search. Call credentials_list without filters '
+                'before concluding access is missing; saved capability names may differ from the service name.'
+                if args.provider or args.name else
+                'Inspect appropriate saved connections and credential_sources. Metadata alone does not verify '
+                'task access; use the authorized secure tools for the smallest task-relevant check.'),
+        }
+        return result
+
+    def discovery_context(self, run):
+        """Orient every runtime before it can mistake undiscovered access for a blocker."""
+        if not self.tools(run):
+            return None
+        return self.inventory(run, ListCredentials())['discovery']['available']
 
     def validated_value(self, body):
         value = body.value.get_secret_value()
