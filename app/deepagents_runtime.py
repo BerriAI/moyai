@@ -28,7 +28,7 @@ from agent.prompts import system_prompt
 from agent.tools import computer_tools, github_tools
 from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
 from agent.tools.remote_computer import requires_computer
-from sandbox.broker_failure import TRANSIENT_STATUSES
+from sandbox.broker_failure import TRANSIENT_STATUSES, exception_diagnostic, safe_error
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
 from .database import DatabaseBusyError
 from .db import database, now
@@ -268,11 +268,19 @@ class DeepAgentsRuntime:
             await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _call_tool(self, scope, call_id, name, arguments):
-        observation = {'tool': name, 'start_ns': time.time_ns(), 'call_id':
+        observation = {'tool': name, 'start_ns': time.time_ns(), 'failure_stage': 'tool_catalog', 'call_id':
             hashlib.sha256(f'{scope.run_id}:{scope.message_id}:{scope.segment}:{call_id}'.encode()).hexdigest()[:32]}
+        failed = False
         try:
             return await self._invoke_tool(scope, call_id, name, arguments, observation)
         except (Exception, asyncio.CancelledError) as exc:
+            failed = True
+            if 'diagnostic' not in observation:
+                try:
+                    observation['diagnostic'] = exception_diagnostic(
+                        exc, stage=observation['failure_stage'], request_id=observation['call_id'])
+                except (Exception, asyncio.CancelledError):
+                    pass
             if 'status' not in observation:
                 observation.update(status='cancelled' if isinstance(exc, asyncio.CancelledError) else 'error',
                                    error_type=type(exc).__name__)
@@ -280,11 +288,23 @@ class DeepAgentsRuntime:
         finally:
             observation.setdefault('end_ns', time.time_ns())
             try:
+                if diagnostic := observation.get('diagnostic'):
+                    await database(self.runner.store.event, scope.run_id, 'error', 'Tool execution failed.',
+                        {'phase': 'tool_failure', **diagnostic}, turn_id=scope.message_id)
+            except Exception:
+                pass  # Diagnostic storage cannot change the original outcome.
+            except asyncio.CancelledError:
+                if not failed:
+                    raise
+            try:
                 if self.runner.store.tracing:
                     await database(self.runner.store.tracing.tool, scope.run_id, observation,
                                    message_id=scope.message_id)
             except Exception:
                 pass
+            except asyncio.CancelledError:
+                if not failed:
+                    raise
 
     async def _invoke_tool(self, scope, call_id, name, arguments, observation):
         if name not in {t['name'] for t in await self.catalog(scope)}:
@@ -294,18 +314,21 @@ class DeepAgentsRuntime:
         r = self.runner
         reporter = ActivityReporter(lambda kind, message, data: r.store.event(scope.run_id, kind, message, data))
         reporter.prefix = identity
+        observation['failure_stage'] = 'tool_activity'
         await database(reporter.start, call_id, name, arguments)
         try:
             if requires_computer(name):
                 body = {'action': 'computer_call', 'request_id': identity, 'name': name, 'arguments': arguments,
                         'input_id': scope.input_id or scope.message_id}
                 while True:
+                    observation['failure_stage'] = 'computer_poll'
                     value = await self.broker(scope, '/agent-runtime', body)
                     if value['status'] in {'completed', 'unknown', 'cancelled', 'rejected'}:
                         value = value['result']
                         break
                     # Computer acquisition and observation use tool capacity,
                     # not the controller slots needed by other conversations.
+                    observation['failure_stage'] = 'computer_step'
                     async with r.session_guard(scope.run_id, wait=False) as acquired:
                         if acquired:
                             await database(self.current, scope)
@@ -313,22 +336,32 @@ class DeepAgentsRuntime:
                             await r.agent_runtime.computer_step(scope.run_id, state)
                     await asyncio.sleep(.1)
             else:
+                observation['failure_stage'] = 'tool_dispatch'
                 value = await self.broker(scope, '/tools/call', {'name': name, 'arguments': arguments,
                     'input_id': scope.input_id or scope.message_id, 'request_id': identity})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            observation.update(status='error', error_type=type(exc).__name__)
+            diagnostic = {}
+            try:
+                diagnostic = exception_diagnostic(exc, stage=observation['failure_stage'], request_id=identity)
+            except (Exception, asyncio.CancelledError):
+                pass
+            observation.update(status='error', error_type=type(exc).__name__, diagnostic=diagnostic)
             # The broker/computer receipt remains the authority. Never convert
             # uncertainty to a retryable tool error that could repeat a write.
             raise ApplicationError('Tool outcome could not be confirmed. Inspect saved receipts before retrying.',
-                                   type='UncertainToolOutcome', non_retryable=True) from None
+                                   diagnostic, type='UncertainToolOutcome', non_retryable=True) from None
         observation.update(status=result_status(value)[0], end_ns=time.time_ns())
         if observation['status'] == 'error':
             observation['error_type'] = value.get('error_type') if isinstance(value, dict) else None
+            if isinstance(value, dict) and (diagnostic := safe_error(value.get('diagnostic'))):
+                observation['diagnostic'] = {**diagnostic, 'request_id': identity}
         # Keep persistence outside the dispatch exception boundary: a confirmed
         # action must not be reported as an unexecuted/retryable action.
+        observation['failure_stage'] = 'tool_receipt'
         await database(reporter.complete, call_id, name, arguments, value)
+        observation['failure_stage'] = 'tool_journal'
         await database(self.append, scope, [
             {'id': identity + ':call', 'message': {'role': 'assistant', 'content': '', 'tool_calls': [{
                 'id': identity, 'type': 'function', 'function': {'name': name,

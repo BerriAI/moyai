@@ -26,7 +26,7 @@ to a model or tool error.
 `workspace_diagnostics` is a read-only tool available through the active run's
 broker capability. It takes no arguments and cannot inspect a different run.
 It returns the active harness/model, current broker tool names, connection scope
-and policy flags, and the latest 20 sanitized broker/SDK failures for this session.
+and policy flags, and the latest 20 sanitized broker, SDK, tool and supervisor failures for this session.
 Records include allowlisted status codes, counters and correlation IDs; message
 text, tool payloads, credentials and raw host logs are excluded. The stdio MCP
 bridge adds the tool names from its last `tools/list` response. This distinguishes
@@ -39,6 +39,51 @@ Source access already uses `github_repositories` and `github_checkout` when
 as a full commit SHA so source can be compared with the deployed version. General
 Render/Modal logs still require an operator or an explicitly scoped log-reader
 integration. Do not give agent sandboxes account administrator keys to obtain them.
+
+### Tool and supervisor failure details
+
+Generic dispatch boundaries use `sandbox.broker_failure.exception_diagnostic`
+and reapply `safe_error` when reading structured diagnostic records. These fields
+are additive to existing failure records:
+
+| Field | Meaning |
+| --- | --- |
+| `exception_type`, `cause_type` | Exception class or a known Temporal application error type; no message text. |
+| `exception_chain` | Up to six exception types, starting with the caught failure. |
+| `failure_stage` | Allowlisted execution boundary, such as `tool_catalog`, `computer_poll`, `computer_step`, `tool_dispatch`, `tool_receipt`, `tool_journal`, `supervisor_launch`, or `remote_activate`. |
+| `stack_locations` | Up to twelve `app/`, `agent/`, or `sandbox/` source locations formatted as `path.py:line:function`; no absolute paths, source lines, third-party frames or locals. |
+| `request_id` | Existing operation identity; the controller binds sandbox diagnostics to its own request ID. |
+| `http_status`, `errno`, `exit_code` | Bounded numeric values from structured exception or process fields. Temporal `BrokerRejected` retains its HTTP status. |
+| `outcome_type` | `UncertainToolOutcome` on a failed workflow whose original tool error was captured before wrapping. |
+
+Raised dispatch errors and errors returned through the generic MCP bridge produce
+`tool_failure` events. Failed tool spans export these fields as `moyai.error.*`,
+using the original exception type in `error.type` and the OTLP exception event.
+An ambiguous dispatch carries the same diagnostic in its non-retryable Temporal
+failure detail. The terminal `sdk_failure` event and root span retain that cause,
+with the existing run, turn and trace hierarchy. The diagnostic does not authorize
+retrying a write. Confirmed receipts remain outside the ambiguous dispatch
+handler; a later journal failure records its stage without changing the confirmed
+tool span to an uncertain action.
+
+The detached supervisor saves a bounded `diagnostic.json` alongside its execution
+journal. Status reads return that record independently of the 30-event page, so
+the original remote failure is available even when later journal pages have not
+been read. Computer-operation polling persists the sanitized record as a
+`supervisor_failure` event before guest cleanup and includes it in an unconfirmed
+operation receipt. A child that exits without structured diagnostics reports
+`ProcessExit` and its numeric exit code; this identifies the boundary, not the
+underlying cause. Raw stderr stays in the guest and is never copied into these
+records. Diagnostics are best-effort and cannot make an uncertain operation
+retryable or replace a confirmed receipt.
+
+Use `uv run python scripts/tool_diagnostics_demo.py --output /tmp/tool-diagnostics`
+for a local failure injection through the real runtime, database and OTLP outbox.
+The demo uses the development trace environment and a local capture transport;
+it makes no production tool or model calls. Run
+`uv run pytest -q tests/test_tool_failure_diagnostics.py` for privacy, failure,
+Temporal conversion and supervisor regression coverage. These checks validate
+new failure evidence; they do not recover exceptions discarded by older builds.
 
 The sandbox emits an `error` event with `data.phase=broker_failure`. Its structured
 fields preserve HTTP status, original upstream status, client request ID,

@@ -14,6 +14,11 @@ import sys
 import threading
 import time
 
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sandbox.broker_failure import exception_diagnostic, safe_error
+
 
 class DeadlineExpired(TimeoutError):
     pass
@@ -42,6 +47,21 @@ def atomic(path, value):
     temporary.replace(path)
 
 
+def save_diagnostic(directory, diagnostic):
+    """A separate bounded receipt can be read before guest cleanup."""
+    try:
+        atomic(directory / 'diagnostic.json', safe_error(diagnostic))
+    except Exception:
+        pass  # Diagnostic disk failures do not authorize a second execution.
+
+
+def save_exception(directory, exc, *, stage, exit_code):
+    try:
+        save_diagnostic(directory, {**exception_diagnostic(exc, stage=stage), 'exit_code': exit_code})
+    except Exception:
+        pass  # Collecting diagnostics must not prevent the terminal marker.
+
+
 def supervise(directory, command, *, deadline_at=None):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (directory / 'lock').open('a') as lock:
@@ -55,6 +75,10 @@ def supervise(directory, command, *, deadline_at=None):
         # Keep third-party diagnostics inside Modal, out of workflow history.
         with (directory / 'stderr.log').open('ab') as stderr, (directory / 'events.jsonl').open('ab') as journal:
             def record(event):
+                if event.get('kind') == 'error' and isinstance(event.get('data'), dict):
+                    diagnostic = safe_error(event['data'])
+                    if diagnostic.get('failure_stage'):
+                        save_diagnostic(directory, diagnostic)
                 if event.get('kind') == 'final':
                     atomic(directory / 'final.json', event)
                 journal.write(json.dumps(event).encode() + b'\n')
@@ -81,6 +105,7 @@ def supervise(directory, command, *, deadline_at=None):
                 except ProcessLookupError:
                     pass
 
+            stage = 'supervisor_launch'
             try:
                 execution_timeout({'deadline_at': deadline_at})
                 child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr,
@@ -88,6 +113,7 @@ def supervise(directory, command, *, deadline_at=None):
                 if deadline_at is not None:
                     watchdog = threading.Thread(target=enforce_deadline, args=(child,), daemon=True)
                     watchdog.start()
+                stage = 'supervisor_events'
                 for line in child.stdout:
                     if not line.startswith(b'WORKSPACE_EVENT '):
                         continue
@@ -96,18 +122,23 @@ def supervise(directory, command, *, deadline_at=None):
                     except (ValueError, UnicodeDecodeError):
                         continue
                     record(event)
+                stage = 'supervisor_wait'
                 code = child.wait()
                 if expired.is_set():
                     raise DeadlineExpired('The swarm time budget ended.')
+                if (code or not (directory / 'final.json').exists()) and not (directory / 'diagnostic.json').exists():
+                    save_diagnostic(directory, {'exception_type': 'ProcessExit', 'failure_stage': stage, 'exit_code': code})
                 atomic(directory / 'done.json', {'exit_code': code})
             except DeadlineExpired as exc:
+                save_exception(directory, exc, stage=stage, exit_code=124)
                 record({'kind': 'error', 'message': str(exc), 'data': {'phase': 'deadline'}})
                 if not (directory / 'final.json').exists():
                     record({'kind': 'final', 'message': str(exc), 'completed': False})
                 atomic(directory / 'done.json', {'exit_code': 124})
-            except Exception:
+            except Exception as exc:
                 # The started marker prevents an ambiguous subprocess failure
                 # from being turned into an automatic second execution.
+                save_exception(directory, exc, stage=stage, exit_code=1)
                 atomic(directory / 'done.json', {'exit_code': 1})
             finally:
                 stopped.set()
@@ -139,6 +170,12 @@ def status(directory, cursor=0):
                 result['state'] = 'uncertain'
             except BlockingIOError:
                 result['state'] = 'running'
+    try:
+        diagnostic = safe_error(json.loads((directory / 'diagnostic.json').read_text()))
+        if diagnostic:
+            result['diagnostic'] = diagnostic
+    except (OSError, ValueError):
+        pass
     return result
 
 

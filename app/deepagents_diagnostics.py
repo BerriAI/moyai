@@ -26,4 +26,11 @@ def workflow_failure(exc):
         'exception_type', 'ApplicationError' if isinstance(error, ApplicationError) else 'Exception')
     if isinstance(error, ApplicationError) and error.type == 'BrokerRejected' and error.details:
         diagnostic.update(safe_error({'http_status': error.details[0]}))
+    if isinstance(error, ApplicationError) and error.type == 'UncertainToolOutcome' and error.details:
+        # These structured details were captured before suppressing the unsafe
+        # exception chain; never deserialize messages or Temporal stack strings.
+        detail = safe_error(error.details[0])
+        if detail.get('failure_stage'):
+            diagnostic.update(detail)
+            diagnostic['outcome_type'] = 'UncertainToolOutcome'
     return diagnostic
