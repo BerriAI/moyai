@@ -77,7 +77,7 @@ def select_captures(settings: Settings, run_id: str, answer: str, *, store,
                     continue
                 checksum = info['sha256']
             else:
-                raw, _ = captures.read(path, store=store)
+                raw, _ = captures.read(path, store=store, connection=conn)
                 checksum = hashlib.sha256(raw).hexdigest()
         except (OSError, HTTPException):
             continue

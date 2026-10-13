@@ -3,7 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import threading
 import time
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 from fastapi.responses import JSONResponse
 import httpx
@@ -12,11 +12,13 @@ import pytest
 
 from app.config import Settings
 from app.context_maintenance import ContextMaintenance
-from app.db import Store
+from app.db import Store, database
+from app.durable_runner import DurableRunner
 from app.live_context import LiveContext
 from app.model_request import ModelRequest
 from app.model_slots import ModelSlots
 from app.spend import Spend
+from app.session_lifecycle import SessionLifecycle
 from app.trace_outbox import TraceOutbox
 
 
@@ -260,3 +262,31 @@ async def test_model_request_pool_wait_keeps_event_loop_responsive(latency_store
     assert current['model_calls'] == current['turn_model_calls'] == 1
     assert checkpoints == [True]
     assert len(traces) == 1 and traces[0][0][1] == request.id and traces[0][0][5] == 'completed'
+
+
+async def test_session_deletion_pool_wait_keeps_event_loop_responsive(latency_store, record_property):
+    from app.agents import initialize_schema
+    store = latency_store
+    initialize_schema(store)
+    run = store.create_run('Delete a stopped isolated session.', '', 'modal', [])
+    cleaned = []
+
+    async def stopped(run_id):
+        await database(store.update_run, run_id, status='cancelled')
+
+    async def cleanup(member, run_id):
+        cleaned.append(run_id)
+
+    async def flush():
+        pass
+
+    manager = SimpleNamespace(store=store, stop_for_deletion=stopped, cleanup=cleanup)
+    manager.is_active = MethodType(DurableRunner.is_active, manager)
+    owner = SessionLifecycle(store, SimpleNamespace(settings=SimpleNamespace(moyai_runtime_role='coordinator')),
+                             manager, SimpleNamespace(flush=flush))
+    owner.request_delete(run['id'], '', True)
+    async with responsive_pool(store, record_property) as waiting:
+        await asyncio.to_thread(waiting.hold)
+        await asyncio.wait_for(owner.complete_delete(run['id']), 5)
+    assert store.run(run['id'])['deleted_at']
+    assert cleaned == [run['id']] and not owner.deletion_errors

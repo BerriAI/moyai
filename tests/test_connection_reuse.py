@@ -3,6 +3,7 @@
 Run normally for SQLite, or with --postgres-backend and
 MOYAI_TEST_POSTGRES_URL for an isolated, single-connection PostgreSQL pool.
 """
+import hashlib
 import json
 import os
 from uuid import uuid4
@@ -11,12 +12,15 @@ from fastapi import HTTPException
 import pytest
 
 from app.automations import Definition, Save as SaveAutomation
+from app import captures
 from app.config import Settings
 from app.credentials import CredentialRequest, Materialize, Resolve, SaveSecret, UpdateSecret
 from app.db import Store, now
 from app.main import create_app
+from app.message_queue import MessageQueue
 from app.security import digest
 from app.skills import SearchSkills, SkillForm
+from test_deepagents_runtime import durable_app  # noqa: F401
 from test_github_write_access import call as github_access, decide as github_decide, external
 from test_spend import sign_in
 from test_workspace import workspace
@@ -26,6 +30,16 @@ ALICE = 'google:alice'
 BOB = 'google:bob'
 SECRET = json.dumps({'REVIEW_TOKEN': 'synthetic-connection-reuse-value'})
 POOL_TIMEOUT = .5
+
+
+def test_durable_deletion_reuses_its_existing_run_snapshot(durable_app):
+    store = durable_app.state.store
+    run = store.create_run('Delete an already stopped session.', '', 'modal', [])
+    lifecycle = durable_app.state.session_lifecycle
+    lifecycle.request_delete(run['id'], '', True)
+    store.update_run(run['id'], status='cancelled')
+    assert lifecycle.delete(run['id'], '', True) == {'id': run['id'], 'deleted': True}
+    assert store.run(run['id'])['deleted_at']
 
 
 @pytest.fixture(autouse=True)
@@ -349,3 +363,148 @@ def test_github_write_decision_preserves_verified_aliases_and_terminal_consent(e
         store.execute('UPDATE runs SET active_user_id=? WHERE id=?', (current, run_id))
         assert github_access(external).json()['status'] == terminal
     assert not [method for method, _, _ in api.calls if method != 'GET']
+
+
+@pytest.fixture
+def slack_connection_app(single_connection_app):
+    app = single_connection_app
+    settings = app.state.settings
+    settings.slack_bot_enabled = True
+    settings.slack_signing_secret = 'test-slack-signature'
+    settings.slack_session_users = '*'
+    settings.slack_thread_chat_enabled = True
+    app.state.connectors.save('slack', {
+        'kind': 'oauth', 'access_token': 'synthetic-user-token',
+        'bot': {'access_token': 'synthetic-bot-token', 'team': {'id': 'T12345678'},
+                'bot_user_id': 'U99999999', 'scope': 'reactions:write,channels:history,groups:history'},
+    }, 'Test Slack workspace')
+    run = app.state.slack.chat.accept(
+        team='T12345678', event_id='EvConnectionReuse', channel='C12345678',
+        ts='1790719000.123456', root='1790719000.123456', user='U12345678',
+        prompt='Review with <@U12345678> and <@U99999999>.', mentioned=True, missing_cloud=[])
+    message = app.state.store.claim_message(run['id'])
+    app.state.store.update_run(run['id'], status='running')
+    return app, app.state.store.run(run['id']), message
+
+
+def test_slack_publication_callbacks_preserve_receipts_and_mention_scope(slack_connection_app):
+    app, run, message = slack_connection_app
+    store, chat = app.state.store, app.state.slack.chat
+    for _ in range(2):
+        store.event(run['id'], 'message', 'Checking the review inputs.',
+                    {'phase': 'commentary', 'activity_id': 'review-progress', 'input_id': message['id']})
+    progress = store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='progress'", (run['id'],))
+    assert len(progress) == 1 and progress[0]['status'] == 'pending'
+    answer = 'Ready for <@U12345678>, <@U99999999> and <@U87654321>.'
+    for _ in range(2):
+        store.finish_message(run['id'], message['id'], answer)
+        chat.collect_thread(run['id'])
+    answers = store.rows("SELECT * FROM messages WHERE run_id=? AND role='assistant'", (run['id'],))
+    outbox = store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='answer'", (run['id'],))
+    assert len(answers) == len(outbox) == 1
+    assert answers[0]['response_to_id'] == message['id'] and answers[0]['content'] == answer
+    assert '<@U12345678>' in outbox[0]['text']
+    assert '<@U99999999>' not in outbox[0]['text'] and '<@U87654321>' not in outbox[0]['text']
+    assert '&lt;@U99999999&gt;' in outbox[0]['text'] and '&lt;@U87654321&gt;' in outbox[0]['text']
+
+
+def test_slack_queued_message_callbacks_retire_input_and_correct_delivered_edit(slack_connection_app):
+    app, run, _ = slack_connection_app
+    store, chat = app.state.store, app.state.slack.chat
+    message, created = chat.enqueue_web(run['id'], 'Original follow-up', 'web-follow-up', None, ALICE)
+    assert created
+    queue = MessageQueue(store, chat.change_queued_in)
+    changed = queue.change(run['id'], message['id'], ALICE, False, 0, 'edit', 'Corrected follow-up')
+    assert changed['revision'] == 1 and changed['content'] == 'Corrected follow-up'
+    assert store.rows('SELECT status FROM slack_outbox WHERE dedupe_key=?',
+                      (f"input:{message['id']}:0",)) == [{'status': 'skipped'}]
+    corrections = store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='input_update'", (run['id'],))
+    assert len(corrections) == 1 and 'Corrected follow-up' in corrections[0]['text']
+    store.execute("UPDATE slack_outbox SET status='sent',slack_ts='1790719999.123456' WHERE id=?",
+                  (corrections[0]['id'],))
+    removed = queue.change(run['id'], message['id'], ALICE, False, 1, 'delete')
+    assert removed['status'] == 'deleted' and removed['revision'] == 2
+    notices = store.rows("SELECT text FROM slack_outbox WHERE run_id=? AND kind='input_update' AND status='pending'",
+                         (run['id'],))
+    assert len(notices) == 1 and 'removed in Moyai' in notices[0]['text']
+
+
+def test_slack_credential_collection_keeps_one_card_for_the_original_installation(slack_connection_app):
+    app, run, _ = slack_connection_app
+    request = app.state.credentials.request(run, credential_request())
+    assert request['status'] == 'pending'
+    for _ in range(2):
+        app.state.slack.chat.collect_thread(run['id'])
+    cards = app.state.store.rows('SELECT metadata,status FROM slack_outbox WHERE dedupe_key=?',
+                                 ('credential:' + request['request_id'],))
+    assert len(cards) == 1 and cards[0]['status'] == 'pending'
+    metadata = json.loads(cards[0]['metadata'])
+    assert metadata['credential_request_id'] == request['request_id']
+    assert (metadata['team_id'], metadata['bot_user_id'], metadata['channel'], metadata['thread_ts']) == (
+        'T12345678', 'U99999999', 'C12345678', '1790719000.123456')
+
+
+def test_slack_publication_observes_policy_revocation_in_the_same_transaction(slack_connection_app):
+    app, run, message = slack_connection_app
+    store = app.state.store
+    with store.connect() as conn:
+        conn.begin_write()
+        conn.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0)")
+        store.finish_message_in(conn, run['id'], message['id'], 'Saved while Slack is disabled.', 'completed')
+    assert store.rows("SELECT status FROM messages WHERE run_id=? AND role='assistant'",
+                      (run['id'],)) == [{'status': 'completed'}]
+    assert not store.rows('SELECT 1 FROM slack_outbox WHERE run_id=?', (run['id'],))
+    store.execute("UPDATE connection_policies SET enabled=1 WHERE provider='slack'")
+    app.state.slack.chat.collect_thread(run['id'])
+    assert not store.rows('SELECT 1 FROM slack_outbox WHERE run_id=?', (run['id'],))
+
+
+def test_slack_answer_and_outbox_roll_back_together_when_callback_fails(slack_connection_app, monkeypatch):
+    app, run, message = slack_connection_app
+    store, chat = app.state.store, app.state.slack.chat
+    queue = chat.queue
+
+    def fail_after_queuing(*args, **kwargs):
+        queue(*args, **kwargs)
+        raise RuntimeError('Synthetic publication failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(chat, 'queue', fail_after_queuing)
+        with pytest.raises(RuntimeError, match='Synthetic publication failure'):
+            store.finish_message(run['id'], message['id'], 'Atomic answer.')
+    assert store.rows('SELECT status FROM messages WHERE id=?', (message['id'],)) == [{'status': 'running'}]
+    assert not store.rows("SELECT 1 FROM messages WHERE run_id=? AND role='assistant'", (run['id'],))
+    assert not store.rows('SELECT 1 FROM slack_outbox WHERE run_id=?', (run['id'],))
+    store.finish_message(run['id'], message['id'], 'Atomic answer.')
+    assert len(store.rows("SELECT id FROM slack_outbox WHERE run_id=? AND kind='answer'", (run['id'],))) == 1
+
+
+def test_slack_local_capture_publication_selects_only_referenced_saved_media(slack_connection_app):
+    app, run, message = slack_connection_app
+    store = app.state.store
+    raw = b'\x89PNG\r\n\x1a\nsynthetic-selected-capture'
+    store.artifacts.save(run['id'] + '-captures/result.png', raw)
+    store.artifacts.save(run['id'] + '-captures/unrelated.png', b'\x89PNG\r\n\x1a\nnot-selected')
+    answer = '[Screenshot](moyai-captures/result.png) and [missing](moyai-captures/missing.png)'
+    store.finish_message(run['id'], message['id'], answer)
+    app.state.slack.chat.collect_thread(run['id'])
+    rows = store.rows("SELECT text,metadata FROM slack_outbox WHERE run_id=? AND kind='answer'", (run['id'],))
+    selected = [item for row in rows for item in json.loads(row['metadata']).get('captures', [])]
+    assert selected == [{'name': 'result.png', 'sha256': hashlib.sha256(raw).hexdigest()}]
+    assert len(rows) == 2
+    assert not any('unrelated.png' in json.dumps(row) for row in rows)
+
+
+def test_capture_read_with_existing_connection_preserves_private_owner_check(single_connection_app):
+    app = single_connection_app
+    store = app.state.store
+    run = store.create_run('Private capture.', '', 'modal', [], chat_enabled=True,
+                           user_id=ALICE, private_owner_id=ALICE)
+    raw = b'\x89PNG\r\n\x1a\nsynthetic-private-capture'
+    store.artifacts.save(run['id'] + '-captures/private.png', raw)
+    path = captures.directory(app.state.settings, run['id']) / 'private.png'
+    with store.connect() as conn:
+        with pytest.raises(HTTPException) as denied:
+            captures.read(path, store=store, actor=BOB, connection=conn)
+        assert denied.value.status_code == 404
+        assert captures.read(path, store=store, actor=ALICE, connection=conn) == (raw, 'image/png')

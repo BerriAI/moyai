@@ -87,16 +87,17 @@ class SessionLifecycle:
                 # A transient checkpoint failure must retry with the intent,
                 # without requiring the browser to submit another request.
                 await self.checkpoints.flush()
-                if self.store.run(run_id)['deleted_at']:
+                if (await database(self.store.run, run_id))['deleted_at']:
                     self.deletion_errors.pop(run_id, None)
                     return
                 await self.manager.stop_for_deletion(run_id)
-                self.delete(run_id, '', True, check_only=True)
+                await database(self.delete, run_id, '', True, check_only=True)
                 # Legacy rows retain historical sandbox IDs, including after
                 # a failed release. Confirm absence through the runtime owner.
-                for member in self.store.rows('SELECT id,sandbox_id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)', (run_id,)):
+                for member in await database(self.store.rows,
+                        'SELECT id,sandbox_id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)', (run_id,)):
                     await self.manager.cleanup(member, member['id'])
-                self.delete(run_id, '', True)
+                await database(self.delete, run_id, '', True)
                 await self.checkpoints.flush()
                 self.deletion_errors.pop(run_id, None)
                 return
@@ -266,7 +267,7 @@ class SessionLifecycle:
                     if not sending and 'slack_notifications' in conn.table_names():
                         sending = conn.execute("SELECT 1 FROM slack_notifications WHERE run_id=? AND status='sending' LIMIT 1", (member['id'],)).fetchone()
                     state = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (member['id'],)).fetchone() if durable else None
-                    if (member['status'] not in TERMINAL or pending or sending or self.manager.is_active(member['id'])
+                    if (member['status'] not in TERMINAL or pending or sending or self.manager.is_active(member['id'], run=member)
                             or (state and json.loads(state['state']).get('phase', 'idle') != 'idle')):
                         raise HTTPException(409, 'Stop this session and its agents, wait for cleanup to finish, then delete it.')
                 if check_only:

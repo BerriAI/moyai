@@ -159,10 +159,14 @@ admission, generator and fallback-cleanup ownership through shutdown, including
 jobs cancelled before their coroutine starts.
 
 The `boundaries` CI job exercises these contracts with SQLite and real PostgreSQL.
-The one-connection tests cover credentials, skills, memory, automation and
-duplicate submissions. Storage tests hold I/O while another writer progresses
+The one-connection tests cover credentials, skills, memory, automation, GitHub
+consent, Slack publication/card callbacks, retained session deletion and duplicate
+submissions. Storage tests hold I/O while another writer progresses
 and race revocation/inventory changes against publication. Background contention
-tests measure heartbeat latency separately from request duration.
+tests measure heartbeat latency separately from request duration, including
+deletion cleanup. Contention fixtures hold their competing transaction in an
+independent thread so they exercise another operation, rather than an accidental
+nested checkout in the test itself.
 
 For a live intake check, start the actual application against an isolated local
 PostgreSQL schema with `MOYAI_DATABASE_POOL_SIZE=1` and workspace authentication
