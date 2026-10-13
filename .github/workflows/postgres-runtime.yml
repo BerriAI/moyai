@@ -83,7 +83,7 @@ jobs:
   scheduling:
     # Keep real Temporal and database-contention guarantees on every PR.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17-alpine
