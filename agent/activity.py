@@ -47,7 +47,9 @@ def result_status(result, *, receipt_status=None):
     if isinstance(result, str):
         try:
             result = json.loads(result)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
+            # Result text is optional status metadata. Parser depth limits
+            # must not discard the independent computer receipt.
             return 'completed', None
     if not isinstance(result, dict):
         return 'completed', None

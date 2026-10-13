@@ -15,6 +15,7 @@ from test_trace_outbox import spans
 
 
 DEFAULT_RESULT = object()
+DEEP_JSON_TEXT = '[' * 10000 + '0' + ']' * 10000
 
 
 def broker(probe, receipt_status='completed', result=DEFAULT_RESULT, *, after_receipt=None, name='credentials_run'):
@@ -79,7 +80,8 @@ async def test_terminal_receipt_enum_is_additive_to_result_and_canonical_diagnos
     {'status': 'completed', 'outcome': 'completed', 'success': True, 'isError': False,
      'receipt_status': 'completed', 'retryable': True, 'dispatched': False},
     {'status': 'yielded_to_background'},
-], ids=['string', 'list', 'null', 'benign-dict', 'misleading-dict', 'backgrounded-dict'])
+    DEEP_JSON_TEXT,
+], ids=['string', 'list', 'null', 'benign-dict', 'misleading-dict', 'backgrounded-dict', 'deep-json-text'])
 @pytest.mark.parametrize('later_failure', [None, 'tool_receipt', 'tool_journal'])
 async def test_trusted_non_success_receipt_survives_body_shape_and_later_failure(
         traced_tool_runtime, monkeypatch, receipt_status, result, later_failure):
@@ -128,6 +130,7 @@ async def test_trusted_non_success_receipt_survives_body_shape_and_later_failure
     ({'isError': False, 'receipt_status': 'unknown'}, 'completed'),
     ({'isError': True, 'receipt_status': 'completed'}, 'error'),
     ({'exit_code': 1}, 'error'),
+    pytest.param(DEEP_JSON_TEXT, 'completed', id='deep-json-text'),
 ])
 async def test_completed_receipt_preserves_body_level_success_or_error(
         traced_tool_runtime, result, expected_phase):
