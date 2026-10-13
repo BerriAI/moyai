@@ -123,6 +123,11 @@ honored; missing/invalid intervals or intervals beyond the remaining budget stop
 the read instead of retrying early. A known cooldown also applies to subsequent
 attachment reads by the same process. Other retries wait a random 0.5–1.5 seconds
 within the existing transfer budget. This jitter never reduces `Retry-After`.
+Token acquisition has a separate safety boundary: refreshing an expired bot token
+can issue an OAuth POST, so an acquisition failure is not retried by the file GET
+loop. Explicit authentication rejection is distinguished from a credential-service
+upstream error, connection failure, unavailable credentials or an unconfirmed
+refresh result. An uncertain refresh requires checking the saved connection state.
 
 If recovery fails, the existing turn records a safe error event and missing-input
 explanation: stage, fixed error code, declared/received byte counts when known,
@@ -136,6 +141,9 @@ empty body records zero. URLs, file identifiers/names, credentials, provider exc
 and file contents are excluded from these diagnostics. A partial stream is
 distinguished from a complete stream whose byte count disagrees with metadata.
 No Slack sends or uploads are retried by this path.
+The diagnostic event is best effort: failure to record it does not prevent saving
+the original missing-input explanation, binding other successful attachments or
+settling the batch. Cancellation still stops preparation.
 
 [Slack defines file size in bytes](https://docs.slack.dev/reference/objects/file-object/).
 [aiohttp documents automatic decompression and timeout controls](https://docs.aiohttp.org/en/stable/client_reference.html);

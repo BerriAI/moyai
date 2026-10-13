@@ -24,12 +24,18 @@ INSPECTION_BUDGET_SECONDS = 90
 DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=45, sock_connect=10, sock_read=15)
 TRANSIENT_STATUSES = {408, 500, 502, 503, 504}
 CONTENT_ENCODINGS = {'identity', 'gzip', 'br', 'deflate', 'zstd'}
+AUTH_FAILURES = {'invalid_auth', 'token_revoked', 'not_authed', 'account_inactive',
+                 'invalid_client_id', 'bad_client_secret', 'invalid_refresh_token', 'invalid_grant'}
 
 # Only application-owned prose/codes enter errors and events. Never copy a
 # provider exception, URL, filename, response body or arbitrary header value.
 FAILURES = {
     'access_changed': ('Slack access changed.', 'Reconnect Slack and resend the attachment.'),
     'authentication': ('Could not read this Slack attachment because access was denied.', 'Reconnect Slack and verify the bot can access the file.'),
+    'credential_upstream': ('Slack’s credential service returned an upstream error.', 'Wait for the service to recover and check the saved Slack connection before retrying.'),
+    'credential_transport': ('The Slack credential service could not be reached.', 'Check the network and saved Slack connection before retrying.'),
+    'credential_unconfirmed': ('The Slack credential acquisition result could not be confirmed.', 'Check the saved Slack connection before retrying an unconfirmed token refresh.'),
+    'credential_unavailable': ('Slack bot credentials could not be obtained.', 'Check the saved Slack connection state before retrying.'),
     'missing_scope': ('Reconnect Slack with files:read permission.', 'Reconnect Slack and resend the attachment.'),
     'unavailable': ('This Slack file is unavailable.', 'Upload the attachment again or describe its contents.'),
     'invalid_identifier': ('Expected a Slack file identifier.', 'Resend the attachment from Slack.'),
@@ -293,12 +299,28 @@ class SlackFiles:
             return name, raw, file.get('mimetype') or ''
         except ConnectorError as exc:
             state['http_status'] = exc.status_code
-            if exc.status_code == 429 or exc.code in {'ratelimited', 'rate_limited'}:
-                failure = SlackFileError('rate_limited', retryable=True, retry_after=retry_seconds(exc.retry_after))
+            if exc.status_code in {401, 403} or exc.code in AUTH_FAILURES:
+                failure = SlackFileError('authentication')
             elif exc.code == 'missing_scope':
                 failure = SlackFileError('missing_scope')
-            elif state['stage'] == 'access' or exc.status_code in {401, 403} or exc.code in {'invalid_auth', 'token_revoked', 'not_authed', 'account_inactive'}:
-                failure = SlackFileError('authentication')
+            elif state['stage'] == 'access':
+                # Token acquisition may POST an OAuth refresh. Read-only file
+                # recovery must not replay that mutation or infer denied access
+                # merely because its failure occurred before files.info.
+                if exc.status_code == 429 or exc.code in {'ratelimited', 'rate_limited'}:
+                    failure = SlackFileError('rate_limited', retry_after=retry_seconds(exc.retry_after))
+                elif exc.status_code in TRANSIENT_STATUSES:
+                    failure = SlackFileError('credential_upstream')
+                elif exc.code == 'connection_unavailable' and exc.dispatched is False:
+                    failure = SlackFileError('credential_transport')
+                elif exc.code == 'response_unavailable' or (exc.dispatched is not False and not exc.rejected):
+                    failure = SlackFileError('credential_unconfirmed')
+                else:
+                    failure = SlackFileError('credential_unavailable')
+                failure.retry_blocker = (
+                    'Token acquisition may perform an OAuth refresh POST; attachment recovery did not replay it.')
+            elif exc.status_code == 429 or exc.code in {'ratelimited', 'rate_limited'}:
+                failure = SlackFileError('rate_limited', retryable=True, retry_after=retry_seconds(exc.retry_after))
             elif exc.status_code in TRANSIENT_STATUSES or exc.retryable:
                 failure = SlackFileError('transport', retryable=True)
             else:
@@ -398,7 +420,13 @@ class SlackFiles:
                     attachments.append(attachment_id)
                 except SlackFileError as exc:
                     errors.append(str(exc))
-                    store.event(run_id, 'error', str(exc), exc.diagnostic(), turn_id=row['message_id'])
+                    try:
+                        store.event(run_id, 'error', str(exc), exc.diagnostic(), turn_id=row['message_id'])
+                    except Exception:
+                        # Optional diagnostics must not lose the original error
+                        # or prevent binding the other files. Cancellation and
+                        # process-exit exceptions deliberately still propagate.
+                        pass
                 except ValueError as exc:
                     errors.append(str(exc))
                 except Exception:

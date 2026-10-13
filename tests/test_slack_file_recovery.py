@@ -4,15 +4,18 @@ import gzip
 import json
 import threading
 from types import SimpleNamespace
+from urllib.parse import parse_qs
 from unittest.mock import AsyncMock
 
 import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+import httpx
 import pytest
 
 from app import slack_files
 from app.connector_errors import ConnectorError
+from app.connectors import Connectors
 from app.slack_files import SlackFileError, SlackFiles
 from test_slack import event, signed, slack_app
 from test_slack_files import FILE, provider
@@ -461,3 +464,173 @@ def test_failed_attachment_records_safe_attempt_history_on_existing_turn(slack_a
     assert len(detail['attempt_history']) == 2
     for private in ('bot-token', 'private file contents', 'https://', FILE['id']):
         assert private not in str(failures) + row['content']
+
+
+@pytest.fixture
+def failed_then_successful_batch(slack_app, monkeypatch):
+    app, client, runs, _ = slack_app
+    monkeypatch.setattr(slack_files, 'RETRY_DELAY_SECONDS', .001)
+    calls, _ = provider(app, monkeypatch)
+    original_request = app.state.connectors.request
+
+    async def request(method, url, **kwargs):
+        result = await original_request(method, url, **kwargs)
+        if url.endswith('files.info') and kwargs['params']['file'] == FILE['id']:
+            result['file']['size'] = 1
+        return result
+
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    other = {**FILE, 'id': 'F87654321'}
+    client.post('/hooks/slack/events', **signed(event(files=[FILE, other])))
+    run_id = runs[0]['id']
+    message = app.state.store.claim_message(run_id)
+    return app, client, run_id, message, calls, other
+
+
+@pytest.mark.parametrize('after_record', [False, True])
+def test_optional_diagnostic_failure_preserves_explanation_and_successful_batch(
+        failed_then_successful_batch, monkeypatch, after_record):
+    app, client, run_id, message, calls, other = failed_then_successful_batch
+    store = app.state.store
+    record = store.event
+    failed_records = []
+
+    def unavailable(identity, kind, text, data=None, **kwargs):
+        if (data or {}).get('phase') == 'slack_attachment_read':
+            failed_records.append(data)
+            if after_record:
+                record(identity, kind, text, data, **kwargs)
+            raise RuntimeError(PRIVATE)
+        return record(identity, kind, text, data, **kwargs)
+
+    monkeypatch.setattr(store, 'event', unavailable)
+    checkpoint = AsyncMock()
+    monkeypatch.setattr(app.state.slack, 'checkpoints', SimpleNamespace(flush=checkpoint))
+    client.portal.call(app.state.slack.files.prepare, run_id)
+    row = store.messages(run_id)[0]
+    assert calls == [FILE['id'], FILE['id'], other['id']]
+    assert len(row['attachments']) == 1 and row['attachments'][0]['size'] > 1
+    assert 'metadata_size_mismatch' in row['content'] and 'Do not guess' in row['content']
+    assert PRIVATE not in row['content']
+    assert store.rows('SELECT status FROM slack_audio_inputs WHERE message_id=?', (message['id'],))[0]['status'] == 'ready'
+    assert len(failed_records) == 1 and failed_records[0]['code'] == 'metadata_size_mismatch'
+    assert checkpoint.await_count >= 1
+
+
+def test_diagnostic_cancellation_still_stops_preparation(failed_then_successful_batch, monkeypatch):
+    app, client, run_id, message, calls, _ = failed_then_successful_batch
+    store = app.state.store
+    record = store.event
+
+    def cancelled(identity, kind, text, data=None, **kwargs):
+        if (data or {}).get('phase') == 'slack_attachment_read':
+            raise asyncio.CancelledError()
+        return record(identity, kind, text, data, **kwargs)
+
+    monkeypatch.setattr(store, 'event', cancelled)
+    async def prepare():
+        with pytest.raises(asyncio.CancelledError):
+            await app.state.slack.files.prepare(run_id)
+    client.portal.call(prepare)
+    assert calls == [FILE['id'], FILE['id']]
+    assert store.rows('SELECT status FROM slack_audio_inputs WHERE message_id=?', (message['id'],))[0]['status'] == 'pending'
+    assert not store.messages(run_id)[0]['attachments']
+
+
+@pytest.mark.parametrize('failure,code,status', [
+    ('http401', 'authentication', 401),
+    ('invalid_auth', 'authentication', None),
+    ('http503', 'credential_upstream', 503),
+    ('connect', 'credential_transport', None),
+    ('response_lost', 'credential_unconfirmed', None),
+    ('invalid_json', 'credential_unconfirmed', None),
+    ('http429', 'rate_limited', 429),
+    ('http400', 'credential_unavailable', 400),
+])
+def test_real_oauth_refresh_failure_is_not_a_file_get_retry(
+        slack_app, monkeypatch, failure, code, status):
+    """Actual token acquisition -> exchange -> request; only HTTPS transport is controlled."""
+    app, client, *_ = slack_app
+    connectors = app.state.connectors
+    app.state.settings.slack_client_id = 'fixture-client'
+    app.state.settings.slack_client_secret = 'fixture-client-secret'
+    credentials = {'access_token': 'unused-user-secret', 'kind': 'oauth', 'bot': {
+        'access_token': 'expired-bot-secret', 'refresh_token': 'fixture-refresh-secret', 'expires_at': 1,
+        'team': {'id': TEAM}, 'bot_user_id': 'U99999999', 'scope': 'files:read'}}
+    connectors.save('slack', credentials, 'Fixture team')
+    saved = app.state.store.rows("SELECT encrypted FROM connections WHERE provider='slack'")[0]['encrypted']
+    monkeypatch.setattr(connectors, 'request', Connectors.request.__get__(connectors))
+    attempts = []
+
+    def upstream(request):
+        attempts.append((request.method, request.url.path))
+        assert request.method == 'POST' and request.url.path == '/api/oauth.v2.access'
+        assert parse_qs(request.content.decode()) == {
+            'grant_type': ['refresh_token'], 'refresh_token': ['fixture-refresh-secret'],
+            'client_id': ['fixture-client'], 'client_secret': ['fixture-client-secret']}
+        if failure == 'connect':
+            raise httpx.ConnectError(PRIVATE, request=request)
+        if failure == 'response_lost':
+            raise httpx.ReadError(PRIVATE, request=request)
+        if failure == 'invalid_json':
+            return httpx.Response(200, text=PRIVATE)
+        if failure == 'invalid_auth':
+            return httpx.Response(200, json={'ok': False, 'error': 'invalid_auth', 'detail': PRIVATE})
+        return httpx.Response(status, headers={'Retry-After': '0.001'} if status == 429 else {},
+                              json={'error': PRIVATE})
+
+    actual = httpx.AsyncClient
+    class ProviderClient(actual):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(upstream), **kwargs)
+    monkeypatch.setattr('app.connectors.httpx', SimpleNamespace(**{**vars(httpx), 'AsyncClient': ProviderClient}))
+    with pytest.raises(SlackFileError) as caught:
+        client.portal.call(app.state.slack.files.read, FILE['id'], TEAM)
+    detail = caught.value.diagnostic()
+    assert detail['code'] == code and detail['stage'] == 'access'
+    assert detail['http_status'] == status and detail['attempts'] == 1
+    assert not caught.value.retryable
+    assert attempts == [('POST', '/api/oauth.v2.access')]
+    assert app.state.store.rows("SELECT encrypted FROM connections WHERE provider='slack'")[0]['encrypted'] == saved
+    assert 'received_bytes' not in detail and 'content_encoding' not in detail
+    if code != 'authentication':
+        assert 'access was denied' not in str(caught.value) and 'Reconnect Slack' not in detail['next_action']
+        assert 'OAuth refresh POST' in detail['remaining_blocker']
+    for private in (PRIVATE, 'expired-bot-secret', 'fixture-client-secret', 'fixture-refresh-secret', 'unused-user-secret'):
+        assert private not in str(caught.value) + json.dumps(detail)
+
+
+def test_real_oauth_refresh_success_can_continue_to_file_read(slack_app, monkeypatch):
+    app, client, *_ = slack_app
+    connectors = app.state.connectors
+    app.state.settings.slack_client_id = 'fixture-client'
+    app.state.settings.slack_client_secret = 'fixture-client-secret'
+    connectors.save('slack', {'access_token': 'unused-user-secret', 'bot': {
+        'access_token': 'expired-bot-secret', 'refresh_token': 'fixture-refresh-secret', 'expires_at': 1,
+        'team': {'id': TEAM}, 'bot_user_id': 'U99999999', 'scope': 'files:read'}}, 'Fixture team')
+    monkeypatch.setattr(connectors, 'request', Connectors.request.__get__(connectors))
+    attempts = []
+
+    def upstream(request):
+        attempts.append((request.method, request.url.path))
+        if request.url.path == '/api/oauth.v2.access':
+            return httpx.Response(200, json={'ok': True, 'access_token': 'xoxb-secret',
+                                            'refresh_token': 'rotated-refresh-secret', 'expires_in': 3600})
+        assert request.url.path == '/api/files.info' and request.headers['Authorization'] == 'Bearer xoxb-secret'
+        return httpx.Response(200, json=metadata())
+
+    actual = httpx.AsyncClient
+    class ProviderClient(actual):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(upstream), **kwargs)
+    monkeypatch.setattr('app.connectors.httpx', SimpleNamespace(**{**vars(httpx), 'AsyncClient': ProviderClient}))
+    calls, _ = downloads(monkeypatch, {})
+    _, raw, _ = client.portal.call(app.state.slack.files.read, FILE['id'], TEAM)
+    try:
+        assert raw.read() == CONTENT
+    finally:
+        raw.close()
+    assert attempts == [('POST', '/api/oauth.v2.access'), ('GET', '/api/files.info')] and len(calls) == 1
+    saved = json.loads(app.state.security.decrypt(
+        app.state.store.rows("SELECT encrypted FROM connections WHERE provider='slack'")[0]['encrypted']))
+    assert saved['bot']['access_token'] == 'xoxb-secret' and saved['access_token'] == 'unused-user-secret'
