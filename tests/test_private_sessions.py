@@ -97,7 +97,10 @@ def test_shared_login_cannot_create_private(users_app, monkeypatch):
     assert client.post('/api/runs', json={'prompt': 'No individual', 'private_session': True}).status_code == 403
 
 
-@pytest.mark.parametrize('name', ['slack_send', 'linear_create_issue', 'skills_save', 'memory_save',
+@pytest.mark.parametrize('name', ['slack_send', 'linear_create_issue', 'linear_update_issue',
+                                  'slack_reply', 'slack_edit_message', 'slack_delete_message', 'slack_reaction',
+                                  'notion_create_page', 'notion_update_page', 'notion_append_blocks', 'notion_update_block',
+                                  'skills_save', 'memory_save',
                                   'credentials_request', 'credentials_run', 'automation_create',
                                   'agents_fanout', 'media_share'])
 def test_broker_private_exports_denied_before_dispatch(private_app, name):

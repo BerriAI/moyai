@@ -97,8 +97,9 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         github_search github_issues github_issue github_issue_comments github_pull_requests github_branches github_commits
         github_commit github_compare_commits github_file github_labels github_milestones github_releases
         github_review_threads github_workflow_artifacts github_download_artifact github_capabilities github_publication_status
-        linear_my_issues linear_teams linear_search linear_issue
-        slack_search slack_thread slack_channel slack_me notion_search notion_page media_list sessions_search sessions_read model_list
+        linear_my_issues linear_teams linear_search linear_issue linear_options
+        slack_search slack_thread slack_channel slack_me slack_message
+        notion_search notion_page notion_discover notion_object notion_property notion_query media_list sessions_search sessions_read model_list
         workspace_diagnostics history_read bundled_skill_read artifacts_list artifact_read'''.split())
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
@@ -113,7 +114,8 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         github_update_pull_request_details github_pull_request_reviewers github_reply_review_comment
         github_edit_pull_request_comment github_set_review_thread_resolved github_mark_pull_request_ready github_workflow_action
         linear_comment linear_create_issue
-        linear_update_issue slack_send notion_append media_share media_revoke model_switch memory_save
+        linear_update_issue slack_send slack_reply slack_edit_message slack_delete_message slack_reaction
+        notion_append notion_create_page notion_update_page notion_append_blocks notion_update_block media_share media_revoke model_switch memory_save
         memory_forget skills_save goal artifact_publish artifact_fetch computer_handoff'''.split())
     assert not (safe & read_effects or safe & writes or read_effects & writes)
     assert {tool['name'] for catalog in catalogs for tool in catalog} == safe | read_effects | writes
