@@ -19,13 +19,12 @@ def system_prompt(spec, *, workspace=Path('/workspace'), session=Path('/session'
     message = Template(_read('system')).substitute(
         workspace=str(workspace), session=str(session),
         tool_guidance=tool_guidance(spec.get('harness', 'hermes')),
-        access=_read('access'),
         delegation=_read('delegation') + ' ' if spec.get('is_child_agent') else '',
         slack=_read('slack') + ' ' if spec.get('slack_thread_chat') else '',
     )
     if spec.get('credential_discovery') is not None:
         # Counts only: no labels, identities, secret handles, or secret values.
-        # Keep this orientation and the access policy outside optional context
+        # Keep this orientation and the core skill trigger outside optional context
         # truncation, including on resumed turns and low-context models.
         message += (
             '\nCredential discovery snapshot for the current requester and session '

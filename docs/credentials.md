@@ -2,8 +2,10 @@
 
 ## Discover before declaring an access blocker
 
-The shared system instructions require access discovery before an agent reports
-missing access in a normal reply, progress update, or secure-form request. Each
+The shared system instructions contain a short rule to load the `access-discovery`
+bundled skill before declaring access blocked or requesting it. The detailed
+procedure lives in `agent/skills/access-discovery/SKILL.md` and loads on demand
+through the existing revision-pinned `bundled_skill_read` tool. Each
 turn's run spec includes counts of the current requester's authorized active
 personal connections, organization connections, and Shared vault sources. This
 metadata does not include secret values, labels, or handles and never establishes
@@ -19,15 +21,16 @@ Filtered inventories include the same authorized counts and an explicit
 instruction to repeat the lookup without filters. An exact capability-name
 miss therefore remains distinguishable from an empty credential store.
 
-This policy is shared by all harnesses and retained outside optional prompt
-truncation. The broker continues to enforce saved-access reuse and source lookup
+The core trigger and context are shared by all harnesses and retained outside
+optional prompt truncation; the procedure is not injected into every prompt.
+The broker continues to enforce saved-access reuse and source lookup
 before opening a credential form. Natural-language compliance is also exercised
 by the live credential-discovery probe; the policy is not a claim that every
 future model answer is mechanically verified.
 
 The Docker regression jobs exercise requester/session isolation, expiry,
-revocation, filtered misses, source lookup before forms, and shared prompt
-assembly across harnesses. For the separate, billed live-model behavior check,
+revocation, filtered misses, source lookup before forms, shared prompt
+assembly across harnesses, and versioned skill reads. For the separate, billed live-model behavior check,
 use an isolated local deployment with the approved non-production gateway and
 Modal configuration, a fresh `DATA_DIR`, and an authenticated temporary HTTPS
 tunnel to the selected local port:
@@ -44,7 +47,10 @@ credential, and sends access-assessment requests through the normal session
 endpoint. An observer records only inventory filters and whether the saved
 connection was returned. A passing case must discover that connection; merely
 calling `credentials_list` does not pass. A conceptual no-tools request must
-remain tool-free. No service call is authorized or needed, and this probe does
+remain tool-free. The `after` arm additionally requires a completed, full
+`access-discovery` skill read recorded by the real app. The `before` arm retains
+the same discovery checks without requiring a skill absent from older builds.
+No service call is authorized or needed, and this probe does
 not establish that the synthetic token authenticates to any provider.
 
 Run the same probe against the base and final revisions; keep the output and

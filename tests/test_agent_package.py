@@ -53,18 +53,19 @@ def test_should_keep_the_default_production_prompt_paths():
 
 
 @pytest.mark.parametrize('harness', ['deepagents-temporal', 'codex', 'claude-agent-sdk', 'hermes', 'pi', 'tool-loop'])
-def test_access_discovery_policy_survives_small_context_and_runtime_selection(harness, tmp_path):
+def test_access_discovery_trigger_and_context_survive_without_inlining_procedure(harness, tmp_path):
     snapshot = {'saved_personal_connections': 1, 'saved_organization_connections': 2,
                 'shared_vault_sources': 1, 'capability_verification': 'not_assessed'}
     prompt = system_prompt({'harness': harness, 'independent_runtime': True, 'continuation': True,
                             'credential_discovery': snapshot}, session=tmp_path, input_budget=32)
-    assert 'ordinary replies and progress updates as well as credential forms' in prompt
-    assert 'credentials_list without filters' in prompt
-    assert 'lookup_required result means continue discovery' in prompt
-    assert 'never request keys in chat' in prompt
-    assert 'Honor explicit limits on external calls or spending' in prompt
+    trigger = 'read the access-discovery bundled skill'
+    assert trigger in prompt
+    assert 'Never request secrets in chat' in prompt
+    assert 'credentials_list without filters' not in prompt
+    assert 'lookup_required result means continue discovery' not in prompt
+    assert 'If a connected 1Password Shared source' not in prompt
     assert json.dumps(snapshot, sort_keys=True) in prompt
-    assert prompt.index('credentials_list without filters') < prompt.index('Bundled skill catalog')
+    assert prompt.index(trigger) < prompt.index('Bundled skill catalog')
 
 
 def test_context_recovery_reason_survives_last_broker_failure(monkeypatch, tmp_path):

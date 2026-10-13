@@ -61,7 +61,7 @@ async def wait_until(predicate, seconds):
             await asyncio.sleep(.1)
 
 
-async def run_case(api, store, case, model, trial, observations):
+async def run_case(api, store, case, model, trial, observations, require_skill):
     started = time.monotonic()
     response = await api.post('/api/runs', json={
         'prompt': case['prompt'], 'mode': 'modal', 'chat_enabled': True,
@@ -81,12 +81,23 @@ async def run_case(api, store, case, model, trial, observations):
     detail.raise_for_status()
     state = detail.json()
     # Read tool identity only; never copy credential command bodies or values.
-    tools = [event['data']['tool'] for event in store.events(run_id, limit=10000)
+    events = store.events(run_id, limit=10000)
+    tools = [event['data']['tool'] for event in events
              if event['kind'] == 'tool' and event['data'].get('phase') == 'started']
+    skill_reads = []
+    for event in events:
+        data = event['data']
+        output = data.get('output')
+        if (event['kind'] == 'tool' and data.get('tool') == 'bundled_skill_read'
+                and data.get('phase') == 'completed' and isinstance(output, dict)
+                and output.get('name') == 'access-discovery'
+                and output.get('path') == 'SKILL.md' and output.get('offset') == 0
+                and output.get('next_offset') is None and output.get('content')):
+            skill_reads.append({'name': output['name'], 'revision': output['revision']})
     requests = store.rows('SELECT status,provider,name FROM credential_requests WHERE run_id=?', (run_id,))
     result.update(status=state['status'], answer=state['summary'], tools=tools,
                   credential_requests=requests, model_calls=state['model_calls'],
-                  seconds=round(time.monotonic() - started, 2))
+                  seconds=round(time.monotonic() - started, 2), skill_reads=skill_reads)
     inventory_reads = observations.get(run_id, [])
     result['inventory_reads'] = inventory_reads
     # Merely invoking the tool is insufficient: an exact-name miss can still
@@ -96,6 +107,7 @@ async def run_case(api, store, case, model, trial, observations):
         state['status'] in {'idle', 'completed'} and state['model_calls'] > 0
         and not any(row['status'] == 'pending' for row in requests)
         and (discovered if case['requires_discovery'] else not tools and state['model_calls'] == 1)
+        and (not require_skill or not case['requires_discovery'] or bool(skill_reads))
         and not state['sandbox_id']
     )
     return result
@@ -110,10 +122,13 @@ async def main(args):
         'arm': args.arm,
         'scope': 'Actual local Moyai HTTP app, real Temporal, live configured model; synthetic saved service token.',
         'model': args.model, 'cases': CASES, 'results': [],
+        'access_skill_required': args.arm == 'after',
         'source_sha256': {
             path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
             for path in ('agent/prompts/system.md', 'agent/prompts/__init__.py',
-                         'app/credentials.py', 'app/runner.py')
+                         'app/credentials.py', 'app/runner.py',
+                         'agent/skills/access-discovery/SKILL.md')
+            if (ROOT / path).is_file()
         },
     }
     def save():
@@ -181,7 +196,8 @@ async def main(args):
                 seeded_id = response.json()['id']
                 for case in CASES:
                     for trial in range(1, (args.trials if case['requires_discovery'] else 1) + 1):
-                        result = await run_case(api, app.state.store, case, args.model, trial, observations)
+                        result = await run_case(api, app.state.store, case, args.model, trial,
+                                                observations, args.arm == 'after')
                         report['results'].append(result)
                         save()
                         print(json.dumps({k: v for k, v in result.items() if k != 'answer'}), flush=True)

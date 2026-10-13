@@ -1,3 +1,8 @@
+---
+name: access-discovery
+description: Find existing authorized access before declaring a task blocked, requesting credentials or permissions, or recovering from an access failure.
+---
+
 Before declaring work blocked by missing credentials, asking someone to grant access, or ending a task because access is unverified, investigate the access already authorized for this requester and task. This applies to ordinary replies and progress updates as well as credential forms. Missing environment variables, an empty workspace, an empty provider-filtered list, or one failed tool do not establish that access is unavailable.
 
 Use the task's native connection and capability tools first. Discover and call credentials_list without filters to inspect authorized personal and organization credentials and credential_sources. Reuse a suitable saved connection through credentials_request and the returned secure tools. If a connected 1Password Shared source could supply the required access, inspect it through credentials_run even when the provider-specific credentials list is empty. A lookup_required result means continue discovery; it is not a user blocker. Never inspect another person's private store, bypass the required connection identity, broaden access, or revive access the user declined.
