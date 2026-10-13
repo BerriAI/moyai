@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
@@ -1465,14 +1466,21 @@ def _create_app(settings, store):
         try:
             result = await execute_tool(run_id, request, run, body, dispatch)
         except (Exception, asyncio.CancelledError) as exc:
+            from sandbox.broker_failure import TOOL_REJECTION_HEADERS, exception_diagnostic, tool_rejection_headers
+            rejected = isinstance(exc, (PrivateExportDenied, ToolRejected))
+            if isinstance(exc, StarletteHTTPException):
+                # Provider/ordinary HTTP exceptions cannot impersonate a local
+                # guard, including an error raised after a committed write.
+                exc.headers = {key: value for key, value in (exc.headers or {}).items()
+                               if key.lower() not in TOOL_REJECTION_HEADERS}
             if dispatch:
                 # A status code alone cannot prove no action happened: handlers
                 # can recheck scope after committing an internal write.
-                rejected = isinstance(exc, ToolRejected)
                 await database(dispatch.finish, {'dispatched': False} if rejected else None,
                                outcome='rejected' if rejected else 'unknown')
-            if isinstance(exc, (PrivateExportDenied, ToolRejected)):
-                from sandbox.broker_failure import exception_diagnostic
+            if rejected:
+                kind = 'PrivateExportDenied' if isinstance(exc, PrivateExportDenied) else 'ToolRejected'
+                exc.headers.update(tool_rejection_headers(kind, body.request_id))
                 try:
                     await database(store.event, run_id, 'error', 'Tool request rejected.', {
                         'phase': 'tool_failure', 'tool': body.name,

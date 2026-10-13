@@ -28,7 +28,8 @@ from agent.prompts import system_prompt
 from agent.tools import computer_tools, github_tools
 from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
 from agent.tools.remote_computer import requires_computer
-from sandbox.broker_failure import TRANSIENT_STATUSES, exception_diagnostic, safe_error, tool_evidence, upstream_diagnostic
+from sandbox.broker_failure import (TRANSIENT_STATUSES, exception_diagnostic, safe_error, tool_evidence,
+                                   upstream_diagnostic, tool_rejection_diagnostic)
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
 from .database import DatabaseBusyError
 from .db import database, now
@@ -100,8 +101,9 @@ class DeepAgentsRuntime:
     def url(self, scope):
         return self.runner.settings.public_url.rstrip('/') + '/broker/' + scope.run_id
 
-    async def broker(self, scope, route, body=None):
+    async def broker(self, scope, route, body=None, *, _tool_request_id=None):
         await database(self.current, scope)
+        tool_request_id = body.get('request_id', _tool_request_id) if isinstance(body, dict) else None
         raw = json.dumps(body, ensure_ascii=False, allow_nan=False).encode() if body is not None else None
         if raw is not None and len(raw) > body_limit(route):
             checksum = hashlib.sha256(raw).hexdigest()
@@ -110,7 +112,8 @@ class DeepAgentsRuntime:
                 await self.broker(scope, '/payloads', {'route': route, 'digest': checksum,
                     'part': index, 'data': base64.b64encode(chunk).decode()})
             return await self.broker(scope, route, {'moyai_payload': {'digest': checksum, 'parts': len(chunks)},
-                **({'name': body['name']} if route == '/tools/call' else {})})
+                **({'name': body['name']} if route == '/tools/call' else {})},
+                _tool_request_id=tool_request_id)
         headers = self.headers(scope)
         if raw is not None:
             headers['Content-Type'] = CONTENT_TYPE
@@ -122,6 +125,10 @@ class DeepAgentsRuntime:
             # Provider bodies can contain prompts/credentials. Do not put them
             # into exception messages, logs or public activity records.
             diagnostic = upstream_diagnostic(response.headers)
+            if route == '/tools/call' and (rejection := tool_rejection_diagnostic(response.headers, tool_request_id)):
+                raise ApplicationError(f'The tool request was rejected before dispatch ({response.status_code}).',
+                    {**diagnostic, **rejection, 'http_status': response.status_code},
+                    type='ToolNotDispatched', non_retryable=True) from None
             raise ApplicationError(f'Broker request failed ({response.status_code}).', response.status_code,
                 *([diagnostic] if diagnostic else []), type='BrokerRejected',
                 non_retryable=(response.status_code in {400, 401, 403, 404, 409, 413, 422}
@@ -390,6 +397,13 @@ class DeepAgentsRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if (isinstance(exc, ApplicationError) and exc.type == 'ToolNotDispatched' and exc.details
+                    and (rejection := safe_error(exc.details[0])).get('outcome_type') == 'ToolNotDispatched'
+                    and rejection.get('request_id') == identity):
+                observation.update(status='error', error_type=rejection.get('exception_type', 'ToolRejected'),
+                    diagnostic=rejection, evidence={'action': {
+                        'dispatched': False, 'outcome': 'rejected', 'retryable': False}})
+                raise  # A known rejection stays terminal; never replay this POST.
             diagnostic = {}
             try:
                 diagnostic = exception_diagnostic(exc, stage=observation['failure_stage'], request_id=identity)

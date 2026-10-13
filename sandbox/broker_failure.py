@@ -17,6 +17,8 @@ REQUEST_ID_HEADERS = (
     'x-render-request-id', 'rndr-id', 'x-litellm-call-id',
 )
 TRANSIENT_STATUSES = {408, 425, 429, 500, 502, 503, 504, 524}
+TOOL_REJECTION_HEADERS = {'x-moyai-tool-rejection-v1', 'x-moyai-tool-request-id'}
+TOOL_REJECTION_TYPES = {'PrivateExportDenied', 'ToolRejected'}
 ERROR_CODES = {
     'cyber_policy', 'content_policy_violation', 'authentication_error', 'permission_error',
     'invalid_request_error', 'not_found_error', 'rate_limit_error', 'overloaded_error',
@@ -139,7 +141,7 @@ def safe_error(data):
                         'route': BROKER_ROUTES, 'code': CODEX_ERRORS, 'native_status': CLAUDE_RESULTS,
                         'terminal_reason': CLAUDE_TERMINAL_REASONS,
                         'failure_stage': FAILURE_STAGES,
-                        'outcome_type': {'UncertainToolOutcome'}}.items():
+                        'outcome_type': {'UncertainToolOutcome', 'ToolNotDispatched'}}.items():
         if isinstance(data.get(key), str) and data[key] in values:
             result[key] = data[key]
     for key in ('response_status', 'http_status', 'upstream_status'):
@@ -199,6 +201,24 @@ def upstream_diagnostic(headers):
     if ids := request_ids(headers):
         result['request_ids'] = ids
     return result
+
+
+def tool_rejection_headers(kind, request_id):
+    """Only the broker's explicit no-dispatch guards may produce this signal."""
+    if (not isinstance(kind, str) or kind not in TOOL_REJECTION_TYPES or not isinstance(request_id, str)
+            or not re.fullmatch(r'[0-9a-f]{32}', request_id)):
+        return {}
+    return {'x-moyai-tool-rejection-v1': kind, 'x-moyai-tool-request-id': request_id}
+
+
+def tool_rejection_diagnostic(headers, request_id):
+    """Bind a trusted broker rejection to the submitted tool, never its prose."""
+    kind = headers.get('x-moyai-tool-rejection-v1')
+    if (not isinstance(kind, str) or not tool_rejection_headers(kind, request_id)
+            or headers.get('x-moyai-tool-request-id') != request_id):
+        return {}
+    return {'outcome_type': 'ToolNotDispatched', 'exception_type': kind,
+            'failure_stage': 'tool_dispatch', 'request_id': request_id}
 
 
 def tool_evidence(value, *, receipt_status=None):

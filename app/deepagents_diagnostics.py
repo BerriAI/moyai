@@ -37,6 +37,11 @@ def workflow_failure(exc):
         diagnostic.update(safe_error({'http_status': error.details[0]}))
     if isinstance(error, ApplicationError) and error.type == 'ModelRequestFailed' and error.details:
         diagnostic.update(safe_error(error.details[0]))
+    if isinstance(error, ApplicationError) and error.type == 'ToolNotDispatched' and error.details:
+        detail = safe_error(error.details[0])
+        if detail.get('outcome_type') == 'ToolNotDispatched':
+            diagnostic.update(detail)
+            diagnostic['action'] = {'dispatched': False, 'outcome': 'rejected', 'retryable': False}
     if isinstance(error, ApplicationError) and error.type == 'UncertainToolOutcome' and error.details:
         # These structured details were captured before suppressing the unsafe
         # exception chain; never deserialize messages or Temporal stack strings.
