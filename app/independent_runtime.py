@@ -247,9 +247,27 @@ class IndependentRuntime:
             return
         if not await database(self.operations.dispatch, run, operation, computer['sandbox_id']):
             return
-        result = await self.job(run_id, state, await r.sandbox(computer), operation['request_id'],
+        sandbox = await r.sandbox(computer)
+        result = await self.job(run_id, state, sandbox, operation['request_id'],
                                 {'name': operation['name'], 'arguments': json.loads(operation['arguments'])})
         if result is not None:
+            if (operation['name'] in {'browser_screenshot', 'browser_record_stop'}
+                    and result['status'] == 'completed' and not result['result'].get('isError')):
+                try:
+                    await r.computer.sync(sandbox, run_id)
+                except Exception as exc:
+                    # Storage owns upload retries. Preserve the confirmed native
+                    # action if copying fails, rather than failing or blocking the turn.
+                    persistence = {'status': 'unconfirmed', 'error_type': type(exc).__name__,
+                                   'status_code': exc.status_code if isinstance(exc, HTTPException) else None}
+                    notice = ('Capture completed, but saving it to the app could not be confirmed. '
+                              'The original sandbox path is preserved in this receipt. Do not repeat the capture. '
+                              'Normal Computer polling or workspace saving can retry the copy; use media_list to confirm.')
+                    result['result'] = {**result['result'], 'content': [*result['result']['content'],
+                        {'type': 'text', 'text': json.dumps({'capture_persistence': persistence, 'notice': notice})}]}
+                    await database(r.store.event, run_id, 'error', notice,
+                                   {'stage': 'capture_sync', 'tool': operation['name'],
+                                    'request_id': operation['request_id'], **persistence})
             await database(self.operations.settle, operation, result['status'], result['result'])
 
     async def checkpoint(self, run_id, state):
