@@ -741,6 +741,55 @@ test('failure correlation requires an unambiguous call in the same turn and pres
   assert.equal(rows.find(x=>x.id==='shared:first').state,'error');
 });
 
+test('untagged failed starts retain their owner before and between steering receipts',()=>{
+  for(const owner of ['1','2'])for(const scoped of [true,false]){
+    const snapshot=run();
+    snapshot.messages.push({id:3,role:'user',status:'injected',steering_parent_id:1});
+    snapshot.messages[1].status='injected';snapshot.messages[1].steering_parent_id=1;
+    if(owner==='2')snapshot.events.push(event(2,'status','First follow-up delivered',{
+      phase:'steering',...(scoped?{turn_id:1}:{}),message_id:2}));
+    snapshot.events.push(tool(3,'request-1:model-call','started'),
+      event(4,'status','Another input delivered',{phase:'steering',...(scoped?{turn_id:1}:{}),message_id:owner==='1'?2:3}));
+    const partial=JSON.parse(JSON.stringify(snapshot));
+    snapshot.events.push(standaloneToolFailure(5,'request-1'));
+    snapshot.deferred_activity=['1'];snapshot.loaded_activity=['1'];
+    const before=JSON.stringify(snapshot);
+    const merged={...snapshot,events:[...partial.events,snapshot.events.at(-1)]};
+    for(const value of [snapshot,JSON.parse(before),merged]){
+      const items=timeline(value),rows=items.get(owner).flatMap(item=>item.block?.rows||[]);
+      assert.equal(rows.length,1);assert.equal(rows[0].state,'error');
+      assert.equal(items.get(owner==='1'?'2':'3').flatMap(item=>item.block?.rows||[]).length,0);
+    }
+    assert.equal(JSON.stringify(snapshot),before);
+  }
+});
+
+test('a later unknown diagnostic cannot erase completion recorded only in a failure observation',()=>{
+  const snapshot=run(),completed=standaloneToolFailure(3,'request-1');
+  completed.data.action={dispatched:true,outcome:'completed'};
+  completed.failure_explanation={...completed.failure_explanation,
+    observed_cause:'Recording failed after a confirmed action.',action:completed.data.action,
+    retryability:'do_not_repeat',next_action:'Keep the confirmed receipt.'};
+  const unknown=standaloneToolFailure(4,'request-1');
+  unknown.data.action={dispatched:null,outcome:'unknown'};
+  unknown.failure_explanation={...unknown.failure_explanation,
+    observed_cause:'Later recording status unavailable.',action:unknown.data.action,
+    retryability:'blocked_unknown_outcome'};
+  snapshot.events.push(tool(2,'request-1:model-call','started'),completed,unknown,
+    {...unknown,id:5,created_at:stamp(5)});
+  const before=JSON.stringify(snapshot);
+  for(const value of [snapshot,JSON.parse(before)]){
+    const turn=groups(value).get('1');
+    assert.equal(turn.rows.length,1);
+    assert.equal(turn.rows[0].failure_explanation.action.outcome,'completed');
+    assert.match(html(turn),/Completion receipt recorded/);
+    assert.match(html(turn),/Do not repeat the confirmed action/);
+    assert.doesNotMatch(html(turn),/Automatic replay blocked: outcome unknown/);
+    assert.deepEqual(MoyaiActivity.visibleEvents(value.events).map(e=>e.id),[1,3]);
+  }
+  assert.equal(JSON.stringify(snapshot),before);
+});
+
 test('credential replay and content encoding use fixed labels with independent recorded presence',()=>{
   const value={version:1,component:'Slack credential acquisition',observed_cause:'Credential outcome unconfirmed.',
     stage:'Obtaining Slack credentials',action:{outcome:'unknown',dispatched:null},

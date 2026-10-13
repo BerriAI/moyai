@@ -10,14 +10,26 @@
   function visibleEvents(events){
     const scoped=(data,id)=>data.turn_id&&typeof id==='string'&&id?
       JSON.stringify([String(data.turn_id),id]):'';
-    const calls=new Map(),owners=new Map(),diagnostics=new Map();
+    const calls=new Map(),owners=new Map(),diagnostics=new Map(),delivered=new Map();
+    let claimed=null;
     for(const event of events){
       const data=event.data||{};
+      if(event.kind==='chat'&&event.message==='Response started'&&data.message_id)
+        claimed=String(data.message_id);
+      const turn=data.turn_id?String(data.turn_id):claimed;
+      if(data.phase==='steering'&&data.message_id&&turn)delivered.set(turn,data.message_id);
+      if(event.kind==='chat'&&event.message==='Response saved'&&String(data.message_id)===claimed)
+        claimed=null;
       const key=event.kind==='tool'&&scoped(data,data.call_id);
       if(!key)continue;
       if(!calls.has(key))calls.set(key,{start:null,terminal:false,failed:false});
       const call=calls.get(key);
-      if(data.phase==='started'&&data.activity_version===1)call.start??=event;
+      if(data.phase==='started'&&data.activity_version===1&&!call.start){
+        call.start=event;
+        // Current and older reporters can omit input_id. Retain the input
+        // delivered at the start, not the one active when a failure arrives.
+        call.input=data.input_id||delivered.get(String(data.turn_id))||data.turn_id;
+      }
       if(['completed','error','backgrounded'].includes(data.phase))call.terminal=true;
       if(data.phase==='error')call.failed=true;
       for(const id of [data.call_id,data.call_id.split(':')[0]]){
@@ -27,9 +39,14 @@
     }
     const diagnosticCall=data=>owners.get(scoped(data,
       typeof data.call_id==='string'&&data.call_id?data.call_id:data.request_id));
+    const confirmed=event=>event?.failure_explanation?.version===1&&
+      event.failure_explanation.action?.outcome==='completed';
     for(const event of events){
       const data=event.data||{},key=diagnosticCall(data),call=calls.get(key);
-      if(event.kind==='error'&&data.phase==='tool_failure'&&call?.start&&!call.terminal)
+      // A post-action recording failure can carry the only completion receipt.
+      // A later generic diagnostic cannot make that confirmed action unknown.
+      if(event.kind==='error'&&data.phase==='tool_failure'&&call?.start&&!call.terminal&&
+        (!confirmed(diagnostics.get(key))||confirmed(event)))
         diagnostics.set(key,event);
     }
     // Failed operations belong in work history even when the response succeeds.
@@ -49,7 +66,7 @@
           return [{...event,kind:'tool',message:call.start.message,data:{...data,
             activity_version:1,call_id:start.call_id,phase:'error',
             tool:start.tool||data.tool,category:start.category||'tool',label:start.label,
-            ...(start.input_id!=null?{input_id:start.input_id}:{})}}];
+            input_id:call.input}}];
         }
         return [event];
       }
