@@ -32,6 +32,8 @@ def workflow_failure(exc):
                 if recovery['method'] == 'catalog_read':
                     diagnostic['action'] = {'dispatched': False, 'outcome': 'rejected'}
     if isinstance(error, ApplicationError) and error.type == 'BrokerRejected' and error.details:
+        if len(error.details) > 1:
+            diagnostic.update(safe_error(error.details[1]))
         diagnostic.update(safe_error({'http_status': error.details[0]}))
     if isinstance(error, ApplicationError) and error.type == 'ModelRequestFailed' and error.details:
         diagnostic.update(safe_error(error.details[0]))

@@ -33,6 +33,11 @@ bounded view, not a complete execution trace.
   controller records contain **scheduled retry** counts from saved state;
   native SDK records use their own recovery counter. Missing records mean
   “No recovery attempt recorded”, not proof that none happened.
+- Gateway model-metadata failures keep the API's 503 wrapper separately from
+  the factual upstream status, safe code and correlation IDs. A recorded
+  upstream 401/403 is terminal for preparation/startup recovery. The explanation
+  identifies metadata access and asks an administrator to verify credentials;
+  it does not substitute context-limit configuration advice for that rejection.
 - `phase=slack_attachment_read` is optional. Its allowlisted code/stage,
   byte counts and bounded `attempts` are accepted without a producer import.
   `attempts` is a **read-attempt index, not an HTTP-request count**. Missing
@@ -71,7 +76,15 @@ tests are supplementary regression coverage. They do not prove live provider,
 Modal, or production recovery.
 
 For the service-level before/after proof, run the actual baseline and final app
-with the scoped E2E launcher. From an authenticated active private session, call
+with the scoped E2E launcher. One normal-app scenario uses a deliberately invalid
+synthetic gateway key: the real gateway rejects `/model/info` with 401, while the
+broker keeps its 503 contract. Before, terminal details lose the 401; after,
+metadata stage and both statuses remain visible without revealing the key or
+provider body. A separate healthy run with the configured gateway verifies the
+normal path. Keep both runs isolated and use real gateway responses.
+
+An optional guard scenario, if a real private-session identity is available,
+uses an authenticated active private session to call
 the actual `/broker/{run_id}/tools/call` endpoint for `media_share` with that
 session's valid capability and request identity. Both versions must deny export.
 The final version additionally records `PrivateExportDenied`, original turn,

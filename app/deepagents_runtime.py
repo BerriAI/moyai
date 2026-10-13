@@ -28,7 +28,7 @@ from agent.prompts import system_prompt
 from agent.tools import computer_tools, github_tools
 from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
 from agent.tools.remote_computer import requires_computer
-from sandbox.broker_failure import TRANSIENT_STATUSES, exception_diagnostic, safe_error, tool_evidence
+from sandbox.broker_failure import TRANSIENT_STATUSES, exception_diagnostic, safe_error, tool_evidence, upstream_diagnostic
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
 from .database import DatabaseBusyError
 from .db import database, now
@@ -121,8 +121,11 @@ class DeepAgentsRuntime:
         if response.status_code >= 400:
             # Provider bodies can contain prompts/credentials. Do not put them
             # into exception messages, logs or public activity records.
+            diagnostic = upstream_diagnostic(response.headers)
             raise ApplicationError(f'Broker request failed ({response.status_code}).', response.status_code,
-                type='BrokerRejected', non_retryable=response.status_code in {400, 401, 403, 404, 409, 413, 422})
+                *([diagnostic] if diagnostic else []), type='BrokerRejected',
+                non_retryable=(response.status_code in {400, 401, 403, 404, 409, 413, 422}
+                               or diagnostic.get('upstream_status') in {401, 403}))
         return response.json()
 
     @asynccontextmanager

@@ -32,6 +32,7 @@ TOOLS = {
 }
 STAGES = {
     'runtime_entrypoint': 'Agent entrypoint — exact operation not recorded',
+    'model_metadata': 'Reading gateway model metadata',
     'tool_catalog': 'Reading the tool catalog', 'tool_activity': 'Recording tool activity',
     'tool_dispatch': 'Calling the tool', 'computer_poll': 'Reading the computer receipt',
     'computer_step': 'Preparing or running computer work', 'tool_receipt': 'Saving the tool receipt',
@@ -216,6 +217,13 @@ def explain(data):
         observed = 'The capture completed, but its copy to the app could not be confirmed. Underlying copy failure cause unknown.'
         dispatched, outcome, decision = True, 'completed', 'do_not_repeat'
         next_action = 'Do not repeat the capture. Keep the original receipt; normal computer polling or workspace saving can retry the copy. Use media_list to confirm.'
+    if facts.get('failure_stage') == 'model_metadata' and facts.get('upstream_status') in {401, 403}:
+        category, decision = 'execution', 'not_retryable'
+        upstream = facts['upstream_status']
+        observed = (f'The gateway rejected model metadata access with HTTP {upstream}. '
+                    f'The broker reported HTTP {facts.get("http_status", 503)}. '
+                    'The underlying reason for the access rejection was not recorded.')
+        next_action = 'Have an administrator verify the configured gateway credentials and access to model metadata before retrying.'
     support = {}
     for key in ('request_id', 'broker_request_id', 'model_request_id'):
         value = safe_id(facts.get(key))

@@ -45,6 +45,7 @@ CLAUDE_TERMINAL_REASONS = {'completed', 'max_turns', 'max_budget_usd',
                           'aborted_streaming', 'aborted_tools', 'error'}
 FAILURE_STAGES = {
     'runtime_entrypoint',
+    'model_metadata',
     'tool_catalog', 'tool_activity', 'tool_dispatch', 'computer_poll', 'computer_step',
     'tool_receipt', 'tool_journal', 'supervisor_launch', 'supervisor_events', 'supervisor_wait',
     'remote_setup', 'remote_prepare', 'remote_finish', 'remote_activate', 'remote_attachments',
@@ -82,11 +83,21 @@ def _exception_diagnostic(exc, *, stage, request_id):
             if name == 'BrokerRejected' and exc.details:
                 for key, value in safe_error({'http_status': exc.details[0]}).items():
                     result.setdefault(key, value)
+                if len(exc.details) > 1:
+                    for key, value in safe_error(exc.details[1]).items():
+                        result.setdefault(key, value)
             if exc.details and isinstance(exc.details[-1], dict):
                 if recovery := safe_recovery(exc.details[-1].get('recovery')):
                     result.setdefault('recovery', recovery)
         if recovery := safe_recovery(getattr(exc, 'moyai_recovery', None)):
             result.setdefault('recovery', recovery)
+        if isinstance(exc, urllib.error.HTTPError):
+            result.setdefault('http_status', exc.code)
+            provenance = upstream_diagnostic(exc.headers or {})
+            for key, value in provenance.items():
+                result.setdefault(key, value)
+            if provenance.get('failure_stage') == 'model_metadata':
+                result['failure_stage'] = 'model_metadata'
         chain.append(name)
         if 'exception_type' not in result:
             result['exception_type'] = name
@@ -172,6 +183,20 @@ def safe_recovery(value):
         number = value.get(key)
         if type(number) is int and 0 <= number <= 10000:
             result[key] = number
+    return result
+
+
+def upstream_diagnostic(headers):
+    """Decode only our body-free provenance headers, independently of wire status."""
+    result = safe_error({
+        'upstream_status': http_status(headers.get('x-moyai-upstream-status')),
+        'error_code': headers.get('x-moyai-error-code'),
+        'stage': headers.get('x-moyai-error-stage'),
+        'failure_stage': headers.get('x-moyai-failure-stage'),
+        'cause_type': headers.get('x-moyai-upstream-error-type'),
+    })
+    if ids := request_ids(headers):
+        result['request_ids'] = ids
     return result
 
 
@@ -294,7 +319,8 @@ def failure(route, request_id, exc, *, headers=None, status=None, response_start
         cause = exc.__cause__
     errno = getattr(cause, 'errno', None) if cause else getattr(exc, 'errno', None)
     return {
-        **safe_error({'error_code': headers.get('x-moyai-error-code'), 'stage': headers.get('x-moyai-error-stage')}),
+        **safe_error({'error_code': headers.get('x-moyai-error-code'), 'stage': headers.get('x-moyai-error-stage'),
+                      'failure_stage': headers.get('x-moyai-failure-stage')}),
         'version': 1, 'route': route if route in BROKER_ROUTES else 'unknown',
         'http_status': status, 'upstream_status': upstream,
         'request_id': request_id, 'request_ids': request_ids(headers),
