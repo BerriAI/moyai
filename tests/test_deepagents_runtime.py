@@ -1087,7 +1087,8 @@ async def test_official_provider_sdk_uses_sealed_responses_broker(model_name):
     thread.start()
     runtime = object.__new__(DeepAgentsRuntime)
     runtime.runner = SimpleNamespace(settings=SimpleNamespace(public_url=f'http://127.0.0.1:{edge.server_port}',
-        cloudflare_access_client_id='', cloudflare_access_client_secret=''), token=lambda *args: 'scoped-token')
+        cloudflare_access_client_id='', cloudflare_access_client_secret='', native_web_search_models=[]),
+        token=lambda *args: 'scoped-token')
     runtime.current = lambda scope: {}
     try:
         result = await runtime._model_request(TurnScope('test', 1, model=model_name, input_budget=10000),

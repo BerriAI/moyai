@@ -168,19 +168,27 @@ class DeepAgentsRuntime:
             return await self._model_request(scope, messages, settings, parameters)
 
     async def _model_request(self, scope, messages, settings, parameters):
-        await database(self.current, scope)
+        run = await database(self.current, scope)
         settings = dict(settings or {})
         public_id = settings.pop('moyai_public_id', '')
         input_id = settings.pop('moyai_input_id', scope.message_id)
+        selected_model = run.get('active_model') or run.get('model') or scope.model
+        tools = list(parameters or [])
+        include = ['reasoning.encrypted_content']
+        if selected_model in self.runner.settings.native_web_search_models:
+            # Hosted search executes inside the existing model activity. It is
+            # not a workspace function and must not enter broker tool dispatch.
+            tools.append({'type': 'web_search', 'search_context_size': 'low'})
+            include.append('web_search_call.action.sources')
         token = self.runner.token(scope.run_id, scope.message_id)
         async with httpx.AsyncClient(transport=SealedModelTransport(token)) as client:
             sdk = AsyncOpenAI(api_key=token, base_url=self.url(scope) + '/v1',
                 default_headers=self.headers(scope), http_client=client, max_retries=0, timeout=600)
             model = ChatOpenAI(model=scope.model, api_key=token, use_responses_api=True,
-                store=False, use_previous_response_id=False, include=['reasoning.encrypted_content'],
+                store=False, use_previous_response_id=False, include=include,
                 root_async_client=sdk, async_client=sdk.chat.completions, max_retries=0)
             try:
-                bound = model.bind_tools(parameters) if parameters else model
+                bound = model.bind_tools(tools) if tools else model
                 result, last_text, published_at = None, '', 0.0
                 async with aclosing(bound.astream(messages, **settings)) as stream:
                     async for chunk in stream:

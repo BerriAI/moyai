@@ -51,6 +51,10 @@ class NativeModelContent:
                 name = block.get('name')
                 if isinstance(name, str) and name and len(self.tools) < 100:
                     self.tools.append(name if len(name) <= 120 else '[tool name omitted]')
+            elif not input_text and kind == 'web_search_call' and len(self.tools) < 100:
+                # Native search has no client function name. Keep its identity,
+                # never its query, source bodies or other provider-private data.
+                self.tools.append('web_search')
             elif not input_text and kind == 'message' and block.get('role') == 'assistant':
                 # Responses message content is a flat list; never traverse
                 # arbitrary nested objects (reasoning, arguments or results).
@@ -78,7 +82,7 @@ class NativeModelContent:
                 self.append(value.get('delta'))
             elif kind == 'response.output_item.added':
                 item = value.get('item')
-                if isinstance(item, dict) and item.get('type') in ('function_call', 'custom_tool_call'):
+                if isinstance(item, dict) and item.get('type') in ('function_call', 'custom_tool_call', 'web_search_call'):
                     self.blocks([item])
             else:
                 response = value.get('response') if kind in (
