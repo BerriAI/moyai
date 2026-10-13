@@ -73,6 +73,9 @@ jobs:
       - name: Test independent agent startup and warm runtime reuse
         if: matrix.group == 'agent'
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_independent_runtime.py tests/test_independent_runtime_warm.py tests/test_independent_runtime_sdk.py
+      - name: Test shared agent instructions and credential discovery orientation
+        if: matrix.group == 'agent'
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_agent_package.py tests/test_credential_behavior_probe.py
       - name: Test saved model choices and opt-in processing tiers
         if: matrix.group == 'agent'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_astra_ultrafast.py tests/test_model_preferences.py tests/test_model_tools.py

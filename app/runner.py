@@ -481,6 +481,8 @@ class RunManager:
             spec["project_environment"] = self.environments.context(run)
             if spec['project_environment']:
                 spec['repo_url'] = 'https://github.com/' + spec['project_environment']['repository']
+        if self.credentials:
+            spec['credential_discovery'] = self.credentials.discovery_context(run)
         return spec
 
     async def cloud(self, run):

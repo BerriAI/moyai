@@ -43,7 +43,8 @@ async def checkpoint_wait(durable, phase):
             cancel_children=AsyncMock())
     else:
         state['wait_credential'] = 'existing-key-request'
-        manager.credentials = SimpleNamespace(resolution=lambda *a: {'status':'pending'})
+        manager.credentials = SimpleNamespace(
+            resolution=lambda *a: {'status':'pending'}, discovery_context=lambda *a: None)
     manager.save(run_id, state)
     manager.store.update_run(run_id, status=phase, pending_result='', summary='', token_hash='')
     return state['message_id']
