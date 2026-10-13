@@ -116,7 +116,8 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
     return {**data, 'directory': str(target), 'reused': False,
             'instruction': ('Use github_update_pull_request to publish follow-up edits to this PR. An external PR requires explicit requester approval through github_request_pull_request_write_access for this saved chat.' if number is not None else
                             'Use github_create_pull_request to publish actual files as a normal PR without an administrator approval step.')
-                           + ' Git push is unavailable.'}
+                           + ' Git push is unavailable. This checkout does not change the session repository or prepared environment. '
+                             'For another repository, pass its explicit repository_id and a fresh directory; do not move /workspace/repo.'}
 
 
 def collect(directory, title, body, request_key):
@@ -184,8 +185,9 @@ def advertised_tools(tools):
             required = []
             if tool['name'] == 'github_checkout':
                 properties['repository_id'] = {'type': 'integer', 'minimum': 1, 'description': 'Permanent ID from github_repositories. Preferred over a repository name.'}
-                properties['repository'] = {'type': 'string', 'description': 'Allowed owner/repository, such as BerriAI/moyai. Use github_repositories to list choices; defaults to the session repository.'}
+                properties['repository'] = {'type': 'string', 'description': 'Allowed owner/repository, such as BerriAI/moyai. Defaults only to an existing session repository. Otherwise use github_repositories, then pass an explicit repository_id.'}
                 properties['number'] = {'type': 'integer', 'minimum': 1, 'description': 'Optional PR number; use a fresh directory to check out its current head.'}
+                properties['directory']['description'] += ' For another repository or PR head, use a fresh directory. Do not move /workspace/repo or replace its prepared environment; checkout does not change the session repository.'
             if tool['name'] in {'github_create_pull_request', 'github_update_pull_request'}:
                 properties.update({
                     'title': {'type': 'string', 'minLength': 3, 'maxLength': 250},

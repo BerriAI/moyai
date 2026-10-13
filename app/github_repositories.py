@@ -19,8 +19,8 @@ class GitHubRepositories:
         if self.store.schema_updates:
             initialize_schema(self.store)
 
-    def saved_credentials(self):
-        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='github'")
+    def saved_credentials(self, *, connection=None):
+        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='github'", connection=connection)
         return json.loads(self.security.decrypt(rows[0]['encrypted'])) if rows else {}
 
     def connected_ids(self, credentials):
@@ -29,11 +29,11 @@ class GitHubRepositories:
             raise ConnectorError('Refresh the GitHub connection to confirm repository IDs.')
         return list(dict.fromkeys(ids))
 
-    def repository_options(self, credentials=None):
-        credentials = credentials if credentials is not None else self.saved_credentials()
+    def repository_options(self, credentials=None, *, connection=None):
+        credentials = credentials if credentials is not None else self.saved_credentials(connection=connection)
         ids = credentials.get('repository_ids', [])
         rows = self.store.rows('SELECT * FROM github_repositories WHERE installation_id=?',
-                               (credentials.get('installation_id', 0),))
+                               (credentials.get('installation_id', 0),), connection=connection)
         by_id = {r['repository_id']: r for r in rows}
         return [{'id': i, 'full_name': by_id[i]['full_name']} for i in ids if i in by_id]
 
@@ -44,17 +44,17 @@ class GitHubRepositories:
     def connected_targets(self, credentials):
         return self.connected_ids(credentials)
 
-    def target(self, repository='', credentials=None):
-        credentials = credentials if credentials is not None else self.saved_credentials()
+    def target(self, repository='', credentials=None, *, connection=None):
+        credentials = credentials if credentials is not None else self.saved_credentials(connection=connection)
         ids = self.connected_ids(credentials)
         if repository in ('', None):
-            return ids[0]
+            raise ConnectorError('No repository is selected. Use github_repositories, then pass an explicit repository_id.', dispatched=False)
         if positive_id(repository):
             if repository in ids:
                 return repository
         elif isinstance(repository, str):
             rows = self.store.rows('SELECT * FROM github_repositories WHERE installation_id=?',
-                                   (credentials['installation_id'],))
+                                   (credentials['installation_id'],), connection=connection)
             matches = [row['repository_id'] for row in rows if row['repository_id'] in ids
                        and repository.lower() in json.loads(row['aliases'])]
             if len(matches) == 1:
@@ -199,7 +199,7 @@ class GitHubRepositories:
         try:
             target = self.target(requested, credentials)
         except ConnectorError:
-            if repository_id is not None or positive_id(requested):
+            if not requested or repository_id is not None or positive_id(requested):
                 raise
             # A new spelling may be a rename of one of the already selected IDs.
             for identity in self.connected_ids(credentials):
@@ -210,9 +210,6 @@ class GitHubRepositories:
             raise ConnectorError('The GitHub connection changed during repository lookup. Retry the operation.')
         if repository_id is not None and repository and self.target(repository, credentials) != target:
             raise ConnectorError('The repository name and ID identify different repositories.')
-        if run.get('id') and not repository and repository_id is None:
-            self.store.execute('UPDATE runs SET github_repository_id=?,repo_url=? WHERE id=?',
-                               (target, 'https://github.com/' + self.repository_name(target), run['id']))
         if self.references_dirty:
             self.migrate_references(credentials)
         return target

@@ -399,7 +399,7 @@ async def live_owner(request, monkeypatch):
     from app.model_slots import ModelSlots
     route = request.param
     proof = SimpleNamespace(route=route, field='input' if route == '/v1/responses' else 'messages',
-        calls=[], queue=asyncio.Queue(), limit=20000, clock=1000., slots=ModelSlots(1))
+        calls=[], queue=asyncio.Queue(), limit=20000, clock=1000., slots=ModelSlots(1), measure_owners={})
     monkeypatch.setattr(live_context, 'time', SimpleNamespace(monotonic=lambda: proof.clock))
     proof.run = dict(id='run', token_hash='cap', active_message_id=1, active_user_id='actor',
                      active_model='model', model='model', status='running', deleted_at='', mode='modal')
@@ -443,6 +443,7 @@ async def live_owner(request, monkeypatch):
         async def blocked(payload, **kwargs):
             if run_id is None or kwargs.get('scope') == run_id + route:
                 gate = asyncio.get_running_loop().create_future()
+                proof.measure_owners[gate] = asyncio.current_task()
                 gates.put_nowait(gate)
                 await gate
             return await measure(payload, **kwargs)
@@ -696,14 +697,25 @@ async def test_live_measurement_rechecks_scope_and_discards_stale_completion(liv
 async def test_live_global_caps_keep_evicted_tasks_owned_until_cleanup(live_owner, monkeypatch):
     from app import live_context
     p = live_owner
+    cleanup = asyncio.Event()
+    summarize = p.owner.gateway.summarize_private
+    async def retained(*args):
+        try:
+            return await summarize(*args)
+        finally:
+            await cleanup.wait()
+    monkeypatch.setattr(p.owner.gateway, 'summarize_private', retained)
     for name in ('MAX_SCOPES', 'MAX_TASKS', 'MAX_CACHE_BYTES'):
         monkeypatch.setattr(live_context, name, 1)
     await p.prepare()
     first = await p.next()
     p.run['id'] = 'another-run'
-    await p.prepare()
-    assert first.task.cancelling() and first.task in p.owner.tasks
-    assert len(p.owner.states) == 1 and not next(iter(p.owner.states.values())).pending
+    try:
+        await p.prepare()
+        assert first.task.cancelling() and first.task in p.owner.tasks
+        assert len(p.owner.states) == 1 and not next(iter(p.owner.states.values())).pending
+    finally:
+        cleanup.set()
     await asyncio.gather(first.task, return_exceptions=True)
     assert not p.owner.tasks
     await p.prepare()
@@ -740,16 +752,30 @@ async def test_live_exhausted_capacity_retries_report_context_pressure(live_owne
     p, measured = live_owner, []
     monkeypatch.setattr(live_context, 'MAX_TASKS', 1)
     measure = p.owner.gateway.context_budget.measure
+    releases, competitors = [], []
     async def saturated(payload, **kwargs):
         budget = await measure(payload, **kwargs)
         measured.append(budget)
-        task = p.slots.run_maintenance(asyncio.sleep(0))
+        release = asyncio.Event()
+        releases.append(release)
+        task = p.slots.run_maintenance(release.wait())
+        competitors.append(task)
         p.owner.tasks.add(task)
         task.add_done_callback(p.owner.tasks.discard)
         return budget
+    wait = p.owner.wait
+    async def capacity_clears(state, tasks):
+        releases[-1].set()
+        await wait(state, tasks)
     p.owner.gateway.context_budget.measure = saturated
-    with pytest.raises(ContextPressure) as rejected:
-        await p.prepare(p.items + p.items[1:9])
+    monkeypatch.setattr(p.owner, 'wait', capacity_clears)
+    try:
+        with pytest.raises(ContextPressure) as rejected:
+            await asyncio.wait_for(p.prepare(p.items + p.items[1:9]), 2)
+    finally:
+        for release in releases:
+            release.set()
+        await asyncio.gather(*competitors)
     assert len(measured) == 4 and rejected.value.budget == measured[-1].public()
     assert not p.calls and not p.owner.tasks
 
@@ -761,13 +787,17 @@ async def test_live_borrowed_scope_survives_idle_sweeps_and_gets_release_grace(l
     await p.prepare()
     summary = await p.next()
     state = p.owner.states[(p.run['id'], p.route)]
+    measure = p.owner.gateway.context_budget.measure
+    gates = p.block_measure()
     waiting = asyncio.create_task(p.prepare(p.items + p.items[1:9]))
     try:
-        await asyncio.sleep(0)
+        gate = await asyncio.wait_for(gates.get(), 2)
+        p.owner.gateway.context_budget.measure = measure
         p.clock += IDLE_SECONDS + 1
         if sweep == 'watch': await asyncio.sleep(1.05)
         else: await p.prepare([p.message('user', 'Another foreground request')])
         assert p.owner.states[(p.run['id'], p.route)] is state and not summary.task.done()
+        gate.set_result(None)
         await p.settle(summary)
         body, budget = await asyncio.wait_for(waiting, 2)
         assert summary.summary in json.dumps(body) and budget.input_tokens <= budget.input_budget
@@ -785,7 +815,9 @@ async def test_live_concurrent_borrowers_release_on_success_cancel_and_error(liv
     gates = p.block_measure()
     tasks = [asyncio.create_task(p.prepare([p.message('user', 'Small foreground request')])) for _ in range(3)]
     try:
-        held = [await asyncio.wait_for(gates.get(), 2) for _ in tasks]
+        arrived = [await asyncio.wait_for(gates.get(), 2) for _ in tasks]
+        by_task = {p.measure_owners[gate]: gate for gate in arrived}
+        held = [by_task[task] for task in tasks]
         state = p.owner.states[(p.run['id'], p.route)]
         assert state.borrowers == 3
         p.clock += IDLE_SECONDS + 1
@@ -803,6 +835,27 @@ async def test_live_concurrent_borrowers_release_on_success_cancel_and_error(liv
     finally:
         for task in tasks: task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_live_summary_finishing_during_measurement_is_reused(live_owner):
+    p = live_owner
+    await p.prepare()
+    summary = await p.next()
+    measure = p.owner.gateway.context_budget.measure
+    gates = p.block_measure()
+    waiting = asyncio.create_task(p.prepare())
+    try:
+        gate = await asyncio.wait_for(gates.get(), 2)
+        await p.settle(summary)
+        p.owner.gateway.context_budget.measure = measure
+        gate.set_result(None)
+        body, budget = await asyncio.wait_for(waiting, 2)
+        assert summary.summary in json.dumps(body)
+        assert budget.input_tokens <= budget.input_budget
+        assert len(p.calls) == 1
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
 
 
 @pytest.mark.parametrize('bound', ['MAX_SCOPES', 'MAX_CACHE_BYTES'])

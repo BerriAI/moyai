@@ -1026,13 +1026,18 @@ def test_activity_snapshot_cannot_skip_events_committed_during_chat_read(workspa
     original = store.messages
     saved = []
 
+    def complete_during_read():
+        event = activity_event(store, run_id, 'tool', 'Committed during read', {'turn_id': turn})
+        store.finish_message(run_id, turn, 'Concurrent answer')
+        store.update_run(run_id, status='idle')
+        return event
+
     def finish_after_run_read(selected, *, connection=None):
         # WAL permits the independent writer to commit while the endpoint holds
         # its read snapshot. Message, lifecycle and cursor must stay consistent.
         if selected == run_id and connection is not None and not saved:
-            saved.append(activity_event(store, run_id, 'tool', 'Committed during read', {'turn_id': turn}))
-            store.finish_message(run_id, turn, 'Concurrent answer')
-            store.update_run(run_id, status='idle')
+            with ThreadPoolExecutor(max_workers=1) as writer:
+                saved.append(writer.submit(complete_during_read).result(timeout=3))
         return original(selected, connection=connection)
 
     monkeypatch.setattr(store, 'messages', finish_after_run_read)
@@ -1052,7 +1057,9 @@ def test_activity_snapshot_cannot_skip_events_committed_during_chat_read(workspa
 
     def append_after_cursor(connection, selected, cursor):
         if selected == run_id and not additional:
-            additional.append(activity_event(store, run_id, 'status', 'After cursor', {'turn_id': turn}))
+            with ThreadPoolExecutor(max_workers=1) as writer:
+                additional.append(writer.submit(activity_event, store, run_id, 'status', 'After cursor',
+                                                {'turn_id': turn}).result(timeout=3))
         return original_markers(connection, selected, cursor)
 
     monkeypatch.setattr(activity_history, 'markers', append_after_cursor)

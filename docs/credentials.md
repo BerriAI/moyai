@@ -1,5 +1,65 @@
 # Secure access and 1Password
 
+## Discover before declaring an access blocker
+
+The shared system instructions contain a short rule to load the `access-discovery`
+bundled skill before declaring access blocked or requesting it. The detailed
+procedure lives in `agent/skills/access-discovery/SKILL.md` and loads on demand
+through the existing revision-pinned `bundled_skill_read` tool. Each
+turn's run spec includes counts of the current requester's authorized active
+personal connections, organization connections, and Shared vault sources. This
+metadata does not include secret values, labels, or handles and never establishes
+that access has been tested.
+
+Agents inspect the required native connection, call `credentials_list` without
+filters, reuse appropriate saved access, and inspect a connected Shared source
+when it could satisfy the task. They verify only the requested capability within
+the user's authorized scope. A missing environment variable, a filtered empty
+list, or an internal tool error is insufficient evidence for requesting keys.
+Discovery failures must remain distinguishable from confirmed missing access.
+Filtered inventories include the same authorized counts and an explicit
+instruction to repeat the lookup without filters. An exact capability-name
+miss therefore remains distinguishable from an empty credential store.
+
+The core trigger and context are shared by all harnesses and retained outside
+optional prompt truncation; the procedure is not injected into every prompt.
+The broker continues to enforce saved-access reuse and source lookup
+before opening a credential form. Natural-language compliance is also exercised
+by the live credential-discovery probe; the policy is not a claim that every
+future model answer is mechanically verified.
+
+The Docker regression jobs exercise requester/session isolation, expiry,
+revocation, filtered misses, source lookup before forms, shared prompt
+assembly across harnesses, and versioned skill reads. For the separate, billed live-model behavior check,
+use an isolated local deployment with the approved non-production gateway and
+Modal configuration, a fresh `DATA_DIR`, and an authenticated temporary HTTPS
+tunnel to the selected local port:
+
+```sh
+uv run --frozen python scripts/credential_behavior_probe.py \
+  --arm after --port 8893 --public-url "$TEST_PUBLIC_URL" \
+  --output "$TEST_RESULTS_DIR" --trials 2 --serve
+```
+
+The probe starts the real application and a disposable real Temporal service,
+logs in through the normal HTTP endpoint, saves a synthetic organization
+credential, and sends access-assessment requests through the normal session
+endpoint. An observer records only inventory filters and whether the saved
+connection was returned. A passing case must discover that connection; merely
+calling `credentials_list` does not pass. A conceptual no-tools request must
+remain tool-free. The `after` arm additionally requires a completed, full
+`access-discovery` skill read recorded by the real app. The `before` arm retains
+the same discovery checks without requiring a skill absent from older builds.
+No service call is authorized or needed, and this probe does
+not establish that the synthetic token authenticates to any provider.
+
+Run the same probe against the base and final revisions; keep the output and
+real-app captures separate. `--serve` retains the app for browser inspection;
+its temporary login password is stored with mode 0600 under the private
+`DATA_DIR`, outside the result artifacts. Stop the local app and close its
+tunnel after capturing evidence. Omitting `--serve` exits nonzero on a failed
+behavior check.
+
 [Documentation](README.md) · [Project overview](../README.md)
 
 > This guide retains the detailed reference material from the original README.
@@ -91,8 +151,11 @@ commands can themselves copy data or create service caches; this is not a
 boundary against malicious sandbox code. Revocation prevents subsequent loads,
 not an already-running command or use at the upstream service.
 
-New images include `aws`, `kubectl`, `helm` and 1Password CLI `op` 2.30.0. Restored older images install a
-missing supported CLI when a credential command references it. Installation
+New images include AWS CLI **2.38.0**, `kubectl`, `helm` and 1Password CLI `op` 2.30.0.
+AWS uses the official Linux x86_64/aarch64 bundles, pinned by SHA-256 after
+verification of their release signatures against AWS's published signing key.
+Restored older images upgrade AWS CLI v1 (or another version) on demand.
+Other supported CLIs are installed when missing. Installation
 errors are separate from authentication failures. Generic access is a deliberate
 policy expansion: approved credentials can now reach sandbox commands, with the
 permissions the user supplied. Organization connection policies still apply.
@@ -106,6 +169,119 @@ return their observed revisions so the agent can identify the failed connection;
 ambiguous failures do not invalidate every credential. Completed or uncertain
 writes are never automatically replayed. The agent verifies updated access and
 continues from the saved task.
+
+### Personal AWS IAM Identity Center login
+
+`credentials_aws_login` implements AWS's device authorization flow without
+holding a sandbox command open. It uses unsigned SSO OIDC calls with fixed AWS
+endpoints, independent of Moyai's AWS infrastructure credentials. It neither
+changes IAM permissions nor transfers the server's AWS access to an agent.
+
+First inspect `credentials_list`. Reuse a matching saved login through
+`credentials_request` with `provider=generic`, `format=aws-sso`,
+`name=aws-sso/<profile>` and its `secret_id`. When login is needed, start it:
+
+```json
+{
+  "action": "start",
+  "request_key": "aws-development-login",
+  "lifetime": "persistent",
+  "profile": {
+    "profile": "development",
+    "start_url": "https://your-portal.awsapps.com/start",
+    "sso_region": "us-east-1",
+    "account_id": "123456789012",
+    "role_name": "ReadOnly",
+    "region": "us-west-2"
+  }
+}
+```
+
+Use the account, role, and portal supplied by the requester or administrator.
+`persistent` requires the user's authorization to reuse access in future
+sessions; the default is `session`. The requester must have a personal
+Google/Cloudflare identity (local previews are the development exception).
+Organization sharing is rejected, including later edits through the Secrets API.
+
+Show the returned `verification_uri` and `user_code` to the requester. They
+approve on their own device; the agent must not approve on their behalf.
+Poll with `{"action":"poll","login_id":"<returned id>"}` no more frequently than
+the returned `interval`. Pending/slow-down responses retain the encrypted
+authorization and enforce backoff. Cancel with
+`{"action":"cancel","login_id":"<returned id>"}`. Duplicate start calls with the
+same key return the existing attempt. An interrupted/uncertain token exchange
+is not repeated: inspect saved access, cancel, and start a fresh authorization.
+Expired pending payloads are cleared when the login tool next runs.
+
+Completion returns only the new saved credential ID and capability name.
+Request that credential, then run a harmless verification:
+
+```json
+{
+  "request_ids": ["<credentials_request handle>"],
+  "command": "aws sts get-caller-identity",
+  "timeout": 60
+}
+```
+
+`credentials_run` restores a generated `sso-session` config and the selected
+profile's SSO token/role cache into a fresh **0700 Linux tmpfs home**. Credential
+files are **0600**. The command receives that profile, no inherited `AWS_*`
+settings, no default credentials file, and disabled EC2 instance metadata.
+AWS automatic retries are disabled for this execution. Do not mix an SSO
+profile with another AWS environment binding or multiple SSO profiles.
+Approved commands may use their supplied permissions; this is not a boundary
+against malicious sandbox code copying credentials elsewhere.
+
+The AWS CLI can refresh its token and role credentials normally. After the
+process group stops, the executor collects only that profile's two expected
+cache files, rejects symlinks and nonregular/oversized/malformed files, and
+redacts both restored and collected values before returning output. Unsafe
+cache collection suppresses output. It removes the temporary home on every
+normal exit, failure or timeout. Abrupt sandbox termination loses uncollected
+refreshes; tmpfs is not an on-disk workspace credential store.
+
+Refreshed state goes directly to the authenticated internal
+`/broker/{run_id}/credentials/aws/writeback` endpoint, never through model tool
+arguments, tool receipts or Temporal payloads. The broker rechecks the active
+requester, ownership, expiry, revocation and both handle/secret revisions.
+Concurrent refreshes use compare-and-swap: a stale result cannot overwrite a
+newer login. A rejected or lost writeback is reported separately from the
+command's exit status; it may require reauthentication. **Never repeat an
+uncertain AWS write just because login or cache persistence failed.**
+
+Settings → Secrets shows metadata and **Revoke access** for these profiles.
+To change account/role/reuse period, revoke and log in again. Revocation clears
+Moyai's encrypted copy and prevents subsequent loads and late writeback; it
+cannot cancel an already-running command or revoke an AWS session upstream.
+AWS logout/provider-side revocation remains an administrator/user action.
+
+The typed `aws-sso` format is also accepted by the authenticated Secrets API for
+secure imports: `value` is a JSON document with `version:1`, `profile` (the six
+fields above), and `cache` keyed by the CLI's hashed `sso/cache/*.json` and
+`cli/cache/*.json` names. Use `sandbox.aws_credentials.cache_paths` to derive
+them. Arbitrary config, credential processes, endpoints and paths are rejected.
+Never put this value in chat. Existing generic AWS env/file credentials remain
+supported without SSO cache persistence.
+
+Scope: AWS access-portal URLs (`https://<portal>.awsapps.com/start`) and IAM
+Identity Center `sso-session` profiles. This does not implement `aws login`
+console sessions, custom issuer URLs, GovCloud/China portal variants, arbitrary
+assume-role chains, organization-wide SSO sharing, or an AWS login settings
+wizard. Upstream account/role authorization is checked by AWS on first use,
+not inferred from a completed device login.
+
+PostgreSQL deployments using verified schema admission must run the normal
+offline migration to **schema revision 20** before starting this revision.
+SQLite initializes the additional durable login-attempt table at startup.
+No production migration is performed by the implementation or tests.
+
+Official references:
+[CLI v2 install and signature verification](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html),
+[SSO sessions and device-code login](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html),
+[RegisterClient](https://docs.aws.amazon.com/singlesignon/latest/OIDCAPIReference/API_RegisterClient.html),
+[StartDeviceAuthorization](https://docs.aws.amazon.com/singlesignon/latest/OIDCAPIReference/API_StartDeviceAuthorization.html),
+[CreateToken](https://docs.aws.amazon.com/singlesignon/latest/OIDCAPIReference/API_CreateToken.html).
 
 A command using Shared may fail because a retrieved destination key is invalid
 while the 1Password service-account token remains valid. The executor reports

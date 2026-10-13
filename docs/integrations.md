@@ -62,15 +62,32 @@ unchanged. A missing or inaccessible parent stops creation.
 
 For an **existing** ticket, use `linear_update_issue` with `issue_id` and
 `parent_id`, for example `{"issue_id":"LIT-1234","parent_id":"LIT-9222"}`.
-Both accept a Linear identifier or UUID. This sends `issueUpdate` with only
-`parentId`; it preserves the existing issue instead of creating a replacement or
+Both accept a Linear identifier or UUID. A parent-only call sends `issueUpdate`
+with only `parentId`; it preserves the existing issue instead of creating a replacement or
 substituting cross-links. To remove a parent, explicitly pass `"parent_id":null`.
-Omitting `parent_id` is rejected. Parent updates execute directly when the
+Omitting a field preserves it; supply at least one update field. Updates execute directly when the
 connection allows writes, without an administrator approval step.
 
-Read the ticket with `linear_issue` to verify its returned `parent` (ID,
-identifier, title and URL). An update is confirmed only when Linear returns
-success, the same issue ID, and the requested parent. Unconfirmed writes are
+`linear_update_issue` also accepts `title`, Markdown `description`, `state_id`
+(workflow status), `assignee_id`, `priority` (0–4), `label_ids`, `project_id`,
+`cycle_id` and `due_date` (`YYYY-MM-DD`). Explicit null clears description,
+assignee, parent, project, cycle or due date. Title, state, labels and priority
+reject null: use `label_ids: []` to remove all labels and `priority: 0` for no
+priority. Labels replace the whole set. For example,
+`{"issue_id":"LIT-1234","title":"Corrected title","priority":2}` leaves the
+parent, labels, assignee and all other fields unchanged.
+
+Find the issue's team using `linear_issue`, then call
+`linear_options(team_id=…, resource="states"|"members"|"labels"|"projects"|"cycles")`.
+Each resource has independent cursor pagination; follow `next_arguments`.
+Use returned IDs, not ambiguous names. Discovery is scoped to the selected team;
+Linear still enforces issue/team permissions and relationship validity.
+
+Read the ticket with `linear_issue` to verify the changed fields and its
+returned parent. Comments and labels paginate separately: follow
+`next_arguments` for comments and `labels_next_arguments` for labels.
+An update is confirmed only when Linear returns
+success, the same issue ID, and the supplied field values. Unconfirmed writes are
 marked uncertain and are never retried automatically. Reparenting several
 existing tickets requires one update per ticket; no new tickets are needed.
 
@@ -84,6 +101,89 @@ After deployment, these tools are advertised by the workspace broker and its
 MCP bridge; a running agent may need to refresh its tool discovery or resume in
 a new turn to see the updated schema. The connector uses Linear's
 [issue update API](https://linear.app/developers/graphql#creating--editing-issues).
+
+## Notion pages, properties and blocks
+
+Native requests pin **Notion-Version: 2025-09-03**. In this version databases
+contain data sources: retrieve a database using
+`notion_object(kind="database", object_id=…)`, choose an explicit `data_sources`
+entry, then retrieve its schema with `kind="data_source"`. Query rows with
+`notion_query(data_source_id=…)`. Do not send a database ID to a data-source
+endpoint or silently choose the first source in a multi-source database.
+
+`notion_discover` searches page or data-source titles visible to the integration.
+An empty query lists accessible objects of the selected kind. `notion_search`
+retains its existing page-title behavior. Neither tool provides workspace-wide
+content search. `notion_query` supports typed AND conditions and ordered property
+sorts on a single data source; unsupported formula/rollup filters are rejected.
+Follow returned continuations for search, queries and property collections.
+
+`notion_object(kind="page")` reads metadata and properties; `notion_property`
+reads a property's full paginated values using its returned ID.
+`notion_page` still reads direct block children and returns explicit descendant
+collections, each with its own cursor.
+
+`notion_create_page` accepts a shared `page_id` or `data_source_id` parent,
+typed properties and optional children. Under a page, supply just
+`{"property":"title","type":"title","text":"New page"}`. For a data-source row,
+use exact property names/IDs and existing options from its schema.
+`notion_update_page` modifies only supplied properties or `in_trash`.
+Property values replace existing values: `[]` clears multi-select, people or
+relations, empty text clears text, and null clears nullable number, select,
+status, date and contact values. Read-only calculated properties are not writable.
+
+`notion_append_blocks` appends up to 100 structured blocks, optionally after
+an existing sibling, with at most two levels in one call. Supported blocks are
+paragraphs, headings, lists, to-dos, toggles, quotes, code and dividers.
+Rich-text segments support bold, italic, strikethrough, code and HTTP(S) links.
+`notion_update_block` replaces content while preserving the current block type,
+or archives/restores via `archived`. Append children separately. The original
+`notion_append(page_id, text)` paragraph helper remains supported.
+Notion's 2,000-character rich-text, array and 500 KB payload constraints apply.
+
+The connection must have access to the parent, target and relation destinations
+and the provider's read/insert/update content capabilities. Local write policies,
+session app selection and private-session restrictions apply to every operation.
+Read the target with `notion_object`/`notion_property` after an uncertain update.
+For uncertain creation or append, search/query/read the parent and reconcile
+the returned IDs and content before explicitly retrying. No mutation auto-retries.
+
+## Slack message operations
+
+`slack_reply(channel, thread_ts, text)` verifies an exact thread root through
+the installed bot and posts an attributed reply. All parts of a long reply
+stay in that original thread. `slack_send` remains compatible, including `me`
+and explicit user-ID DM resolution.
+
+`slack_message(channel, ts)` retrieves one exact message and reactions using
+the bot. `slack_edit_message` and `slack_delete_message` verify its channel,
+timestamp and bot author before mutation. Edit replaces one message's body,
+adds the active requester's attribution, and clears old blocks/attachments.
+`slack_reaction(action="add"|"remove", channel, ts, name)` operates only on the
+bot's own reaction; already-present/absent outcomes are acknowledged.
+
+Reconnect existing Slack installations for **bot `reactions:read`**.
+Replies/edits/deletes additionally require `chat:write`; reactions require
+`reactions:write`. Bot membership and provider permissions still apply.
+These operations never use a personal or shared user token. Existing personal
+Slack reads retain their private-session selection and fail-closed boundaries.
+Private sessions cannot use these writes.
+
+Reconcile uncertain edits/reactions with `slack_message`; verify reply parts
+with `slack_thread(as_bot=true)` and the original root. A not-found/inaccessible
+message alone does not prove deletion. Preserve acknowledged parts after a
+partial reply, and never resend the full body automatically.
+
+Provider references: [Linear GraphQL](https://linear.app/developers/graphql)
+and [official schema](https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql);
+[Notion version migration](https://developers.notion.com/docs/upgrade-guide-2025-09-03),
+[page creation](https://developers.notion.com/reference/post-page),
+[page update](https://developers.notion.com/reference/patch-page),
+[data-source query](https://developers.notion.com/reference/query-a-data-source);
+Slack [reactions.get](https://docs.slack.dev/reference/methods/reactions.get/),
+[chat.postMessage](https://docs.slack.dev/reference/methods/chat.postMessage/),
+[chat.update](https://docs.slack.dev/reference/methods/chat.update/),
+[chat.delete](https://docs.slack.dev/reference/methods/chat.delete/).
 
 ## Shared organization GitHub
 

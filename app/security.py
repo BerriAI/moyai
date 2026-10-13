@@ -161,8 +161,10 @@ class Security:
         self.set_session_cookie(response, info)
         return response.headers['set-cookie'].encode('latin-1')
 
-    def google_role(self, email: str) -> str:
+    def google_role(self, email: str, *, connection=None) -> str:
         if self.user_roles is not None:
+            if connection is not None:
+                return self.user_roles.role_in(connection, email.strip().lower())
             return self.user_roles.role(email)
         return 'admin' if email in self.settings.google_admins() else 'member'
 

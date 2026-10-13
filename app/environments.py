@@ -164,8 +164,8 @@ class Environments:
             raise HTTPException(409, str(exc)) from None
         return self.bind(run_id)
 
-    def get(self, identity):
-        rows = self.store.rows('SELECT * FROM environments WHERE id=?', (identity,))
+    def get(self, identity, *, connection=None):
+        rows = self.store.rows('SELECT * FROM environments WHERE id=?', (identity,), connection=connection)
         if not rows:
             raise HTTPException(404, 'Project environment not found.')
         return rows[0]
@@ -237,8 +237,8 @@ class Environments:
             conn.execute('UPDATE environment_builds SET sandbox_provider=? WHERE id=?', (provider, identity_build))
         return self.build(identity_build)
 
-    def build(self, identity):
-        rows = self.store.rows('SELECT * FROM environment_builds WHERE id=?', (identity,))
+    def build(self, identity, *, connection=None):
+        rows = self.store.rows('SELECT * FROM environment_builds WHERE id=?', (identity,), connection=connection)
         if not rows:
             raise HTTPException(404, 'Build not found.')
         return rows[0]
@@ -249,11 +249,11 @@ class Environments:
     def progress(self, identity, **fields):
         return self.store.execute('UPDATE environment_builds SET ' + ','.join(k + '=?' for k in fields) + " WHERE id=? AND phase!='cancelling'", (*fields.values(), identity))
 
-    def choose(self, selection, repo_url, repository_id=None):
+    def choose(self, selection, repo_url, repository_id=None, *, connection=None):
         repository = repo_url.removeprefix('https://github.com/').removesuffix('.git').lower()
         if repository_id is None and repository and self.connectors:
             try:
-                repository_id = self.connectors.github.target(repository)
+                repository_id = self.connectors.github.target(repository, connection=connection)
             except ConnectorError:
                 pass
 
@@ -265,17 +265,17 @@ class Environments:
         if selection == 'none':
             return None
         if selection and selection != 'auto':
-            row = self.get(selection)
+            row = self.get(selection, connection=connection)
             if (not row['enabled'] or not row['active_build']) and not row['activate_on_ready']:
                 raise HTTPException(409, 'Build and enable this environment before starting a session.')
-            recipe = json.loads(self.build(row['active_build'])['recipe'] if row['active_build'] else row['recipe'])
+            recipe = json.loads(self.build(row['active_build'], connection=connection)['recipe'] if row['active_build'] else row['recipe'])
             if (repo_url or repository_id) and not matches(recipe):
                 raise HTTPException(422, 'The repository does not match the selected environment.')
             return row
-        rows = self.store.rows("SELECT * FROM environments WHERE (enabled=1 AND active_build!='') OR activate_on_ready=1 ORDER BY is_default DESC,updated_at DESC,id")
+        rows = self.store.rows("SELECT * FROM environments WHERE (enabled=1 AND active_build!='') OR activate_on_ready=1 ORDER BY is_default DESC,updated_at DESC,id", connection=connection)
         repository = repo_url.removeprefix('https://github.com/').removesuffix('.git').lower()
         for row in rows:
-            recipe = json.loads(self.build(row['active_build'])['recipe'] if row['active_build'] else row['recipe'])
+            recipe = json.loads(self.build(row['active_build'], connection=connection)['recipe'] if row['active_build'] else row['recipe'])
             if matches(recipe) or (not repository and not repository_id and row['is_default']):
                 return row
         return None

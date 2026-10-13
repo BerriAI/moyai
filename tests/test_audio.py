@@ -33,6 +33,7 @@ def slack_download(monkeypatch, handler):
     class Stream:
         def __init__(self, response):
             self.response, self.status, self.content = response, response.status_code, self
+            self.headers = response.headers
 
         async def __aenter__(self):
             return self

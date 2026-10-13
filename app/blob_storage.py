@@ -286,8 +286,8 @@ class ArtifactStore:
                 self.store.generation += 1
         return True
 
-    def read(self, name: str, limit: int, *, revision: str | None = None) -> bytes:
-        info = self.info(name)
+    def read(self, name: str, limit: int, *, revision: str | None = None, connection=None) -> bytes:
+        info = self.info(name, conn=connection)
         if info is None:
             raise FileNotFoundError(name)
         if revision is not None and info['revision'] != revision:

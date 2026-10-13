@@ -216,6 +216,73 @@ async def test_cancelled_running_write_stays_uncertain_and_cannot_be_replayed(br
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('failure', ['cancel', 'log_error'])
+@pytest.mark.parametrize('outcome', ['completed', 'failed', 'rejected'])
+async def test_confirmed_tool_result_survives_interrupted_event_logging(workspace, monkeypatch, outcome, failure):
+    from starlette.requests import Request
+    from app.security import digest
+    app, _ = workspace
+    store = app.state.store
+    run = store.create_run('Keep the confirmed tool receipt.', '', 'modal', ['notion'],
+                           chat_enabled=True, user_id='owner', harness='deepagents-temporal')
+    store.claim_message(run['id'])
+    store.update_run(run['id'], status='running', token_hash=digest('capability'))
+    run = store.run(run['id'])
+    monkeypatch.setattr(app.state.connectors, 'allowed', lambda *args, **kwargs: True)
+    calls = []
+
+    async def confirmed(*args, **kwargs):
+        calls.append(True)
+        return ({'id': 'confirmed-write'} if outcome == 'completed' else
+                {'error': 'Known provider outcome', 'outcome': outcome, 'dispatched': outcome != 'rejected'})
+
+    monkeypatch.setattr(app.state.connectors, 'call', confirmed)
+    entered, release = threading.Event(), threading.Event()
+    event = store.event
+
+    def held(run_id, kind, message, *args, **kwargs):
+        if kind in {'tool', 'error'} and message.startswith('notion_append '):
+            entered.set()
+            assert release.wait(5)
+            if failure == 'log_error':
+                raise OSError('event log unavailable')
+        return event(run_id, kind, message, *args, **kwargs)
+
+    monkeypatch.setattr(store, 'event', held)
+    payload = {'name': 'notion_append', 'arguments': {'page_id': 'b' * 32, 'text': 'One write'},
+               'input_id': run['active_message_id'], 'request_id': 'a' * 32}
+
+    def request():
+        async def receive():
+            return {'type': 'http.request', 'body': json.dumps(payload).encode(), 'more_body': False}
+        return Request({'type': 'http', 'method': 'POST', 'path': f"/broker/{run['id']}/tools/call",
+                        'path_params': {'run_id': run['id']}, 'query_string': b'',
+                        'headers': [(b'authorization', b'Bearer capability'),
+                                    (b'content-type', b'application/json')]}, receive=receive)
+
+    endpoint = next(route.endpoint for route in app.routes
+                    if getattr(route, 'path', '') == '/broker/{run_id}/tools/call')
+    pending = asyncio.create_task(endpoint(run['id'], request()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        if failure == 'cancel':
+            pending.cancel('original cancellation')
+            await asyncio.sleep(.02)
+            pending.cancel('repeated cancellation')
+            await asyncio.sleep(.02)
+            assert not pending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError if failure == 'cancel' else OSError):
+        await pending
+    receipt, = store.rows("SELECT data FROM events WHERE run_id=? AND kind='tool_dispatch'", (run['id'],))
+    assert json.loads(receipt['data'])['outcome'] == outcome
+    assert json.loads(receipt['data'])['dispatched'] is (outcome != 'rejected')
+    retry = await endpoint(run['id'], request())
+    assert retry['outcome'] == outcome and retry['retryable'] is False
+    assert calls == [True]
+
+
 async def test_request_identity_cannot_be_rebound_or_omitted(broker):
     app, manager, store, scope, calls = broker
     request = body(scope)
@@ -251,6 +318,7 @@ async def test_computer_artifact_fetch_preserves_nested_dispatch_scope(broker, t
     from agent.tools import mcp_bridge
     from sandbox import remote_tool
     from test_published_artifacts import save
+    monkeypatch.setattr(remote_tool, 'WORKSPACE_ROOT', tmp_path)
     app, manager, store, scope, _ = broker
     raw = b'original saved bytes' * 70000
     artifact = save(app.state.published_artifacts, store.run(scope.run_id), raw)
@@ -395,6 +463,7 @@ async def test_repository_preparation_uses_the_same_scoped_broker(broker, tmp_pa
     monkeypatch.setattr(agent, 'prepare_project', lambda *a: None)
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture')
     def checkout(send, remote, token, **kwargs):
+        (tmp_path / 'workspace/repo').mkdir()
         return send('/tools/call', {'name': 'github_checkout', 'arguments': kwargs})
     monkeypatch.setattr(agent, 'github_checkout', checkout)
     def upstream(request, timeout):
@@ -461,15 +530,14 @@ async def test_computer_receipt_read_rejections_stay_unsent(broker, arguments, s
 
 
 async def test_computer_receipt_read_scope_rejection_stays_unsent(broker, monkeypatch):
-    from app.computer_operations import ComputerOperations
     app, manager, store, scope, calls = broker
-    original = ComputerOperations.current
+    original = manager.agent_runtime.operations.read
 
-    def changed(conn, caller):
+    def changed(caller, arguments):
         store.update_run(scope.run_id, status='stopping')
-        return original(conn, caller)
+        return original(caller, arguments)
 
-    monkeypatch.setattr(ComputerOperations, 'current', staticmethod(changed))
+    monkeypatch.setattr(manager.agent_runtime.operations, 'read', changed)
     with pytest.raises(ApplicationError, match='409'):
         await manager.deepagents_runtime.broker(scope, '/tools/call', {
             **body(scope), 'name': 'computer_operation_read', 'arguments': {}})

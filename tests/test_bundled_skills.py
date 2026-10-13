@@ -90,6 +90,38 @@ def test_templates_and_public_procedures_keep_separate_discovery_and_reads(works
         read(template.name, public['coding']['revision'])
 
 
+def test_access_discovery_procedure_loads_through_versioned_broker_read(workspace):
+    from agent.prompts import system_prompt
+    from agent.skills import catalog
+
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    entry = next(item for item in catalog() if item['name'] == 'access-discovery')
+    prompt = system_prompt({'harness': 'deepagents-temporal', 'independent_runtime': True})
+    assert entry['description'] in prompt
+    assert entry['revision'] in prompt
+    assert 'credentials_list without filters' not in prompt
+    response = client.post(f"/broker/{run['id']}/tools/call",
+        headers={'Authorization': 'Bearer capability'}, json={
+            'name': 'bundled_skill_read',
+            'arguments': {'name': entry['name'], 'revision': entry['revision']}})
+    assert response.status_code == 200
+    result = response.json()
+    assert result['revision'] == entry['revision']
+    assert 'credentials_list without filters' in result['content']
+    assert 'If a connected 1Password Shared source' in result['content']
+    assert 'Honor explicit limits on external calls or spending' in result['content']
+    stale = client.post(f"/broker/{run['id']}/tools/call",
+        headers={'Authorization': 'Bearer capability'}, json={
+            'name': 'bundled_skill_read',
+            'arguments': {'name': entry['name'], 'revision': '0' * 64}})
+    assert stale.status_code == 200
+    assert stale.json()['status_code'] == 422
+    assert 'version changed' in stale.json()['error']
+    assert 'content' not in stale.json()
+
+
 def test_upgrade_pins_loaded_body_and_references_and_never_downgrades(workspace):
     app, client = workspace
     sign_in(app, client)

@@ -94,6 +94,9 @@ class DurableRunner(RunManager):
         with self.store.connect() as conn:
             self.submit_in(conn, run)
 
+    async def submit_async(self, run):
+        await database(self.submit, run)
+
     async def wait_for_stop(self, run_id):
         # Temporal owns active turns, answers and warm/computer cleanup. Only
         # an idle journal has no owner left to settle orphaned input rows.

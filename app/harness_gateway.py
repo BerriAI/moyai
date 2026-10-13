@@ -20,6 +20,8 @@ from .broker_diagnostics import model_gateway_error, upstream_headers, model_err
 from sandbox.broker_failure import provider_error
 from sandbox.broker_transport import MAX_BODY
 from .model_selection import ASTRA_ULTRAFAST, gateway_payload
+from .db import database
+from .model_request import ModelRequest
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -137,7 +139,7 @@ class HarnessGateway:
         return [fit_context(context, allocation) for context in contexts]
 
     async def context_window(self, run_id, request):
-        run = self.require_run(run_id, request)
+        run = await database(self.require_run, run_id, request)
         try:
             model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
         except ValueError as exc:
@@ -147,13 +149,13 @@ class HarnessGateway:
         # The SDK cannot see broker-injected context. Reserve its byte bound as
         # well as room for a new tool result before the next native compact.
         window = max(1, budget.input_budget - len(context.encode()) - 4096)
-        self.require_run(run_id, request)
+        await database(self.require_run, run_id, request)
         return {'model': model, 'input_budget': window, 'live_compaction': True}
 
     async def forward(self, run_id, request, route):
         if route != '/context/compact':
             return await self._forward_once(run_id, request, route)
-        self.require_run(run_id, request)
+        await database(self.require_run, run_id, request)
         # Decrypt once while the transport envelope is fresh. A valid recovery
         # can outlive its five-minute envelope TTL; authorization is still
         # rechecked for every inference attempt below.
@@ -190,7 +192,7 @@ class HarnessGateway:
                 message = labels.get(exc.reason, 'The model did not return a usable context summary.')
                 message += ' Retrying the summary; task actions will not be repeated.' if retry else ' Saved records are preserved.'
                 if not private:
-                    self.store.event(run_id, 'context', message, {
+                    await database(self.store.event, run_id, 'context', message, {
                         'reason': exc.reason, 'attempt': attempt + 1, 'request_id': exc.request_id,
                         'summary_bytes': exc.summary_bytes, 'retrying': retry,
                     })
@@ -219,10 +221,9 @@ class HarnessGateway:
                 if selected != expected_model:
                     raise HTTPException(409, 'The originating model has changed.')
             return current
-        run = current_run()
+        run = await database(current_run)
         if not compact and self.store.goals:
-            with self.store.connect() as conn:
-                goal = self.store.goals.current(conn, run_id)
+            goal = await database(self.store.goal, run_id)
             if goal and goal['status'] == 'wrapping':
                 raise HTTPException(409, 'Goal work has ended. Save and deliver the goal report; no new task inference is admitted.')
         if not compact:
@@ -238,12 +239,11 @@ class HarnessGateway:
         client = None
         upstream = None
         request_id = None
-        gateway_id = ''
         capture = None
         content = None
         status = 'failed'
         started = time.time_ns()
-        finished = False
+        accounting = None
         error = {}
         stage = 'validation'
 
@@ -254,32 +254,33 @@ class HarnessGateway:
             if not compact:
                 model_stage(request, stage, error=error)
 
-        async def finish():
-            nonlocal finished
-            if finished:
+        async def finish(original=None):
+            nonlocal slot_acquired
+            if accounting is None:
                 return
-            finished = True
-            if status != 'completed' and not error:
+            if accounting.finalization is None and status != 'completed' and not error:
                 observe((capture.error if capture and capture.error else {}) or model_error(stage=stage,
                     code='cancelled' if status == 'interrupted' else 'stream_incomplete' if capture else 'unknown'))
+            response = capture.response if capture else {}
+            if content is not None:
+                response = {**response, 'choices': content.choices}
+            closers = [value.aclose for value in (upstream, client) if value is not None]
+            remember = (lambda: self.context_budget.remember(payload, capture.usage, run_id + route)
+                        ) if status == 'completed' and capture and not compact else None
             try:
-                if upstream is not None:
-                    await upstream.aclose()
-                if client is not None:
-                    await client.aclose()
-                if request_id:
-                    self.spend.finish(request_id, capture, status)
-                    if status == 'completed' and capture and not compact:
-                        self.context_budget.remember(payload, capture.usage, run_id + route)
-                    response = capture.response if capture else {}
-                    if content is not None:
-                        response = {**response, 'choices': content.choices}
-                    self.tracing.model(run, request_id, started, content.messages if content else [],
-                        response, status, gateway_id=gateway_id, error=error)
-                    await self.checkpoints.flush()
-            finally:
-                if slot_acquired:
-                    await self.model_slots.release_async(slot_permit)
+                try:
+                    await accounting.finish(capture, status, content.messages if content else [], response,
+                                            error=error, close=closers, remember=remember)
+                finally:
+                    # Local ModelSlots tracks maintenance by the owning task.
+                    # Release here, after joining cleanup, not inside its child task.
+                    if slot_acquired:
+                        slot_acquired = False
+                        await self.model_slots.release_async(slot_permit)
+            except BaseException as cleanup_error:
+                if original is not None:
+                    raise original from cleanup_error
+                raise
 
         try:
             if not compact:
@@ -288,6 +289,8 @@ class HarnessGateway:
                 model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from None
+            accounting = ModelRequest(settings=self.settings, store=self.store, spend=self.spend,
+                tracing=self.tracing, checkpoints=self.checkpoints, run=run, model=model, started=started)
             if not compact:
                 expected_run, expected_model = dict(run), model
             body = compaction_body if compact else await self.read_body(request, route)
@@ -313,7 +316,7 @@ class HarnessGateway:
                 partial_cursor = type(body.get('cursor_protocol')) is int and body['cursor_protocol'] == 1
             else:
                 if self.native_sessions is not None:
-                    self.native_sessions.observe_scope(run)
+                    await database(self.native_sessions.observe_scope, run)
                 context = '\n\n'.join(x for x in await self.library_context(run, model, payload=body) if x)
                 payload = authorized_payload(body, route, model, context)
                 field = 'messages' if route == '/v1/messages' else 'input'
@@ -333,7 +336,7 @@ class HarnessGateway:
                     break
                 except ContextPressure as exc:
                     if not compact:
-                        self.store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
+                        await database(self.store.event, run_id, 'context', 'Compacting before the next model request.', exc.budget)
                         await self.checkpoints.flush()
                         raise
                     if private or assessment:
@@ -350,24 +353,15 @@ class HarnessGateway:
             stage = 'admission'
             if not compact:
                 model_stage(request, stage)
-            current_run()
+            await database(current_run)
             slot_permit = await self.model_slots.acquire()
             slot_acquired = True
-            current_run()
-            admitted = self.store.execute(
-                "UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
-                "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
-                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS NOT DISTINCT FROM ? "
-                "AND active_user_id IS NOT DISTINCT FROM ? AND active_model IS NOT DISTINCT FROM ? AND (coalesce(active_model,'')!='' OR model IS NOT DISTINCT FROM ?)",
-                (run_id, self.settings.max_agent_iterations, self.settings.max_agent_iterations * 3,
-                 run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
-            if not admitted:
-                raise HTTPException(429, 'This run reached its model request limit.')
-            request_id = self.spend.begin(run, model, startup=not compact)
+            request_id = accounting.id
+            await accounting.admit(current_run, startup=not compact)
             stage = 'upstream'
             if not compact:
                 model_stage(request, stage, request_id=request_id)
-            if self.tracing.enabled and not compact and not private_run(self.store, run['id']):
+            if self.tracing.enabled and not compact and not await database(private_run, self.store, run['id']):
                 # A private working summary is model input, never a new public
                 # user message. Trace the original request's user text instead.
                 content = NativeModelContent(body, route)
@@ -380,14 +374,14 @@ class HarnessGateway:
                 if request.headers.get('anthropic-beta'):
                     headers['anthropic-beta'] = request.headers['anthropic-beta']
             await self.checkpoints.flush()
-            current_run()
+            await database(current_run)
             client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
             base = self.settings.litellm_api_base.rstrip('/')
             upstream_route = '/v1/chat/completions' if compact else route
             url = base + upstream_route.removeprefix('/v1') if base.endswith('/v1') else base + upstream_route
             upstream = await client.send(client.build_request('POST', url,
                 json=gateway_payload(payload, upstream_route), headers=headers), stream=True)
-            gateway_id = self.spend.headers(request_id, upstream, capture.streaming)
+            await accounting.headers(upstream, capture.streaming)
             if upstream.status_code >= 400:
                 raw_error = bytearray()
                 async for chunk in upstream.aiter_bytes():
@@ -400,7 +394,7 @@ class HarnessGateway:
                             compaction_body['entries'] = body['entries'][:max(1, len(body['entries']) // 2)]
                             raise SummaryFailure('summary_input_too_large')
                         raise SummaryFailure('summary_input_too_large', retryable=False)
-                    self.store.event(run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
+                    await database(self.store.event, run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
                     raise ContextPressure(checked_budget.public())
                 if compact:
                     transient = upstream.status_code in {408, 429, 500, 502, 503, 504}
@@ -439,18 +433,19 @@ class HarnessGateway:
             raise
         except BaseException as exc:
             observe(model_error(exc, stage=stage))
-            if isinstance(exc, asyncio.CancelledError):
+            if isinstance(exc, asyncio.CancelledError) and (accounting is None or accounting.finalization is None):
                 status = 'interrupted'
-            await finish()
+            await finish(exc)
             raise
 
         async def stream():
             nonlocal status, stage
+            original = None
             stage = 'stream'
             model_stage(request, stage)
             try:
                 async for chunk in upstream.aiter_bytes():
-                    current = self.store.run(run_id)
+                    current = await database(self.store.run, run_id)
                     if current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}:
                         status = 'interrupted'
                         break
@@ -460,10 +455,11 @@ class HarnessGateway:
                 if status != 'interrupted':
                     status = 'completed' if capture.done and not capture.failed else 'failed'
             except BaseException as exc:
+                original = exc
                 observe(model_error(exc, stage=stage))
                 if isinstance(exc, asyncio.CancelledError):
                     status = 'interrupted'
                 raise
             finally:
-                await finish()
+                await finish(original)
         return StreamingResponse(stream(), media_type='text/event-stream', headers=upstream_headers(request_id, upstream))

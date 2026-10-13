@@ -31,6 +31,18 @@ edits, cancellations and disabled environments are preserved. New private-repo
 sessions recheck the live GitHub connection before using a prepared snapshot.
 Set `AUTO_PREPARE_REPOSITORIES=false` to opt out of automatic discovery.
 
+Listing GitHub capabilities or repositories does not select a session repository.
+Repository-specific operations need an explicit repository or the session's saved
+selection; connection ordering is never a repository preference. To work on
+another repository in the same session, pass its repository ID and a fresh
+directory to `github_checkout`, then use that directory for edits and publication.
+Do not move `/workspace/repo` to switch repositories. A secondary checkout does
+not replace the session's prepared image or change its default repository.
+Independent-runtime computer tools use `/workspace` as their directory and
+file boundary, including repository guidance and saved artifacts. A prepared
+checkout at `/workspace/repo` does not hide sibling repositories or preserved
+work from those tools.
+
 Automatic setup recognizes root-level `uv.lock`, `pyproject.toml`, Python
 requirements files, npm lockfiles and pnpm lockfiles with an exact `packageManager`
 version. Frozen installs are used where a supported lockfile is present. Python
@@ -92,10 +104,20 @@ checkpoints. Each session pins its selected build; subagents inherit it and the
 parent's copied filesystem. Session snapshots take precedence over the clean
 project snapshot, so rebuilding cannot erase ongoing work. Startup commands run
 again after restore and must be idempotent; verification must also be safe to
-repeat. Running processes are not preserved by a filesystem snapshot. A failed
-verification stops startup before Moyai reports the environment ready. The
-session Activity panel identifies its environment
-and source commit.
+repeat. Running processes are not preserved by a filesystem snapshot. If the
+restored checkout is missing, belongs to another repository, or fails startup
+or verification, Moyai reports that the project needs repair instead of claiming
+it is ready. Authenticated terminal and file tools remain available to inspect
+and repair the saved workspace. When the previous working directory is missing,
+tools start from `/workspace`; existing files are not replaced or erased.
+The Activity panel identifies the prepared environment and source commit.
+
+Build validation still gates publication of new prepared images. Repair access
+does not bypass connection permissions, session ownership, cancellation, or
+uncertain-operation receipts. Inspect the outcome of an uncertain operation
+before retrying it. A project-health warning describes the last preparation
+check; after repairing files or dependencies, run the appropriate verification
+command before claiming the project is healthy.
 
 **Refresh daily and after recipe edits** is optional and off initially. When
 enabled, the worker queues a rebuild daily and after edits, coalesces pending

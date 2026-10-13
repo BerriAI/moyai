@@ -13,8 +13,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
 from .database import Connection, DatabaseRow
-from .db import now
+from .db import database, now
 from .identities import PROFILE_MAX_AGE_SECONDS
+from .aws_login import AWSLogin, AWS_LOGIN_DESCRIPTION, login_required
+from sandbox.aws_credentials import bundle as aws_bundle
 
 
 # Inference keys retain fixed origins/routes and never enter the sandbox.
@@ -34,7 +36,7 @@ PROVIDERS = {
 Provider = Literal['fireworks', 'openai', 'anthropic', 'together', 'groq', 'generic']
 Scope = Literal['session', 'personal', 'organization']
 Lifetime = Literal['session', 'persistent']
-Format = Literal['env', 'file']
+Format = Literal['env', 'file', 'aws-sso']
 ACCESSIBLE = {'running', 'awaiting_approval', 'saving', 'waiting_credential', 'queued',
               'provisioning', 'reconnecting', 'waiting_environment', 'waiting_children', 'idle', 'completed'}
 ENV_NAME = re.compile(r'^[A-Z_][A-Z0-9_]{0,127}$')
@@ -78,7 +80,10 @@ class Capability(Arguments):
         if self.provider == 'generic':
             if not self.name or not re.fullmatch(r'[a-z0-9][a-z0-9 _./:-]{0,79}', self.name):
                 raise ValueError('Provide a stable capability name.')
-            if self.format == 'file':
+            if self.format == 'aws-sso':
+                if not re.fullmatch(r'aws-sso/[a-z0-9_-]{1,64}', self.name) or self.env_var:
+                    raise ValueError('AWS SSO uses name=aws-sso/<profile> and no environment variable.')
+            elif self.format == 'file':
                 environment_name(self.env_var)
             elif self.env_var:
                 raise ValueError('Environment credentials carry variable names in their JSON value.')
@@ -158,6 +163,12 @@ class RunCredential(Materialize):
     timeout: int = Field(default=120, ge=1, le=600)
 
 
+class AWSWriteback(Arguments):
+    request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    revision: int = Field(ge=1)
+    value: SecretStr
+
+
 class ReportFailure(Arguments):
     request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
     revision: int = Field(ge=1)
@@ -192,6 +203,8 @@ class SaveSecret(Capability):
             if self.provider == 'generic':
                 raise ValueError('Choose this session or future sessions.')
             self.lifetime = 'persistent'  # Existing inference-key clients.
+        if self.format == 'aws-sso' and self.scope != 'personal':
+            raise ValueError('AWS login profiles are personal to the requester.')
         self.expires_at = expiry(self.expires_at)
         if not self.label.strip():
             raise ValueError('Provide a credential name.')
@@ -262,7 +275,8 @@ ONEPASSWORD_GUIDANCE = (
 
 TOOLS = {
     **slack_secrets.TOOLS,
-    'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
+    'credentials_aws_login': (AWSLogin, AWS_LOGIN_DESCRIPTION),
+    'credentials_list': (ListCredentials, 'Before declaring access blocked or asking for it, list without filters to discover authorized personal and organization access and credential_sources. A filtered miss is not proof that access is missing; inspect discovery before concluding. Returns metadata and pending request IDs/generations, never secret values. Shared vault sources remain visible with a provider filter; inspect an available source before asking for another provider key.'),
     'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
     'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication. ' + ONEPASSWORD_GUIDANCE),
@@ -281,8 +295,18 @@ class Credentials:
         if store.schema_updates:
             initialize_schema(store)
 
-    def root(self, run):
+    def root(self, run, *, connection=None):
+        if connection is not None:
+            return self.store.root_id_in(connection, run['id'])
         return self.store.root_id(run['id'])
+
+    def current_in(self, conn, run):
+        current = self.store.run(run['id'], connection=conn)
+        if (not current or current['deleted_at'] or current['deletion_requested_at']
+                or any(current[key] != run[key] for key in
+                       ('token_hash', 'active_message_id', 'active_user_id'))):
+            raise HTTPException(409, 'The credential execution capability changed.')
+        return current
 
     def row(self, request_id):
         rows = self.store.rows('SELECT * FROM credential_requests WHERE id=?', (request_id,))
@@ -325,13 +349,13 @@ class Credentials:
         return {**{k: row[k] for k in fields}, 'status': self.status(row),
                 'can_manage': admin if row['scope'] == 'organization' else row['owner_id'] == user_id}
 
-    def permitted(self, secret, run, actor_id):
+    def permitted(self, secret, run, actor_id, *, connection=None):
         if not actor_id or secret['revoked_at']:
             return False
         # Lifetime bounds every source of reachability, including shared access.
-        if secret['lifetime'] == 'session' and secret['root_id'] != self.root(run):
+        if secret['lifetime'] == 'session' and secret['root_id'] != self.root(run, connection=connection):
             return False
-        return secret['scope'] == 'organization' or self.same_requester(secret['owner_id'], actor_id)
+        return secret['scope'] == 'organization' or self.same_requester(secret['owner_id'], actor_id, connection=connection)
 
     def list_secrets(self, user_id, admin=False, root_id=''):
         rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' ORDER BY created_at DESC")
@@ -340,21 +364,62 @@ class Credentials:
                     and (not root_id or row['lifetime'] != 'session' or row['root_id'] == root_id))]
 
     def inventory(self, run, args):
-        rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' ORDER BY created_at DESC")
-        authorized = [row for row in rows if self.permitted(row, run, run['active_user_id'])]
+        return self._inventory(run, args)
+
+    def _inventory(self, run, args, *, startup=False):
+        from .private_sinks import require_owner
         with self.store.connect() as conn:
+            # Authority and inventory must describe the same read snapshot,
+            # including private ownership, linked identities and session roots.
+            conn.begin_read()
+            run = self.current_in(conn, run)
+            allowed = {'running', 'reconnecting', 'awaiting_approval'}
+            if startup:
+                # Server-built hints precede launch; broker reads stay strict.
+                allowed.update({'queued', 'provisioning'})
+            if run['status'] not in allowed:
+                raise HTTPException(409, 'The credential execution capability changed.')
+            require_owner(self.store, run['id'], run['active_user_id'], conn)
+            rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' ORDER BY created_at DESC",
+                                   connection=conn)
+            authorized = [row for row in rows if self.permitted(row, run, run['active_user_id'], connection=conn)]
             pending = self.pending_rows(conn, run['id'])
-        return {'credentials': [self.metadata(row, run['active_user_id'], False) for row in authorized
-                if (not args.provider or row['provider'] == args.provider)
-                and (not args.name or row['name'] == args.name.strip().lower())],
-                'credential_sources': [self.metadata(row, run['active_user_id'], False) for row in authorized
-                    if row['provider'] == 'generic' and row['name'] == '1password-shared' and self.status(row) == 'active'],
-                'pending_requests': [{'request_id': row['id'], **{key: row[key] for key in ('generation', 'provider', 'name', 'reason')}}
-                    for row in pending
-                    if (self.same_requester(row['actor_id'], run['active_user_id'])
-                        or self.same_requester(run['active_user_id'], row['actor_id']))
-                and (not args.provider or row['provider'] == args.provider)
-                and (not args.name or row['name'] == args.name.strip().lower())]}
+            result = {'credentials': [self.metadata(row, run['active_user_id'], False) for row in authorized
+                    if (not args.provider or row['provider'] == args.provider)
+                    and (not args.name or row['name'] == args.name.strip().lower())],
+                    'credential_sources': [self.metadata(row, run['active_user_id'], False) for row in authorized
+                        if row['provider'] == 'generic' and row['name'] == '1password-shared' and self.status(row) == 'active'],
+                    'pending_requests': [{'request_id': row['id'], **{key: row[key] for key in ('generation', 'provider', 'name', 'reason')}}
+                        for row in pending
+                        if (self.same_requester(row['actor_id'], run['active_user_id'], connection=conn)
+                            or self.same_requester(run['active_user_id'], row['actor_id'], connection=conn))
+                    and (not args.provider or row['provider'] == args.provider)
+                    and (not args.name or row['name'] == args.name.strip().lower())]}
+        active = [row for row in authorized if self.status(row) == 'active']
+        source_ids = {row['id'] for row in result['credential_sources']}
+        saved = [row for row in active if row['id'] not in source_ids]
+        result['discovery'] = {
+            'filter_applied': bool(args.provider or args.name),
+            'available': {
+                'saved_personal_connections': sum(row['scope'] != 'organization' for row in saved),
+                'saved_organization_connections': sum(row['scope'] == 'organization' for row in saved),
+                'shared_vault_sources': len(source_ids),
+                'capability_verification': 'not_assessed',
+            },
+            'next_step': (
+                'This is a filtered inventory, not a complete access search. Call credentials_list without filters '
+                'before concluding access is missing; saved capability names may differ from the service name.'
+                if args.provider or args.name else
+                'Inspect appropriate saved connections and credential_sources. Metadata alone does not verify '
+                'task access; use the authorized secure tools for the smallest task-relevant check.'),
+        }
+        return result
+
+    def discovery_context(self, run):
+        """Orient every runtime before it can mistake undiscovered access for a blocker."""
+        if not self.tools(run):
+            return None
+        return self._inventory(run, ListCredentials(), startup=True)['discovery']['available']
 
     def validated_value(self, body):
         value = body.value.get_secret_value()
@@ -380,6 +445,14 @@ class Credentials:
                             raise ValueError()
                 except (ValueError, TypeError, UnicodeError):
                     raise HTTPException(422, 'Use a JSON object of credential environment names and nonempty string values, without runtime settings.') from None
+            elif body.format == 'aws-sso':
+                try:
+                    saved = aws_bundle(value)
+                    if body.name != 'aws-sso/' + saved['profile']['profile']:
+                        raise ValueError()
+                    value = json.dumps(saved, sort_keys=True)
+                except ValueError:
+                    raise HTTPException(422, 'Invalid AWS SSO profile or cache.') from None
         return value
 
     def insert_secret(self, conn, body, user_id, admin, root_id=''):
@@ -470,8 +543,8 @@ class Credentials:
         if (row['status'] != 'pending' or row['generation'] != generation
                 or run['status'] not in ACCESSIBLE):
             raise HTTPException(409, 'This access request changed. Open the current session.')
-        if not (self.same_requester(actor_id, row['actor_id'])
-                or self.same_requester(row['actor_id'], actor_id)):
+        if not (self.same_requester(actor_id, row['actor_id'], connection=conn)
+                or self.same_requester(row['actor_id'], actor_id, connection=conn)):
             raise HTTPException(403, 'Only the requester can choose how to share this access.')
         if row['preferred_scope'] != scope:
             conn.execute('UPDATE credential_requests SET preferred_scope=?,scope_revision=scope_revision+1 WHERE id=?',
@@ -489,7 +562,7 @@ class Credentials:
             if current:
                 if self.matching(current, row):
                     current_secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (current['secret_id'],)).fetchone()
-                    if (current['status'] != 'provided' or (current_secret and self.permitted(current_secret, run, run['active_user_id'])
+                    if (current['status'] != 'provided' or (current_secret and self.permitted(current_secret, run, run['active_user_id'], connection=conn)
                             and self.status(current_secret) == 'active')):
                         return dict(current)  # A newer grant/decline wins over this older failure.
                     return self.reopen_in(conn, current, failure, run)
@@ -519,7 +592,7 @@ class Credentials:
     def saved_choice(self, conn, run, capability, secret_id=''):
         candidates = [dict(secret) for secret in conn.execute(
             "SELECT * FROM provider_secrets WHERE provider=? AND revoked_at=''", (capability['provider'],))
-            if self.matching(secret, capability) and self.permitted(secret, run, run['active_user_id'])
+            if self.matching(secret, capability) and self.permitted(secret, run, run['active_user_id'], connection=conn)
             and self.status(secret) == 'active']
         if secret_id:
             selected = next((secret for secret in candidates if secret['id'] == secret_id), None)
@@ -535,7 +608,7 @@ class Credentials:
             return None  # Obtaining the source must not recursively require itself.
         sources = [self.metadata(secret, run['active_user_id'], False) for secret in conn.execute(
             "SELECT * FROM provider_secrets WHERE provider='generic' AND name='1password-shared' AND format='env' AND revoked_at=''")
-            if self.permitted(secret, run, run['active_user_id']) and self.status(secret) == 'active']
+            if self.permitted(secret, run, run['active_user_id'], connection=conn) and self.status(secret) == 'active']
         checked = set()
         for check in args.source_checks:
             used = conn.execute('''SELECT 1 FROM credential_source_uses
@@ -575,6 +648,7 @@ class Credentials:
             deny_export(self.store, run['id'])
         with self.store.connect() as conn:
             conn.begin_write()
+            run = self.current_in(conn, run)
             if private_slack:
                 saved = self.saved_choice(conn, run, args.model_dump(), args.secret_id)
                 if not saved or saved['scope'] != 'personal':
@@ -591,8 +665,8 @@ class Credentials:
                 raise ValueError('Use the original credential inputs when retrying this request.')
             if not prior:
                 for candidate in self.pending_rows(conn, run['id']):
-                    same_actor = (self.same_requester(candidate['actor_id'], run['active_user_id'])
-                                  or self.same_requester(run['active_user_id'], candidate['actor_id']))
+                    same_actor = (self.same_requester(candidate['actor_id'], run['active_user_id'], connection=conn)
+                                  or self.same_requester(run['active_user_id'], candidate['actor_id'], connection=conn))
                     if (same_actor and candidate['request_key'] == args.request_key
                             and self.matching(candidate, args.model_dump()) and candidate['reason'] == args.reason
                             and json.loads(candidate['input_fields']) == json.loads(input_fields)):
@@ -605,7 +679,7 @@ class Credentials:
             valid_prior = False
             if prior and prior['status'] == 'provided':
                 bound = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (prior['secret_id'],)).fetchone()
-                valid_prior = bool(bound and self.permitted(bound, run, actor) and self.status(bound) == 'active')
+                valid_prior = bool(bound and self.permitted(bound, run, actor, connection=conn) and self.status(bound) == 'active')
                 if valid_prior and args.secret_id and args.secret_id != prior['secret_id']:
                     raise ValueError('Use a new request_key to select a different saved connection.')
             terminal_prior = prior and prior['status'] in {'declined', 'satisfied'}
@@ -613,6 +687,8 @@ class Credentials:
             if not valid_prior and not terminal_prior and not permission_retry:
                 secret = self.saved_choice(conn, run, args.model_dump(), args.secret_id)
                 if not secret:
+                    if args.format == 'aws-sso':
+                        return login_required()
                     lookup = self.source_lookup(conn, run, args)
                     if lookup:
                         return lookup
@@ -756,7 +832,7 @@ class Credentials:
             run = conn.execute('SELECT * FROM runs WHERE id=?', (row['run_id'],)).fetchone()
             if not run or run['deleted_at']:
                 raise HTTPException(404, 'Session not found.')
-            own = self.same_requester(user_id, row['actor_id'])
+            own = self.same_requester(user_id, row['actor_id'], connection=conn)
             if not own and not admin:
                 raise HTTPException(403, 'Only the requester or an administrator can resolve this request.')
             if (body.generation is not None and body.generation != row['generation']) or (body.generation is None and row['generation']):
@@ -771,7 +847,7 @@ class Credentials:
                     secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (body.secret_id,)).fetchone()
                     if (not secret or not self.matching(secret, row) or self.status(secret) != 'active'
                             or (secret['scope'] != 'organization' and (secret['owner_id'] != user_id or not own))
-                            or not self.permitted(secret, run, row['actor_id'])):
+                            or not self.permitted(secret, run, row['actor_id'], connection=conn)):
                         raise HTTPException(403, 'Those credentials are not available to this requester and session.')
                     secret_id = secret['id']
                 else:
@@ -792,7 +868,7 @@ class Credentials:
                             value=body.value, client_id='request-' + row['id'] + '-' + str(row['generation']))
                     except ValueError:
                         raise HTTPException(422, 'Choose sharing and reuse, and check the credential format and expiry.') from None
-                    secret_id = self.insert_secret(conn, data, user_id, admin, self.root(run))
+                    secret_id = self.insert_secret(conn, data, user_id, admin, self.root(run, connection=conn))
             status = 'provided' if secret_id else 'declined'
             secret_revision = conn.execute('SELECT revision FROM provider_secrets WHERE id=?', (secret_id,)).fetchone()[0] if secret_id else 1
             conn.execute('UPDATE credential_requests SET status=?,secret_id=?,secret_revision=?,resolved_at=?,resolution_pending=1,resolution_error=\'\' WHERE id=?',
@@ -812,16 +888,23 @@ class Credentials:
         return row['run_id']
 
     def authorized_request(self, conn, run, request_id):
+        self.current_in(conn, run)
         row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
         if not row or row['run_id'] != run['id']:
             raise HTTPException(403, 'This credential request is not available in this session.')
         secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (row['secret_id'],)).fetchone()
         # Handles from earlier turns may only be used under current permission.
-        same_actor = (self.same_requester(row['actor_id'], run['active_user_id'])
-                      or self.same_requester(run['active_user_id'], row['actor_id']))
+        same_actor = (self.same_requester(row['actor_id'], run['active_user_id'], connection=conn)
+                      or self.same_requester(run['active_user_id'], row['actor_id'], connection=conn))
         if not same_actor and (not secret or secret['scope'] != 'organization'):
             raise HTTPException(403, 'Request access for the current requester.')
         return dict(row), dict(secret) if secret else None
+
+    def aws_turn_current(self, conn, run):
+        live = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
+        return bool(live and not live['deleted_at'] and not live['deletion_requested_at']
+                    and live['status'] in {'running', 'reconnecting', 'awaiting_approval'}
+                    and all(live[key] == run[key] for key in ('active_user_id', 'active_message_id', 'token_hash')))
 
     def materialize(self, run, args):
         with self.store.connect() as conn:
@@ -829,6 +912,8 @@ class Credentials:
             accepted = []
             for request_id in args.request_ids:
                 row, secret = self.authorized_request(conn, run, request_id)
+                if row['format'] == 'aws-sso' and not self.aws_turn_current(conn, run):
+                    return {'status': 'stale', 'message': 'The requesting turn changed. No AWS credentials were loaded.'}
                 if row['provider'] == 'generic' and row['name'] == 'slack-personal':
                     raise HTTPException(403, 'Use the server-side personal Slack tools; this token cannot be exported to a command.')
                 if row['provider'] != 'generic':
@@ -838,9 +923,13 @@ class Credentials:
                 if row['status'] != 'provided':
                     self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
                     return self.ready(row)
-                if not secret or not self.permitted(secret, run, run['active_user_id']):
+                if not secret or not self.permitted(secret, run, run['active_user_id'], connection=conn):
+                    if row['format'] == 'aws-sso':
+                        return login_required()
                     return self.ready(self.reopen_in(conn, row, 'unavailable', run))
                 if self.status(secret) != 'active':
+                    if row['format'] == 'aws-sso':
+                        return login_required()
                     return self.ready(self.reopen_in(conn, row, self.status(secret), run))
                 accepted.append((self.binding_in(conn, row, secret), secret))
             # No plaintext is produced until every selected handle is authorized.
@@ -854,6 +943,35 @@ class Credentials:
                     'name': secret['name'], 'format': secret['format'], 'env_var': secret['env_var'],
                     'value': self.security.decrypt(secret['encrypted'])} for row, secret in accepted]}
 
+    def aws_writeback(self, run, args):
+        """CAS the encrypted cache; revocation, replacement and requester changes win."""
+        updated = aws_bundle(args.value.get_secret_value())
+        with self.store.connect() as conn:
+            conn.begin_write()
+            if not self.aws_turn_current(conn, run):
+                return {'status': 'stale', 'message': 'The requesting turn changed. AWS cache was not saved; do not replay the command.'}
+            row, secret = self.authorized_request(conn, run, args.request_id)
+            if (row['status'] != 'provided' or not secret or secret['format'] != 'aws-sso'
+                    or secret['scope'] != 'personal' or not self.permitted(secret, run, run['active_user_id'], connection=conn)
+                    or self.status(secret) != 'active' or row['revision'] != args.revision
+                    or row['secret_revision'] != secret['revision']):
+                return {'status': 'stale', 'message': 'AWS access changed; refreshed cache was not saved. Do not replay the command.'}
+            original = aws_bundle(self.security.decrypt(secret['encrypted']))
+            if original['profile'] != updated['profile']:
+                raise ValueError('AWS cache writeback cannot change the profile.')
+            if original != updated:
+                encrypted = self.security.encrypt(json.dumps(updated, sort_keys=True))
+                count = conn.execute("UPDATE provider_secrets SET encrypted=?,revision=revision+1 "
+                                     "WHERE id=? AND revision=? AND revoked_at='' AND invalid_reason='' "
+                                     "AND (expires_at='' OR expires_at>?)",
+                                     (encrypted, secret['id'], secret['revision'], now())).rowcount
+                if not count:
+                    return {'status': 'stale'}
+                secret['revision'] += 1
+                row = self.binding_in(conn, row, secret)
+                self.audit_in(conn, run['active_user_id'], secret['id'], 'AWS cache refreshed', run['id'])
+            return {'status': 'saved', 'revision': row['revision']}
+
     def report_failure(self, run, args):
         with self.store.connect() as conn:
             conn.begin_write()
@@ -861,7 +979,7 @@ class Credentials:
             if (row['status'] != 'provided' or not secret or row['revision'] != args.revision
                     or row['secret_revision'] != secret['revision']):
                 return {'status': 'stale', 'message': 'Access changed since this command. Check the current connection before continuing.'}
-            if not self.permitted(secret, run, run['active_user_id']):
+            if not self.permitted(secret, run, run['active_user_id'], connection=conn):
                 raise HTTPException(403, 'This access is unavailable to the current requester.')
             if args.failure == 'unknown':
                 return {'status': 'unknown', 'request_id': row['id'], 'revision': row['revision'],
@@ -869,6 +987,9 @@ class Credentials:
             if args.failure != 'permission':
                 conn.execute('UPDATE provider_secrets SET invalid_reason=? WHERE id=? AND revision=?',
                              (args.failure, secret['id'], secret['revision']))
+            if secret['format'] == 'aws-sso':
+                self.audit_in(conn, run['active_user_id'], secret['id'], 'authentication ' + args.failure, run['id'])
+                return login_required(permission=args.failure == 'permission')
             replacement = self.saved_choice(conn, run, row) if args.failure != 'permission' else None
             if replacement:
                 row = self.reuse_in(conn, row, replacement)
@@ -890,33 +1011,44 @@ class Credentials:
         args = TOOLS[name][0].model_validate(arguments)
         if name in slack_secrets.TOOLS:
             return await slack_secrets.call(self, run, name, args)
+        if name == 'credentials_aws_login':
+            from .aws_login import call
+            return await call(self, run, args)
         if name == 'credentials_list':
-            return self.inventory(run, args)
+            return await database(self.inventory, run, args)
         if name == 'credentials_request':
-            return self.request(run, args)
+            return await database(self.request, run, args)
         if name == 'credentials_resolve':
-            return self.resolve_external(run, args)
+            return await database(self.resolve_external, run, args)
         if name == 'credentials_report_failure':
-            return self.report_failure(run, args)
+            return await database(self.report_failure, run, args)
         if name == 'credentials_run':
             return {'error': 'Run credential commands through the sandbox credential tool.'}
         status, result = await self.invoke(run, args)
         return {'status_code': status, 'response': result,
                 **({'moyai_wait_credential': result['moyai_wait_credential']} if result.get('moyai_wait_credential') else {})}
 
-    async def invoke(self, run, args):
+    def prepare_invoke(self, run, args, *, acknowledge=False):
         with self.store.connect() as conn:
             conn.begin_write()
             request, secret = self.authorized_request(conn, run, args.request_id)
             if secret:
                 request = self.binding_in(conn, request, secret)
-        if (request['run_id'] != run['id'] or request['status'] != 'provided' or not secret
-                or not self.permitted(secret, run, run['active_user_id'])):
-            raise HTTPException(403, 'This provider key is unavailable. Request it again through the secure form.')
+            if (request['run_id'] != run['id'] or request['status'] != 'provided' or not secret
+                    or not self.permitted(secret, run, run['active_user_id'], connection=conn)):
+                raise HTTPException(403, 'This provider key is unavailable. Request it again through the secure form.')
+            if acknowledge:
+                if self.status(secret) != 'active':
+                    raise HTTPException(403, 'This provider key changed while waiting for capacity.')
+                self.acknowledge_in(conn, run['id'], run['active_message_id'], request['id'], request['generation'])
+            return request, secret
+
+    async def invoke(self, run, args):
+        request, secret = await database(self.prepare_invoke, run, args)
         if secret['provider'] == 'generic':
             raise HTTPException(422, 'Use credentials_run for this connection.')
         if self.status(secret) != 'active':
-            result = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='expired' if self.status(secret) == 'expired' else 'invalid'))
+            result = await database(self.report_failure, run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='expired' if self.status(secret) == 'expired' else 'invalid'))
             return 401, {'error': {'message': 'Saved authentication is unavailable. Follow the returned access recovery instructions.', 'type': 'credential_expired'}, **result}
         provider = PROVIDERS[secret['provider']]
         paths = {'GET': {'/models'}, 'POST': {'/messages'} if secret['provider'] == 'anthropic' else {'/chat/completions', '/completions', '/embeddings'}}
@@ -927,7 +1059,7 @@ class Credentials:
         if await self.slots.is_full():
             raise HTTPException(429, 'Provider request capacity is busy. No provider call was made.')
         async with self.slots:
-            self.acknowledge(run['id'], run['active_message_id'], request['id'], request['generation'])
+            request, secret = await database(self.prepare_invoke, run, args, acknowledge=True)
             value = self.security.decrypt(secret['encrypted'])
             headers = {'x-api-key': value, 'anthropic-version': '2023-06-01'} if secret['provider'] == 'anthropic' else {'Authorization': 'Bearer ' + value}
             try:
@@ -945,7 +1077,7 @@ class Credentials:
             if not 200 <= status < 300:
                 recovery = {}
                 if status in (401, 403):
-                    recovery = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='invalid' if status == 401 else 'permission'))
+                    recovery = await database(self.report_failure, run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='invalid' if status == 401 else 'permission'))
                 return status if 400 <= status < 600 else 502, {'error': {'message': f'{provider["name"]} rejected the request ({status}). ' + ('Follow the returned access recovery instructions.' if status == 401 else 'Check permissions, quota, model and request.'), 'type': 'invalid_credentials' if status == 401 else 'permission' if status == 403 else 'provider_error'}, **recovery}
             try:
                 decoded = json.loads(bytes(raw))
@@ -965,6 +1097,8 @@ class Credentials:
             values = dict(row)
             for key in body.model_fields_set - {'revision', 'value'}:
                 values[key] = getattr(body, key)
+            if row['format'] == 'aws-sso' and values['scope'] != 'personal':
+                raise HTTPException(422, 'AWS login profiles cannot be shared with the organization.')
             if values['scope'] == 'organization' and not admin:
                 raise HTTPException(403, 'Only an administrator can manage organization credentials.')
             if values['scope'] == 'personal' and row['scope'] == 'organization':
@@ -974,10 +1108,10 @@ class Credentials:
                 if not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
                     raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
             if values['lifetime'] == 'session':
-                root = self.store.run(values['root_id']) if values['root_id'] else None
-                if not root or root['deleted_at'] or self.root(root) != values['root_id']:
+                root = self.store.run(values['root_id'], connection=conn) if values['root_id'] else None
+                if not root or root['deleted_at'] or self.root(root, connection=conn) != values['root_id']:
                     raise HTTPException(422, 'Choose an existing root session for session-only use.')
-                if values['scope'] == 'personal' and not self.same_requester(values['owner_id'], root['active_user_id']):
+                if values['scope'] == 'personal' and not self.same_requester(values['owner_id'], root['active_user_id'], connection=conn):
                     raise HTTPException(403, 'Choose your own session for personal credentials.')
             else:
                 values['root_id'] = ''
@@ -1000,7 +1134,7 @@ class Credentials:
             return self.store.identity(self.security.session_info(request)), self.security.role(request) == 'admin'
 
         @router.get('/api/credentials')
-        async def list_keys(request: Request, run_id: str = ''):
+        def list_keys(request: Request, run_id: str = ''):
             user, admin = actor(request)
             run = self.store.run(run_id) if re.fullmatch(r'[0-9a-f]{32}', run_id) else None
             if run and run['deleted_at']:
@@ -1010,7 +1144,7 @@ class Credentials:
                     'root_id': root_id, 'secrets': self.list_secrets(user, admin, root_id)}
 
         @router.post('/api/credentials/secrets', status_code=201)
-        async def save_key(body: SaveSecret, request: Request):
+        def save_key(body: SaveSecret, request: Request):
             user, admin = actor(request, True)
             if body.lifetime == 'session':
                 root = self.store.run(body.root_id) if body.root_id else None
@@ -1024,12 +1158,12 @@ class Credentials:
             return {'id': identity, 'saved': True}
 
         @router.patch('/api/credentials/secrets/{secret_id}')
-        async def update_key(secret_id: str, body: UpdateSecret, request: Request):
+        def update_key(secret_id: str, body: UpdateSecret, request: Request):
             user, admin = actor(request, True)
             return self.update_secret(secret_id, body, user, admin)
 
         @router.delete('/api/credentials/secrets/{secret_id}')
-        async def revoke_key(secret_id: str, request: Request):
+        def revoke_key(secret_id: str, request: Request):
             user, admin = actor(request, True)
             with self.store.connect() as conn:
                 conn.begin_write()
@@ -1044,9 +1178,9 @@ class Credentials:
 
         @router.post('/api/credentials/requests/{request_id}')
         async def resolve_request(request_id: str, body: Resolve, request: Request):
-            user, admin = actor(request, True)
-            run_id = self.resolve(request_id, body, user, admin)
-            self.manager.submit(self.store.run(run_id))
+            user, admin = await database(actor, request, True)
+            run_id = await database(self.resolve, request_id, body, user, admin)
+            await self.manager.submit_async(await database(self.store.run, run_id))
             await self.checkpoints.flush()
             return {'saved': True}
 
@@ -1079,6 +1213,14 @@ def initialize_schema(store):
                 run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL,
                 secret_id TEXT NOT NULL, revision INTEGER NOT NULL,
                 PRIMARY KEY(run_id,message_id,secret_id,revision)
+            );
+            CREATE TABLE IF NOT EXISTS aws_login_requests (
+                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                message_id INTEGER NOT NULL, actor_id TEXT NOT NULL, request_key TEXT NOT NULL,
+                profile_json TEXT NOT NULL, lifetime TEXT NOT NULL, status TEXT NOT NULL,
+                encrypted TEXT NOT NULL DEFAULT '', expires_at INTEGER NOT NULL,
+                interval_seconds INTEGER NOT NULL DEFAULT 5, next_poll INTEGER NOT NULL DEFAULT 0,
+                secret_id TEXT NOT NULL DEFAULT '', UNIQUE(run_id,message_id,request_key)
             );
         ''')
         for table, fields in {

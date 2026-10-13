@@ -87,8 +87,8 @@ class Skills:
         if store.schema_updates:
             initialize_schema(store)
 
-    def visible(self, row, actor):
-        return row['scope'] == 'organization' or self.same_requester(row['owner_id'], actor)
+    def visible(self, row, actor, *, connection=None):
+        return row['scope'] == 'organization' or self.same_requester(row['owner_id'], actor, connection=connection)
 
     def manageable(self, row, actor, admin):
         return admin if row['scope'] == 'organization' else row['owner_id'] == actor
@@ -98,8 +98,8 @@ class Skills:
                 'reference':('org:' if row['scope']=='organization' else 'personal:')+row['name'],
                 'can_manage':self.manageable(row,actor,admin)}
 
-    def files(self, skill_id, revision):
-        with self.store.connect() as conn:
+    def files(self, skill_id, revision, *, connection=None):
+        with (self.store.connect() if connection is None else nullcontext(connection)) as conn:
             row = bundle_row(conn,skill_id,revision)
             return json.loads(row['manifest']) if row else []
 
@@ -117,11 +117,11 @@ class Skills:
             return read_file(self,run,ReadSkillFile.model_validate(arguments))
         return self.load(run,LoadSkill.model_validate(arguments).name)
 
-    def rows_for(self, actor, *, archived=False):
+    def rows_for(self, actor, *, archived=False, connection=None):
         if not actor:
             return []
-        return [row for row in self.store.rows('SELECT * FROM skills ORDER BY scope,name')
-                if (archived or not row['archived']) and self.visible(row,actor)]
+        return [row for row in self.store.rows('SELECT * FROM skills ORDER BY scope,name', connection=connection)
+                if (archived or not row['archived']) and self.visible(row,actor,connection=connection)]
 
     def message_mentions(self, messages: list[dict[str, object]], actor: str) -> list[dict[str, object]]:
         """Display metadata only; never load instructions or change saved text."""
@@ -142,9 +142,9 @@ class Skills:
                  and self.visible(row, message.get('user_id', ''))]}
                 if references.get(message['id']) else message for message in messages]
 
-    def get(self, skill_id, actor):
-        rows = self.store.rows('SELECT * FROM skills WHERE id=?',(skill_id,))
-        if not rows or not self.visible(rows[0],actor):
+    def get(self, skill_id, actor, *, connection=None):
+        rows = self.store.rows('SELECT * FROM skills WHERE id=?',(skill_id,),connection=connection)
+        if not rows or not self.visible(rows[0],actor,connection=connection):
             raise HTTPException(404,'Skill not found.')
         return rows[0]
 
@@ -204,7 +204,7 @@ class Skills:
                     or current['active_user_id'] != run['active_user_id']):
                 raise HTTPException(409,'The requester or turn changed. Read the current skill context before searching.')
             ranked = []
-            for skill in self.rows_for(current['active_user_id']):
+            for skill in self.rows_for(current['active_user_id'], connection=conn):
                 metadata = self.metadata(skill)
                 score = len(terms & search_terms(skill['name']+' '+skill['description']))
                 exact = body.query.casefold() in (skill['name'],metadata['reference'])
@@ -222,30 +222,30 @@ class Skills:
         return {**paging, 'matches':[{'reference':s['reference'],'revision':s['revision']} for s in selected],
                 'message':'Matching descriptions appear privately in the next model call. Use skills_load to load a relevant skill.'}
 
-    def find(self, name, actor):
+    def find(self, name, actor, *, connection=None):
         prefix,_,slug = name.rpartition(':')
-        matches = [s for s in self.rows_for(actor) if s['name']==slug and
+        matches = [s for s in self.rows_for(actor, connection=connection) if s['name']==slug and
                    (not prefix or s['scope']==('organization' if prefix=='org' else 'personal'))]
         if not matches:
             raise HTTPException(404,'That skill is unavailable to the current requester.')
         return next((s for s in matches if s['scope']=='personal'),matches[0])
 
     def load(self, run, name):
-        current = self.store.run(run['id'])
-        if not current or any(current[key] != run[key] for key in ('token_hash', 'active_message_id', 'active_user_id')):
-            raise HTTPException(409, 'The skill capability changed. Use the current authenticated turn.')
         if not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']:
             raise HTTPException(403,'Skills require an authenticated chat turn.')
-        skill = self.find(name,run['active_user_id'])
         with self.store.connect() as conn:
             conn.begin_write()
+            current = self.store.run(run['id'], connection=conn)
+            if not current or any(current[key] != run[key] for key in ('token_hash', 'active_message_id', 'active_user_id')):
+                raise HTTPException(409, 'The skill capability changed. Use the current authenticated turn.')
+            skill = self.find(name,run['active_user_id'], connection=conn)
             params = (run['id'],run['active_message_id'])
             prior = conn.execute('SELECT * FROM skill_uses WHERE run_id=? AND message_id=? AND skill_id=?',(*params,skill['id'])).fetchone()
             if prior:
                 if prior['actor_id'] != run['active_user_id']:
                     raise HTTPException(403,'The requester changed. Start a new message to load this skill.')
                 return {'loaded':True,'name':skill['name'],'scope':skill['scope'],'revision':prior['revision'],
-                        'files':self.files(skill['id'],prior['revision'])}
+                        'files':self.files(skill['id'],prior['revision'], connection=conn)}
             conn.execute('INSERT INTO skill_uses VALUES(?,?,?,?,?,?,?)',
                          (*params,run['active_user_id'],skill['id'],skill['revision'],skill['encrypted'],now()))
         self.store.event(run['id'],'skill','Using '+skill['scope']+' skill: '+skill['name'],{'revision':skill['revision']})
@@ -331,19 +331,19 @@ class Skills:
             return self.store.identity(self.security.session_info(request)),self.security.role(request)=='admin'
 
         @router.get('/api/skills')
-        async def listing(request: Request, archived: bool=False):
+        def listing(request: Request, archived: bool=False):
             user,admin = actor(request)
             return {'skills':[self.metadata(s,user,admin) for s in self.rows_for(user,archived=archived)],'can_publish':admin}
 
         @router.get('/api/skills/{skill_id}')
-        async def detail(skill_id: str, request: Request):
+        def detail(skill_id: str, request: Request):
             user,admin = actor(request)
             row = self.get(skill_id,user)
             return {**self.metadata(row,user,admin),'instructions':self.security.decrypt(row['encrypted']),
                     'files':self.files(row['id'],row['revision'])}
 
         @router.get('/api/skills/{skill_id}/files/{path:path}')
-        async def file_detail(skill_id: str, path: str, request: Request):
+        def file_detail(skill_id: str, path: str, request: Request):
             user,_ = actor(request)
             row = self.get(skill_id,user)
             with self.store.connect() as conn:
@@ -355,17 +355,17 @@ class Skills:
                 'Content-Disposition':'attachment', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff'})
 
         @router.post('/api/skills',status_code=201)
-        async def create(body: SkillForm, request: Request):
+        def create(body: SkillForm, request: Request):
             user,admin = actor(request,True)
             return {'id':self.save(body,user,admin)}
 
         @router.put('/api/skills/{skill_id}')
-        async def update(skill_id: str, body: SkillForm, request: Request):
+        def update(skill_id: str, body: SkillForm, request: Request):
             user,admin = actor(request,True)
             return {'id':self.save(body,user,admin,skill_id)}
 
         @router.post('/api/skills/{skill_id}/archive')
-        async def archive(skill_id: str, body: ArchiveForm, request: Request):
+        def archive(skill_id: str, body: ArchiveForm, request: Request):
             user,admin = actor(request,True)
             with self.store.connect() as conn:
                 conn.begin_write()

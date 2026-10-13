@@ -27,6 +27,7 @@ from .config import Settings
 from .static_assets import versioned_index
 from .connectors import Connectors, ConnectorError, TOOLS, RETRY_SAFE_READS
 from .db import Store, now, database
+from .model_request import ModelRequest
 from .tool_dispatch import ToolDispatch, ToolRejected
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
@@ -46,7 +47,7 @@ from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
-from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
+from .credentials import AWSWriteback, Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
@@ -1017,15 +1018,15 @@ def _create_app(settings, store):
 
     @app.post('/api/runs/{run_id}/pr-write-access/{access_id}')
     async def decide_pr_write_access(run_id: str, access_id: str, body: WriteDecision, request: Request):
-        security.require(request, mutation=True)
-        actor = store.identity(security.session_info(request))
+        await database(security.require, request, mutation=True)
+        actor = await database(store.identity, await database(security.session_info, request))
         result = await connectors.github.decide_write_access(run_id, access_id, actor, body.decision)
         await checkpoints.flush()
         if body.decision == 'approve' and body.resume:
             # The normal message path preserves requester identity, queueing and
             # retry deduplication without touching the browser's unsent draft.
-            access = store.rows('SELECT repository_id, number FROM github_write_access WHERE id=? AND run_id=?',
-                                (access_id, run_id))[0]
+            access = (await database(store.rows, 'SELECT repository_id, number FROM github_write_access WHERE id=? AND run_id=?',
+                                    (access_id, run_id)))[0]
             await send_message(run_id, ChatMessage(
                 content=f"I approved access to PR #{access['number']} in repository {access['repository_id']} for this session. Check the approval and continue the requested work.",
                 client_id=f'pr-access-{access_id}',
@@ -1155,8 +1156,8 @@ def _create_app(settings, store):
                                 body.revision, body.action, body.content, requested_at=received_at)
         await checkpoints.flush()
         slack.chat.wake.set()
-        if store.has_queued_messages(run_id):
-            manager.submit(store.run(run_id))
+        if await database(store.has_queued_messages, run_id):
+            await manager.submit_async(await database(store.run, run_id))
         return {'id': result['id'], 'status': result['status'], 'revision': result['revision']}
 
     def read_event_batch(run_id, cursor):
@@ -1433,19 +1434,19 @@ def _create_app(settings, store):
 
     @app.post('/broker/{run_id}/agent-runtime')
     async def computer_operation(run_id: str, request: Request):
-        run = require_run(run_id, request)
+        run = await database(require_run, run_id, request)
         if computer_operations is None:
             raise HTTPException(409, 'An independent runtime requires durable execution.')
         body = await broker_body(request, '/agent-runtime')
-        result = await asyncio.to_thread(computer_operations.exchange, run, body)
+        result = await database(computer_operations.exchange, run, body)
         await checkpoints.flush()
         return result
 
     @app.post('/broker/{run_id}/artifacts/transfer')
     async def artifact_transfer(run_id: str, request: Request):
-        run = require_run(run_id, request)
+        run = await database(require_run, run_id, request)
         try:
-            result = await asyncio.to_thread(published_artifacts.transfer, run, await broker_body(request, '/artifacts/transfer'))
+            result = await database(published_artifacts.transfer, run, await broker_body(request, '/artifacts/transfer'))
         except ValidationError:
             raise HTTPException(422, 'Invalid artifact transfer arguments.') from None
         await checkpoints.flush()
@@ -1453,7 +1454,7 @@ def _create_app(settings, store):
 
     @app.post("/broker/{run_id}/tools/call")
     async def tool_call(run_id: str, request: Request):
-        run = require_run(run_id, request)
+        run = await database(require_run, run_id, request)
         try:
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
@@ -1473,14 +1474,18 @@ def _create_app(settings, store):
                 # guard, including an error raised after a committed write.
                 exc.headers = {key: value for key, value in (exc.headers or {}).items()
                                if key.lower() not in TOOL_REJECTION_HEADERS}
-            if dispatch:
-                # A status code alone cannot prove no action happened: handlers
-                # can recheck scope after committing an internal write.
-                await database(dispatch.finish, {'dispatched': False} if rejected else None,
-                               outcome='rejected' if rejected else 'unknown')
             if rejected:
                 kind = 'PrivateExportDenied' if isinstance(exc, PrivateExportDenied) else 'ToolRejected'
                 exc.headers.update(tool_rejection_headers(kind, body.request_id))
+            if dispatch:
+                # A status code alone cannot prove no action happened: handlers
+                # can recheck scope after committing an internal write.
+                try:
+                    await database(dispatch.finish, {'dispatched': False} if rejected else None,
+                                   outcome='rejected' if rejected else 'unknown')
+                except BaseException as cleanup_error:
+                    raise exc from cleanup_error
+            if rejected:
                 try:
                     await database(store.event, run_id, 'error', 'Tool request rejected.', {
                         'phase': 'tool_failure', 'tool': body.name,
@@ -1492,6 +1497,7 @@ def _create_app(settings, store):
             raise
         # Confirmed outcomes must survive cancellation during receipt persistence.
         if dispatch:
+            dispatch.confirm(result)
             await database(dispatch.finish, result)
         return result
 
@@ -1550,7 +1556,7 @@ def _create_app(settings, store):
                     result = await goals.review(run, args,
                         lambda system, data: harness_gateway.assess(run, request, system, data))
                 else:
-                    result = await asyncio.to_thread(goals.exchange, run, body.arguments)
+                    result = await database(goals.exchange, run, body.arguments)
             except ValidationError as exc:
                 return {'outcome': 'rejected', 'dispatched': False, 'error': str(exc)}
             except HTTPException as exc:
@@ -1565,7 +1571,7 @@ def _create_app(settings, store):
                 arguments = ReadHistory.model_validate(body.arguments).model_dump(exclude_none=True)
             except ValidationError:
                 return {'error': 'Use nonnegative cursors and positive page/range sizes.', 'outcome': 'rejected', 'dispatched': False}
-            return await asyncio.to_thread(session_journal.exchange, run, {'action': 'read', **arguments})
+            return await database(session_journal.exchange, run, {'action': 'read', **arguments})
         if body.name == 'workspace_diagnostics':
             try:
                 DiagnosticArgs.model_validate(body.arguments)
@@ -1616,7 +1622,7 @@ def _create_app(settings, store):
                 raise HTTPException(422, str(exc)) from None
         if body.name in MEMORY_TOOLS:
             try:
-                result = memory.call(run, body.name, body.arguments)
+                result = await database(memory.call, run, body.name, body.arguments)
             except ValidationError:
                 result = rejected_result('Invalid memory arguments. Check the current turn, text limits and tool schema.', status_code=422)
             except HTTPException as exc:
@@ -1629,14 +1635,14 @@ def _create_app(settings, store):
             return result
         if body.name == 'automation_claim_item':
             try:
-                result = automations.claim(run, body.arguments)
+                result = await database(automations.claim, run, body.arguments)
             except ValidationError:
                 raise ToolRejected(422, 'Invalid item key.') from None
             await checkpoints.flush()
             return result
         if body.name in SKILL_TOOLS:
             try:
-                result = await asyncio.to_thread(skills.call, run, body.name, body.arguments)
+                result = await database(skills.call, run, body.name, body.arguments)
             except ValidationError:
                 result = rejected_result('Invalid skill arguments. Check the tool schema, text limits and relative file paths.', status_code=422)
             except HTTPException as exc:
@@ -1695,7 +1701,7 @@ def _create_app(settings, store):
             run = {**run, 'github_connection_version': connectors.github.connection_version()}
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
-        require_run(run_id, request)
+        await database(require_run, run_id, request)
         if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return ConnectorError('The organization connection changed. No action was sent.',
                                   code='access_changed', dispatched=False).receipt(write=write)
@@ -1707,26 +1713,32 @@ def _create_app(settings, store):
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run, arguments) if body.name == 'linear_my_issues'
                       else await connectors.call(body.name, arguments, run=run))
-            failed = isinstance(result, dict) and bool(result.get('error'))
-            store.event(run_id, 'error' if failed else 'tool', f"{body.name} {'failed; inspect its receipt' if failed else 'completed'}")
-            if body.name == 'github_request_pull_request_write_access':
-                await checkpoints.flush()
-            return result
         except Exception as exc:
             message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
-            store.event(run_id, "error", f"{body.name}: {message}")
             error = exc if isinstance(exc, ConnectorError) else ConnectorError(message)
-            return error.receipt(write=write)
+            result = error.receipt(write=write)
+            event = ('error', f"{body.name}: {message}")
+        else:
+            failed = isinstance(result, dict) and bool(result.get('error'))
+            event = ('error' if failed else 'tool',
+                     f"{body.name} {'failed; inspect its receipt' if failed else 'completed'}")
+        if dispatch:
+            dispatch.confirm(result)
+        # Logging failures are separate from external-operation outcomes.
+        await database(store.event, run_id, *event, turn_id=run['active_message_id'])
+        if body.name == 'github_request_pull_request_write_access':
+            await checkpoints.flush()
+        return result
 
     @app.post('/broker/{run_id}/credentials/materialize')
     async def credential_materialize(run_id: str, request: Request):
-        run = require_run(run_id, request)
+        run = await database(require_run, run_id, request)
         privacy.require_no_export(run)
         if not credentials.tools(run):
             raise HTTPException(403, 'Credential access requires a durable chat session.')
         try:
             args = Materialize.model_validate(await broker_body(request, '/credentials/materialize'))
-            result = credentials.materialize(run, args)
+            result = await database(credentials.materialize, run, args)
         except (ValueError, ValidationError):
             raise HTTPException(422, 'Invalid credential access request.') from None
         await checkpoints.flush()
@@ -1734,9 +1746,23 @@ def _create_app(settings, store):
         # as an agent tool result or saved in runner/Temporal state.
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
+    @app.post('/broker/{run_id}/credentials/aws/writeback')
+    async def credential_aws_writeback(run_id: str, request: Request):
+        run = await database(require_run, run_id, request)
+        privacy.require_no_export(run)
+        if not credentials.tools(run):
+            raise HTTPException(403, 'Credential access requires a durable chat session.')
+        try:
+            args = AWSWriteback.model_validate(await broker_body(request, '/credentials/aws/writeback'))
+            result = await database(credentials.aws_writeback, run, args)
+        except (ValueError, ValidationError):
+            raise HTTPException(422, 'Invalid AWS cache update.') from None
+        await checkpoints.flush()
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+
     @app.post('/broker/{run_id}/credentials/invoke')
     async def credential_invoke(run_id: str, request: Request):
-        run = require_run(run_id,request)
+        run = await database(require_run, run_id,request)
         try:
             args = Invoke.model_validate(await broker_body(request,'/credentials/invoke'))
             status,result = await credentials.invoke(run,args)
@@ -1746,12 +1772,12 @@ def _create_app(settings, store):
 
     @app.get("/broker/{run_id}/v1/models")
     async def models(run_id: str, request: Request):
-        run = require_run(run_id, request)
+        run = await database(require_run, run_id, request)
         return {"object": "list", "data": [{"id": gateway_model(run['active_model'] or run['model'] or settings.agent_model), "object": "model", "owned_by": "workspace"}]}
 
     @app.get('/broker/{run_id}/attachments/{attachment_id}')
     async def broker_attachment(run_id: str, attachment_id: str, request: Request):
-        return await asyncio.to_thread(store.attachments.broker_file, require_run(run_id, request), attachment_id)
+        return await asyncio.to_thread(store.attachments.broker_file, await database(require_run, run_id, request), attachment_id)
 
     @app.post('/hooks/slack/interactions')
     async def slack_interactions(request: Request):
@@ -1778,9 +1804,9 @@ def _create_app(settings, store):
 
     @app.post('/broker/{run_id}/goal')
     async def goal_clock(run_id: str, request: Request):
-        caller = require_run(run_id, request)
+        caller = await database(require_run, run_id, request)
         body = await broker_body(request, '/goal')
-        result = await asyncio.to_thread(goals.exchange, caller, body, internal=True)
+        result = await database(goals.exchange, caller, body, internal=True)
         if body.get('action') == 'review' and (result.get('goal') or {}).get('status') == 'active':
             result = await goals.review(caller, GoalArgs(action='progress', note=body.get('note', '')),
                 lambda system, data: harness_gateway.assess(caller, request, system, data))
@@ -1807,8 +1833,8 @@ def _create_app(settings, store):
 
     @app.post('/broker/{run_id}/context/journal')
     async def conversation_journal(run_id: str, request: Request):
-        caller = require_run_state(run_id, request)
-        result = await asyncio.to_thread(session_journal.exchange, caller, await broker_body(request, '/context/journal'))
+        caller = await database(require_run_state, run_id, request)
+        result = await database(session_journal.exchange, caller, await broker_body(request, '/context/journal'))
         await checkpoints.flush()
         return result
 
@@ -1842,7 +1868,7 @@ def _create_app(settings, store):
 
     @app.post("/broker/{run_id}/v1/chat/completions")
     async def model_proxy(run_id: str, request: Request):
-        require_run(run_id, request)
+        await database(require_run, run_id, request)
         model_stage(request, 'admission')
         # Reject before reading/charging an inference. Waiting on this server
         # would retain large request bodies and could expire sealed envelopes.
@@ -1858,7 +1884,7 @@ def _create_app(settings, store):
             return await forward_model(run_id, request, *prepared)
 
     async def prepare_model(run_id: str, request: Request):
-        run = require_run(run_id, request)
+        run = await database(require_run, run_id, request)
         try:
             selected_model = settings.resolve_model(fallback=run['active_model'] or run['model'])
         except ValueError as exc:
@@ -1867,10 +1893,10 @@ def _create_app(settings, store):
         if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
             raise HTTPException(422, "messages must be an array")
         if 'steering_applied' in body:
-            message_queue.acknowledge(run_id, run['active_message_id'], body['steering_applied'])
+            await database(message_queue.acknowledge, run_id, run['active_message_id'], body['steering_applied'])
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
-        native_sessions.observe_scope(run)
+        await database(native_sessions.observe_scope, run)
         payload['messages'] = await asyncio.to_thread(store.attachments.with_images, run, scrub_memory_history(payload['messages']))
         contexts = await harness_gateway.library_context(run, selected_model, payload=payload)
         # Resolve all private views for the current requester on every inference.
@@ -1889,96 +1915,89 @@ def _create_app(settings, store):
             payload, checked_budget = await harness_gateway.live_context.prepare(
                 run, request, payload, '/v1/chat/completions')
         except ContextPressure as exc:
-            store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
+            await database(store.event, run_id, 'context', 'Compacting before the next model request.', exc.budget,
+                           turn_id=run['active_message_id'])
             await checkpoints.flush()
             raise
         return run, body, payload, checked_budget
 
     async def forward_model(run_id: str, request: Request, run, body, payload, checked_budget):
         selected_model = payload['model']
-        harness_gateway.live_context.require_current(run, request, selected_model)
-        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
-            "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
-            "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS NOT DISTINCT FROM ? "
-            "AND active_user_id IS NOT DISTINCT FROM ? AND active_model IS NOT DISTINCT FROM ? AND (coalesce(active_model,'')!='' OR model IS NOT DISTINCT FROM ?)",
-            (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3,
-             run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
-        if not admitted:
-            raise HTTPException(429, "This run reached its model request limit.")
-        request_id = spend.begin(run, selected_model, startup=True)
-        model_stage(request, 'upstream', request_id=request_id)
-        # Keep user/session accounting local. The existing virtual key remains
-        # the sole billing credential; sandbox-supplied attribution is ignored.
-        payload['metadata'] = {'moyai_request_id': request_id}
+        accounting = ModelRequest(settings=settings, store=store, spend=spend, tracing=tracing,
+                                  checkpoints=checkpoints, run=run, model=selected_model, started=time.time_ns())
+        request_id = accounting.id
+        capture = UsageCapture(False)
+        status, error, trace_response = 'failed', {}, {}
+        original = None
+        client = upstream = None
         wants_stream = bool(payload.get('stream'))
-        # Streaming headers precede generation and cannot contain its final
-        # charge. Ask for a completed response, then adapt it to Hermes' SSE
-        # protocol. Tool/activity events remain live throughout the session.
+        payload['metadata'] = {'moyai_request_id': request_id}
+        # Preserve Hermes' completed-response accounting before adapting SSE.
         payload['stream'] = False
         payload.pop('stream_options', None)
-        await checkpoints.flush()
-        capture = UsageCapture(False)
-        status = 'failed'
-        trace_started = time.time_ns()
-        trace_response = {}
-        gateway_id = ''
-        error = {}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
+        try:
+            await accounting.admit(
+                lambda: harness_gateway.live_context.require_current(run, request, selected_model), startup=True)
+            model_stage(request, 'upstream', request_id=request_id)
+            await checkpoints.flush()
+            await database(harness_gateway.live_context.require_current, run, request, selected_model)
+            client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
+            status = 'unknown'
+            upstream = await client.send(client.build_request('POST',
+                settings.litellm_api_base.rstrip('/') + '/chat/completions', json=payload,
+                headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}), stream=True)
+            await accounting.headers(upstream, False)
+            if upstream.status_code >= 400:
+                status = 'failed'
+                raw_error = bytearray()
+                async for chunk in upstream.aiter_bytes():
+                    raw_error.extend(chunk[:8192 - len(raw_error)])
+                    if len(raw_error) >= 8192:
+                        break
+                if provider_context_rejection(upstream.status_code, raw_error):
+                    await database(store.event, run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
+                    raise ContextPressure(checked_budget.public())
+                raise model_gateway_error(request_id, upstream, raw_error)
+            # Bound transport memory independently of model token limits.
+            raw_response = bytearray()
+            async for chunk in upstream.aiter_bytes():
+                raw_response.extend(chunk)
+                if len(raw_response) > 8 * 1024 * 1024:
+                    raise HTTPException(502, 'Model gateway response exceeded the size limit.')
+            capture.feed(bytes(raw_response))
+            capture.finish()
+            if not capture.done:
+                raise HTTPException(502, 'Model gateway returned an invalid completion.')
+            status = 'completed'
+            trace_response = json.loads(raw_response) if not privacy.is_private(run) else {}
+        except httpx.HTTPError as exc:
+            error = model_error(exc)
+            raise HTTPException(502, 'Model gateway could not be reached.',
+                                headers=upstream_headers(request_id, error=exc)) from None
+        except BaseException as exc:
+            original = exc
+            error = model_error(exc)
+            if isinstance(exc, asyncio.CancelledError) and accounting.finalization is None:
+                status = 'interrupted'
+            raise
+        finally:
+            if error:
+                model_stage(request, 'upstream', error=error)
+            remember = (lambda: context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions'))
             try:
-                harness_gateway.live_context.require_current(run, request, selected_model)
-                status = 'unknown'
-                async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
-                                         json=payload, headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
-                    gateway_id = spend.headers(request_id, upstream, False)
-                    if upstream.status_code >= 400:
-                        status = 'failed'
-                        raw_error = bytearray()
-                        async for chunk in upstream.aiter_bytes():
-                            raw_error.extend(chunk[:8192 - len(raw_error)])
-                            if len(raw_error) >= 8192:
-                                break
-                        if provider_context_rejection(upstream.status_code, raw_error):
-                            store.event(run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
-                            raise ContextPressure(checked_budget.public())
-                        raise model_gateway_error(request_id, upstream, raw_error)
-                    # Bound transport memory independently of model token limits.
-                    raw_response = bytearray()
-                    async for chunk in upstream.aiter_bytes():
-                        raw_response.extend(chunk)
-                        if len(raw_response) > 8 * 1024 * 1024:
-                            raise HTTPException(502, 'Model gateway response exceeded the size limit.')
-                    capture.feed(bytes(raw_response))
-                    capture.finish()
-                    if not capture.done:
-                        raise HTTPException(502, 'Model gateway returned an invalid completion.')
-                    status = 'completed'
-                    trace_response = json.loads(raw_response) if not privacy.is_private(run) else {}
-            except httpx.HTTPError as exc:
-                error = model_error(exc)
-                raise HTTPException(502, 'Model gateway could not be reached.',
-                                    headers=upstream_headers(request_id, error=exc)) from None
-            except BaseException as exc:
-                error = model_error(exc)
-                if isinstance(exc, asyncio.CancelledError):
-                    status = 'interrupted'
+                await accounting.finish(capture, status, body['messages'] if not privacy.is_private(run) else [],
+                                        {**trace_response, **capture.response}, error=error,
+                                        close=[value.aclose for value in (upstream, client) if value is not None],
+                                        remember=remember)
+            except BaseException as cleanup_error:
+                if original is not None:
+                    raise original from cleanup_error
                 raise
-            finally:
-                if error:
-                    model_stage(request, 'upstream', error=error)
-                # Account before returning any data, including if the sandbox
-                # stopped while the already-submitted inference was completing.
-                spend.finish(request_id, capture, status)
-                if status == 'completed':
-                    context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
-                if not privacy.is_private(run):
-                    tracing.model(run, request_id, trace_started, body['messages'],
-                                  {**trace_response, **capture.response}, status, gateway_id=gateway_id, error=error)
-                await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:
             async def relay():
                 for chunk in completion_events(value):
-                    if store.run(run_id)['status'] not in {'running', 'reconnecting', 'awaiting_approval'}:
+                    if (await database(store.run, run_id))['status'] not in {'running', 'reconnecting', 'awaiting_approval'}:
                         break
                     yield chunk
             return StreamingResponse(relay(), media_type='text/event-stream', headers=upstream_headers(request_id, upstream))

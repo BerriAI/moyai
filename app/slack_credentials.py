@@ -37,7 +37,7 @@ class SlackCredentials:
         key = 'credential:' + request['id']
         card = conn.execute('SELECT * FROM slack_outbox WHERE run_id=? AND dedupe_key=?', (binding['run_id'], key)).fetchone()
         previous = json.loads(card['metadata']) if card else {}
-        bot = self.owner.connectors.slack_installation()
+        bot = self.owner.connectors.slack_installation(connection=conn)
         destination = {'team_id': binding['team_id'], 'bot_user_id': bot.get('user_id'),
                        'channel': binding['channel'], 'thread_ts': binding['thread_ts']}
         if previous.get('credential_request_id') and any(previous.get(key) != value for key, value in destination.items()):
@@ -157,7 +157,8 @@ class SlackCredentials:
                 raise HTTPException(409, 'This access request changed. Reopen it in Moyai.')
             actor = 'slack:' + team + ':' + user
             vault = self.owner.manager.credentials
-            if not (vault.same_requester(actor, row['actor_id']) or vault.same_requester(row['actor_id'], actor)):
+            if not (vault.same_requester(actor, row['actor_id'], connection=conn)
+                    or vault.same_requester(row['actor_id'], actor, connection=conn)):
                 raise HTTPException(403, 'Only the original requester can choose this access scope.')
             if data.get('action_ts') and Decimal(clicked) <= Decimal(data['action_ts']):
                 return {'ok': True}  # The POST boundary still flushes replayed state.

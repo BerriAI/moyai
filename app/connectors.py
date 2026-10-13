@@ -5,30 +5,22 @@ import html
 import json
 import re
 import time
-from typing import Annotated
 from urllib.parse import urlencode
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from .db import Store, database, now
 from .connector_errors import ConnectorError
 from .github import GitHub, TOOLS as GITHUB_TOOLS
 from .github_coding import READS as GITHUB_CODING_READS
 from .slack_origin import metadata as slack_metadata
-
-
-class Args(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+from .connector_schemas import Args, CursorPage, LinearIssueId, LinearUpdateIssue, LinearOptions
+from . import notion_tools, slack_tools
 
 
 class Search(Args):
     query: str = Field(min_length=1)
-
-
-class CursorPage(Args):
-    cursor: str = ''
-    page_size: int = Field(default=50, ge=1, le=100, description='Provider page size, not a total result limit. Follow the returned continuation.')
 
 
 class CursorSearch(CursorPage, Search):
@@ -53,15 +45,12 @@ def slack_search_query(query: str) -> str:
     )
 
 
-LinearIssueId = Annotated[str, Field(pattern=r"^(?:[A-Za-z][A-Za-z0-9]*-\d+|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$")]
-
-
 class LinearIssue(Args):
     issue_id: LinearIssueId
 
 
 class LinearIssueRead(LinearIssue, CursorPage):
-    pass
+    label_cursor: str = Field(default='', description="Independent label cursor; follow labels_next_arguments.")
 
 
 class LinearComment(LinearIssue):
@@ -73,10 +62,6 @@ class LinearCreateIssue(Args):
     title: str = Field(min_length=1, max_length=250)
     description: str = Field(min_length=1)
     parent_id: LinearIssueId | None = Field(default=None, description="Optional parent issue identifier (e.g. LIT-9222) or UUID for a new sub-issue.")
-
-
-class LinearUpdateIssue(LinearIssue):
-    parent_id: LinearIssueId | None = Field(description="Required: parent issue identifier (e.g. LIT-9222) or UUID. Explicit null removes the parent.")
 
 
 class SlackChannel(CursorPage):
@@ -107,13 +92,16 @@ class NotionAppend(NotionPage):
 
 TOOLS = {
     **GITHUB_TOOLS,
+    **notion_tools.TOOLS,
+    **slack_tools.TOOLS,
     "linear_my_issues": ("linear", False, CursorPage, "Read open Linear tickets assigned to the authenticated requester, using their verified work email. Follow next_arguments for every page. Never uses the shared connection owner as the assignee."),
     "linear_teams": ("linear", False, CursorPage, "List accessible Linear teams and their IDs. Follow next_arguments for every page. Use before creating an issue; ask if the right team is ambiguous."),
     "linear_search": ("linear", False, CursorSearch, "Search Linear issue titles by text. Follow next_arguments to exhaust results."),
-    "linear_issue": ("linear", False, LinearIssueRead, "Read a Linear issue's description, status, parent, and comments. Follow next_arguments to exhaust comments. Use to verify reparenting."),
+    "linear_issue": ("linear", False, LinearIssueRead, "Read a Linear issue's editable fields, relationship IDs and comments to reconcile updates. Follow next_arguments for comments and labels_next_arguments for labels; the two collections have independent cursors."),
     "linear_comment": ("linear", True, LinearComment, "Add a comment to a Linear issue directly. No administrator approval step is required."),
     "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Optionally set parent_id to create a sub-issue. To reparent an existing ticket, use linear_update_issue instead; do not create a replacement or substitute cross-links. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
-    "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. No administrator approval step is required. The connected credential needs issue-update permission. Verify with linear_issue before retrying an uncertain update."),
+    "linear_options": ("linear", False, LinearOptions, "Discover valid team states (status IDs), members (assignees), labels, projects or cycles. Use linear_teams or linear_issue for team_id, select resource, and follow next_arguments. Names may be ambiguous; update using returned IDs."),
+    "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update supplied fields on an existing issue: title, description, state/status ID, assignee, priority, labels, project, cycle, due date or parent. Omitted fields stay unchanged. Null clears nullable fields; [] clears labels and 0 clears priority. Use linear_options for valid IDs. Parent-only calls remain supported. No administrator approval step is required. Verify with linear_issue before retrying an uncertain update."),
     "slack_search": ("slack", False, SlackSearch, "Search Slack messages visible to the connected account. Use in:channel-name or in:<#CHANNEL_ID>; bare in:CHANNEL_ID is normalized. Follow next_arguments through all available pages; Slack's own search coverage applies."),
     "slack_channel": ("slack", False, SlackChannel, "Read accessible channel history with cursor pagination. Replies require slack_thread. Use as_bot=true for the installed bot's own DM history. Follow next_arguments; coverage describes this collection, not a complete workspace mirror."),
     "slack_thread": ("slack", False, SlackThread, "Read a Slack thread with full cursor pagination. Follow next_arguments. To verify a bot DM sent with slack_send, use as_bot=true and the returned channel and ts as thread_ts."),
@@ -128,6 +116,7 @@ TOOLS = {
 # Metadata/identity caches may refresh; no action or context selection is replayed.
 # github_checkout here only resolves metadata, before the sandbox changes files.
 RETRY_SAFE_READS = frozenset({
+    *notion_tools.READS, *slack_tools.READS, 'linear_options',
     *GITHUB_CODING_READS,
     'github_rulesets', 'github_ruleset', 'github_repositories', 'github_repository',
     'github_checkout', 'github_pull_request', 'github_pull_request_comments',
@@ -177,6 +166,20 @@ class Connectors:
             raise ConnectorError('The executing session changed. No further action was sent.',
                                  code='execution_changed', dispatched=False)
 
+    def connection_revision(self, provider):
+        rows = self.store.rows('SELECT encrypted FROM connections WHERE provider=?', (provider,))
+        return rows[0]['encrypted'] if rows else None
+
+    def guard(self, name, run, revision):
+        """Recheck after preflight awaits and immediately before external actions."""
+        self.check_execution(run)
+        provider = TOOLS[name][0]
+        fresh = self.store.run(run['id']) if run else None
+        if (not self.allowed(name) or self.connection_revision(provider) != revision
+                or (fresh and provider not in fresh['plugins'])):
+            raise ConnectorError('The connection or session selection changed. No further action was sent.',
+                                 code='access_changed', dispatched=False)
+
     def configured_oauth(self, provider):
         if provider == 'github':
             return True
@@ -202,8 +205,8 @@ class Connectors:
                                      for name, spec in TOOLS.items() if spec[0] == provider]})
         return result
 
-    def policy(self, provider):
-        rows = self.store.rows("SELECT enabled,read_only,checked_at,check_status FROM connection_policies WHERE provider=?", (provider,))
+    def policy(self, provider, *, connection=None):
+        rows = self.store.rows("SELECT enabled,read_only,checked_at,check_status FROM connection_policies WHERE provider=?", (provider,), connection=connection)
         row = rows[0] if rows else {"enabled": True, "read_only": False, "checked_at": None, "check_status": None}
         return {**row, "enabled": bool(row["enabled"]), "read_only": bool(row["read_only"])}
 
@@ -218,8 +221,21 @@ class Connectors:
                     return policy['enabled'] and ('plugins' not in run or 'slack' in run['plugins'])
             except ConnectorError:
                 return False
+        return self.organization_allowed(name, policy=policy)
+
+    def organization_allowed(self, name, *, connection=None, policy=None):
+        """Organization catalog policy, without personal-account selection."""
+        provider, write, _, _ = TOOLS[name]
+        policy = policy if policy is not None else self.policy(provider, connection=connection)
         return policy["enabled"] and (not write or not policy["read_only"]) and bool(
-            self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,)))
+            self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,), connection=connection))
+
+    def enabled_providers(self, *, connection=None):
+        """Admission needs provider state, not decrypted UI metadata."""
+        return {row['provider'] for row in self.store.rows(
+            """SELECT c.provider FROM connections c LEFT JOIN connection_policies p ON p.provider=c.provider
+                WHERE c.provider IN ('linear','slack','notion','github') AND coalesce(p.enabled,1)=1""",
+            connection=connection)}
 
     def audit(self, provider, action):
         self.store.execute("INSERT INTO connection_audit(provider,action,actor,created_at) VALUES(?,?,?,?)",
@@ -256,8 +272,8 @@ class Connectors:
                 return fresh
             return credentials
 
-    def slack_installation(self):
-        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='slack'")
+    def slack_installation(self, *, connection=None):
+        rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='slack'", connection=connection)
         if not rows:
             return {}
         credentials = json.loads(self.security.decrypt(rows[0]["encrypted"]))
@@ -294,6 +310,8 @@ class Connectors:
                         status_code=response.status_code, retryable=response.status_code == 429 or response.status_code >= 500,
                         retry_after=float(retry_after) if retry_after.replace('.', '', 1).isdigit() else None)
                 data = response.json()
+                if not isinstance(data, dict):
+                    raise ValueError('Expected a provider object.')
                 if data.get("ok") is False and data.get("error") not in allowed_errors:
                     # Slack error codes are identifiers, never arbitrary body text.
                     code = data.get('error', '')
@@ -356,11 +374,16 @@ class Connectors:
         data = result['data']
         return linear_page(data, args, data.get('issues'), 'requester open issues')
 
-    async def linear_issue_uuid(self, issue_id):
+    async def linear_issue_uuid(self, issue_id, run=None):
         # Resolve identifiers and UUIDs alike before using relationship inputs.
-        data = await self.call("linear_issue", {"issue_id": issue_id})
+        try:
+            data = await self.call("linear_issue", {"issue_id": issue_id}, run=run)
+        except ConnectorError as exc:
+            raise ConnectorError('Could not resolve the Linear issue. No mutation was sent.',
+                                 code=exc.code, dispatched=False, retryable=exc.retryable,
+                                 status_code=exc.status_code, retry_after=exc.retry_after) from exc
         issue = data.get("issue") or {}
-        if not issue.get("id"):
+        if not isinstance(issue, dict) or not issue.get("id"):
             raise ConnectorError("Linear issue not found or not accessible.", dispatched=False)
         return issue["id"]
 
@@ -376,6 +399,8 @@ class Connectors:
             raise ConnectorError("This operation is disabled by your organization's connection policy.", dispatched=False)
         if name == 'slack_send':
             return await self.slack_send(args, run)
+        if name in slack_tools.TOOLS:
+            return await slack_tools.call(self, name, args, run)
         if name == 'slack_me':
             return await self.slack_identities.requester(run)
         if name in {'slack_thread', 'slack_channel'} and args['as_bot']:
@@ -386,41 +411,63 @@ class Connectors:
             headers = self.headers(provider, selection.credentials if selection else await self.credentials(provider))
         if not self.allowed(name, run=run if selection else None):
             raise ConnectorError("This operation is disabled by your organization's connection policy.", dispatched=False)
+        if name in notion_tools.TOOLS:
+            return await notion_tools.call(self, name, args, headers, run)
         if provider == "linear":
+            revision = self.connection_revision(provider)
+            issue_fields = """id identifier title description url priority dueDate updatedAt
+                team{id key name} state{id name type} assignee{id name email}
+                project{id name} cycle{id number name} parent{id identifier title url}
+                labels(first:100){nodes{id name} pageInfo{hasNextPage endCursor}}"""
             if name == "linear_teams":
                 query = "query($first:Int!,$after:String){teams(first:$first,after:$after){nodes{id name key} pageInfo{hasNextPage endCursor}}}"
                 variables = {'first': args['page_size'], 'after': args['cursor'] or None}
+            elif name == "linear_options":
+                fields = {'states': 'id name type', 'members': 'id name email active',
+                          'labels': 'id name', 'projects': 'id name url',
+                          'cycles': 'id number name startsAt endsAt'}[args['resource']]
+                # Resource/fields are selected from finite server-owned maps.
+                query = ("query($team:String!,$first:Int!,$after:String){team(id:$team){id "
+                         + args['resource'] + "(first:$first,after:$after){nodes{" + fields
+                         + "} pageInfo{hasNextPage endCursor}}}}")
+                variables = {'team': args['team_id'], 'first': args['page_size'], 'after': args['cursor'] or None}
             elif name == "linear_create_issue":
                 query = "mutation($input:IssueCreateInput!){issueCreate(input:$input){success issue{id identifier title description url parent{id identifier title url}}}}"
                 variables = {"input": {"teamId": args["team_id"], "title": args["title"], "description": args["description"]}}
                 if args["parent_id"] is not None:
-                    variables["input"]["parentId"] = await self.linear_issue_uuid(args["parent_id"])
+                    variables["input"]["parentId"] = await self.linear_issue_uuid(args["parent_id"], run)
             elif name == "linear_update_issue":
-                issue_id = await self.linear_issue_uuid(args["issue_id"])
-                parent_id = await self.linear_issue_uuid(args["parent_id"]) if args["parent_id"] is not None else None
-                if issue_id == parent_id:
-                    raise ConnectorError("A Linear issue cannot be its own parent.", dispatched=False)
-                query = "mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success issue{id identifier title url parent{id identifier title url}}}}"
-                variables = {"id": issue_id, "input": {"parentId": parent_id}}
+                issue_id = await self.linear_issue_uuid(args["issue_id"], run)
+                patch = {}
+                mapping = {'title': 'title', 'description': 'description', 'state_id': 'stateId',
+                           'assignee_id': 'assigneeId', 'priority': 'priority', 'label_ids': 'labelIds',
+                           'project_id': 'projectId', 'cycle_id': 'cycleId', 'due_date': 'dueDate'}
+                for key, field in mapping.items():
+                    if key in args:
+                        patch[field] = args[key]
+                if 'parent_id' in args:
+                    parent_id = await self.linear_issue_uuid(args["parent_id"], run) if args["parent_id"] is not None else None
+                    if issue_id == parent_id:
+                        raise ConnectorError("A Linear issue cannot be its own parent.", dispatched=False)
+                    patch['parentId'] = parent_id
+                query = "mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success issue{" + issue_fields + "}}}"
+                variables = {"id": issue_id, "input": patch}
             elif name == "linear_search":
                 query = "query($q:String!,$first:Int!,$after:String){issues(filter:{title:{containsIgnoreCase:$q}},first:$first,after:$after){nodes{id identifier title url state{name}} pageInfo{hasNextPage endCursor}}}"
                 variables = {"q": args["query"], 'first': args['page_size'], 'after': args['cursor'] or None}
             elif name == "linear_issue":
-                query = "query($id:String!,$first:Int!,$after:String){issue(id:$id){id identifier title description url state{name} parent{id identifier title url} comments(first:$first,after:$after){nodes{id body url createdAt user{id name}} pageInfo{hasNextPage endCursor}}}}"
-                variables = {"id": args["issue_id"], 'first': args['page_size'], 'after': args['cursor'] or None}
+                read_fields = issue_fields.replace('labels(first:100)', 'labels(first:$first,after:$labelAfter)')
+                query = "query($id:String!,$first:Int!,$after:String,$labelAfter:String){issue(id:$id){" + read_fields + " comments(first:$first,after:$after){nodes{id body url createdAt user{id name}} pageInfo{hasNextPage endCursor}}}}"
+                variables = {"id": args["issue_id"], 'first': args['page_size'], 'after': args['cursor'] or None,
+                             'labelAfter': args['label_cursor'] or None}
             else:
                 # commentCreate expects the issue UUID; issue(id:) resolves LIT-123 too.
-                issue = await self.call("linear_issue", {"issue_id": args["issue_id"]})
-                issue_id = issue.get("issue", {}).get("id")
-                if not issue_id:
-                    raise ConnectorError("Linear issue not found.", dispatched=False)
+                issue_id = await self.linear_issue_uuid(args["issue_id"], run)
                 query = "mutation($input:CommentCreateInput!){commentCreate(input:$input){success comment{id body url}}}"
                 variables = {"input": {"issueId": issue_id, "body": args["body"]}}
             # Relationship resolution can await multiple reads. Recheck the write
             # policy in case the connection changed while those were in flight.
-            if not self.allowed(name):
-                raise ConnectorError("This operation is disabled by your organization's connection policy.", dispatched=False)
-            self.check_execution(run)
+            self.guard(name, run, revision)
             result = await self.request("POST", "https://api.linear.app/graphql", headers=headers, json={"query": query, "variables": variables})
             data = result["data"]
             if name == "linear_comment" and not data.get("commentCreate", {}).get("success"):
@@ -430,13 +477,39 @@ class Connectors:
             if name == "linear_update_issue":
                 update = data.get("issueUpdate") or {}
                 updated_issue = update.get("issue") or {}
-                actual_parent = (updated_issue.get("parent") or {}).get("id")
-                if (not update.get("success") or updated_issue.get("id") != issue_id
-                        or "parent" not in updated_issue or actual_parent != parent_id):
-                    raise ConnectorError("Linear did not confirm the parent update. Read the issue to verify its parent before retrying.", dispatched=True)
+                confirmed = update.get('success') and updated_issue.get('id') == issue_id
+                for field, value in patch.items():
+                    if field == 'labelIds':
+                        labels = updated_issue.get('labels') or {}
+                        confirmed = (confirmed and 'labels' in updated_issue
+                                     and not labels.get('pageInfo', {}).get('hasNextPage', True)
+                                     and {item['id'] for item in labels.get('nodes', [])} == set(value))
+                    elif field.endswith('Id'):
+                        relation = field[:-2]
+                        confirmed = confirmed and relation in updated_issue and (updated_issue.get(relation) or {}).get('id') == value
+                    elif field == 'description':
+                        confirmed = confirmed and field in updated_issue and (updated_issue[field] or '') == (value or '')
+                    else:
+                        confirmed = confirmed and field in updated_issue and updated_issue[field] == value
+                if not confirmed:
+                    raise ConnectorError("Linear did not confirm the requested update. Read the issue to verify supplied fields before retrying.", dispatched=True)
+            if name == 'linear_options':
+                self.guard(name, run, revision)
+                team = data.get('team') or {}
+                if not team.get('id'):
+                    raise ConnectorError('Linear team not found or inaccessible.', dispatched=False)
+                return linear_page(data, args, team.get(args['resource']), f"team {args['resource']}")
             if name in {'linear_teams', 'linear_search', 'linear_issue'}:
+                self.guard(name, run, revision)
                 collection = (data.get('issue') or {}).get('comments') if name == 'linear_issue' else data.get('teams' if name == 'linear_teams' else 'issues')
-                return linear_page(data, args, collection, 'issue comments' if name == 'linear_issue' else name)
+                result = linear_page(data, args, collection, 'issue comments' if name == 'linear_issue' else name)
+                if name == 'linear_issue':
+                    labels = linear_page({}, {**args, 'cursor': args['label_cursor']},
+                                         (data.get('issue') or {}).get('labels'), 'issue labels')
+                    continuation = labels['next_arguments']
+                    result.update(labels_next_arguments={**args, 'label_cursor': continuation['cursor']} if continuation else None,
+                                  labels_coverage=labels['coverage'])
+                return result
             return data
         if provider == "slack":
             endpoint, method, payload = {
@@ -523,13 +596,15 @@ class Connectors:
             raise ConnectorError('The Slack requester has no profile name. Reconnect your sign-in before sending.', dispatched=False)
         return html.escape(label, quote=False)
 
-    async def slack_send(self, args, run):
+    async def slack_send(self, args, run, *, thread_ts=None, operation='slack_send', revision=None):
         text = f"{self.slack_sender_name(run)}: {args['text']}"
         installation = self.slack_installation()
         identity = await self.slack_identities.requester(run) if args['channel'] == 'me' else None
         # Sending must not load or refresh the shared search user's credential.
         # Slack DMs belong to their participants: resolve the recipient as the bot.
         headers = {'Authorization': f'Bearer {await self.slack_bot_token()}'}
+        if revision is None:
+            revision = self.connection_revision('slack')
         scopes = set(self.slack_installation().get('scopes', []))
         channel = identity['user_id'] if identity else args['channel']
         if identity:
@@ -558,16 +633,14 @@ class Connectors:
             part = text[offset:offset+40000]
             payload = {'channel': channel, 'text': part, 'metadata': slack_metadata(self, channel, part),
                        'unfurl_links': False, 'unfurl_media': False}
-            if parts:
-                payload['thread_ts'] = parts[0]['ts']
+            if thread_ts or parts:
+                payload['thread_ts'] = thread_ts or parts[0]['ts']
             try:
-                self.check_execution(run)
-                if not self.allowed('slack_send'):
-                    raise ConnectorError('The organization connection changed.', code='access_changed', dispatched=False)
+                self.guard(operation, run, revision)
                 if identity:
                     self.slack_identities.check_requester(run, installation)
                 result = await self.request('POST', 'https://slack.com/api/chat.postMessage', headers=headers, json=payload)
-                if not result.get('ts'):
+                if not result.get('ts') or (thread_ts and (result.get('ok') is not True or result.get('channel') != channel)):
                     raise ConnectorError('Slack did not return the message receipt.', code='missing_receipt', dispatched=True)
             except ConnectorError as exc:
                 return {**exc.receipt(write=True), 'acknowledged_messages': parts, 'completed_formatted_characters': offset,
@@ -584,7 +657,7 @@ class Connectors:
         elif provider == "slack":
             params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history")
             if self.settings.slack_bot_enabled:
-                params["scope"] = "app_mentions:read,chat:write,im:write,im:history,reactions:write,assistant:write,files:write,files:read"
+                params["scope"] = "app_mentions:read,chat:write,im:write,im:history,reactions:read,reactions:write,assistant:write,files:write,files:read"
                 if self.settings.slack_identity_linking_enabled:
                     params["scope"] += ",users:read,users:read.email"
                 if self.settings.slack_thread_chat_enabled:

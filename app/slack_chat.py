@@ -176,8 +176,8 @@ class SlackChat:
         mirrored = conn.execute("SELECT 1 FROM slack_outbox WHERE run_id=? AND dedupe_key LIKE ? AND status IN ('sent','sending','uncertain')", (run_id, prefix)).fetchone()
         inbound = conn.execute('SELECT 1 FROM slack_receipts WHERE run_id=? AND message_id=?', (run_id, message['id'])).fetchone()
         conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND dedupe_key LIKE ? AND status='pending'", (run_id, prefix))
-        if (binding['paused'] or not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
-                or binding['team_id'] != self.owner.connectors.slack_installation().get('team_id')):
+        if (binding['paused'] or not self.settings.slack_thread_chat_enabled or not self.owner.status(connection=conn)['enabled']
+                or binding['team_id'] != self.owner.connectors.slack_installation(connection=conn).get('team_id')):
             return
         if action == 'delete' and not (mirrored or inbound):
             return
@@ -268,7 +268,8 @@ class SlackChat:
                     if pending >= self.settings.max_pending_runs and command != 'session-id':
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
-                    plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
+                    enabled = self.owner.connectors.enabled_providers(connection=conn)
+                    plugins = [provider for provider in ('linear', 'slack', 'notion', 'github') if provider in enabled]
                     model = preferred_model(conn, self.settings, actor_id)
                     if selected_model:
                         try:
@@ -397,7 +398,7 @@ class SlackChat:
         texts += [row['content'] for row in conn.execute(
             'SELECT m.content FROM slack_receipts r JOIN messages m ON m.id=r.message_id WHERE r.run_id=?', (run_id,))]
         found = {match[1] for text in texts if isinstance(text, str) for match in USER_MENTION.finditer(text)}
-        return frozenset(found - {self.owner.connectors.slack_installation().get('user_id')})
+        return frozenset(found - {self.owner.connectors.slack_installation(connection=conn).get('user_id')})
 
     def collect_progress_in(self, conn, binding, allowed):
         if private_run(self.store, binding['run_id'], conn):
@@ -432,8 +433,8 @@ class SlackChat:
         """Commit saved public text and its existing delivery intent together."""
         binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
         if binding:
-            allowed = (self.settings.slack_thread_chat_enabled and self.owner.status()['enabled'] and
-                       binding['team_id'] == self.owner.connectors.slack_installation().get('team_id'))
+            allowed = (self.settings.slack_thread_chat_enabled and self.owner.status(connection=conn)['enabled'] and
+                       binding['team_id'] == self.owner.connectors.slack_installation(connection=conn).get('team_id'))
             self.collect_answers_in(conn, binding, allowed)
             self.collect_progress_in(conn, binding, allowed)
 
@@ -548,8 +549,8 @@ class SlackChat:
                 FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?""", (run_id,)).fetchone()
             if not binding:
                 return
-            enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
-            team = self.owner.connectors.slack_installation().get('team_id')
+            enabled = self.owner.status(connection=conn)['enabled'] and self.settings.slack_thread_chat_enabled
+            team = self.owner.connectors.slack_installation(connection=conn).get('team_id')
             allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
             if not allowed:
                 conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status IN ('pending','waiting')", (run_id,))

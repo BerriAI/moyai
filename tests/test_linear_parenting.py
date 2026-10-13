@@ -57,7 +57,7 @@ def test_parent_tools_are_discoverable_with_explicit_clear_semantics(linear):
     tools = {t['name']: t for t in client.get(f'/broker/{run_id}/tools', headers=headers).json()}
     update = tools['linear_update_issue']
     assert update['annotations']['readOnlyHint'] is False
-    assert set(update['inputSchema']['required']) == {'issue_id', 'parent_id'}
+    assert set(update['inputSchema']['required']) == {'issue_id'}
     assert {'type': 'null'} in update['inputSchema']['properties']['parent_id']['anyOf']
     assert 'parent_id' in tools['linear_create_issue']['inputSchema']['properties']
     assert 'parent_id' not in tools['linear_create_issue']['inputSchema']['required']
@@ -118,7 +118,7 @@ def test_create_accepts_optional_parent_without_changing_direct_creation(linear,
 @pytest.mark.parametrize('arguments', [
     {'issue_id': 'TEST-2'}, {**UPDATE, 'parent_id': ''}, {**UPDATE, 'parent_id': 'not-an-id'},
     {**UPDATE, 'parent_id': '-' * 36}, {**UPDATE, 'issue_id': '../../secrets'},
-    {**UPDATE, 'title': 'Unrelated edit'},
+    {**UPDATE, 'title': None},
 ])
 def test_invalid_updates_never_request_approval_or_reach_linear(linear, arguments):
     app, client, run_id, headers, _, calls = linear

@@ -188,65 +188,114 @@ class PublishedArtifacts:
         if position != manifest['size']:
             raise HTTPException(503, 'Saved artifact is incomplete.')
 
+    def upload(self, conn, admitted, upload_id):
+        run = self.active(conn, admitted)
+        row = conn.execute('SELECT * FROM artifact_uploads WHERE run_id=? AND upload_id=?',
+                           (run['id'], upload_id)).fetchone()
+        if not row or any(row[key] != run[current] for key, current in
+                          [('actor_id', 'active_user_id'), ('turn_id', 'active_message_id'), ('capability', 'token_hash')]):
+            raise HTTPException(409, 'Begin a new artifact upload under the current execution.')
+        return run, dict(row)
+
+    @staticmethod
+    def parts(conn, run_id, upload_id):
+        return [dict(row) for row in conn.execute(
+            'SELECT run_id,upload_id,part,reference,size,sha256 FROM artifact_parts WHERE run_id=? AND upload_id=? ORDER BY part',
+            (run_id, upload_id))]
+
+    @staticmethod
+    def published(conn, run_id, upload):
+        return conn.execute('SELECT * FROM published_artifacts WHERE run_id=? AND path=? AND revision=?',
+                            (run_id, upload['path'], upload['sha256'])).fetchone()
+
+    @staticmethod
+    def part_available(conn, run_id, body, checksum):
+        old = conn.execute('SELECT sha256 FROM artifact_parts WHERE run_id=? AND upload_id=? AND part=?',
+                           (run_id, body.upload_id, body.part)).fetchone()
+        if old and old['sha256'] != checksum:
+            raise HTTPException(409, 'This upload part already contains different bytes.')
+        if not old and conn.execute('SELECT 1 FROM published_artifacts WHERE run_id=? AND upload_id=?',
+                                    (run_id, body.upload_id)).fetchone():
+            raise HTTPException(409, 'Published artifact parts are immutable.')
+        return bool(old)
+
     def transfer(self, admitted, arguments):
         body = Transfer.model_validate(arguments)
-        with self.store.connect() as conn:
-            conn.begin_write()
-            run = self.active(conn, admitted)
-            upload = conn.execute('SELECT * FROM artifact_uploads WHERE run_id=? AND upload_id=?', (run['id'], body.upload_id)).fetchone()
-            if body.action == 'begin':
-                if not body.path or len(body.sha256) != 64 or any(c not in '0123456789abcdef' for c in body.sha256):
-                    raise HTTPException(422, 'Artifact upload needs a relative path, size, and SHA-256.')
+        if body.action == 'begin':
+            if not body.path or len(body.sha256) != 64 or any(c not in '0123456789abcdef' for c in body.sha256):
+                raise HTTPException(422, 'Artifact upload needs a relative path, size, and SHA-256.')
+            with self.store.connect(write_scope=admitted['id']) as conn:
+                conn.begin_write()
+                run = self.active(conn, admitted)
+                upload = conn.execute('SELECT * FROM artifact_uploads WHERE run_id=? AND upload_id=?',
+                                      (run['id'], body.upload_id)).fetchone()
                 identity = (run['active_user_id'], run['active_message_id'], run['token_hash'], body.path, body.size, body.sha256)
                 if upload and tuple(upload[key] for key in ('actor_id', 'turn_id', 'capability', 'path', 'size', 'sha256')) != identity:
                     raise HTTPException(409, 'This upload identity belongs to a different file or execution.')
                 conn.execute('INSERT INTO artifact_uploads VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
                              (run['id'], body.upload_id, *identity, now()))
-                return {'upload_id': body.upload_id, 'accepted': True}
-            if not upload or any(upload[key] != run[current] for key, current in
-                                 [('actor_id', 'active_user_id'), ('turn_id', 'active_message_id'), ('capability', 'token_hash')]):
-                raise HTTPException(409, 'Begin a new artifact upload under the current execution.')
-            if body.action == 'part':
-                try:
-                    raw = base64.b64decode(body.data, validate=True)
-                except ValueError:
-                    raise HTTPException(422, 'Invalid artifact part encoding.') from None
-                checksum = hashlib.sha256(raw).hexdigest()
-                old = conn.execute('SELECT sha256 FROM artifact_parts WHERE run_id=? AND upload_id=? AND part=?',
-                                   (run['id'], body.upload_id, body.part)).fetchone()
-                if old and old['sha256'] != checksum:
-                    raise HTTPException(409, 'This upload part already contains different bytes.')
-                if not old:
-                    if conn.execute('SELECT 1 FROM published_artifacts WHERE run_id=? AND upload_id=?', (run['id'], body.upload_id)).fetchone():
-                        raise HTTPException(409, 'Published artifact parts are immutable.')
-                    reference = self.store.objects.put(raw) if self.store.objects.enabled else ''
+            return {'upload_id': body.upload_id, 'accepted': True}
+        if body.action == 'part':
+            try:
+                raw = base64.b64decode(body.data, validate=True)
+            except ValueError:
+                raise HTTPException(422, 'Invalid artifact part encoding.') from None
+            checksum = hashlib.sha256(raw).hexdigest()
+            receipt = {'part': body.part, 'sha256': checksum, 'bytes': len(raw)}
+            with self.store.connect() as conn:
+                conn.begin_read()
+                run, expected = self.upload(conn, admitted, body.upload_id)
+                if self.part_available(conn, run['id'], body, checksum):
+                    return receipt
+            # Immutable blob I/O never owns writer admission or a pool slot.
+            reference = self.store.objects.put(raw) if self.store.objects.enabled else ''
+            with self.store.connect(write_scope=admitted['id']) as conn:
+                conn.begin_write()
+                run, current = self.upload(conn, admitted, body.upload_id)
+                if current != expected:
+                    raise HTTPException(409, 'The artifact upload changed while storing its bytes.')
+                if not self.part_available(conn, run['id'], body, checksum):
                     conn.execute('INSERT INTO artifact_parts VALUES(?,?,?,?,?,?,?)',
-                                 (run['id'], body.upload_id, body.part, b'' if reference else raw, reference, checksum, len(raw)))
-                return {'part': body.part, 'sha256': checksum, 'bytes': len(raw)}
-            if body.action != 'commit':
-                raise HTTPException(422, 'Choose begin, part, or commit.')
-            previous = conn.execute('SELECT * FROM published_artifacts WHERE run_id=? AND path=? AND revision=?',
-                                    (run['id'], upload['path'], upload['sha256'])).fetchone()
+                                 (run['id'], body.upload_id, body.part, b'' if reference else raw,
+                                  reference, checksum, len(raw)))
+            return receipt
+        if body.action != 'commit':
+            raise HTTPException(422, 'Choose begin, part, or commit.')
+        with self.store.connect() as conn:
+            conn.begin_read()
+            run, expected = self.upload(conn, admitted, body.upload_id)
+            previous = self.published(conn, run['id'], expected)
             if previous:
                 return {'saved': True, **self.metadata(previous)}
-            rows = conn.execute('SELECT run_id,upload_id,part,reference,size,sha256 FROM artifact_parts WHERE run_id=? AND upload_id=? ORDER BY part', (run['id'], body.upload_id)).fetchall()
-            if len(rows) != body.parts or any(row['part'] != number for number, row in enumerate(rows)):
-                raise HTTPException(409, 'Artifact upload is incomplete. Retry the missing parts.')
-            checksum, size = hashlib.sha256(), 0
-            for row in rows:
-                raw = self.raw(row, conn)
-                checksum.update(raw)
-                size += len(raw)
-            if size != upload['size'] or checksum.hexdigest() != upload['sha256']:
-                raise HTTPException(409, 'Artifact size or hash does not match the complete upload.')
-            manifest = {'run_id': run['id'], 'path': upload['path'], 'revision': upload['sha256'], 'upload_id': body.upload_id,
-                        'size': size, 'media_type': mimetypes.guess_type(upload['path'])[0] or 'application/octet-stream',
+            parts = self.parts(conn, run['id'], body.upload_id)
+        if len(parts) != body.parts or any(part['part'] != number for number, part in enumerate(parts)):
+            raise HTTPException(409, 'Artifact upload is incomplete. Retry the missing parts.')
+        checksum, size = hashlib.sha256(), 0
+        for part in parts:
+            raw = self.raw(part)
+            checksum.update(raw)
+            size += len(raw)
+        if size != expected['size'] or checksum.hexdigest() != expected['sha256']:
+            raise HTTPException(409, 'Artifact size or hash does not match the complete upload.')
+        media_type = mimetypes.guess_type(expected['path'])[0] or 'application/octet-stream'
+        with self.store.connect(write_scope=admitted['id']) as conn:
+            conn.begin_write()
+            run, current = self.upload(conn, admitted, body.upload_id)
+            if current != expected:
+                raise HTTPException(409, 'The artifact upload changed while verifying its bytes.')
+            previous = self.published(conn, run['id'], current)
+            if previous:
+                return {'saved': True, **self.metadata(previous)}
+            if self.parts(conn, run['id'], body.upload_id) != parts:
+                raise HTTPException(409, 'Artifact parts changed while verifying the complete upload. Retry the commit.')
+            manifest = {'run_id': run['id'], 'path': current['path'], 'revision': current['sha256'],
+                        'upload_id': body.upload_id, 'size': size, 'media_type': media_type,
                         'created_at': now(), 'source_turn': run['active_message_id']}
             conn.execute('INSERT INTO published_artifacts VALUES(?,?,?,?,?,?,?,?)', tuple(manifest.values()))
             conn.execute('INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)',
-                         (run['id'], 'artifact', 'Published '+upload['path'],
-                          json.dumps({'turn_id': run['active_message_id'], 'path': upload['path'],
-                                      'revision': upload['sha256'], 'size': size}), manifest['created_at']))
+                         (run['id'], 'artifact', 'Published '+current['path'],
+                          json.dumps({'turn_id': run['active_message_id'], 'path': current['path'],
+                                      'revision': current['sha256'], 'size': size}), manifest['created_at']))
             return {'saved': True, **self.metadata(manifest)}
 
     def call(self, admitted, name, arguments):

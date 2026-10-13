@@ -102,6 +102,7 @@ async def test_finished_turn_is_captured_without_agent_save_and_recalled_after_r
     try:
         new = restarted.state.store.create_run('Prepare benchmark report', '', 'modal', [], chat_enabled=True, user_id='google:alice')
         restarted.state.store.claim_message(new['id'])
+        restarted.state.store.update_run(new['id'], status='running')
         new = restarted.state.store.run(new['id'])
         assert restarted.state.memory.search(new, 'google:alice', 'benchmark')['loaded'] == 1
         assert 'p95' in restarted.state.memory.context(new)

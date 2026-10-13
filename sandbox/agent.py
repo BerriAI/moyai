@@ -119,10 +119,6 @@ def run_agent(spec, relay):
         os.chdir(original)
 
 
-class ProjectUnavailable(RuntimeError):
-    pass
-
-
 def prepare_workspace(spec, relay):
     """Prepare computer files/services without constructing a model runtime."""
     workspace = Path("/workspace")
@@ -130,7 +126,10 @@ def prepare_workspace(spec, relay):
     prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting)
     artifacts = Path("/artifacts")
     artifacts.mkdir(exist_ok=True)
-    if spec["repo_url"]:
+    if spec.get('project_environment'):
+        if (workspace / 'repo').is_dir():
+            workspace /= 'repo'
+    elif spec["repo_url"]:
         requested_repo = spec['repo_url'].removeprefix('https://github.com/').removesuffix('.git').lower()
         if spec.get('github_enabled'):
             def broker(path, body):
@@ -157,11 +156,11 @@ def prepare_workspace(spec, relay):
             emit("tool", "Cloning the repository", {"command": f"git clone --depth 1 {spec['repo_url']}"})
             subprocess.run(["git", "-c", "http.followRedirects=false", "clone", "--depth", "1", "--", spec["repo_url"], str(workspace / "repo")], check=True, timeout=120)
         workspace /= "repo"
-    try:
-        prepare_project(spec, emit)
-    except Exception:
-        raise ProjectUnavailable('The prepared project services did not start successfully. Your workspace is preserved. '
-             'Ask an administrator to check the environment startup command before continuing.') from None
+    health = prepare_project(spec, emit)
+    if health is not None:
+        spec['project_health'] = health
+    if not workspace.is_dir():
+        workspace = Path('/workspace')
     return workspace, artifacts
 
 
@@ -169,11 +168,7 @@ def _run_agent(spec, relay):
     harness = spec.get('harness', 'hermes')
     if harness == 'hermes':
         apply_hermes_patches()
-    try:
-        workspace, artifacts = prepare_workspace(spec, relay)
-    except ProjectUnavailable as exc:
-        emit('final', str(exc), completed=False)
-        return 1
+    workspace, artifacts = prepare_workspace(spec, relay)
     os.chdir(workspace)
     config = hermes_config(spec, relay.url, workspace)
     if harness == 'hermes':

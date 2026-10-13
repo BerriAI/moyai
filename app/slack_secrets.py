@@ -75,7 +75,7 @@ def token_for(vault, run, request_id, *, audit=True):
     with vault.store.connect() as conn:
         row, secret = vault.authorized_request(conn, run, request_id)
         if (row['status'] != 'provided' or not secret or secret['scope'] != 'personal'
-                or not vault.permitted(secret, run, run['active_user_id'])
+                or not vault.permitted(secret, run, run['active_user_id'], connection=conn)
                 or vault.status(secret) != 'active'):
             raise HTTPException(403, 'Request active personal Slack access for the current requester through the secure form.')
         if (secret['provider'], secret['name'], secret['format']) != ('generic', 'slack-personal', 'env'):

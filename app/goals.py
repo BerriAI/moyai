@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent.goal_state import OPEN, advance, create, fallback_report, verdict, reporting_due, checkpoint_report
-from .db import now
+from .db import database, now
 from .session_journal import SessionJournal, encoded
 
 
@@ -120,7 +120,7 @@ class Goals:
         workflow = conn.execute('''SELECT m.id,m.user_id,m.source_json,a.automation_id,a.revision
             FROM messages m JOIN automation_runs a ON a.run_id=m.run_id
             WHERE m.run_id=? AND m.id=? AND m.input_kind='automation' ''',
-            (caller['id'], caller['active_message_id'])).fetchone() if 'automation_runs' in self.store.table_names() else None
+            (caller['id'], caller['active_message_id'])).fetchone() if 'automation_runs' in conn.table_names() else None
         if workflow:
             saved = json.loads(workflow['source_json'])
             if (saved.get('automation_id') == workflow['automation_id'] and saved.get('revision') == workflow['revision']
@@ -146,7 +146,14 @@ class Goals:
                 raise HTTPException(422, 'This control requires an exact authenticated user command.')
             return self.exchange(caller, {'action': 'resume' if arg == 'resume' else 'cancel' if arg == 'clear' else 'pause', 'source_input_id': source_id})
         with self.store.connect(write_scope=caller['id']) as conn:
-            conn.begin_write()
+            # Both harness polling and the public get action are read-only.
+            # Keep all source reads on this connection: borrowing another one
+            # while holding a session lock can exhaust the pool and strand the
+            # schema's other writers behind that lock.
+            if body.get('action') == 'get':
+                conn.begin_read()
+            else:
+                conn.begin_write()
             self.require(conn, caller)
             state = self.current(conn, caller['id'])
             if internal:
@@ -240,6 +247,7 @@ class Goals:
 
     def review_snapshot(self, caller, args):
         with self.store.connect(write_scope=caller['id']) as conn:
+            conn.begin_read()
             self.require(conn, caller)
             state = self.current(conn, caller['id'])
             if not state or state['status'] != 'active':
@@ -251,7 +259,7 @@ class Goals:
                     'trigger': args.action, 'claim': args.note, 'remaining': args.remaining}
 
     async def review(self, caller, args, assess):
-        snapshot = self.review_snapshot(caller, args)
+        snapshot = await database(self.review_snapshot, caller, args)
         journal = SessionJournal(self.store)
         records = {}
         reads = [{'seq': seq} for seq in args.evidence]
@@ -259,7 +267,7 @@ class Goals:
         # is returned to the worker; it is not a reason to stop the goal.
         while True:
             for read in reads:
-                entry = journal.exchange(caller, {'action': 'read', **read})['entry']
+                entry = (await database(journal.exchange, caller, {'action': 'read', **read}))['entry']
                 records[encoded(read)] = entry
             try:
                 result = json.loads(await assess(REVIEW_SYSTEM, {**snapshot, 'records': list(records.values())}))
@@ -278,6 +286,9 @@ class Goals:
                 break
         if result['verdict'] == 'complete' and args.action != 'complete':
             result['verdict'] = 'continue'
+        return await database(self.apply_review, caller, snapshot, result)
+
+    def apply_review(self, caller, snapshot, result):
         with self.store.connect(write_scope=caller['id']) as conn:
             conn.begin_write()
             self.require(conn, caller)

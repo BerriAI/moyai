@@ -1,5 +1,8 @@
+import asyncio
 import base64
+import io
 import json
+import threading
 
 import httpx
 import pytest
@@ -14,9 +17,121 @@ from test_audio import gateway, grant_files, slack_download
 from test_slack import event, signed, slack_app
 from test_spend import sign_in
 from storage_fixture import MemoryObjects
+from test_background_database_latency import responsive_pool
+from test_connection_reuse import single_connection_app, slack_connection_app  # noqa: F401
 
 FILE = {'id': 'F12345678', 'name': 'image.png', 'mimetype': 'image/png'}
 ROOT = '1790719000.123456'
+
+
+@pytest.fixture
+def pending_slack_file(slack_connection_app, monkeypatch):
+    app, run, message = slack_connection_app
+    app.state.store.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?)',
+                            (message['id'], json.dumps([FILE['id']])))
+    downloaded, checkpoints = [], []
+    raw = png()
+
+    async def read(file_id, team):
+        downloaded.append((file_id, team))
+        return FILE['name'], io.BytesIO(raw), inspect_file(raw)
+
+    async def flush():
+        checkpoints.append(True)
+
+    # Only the remote download is synthetic; save, authorization and binding
+    # exercise the real attachment/database pipeline.
+    monkeypatch.setattr(app.state.slack.files, 'read', read)
+    monkeypatch.setattr(app.state.slack.checkpoints, 'flush', flush)
+    return app, run, message, downloaded, checkpoints
+
+
+@pytest.mark.parametrize('phase', ['initial_read', 'publication'])
+@pytest.mark.parametrize('retired', [False, True])
+async def test_slack_file_pool_wait_yields_and_preserves_publication(
+        pending_slack_file, monkeypatch, record_property, phase, retired):
+    app, run, message, downloaded, checkpoints = pending_slack_file
+    store = app.state.store
+    if not store.database:
+        pytest.skip('Pool contention requires --postgres-backend.')
+    assert store.database.pool.max_size == 1
+    save = store.attachments.save
+
+    def saved(*args, **kwargs):
+        result = save(*args, **kwargs)
+        if retired:
+            store.execute("UPDATE messages SET status='cancelled' WHERE id=?", (message['id'],))
+        if phase == 'publication':
+            # The draft has committed. Hold the pool before batch publication.
+            waiting.hold()
+        return result
+
+    monkeypatch.setattr(store.attachments, 'save', saved)
+    async with responsive_pool(store, record_property) as waiting:
+        if phase == 'initial_read':
+            await asyncio.to_thread(waiting.hold)
+        await asyncio.wait_for(app.state.slack.files.prepare(run['id']), 5)
+    assert downloaded == [(FILE['id'], 'T12345678')]
+    attachments = store.attachments.for_run(run['id'], message['id'])
+    assert len(attachments) == (0 if retired else 1)
+    assert checkpoints == ([] if retired else [True])
+    assert store.rows('SELECT status FROM slack_audio_inputs WHERE message_id=?', (message['id'],)) == [
+        {'status': 'pending' if retired else 'ready'}]
+    await app.state.slack.files.prepare(run['id'])
+    assert len(downloaded) == 1 and len(checkpoints) == (0 if retired else 1)
+
+
+async def test_cancelled_file_publication_drains_commit_and_checkpoint(pending_slack_file, monkeypatch):
+    app, run, message, downloaded, checkpoints = pending_slack_file
+    store = app.state.store
+    entered, release = threading.Event(), threading.Event()
+    bind = store.attachments.bind_in
+
+    def blocked(*args, **kwargs):
+        bind(*args, **kwargs)
+        entered.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(store.attachments, 'bind_in', blocked)
+    pending = asyncio.create_task(app.state.slack.files.prepare(run['id']))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        pending.cancel()
+        await asyncio.sleep(.02)
+        pending.cancel()
+        await asyncio.sleep(.02)
+        assert not pending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert len(store.attachments.for_run(run['id'], message['id'])) == 1
+    assert store.rows('SELECT status FROM slack_audio_inputs WHERE message_id=?', (message['id'],)) == [
+        {'status': 'ready'}]
+    assert downloaded == [(FILE['id'], 'T12345678')] and checkpoints == [True]
+
+
+async def test_slack_file_diagnostic_pool_wait_keeps_event_loop_responsive(
+        pending_slack_file, monkeypatch, record_property):
+    from app.slack_files import SlackFileError
+    app, run, message, _, checkpoints = pending_slack_file
+    store = app.state.store
+    if not store.database:
+        pytest.skip('Pool contention requires --postgres-backend.')
+
+    async def failed_read(file_id, team):
+        await asyncio.to_thread(waiting.hold)
+        raise SlackFileError('unavailable')
+
+    monkeypatch.setattr(app.state.slack.files, 'read', failed_read)
+    async with responsive_pool(store, record_property) as waiting:
+        await asyncio.wait_for(app.state.slack.files.prepare(run['id']), 5)
+    assert not store.attachments.for_run(run['id'], message['id'])
+    assert store.rows('SELECT status FROM slack_audio_inputs WHERE message_id=?', (message['id'],)) == [
+        {'status': 'ready'}]
+    diagnostics = [event for event in store.events(run['id']) if event['kind'] == 'error']
+    assert len(diagnostics) == 1 and diagnostics[0]['data']['code'] == 'unavailable'
+    assert checkpoints == [True]
 
 
 def provider(app, monkeypatch, *, raw=None, metadata=None, history=None, status=200):
@@ -204,8 +319,8 @@ def test_slack_images_check_live_access_when_saved_scopes_are_stale(slack_app, m
 @pytest.mark.parametrize('saved_scope', ['', 'files:read'])
 @pytest.mark.parametrize('error,expected', [
     ('missing_scope', 'Reconnect Slack with files:read permission'),
-    ('file_not_found', 'Could not read this Slack attachment'),
-    ('invalid_auth', 'Could not read this Slack attachment'),
+    ('file_not_found', 'code=unavailable'),
+    ('invalid_auth', 'code=authentication'),
 ])
 def test_slack_file_access_errors_come_from_live_api(slack_app, monkeypatch, saved_scope, error, expected):
     app, client, runs, _ = slack_app

@@ -14,7 +14,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .db import now
+from .db import database, now
 from .library_views import page
 
 KINDS = Literal['preference', 'feedback', 'project', 'reference']
@@ -141,11 +141,11 @@ class Memory:
         if store.schema_updates:
             initialize_schema(store)
 
-    def repository_scopes(self, run):
-        if not self.github or 'github' not in run.get('plugins', []) or not self.github.connectors.allowed('github_repository'):
+    def repository_scopes(self, run, *, connection=None):
+        if not self.github or 'github' not in run.get('plugins', []) or not self.github.connectors.organization_allowed('github_repository', connection=connection):
             return []
         return [{'id': entry['id'], 'url': Note.repository('https://github.com/' + entry['full_name'])}
-                for entry in self.github.repository_options()]
+                for entry in self.github.repository_options(connection=connection)]
 
     def owner(self, actor, conn=None):
         if self.security.local_preview() and actor == 'shared:local:admin':
@@ -164,18 +164,27 @@ class Memory:
         return {'enabled': bool(rows[0]['enabled']), 'auto_save': bool(rows[0]['auto_save']),
                 'revision': rows[0]['revision']} if rows else Preferences().model_dump()
 
-    def active(self, run, turn_id=None):
+    def active(self, run, turn_id=None, *, connection=None):
         # Refresh so stale capabilities cannot write for a new requester.
-        deny_export(self.store, run['id'])
+        deny_export(self.store, run['id'], connection)
         previous = run
-        run = self.store.run(run['id'])
+        run = self.store.run(run['id'], connection=connection)
         if run and any(previous.get(key) != run.get(key) for key in ('token_hash', 'active_message_id', 'active_user_id')):
             raise HTTPException(409, 'The memory capability changed. Use the current authenticated turn.')
         if not run or not run['chat_enabled'] or not run['active_message_id']:
             raise HTTPException(403, 'Memory requires an authenticated chat turn.')
         if turn_id is not None and run['active_message_id'] != turn_id:
             raise HTTPException(409, 'The current turn changed. Read the current memory context before continuing.')
-        return run, self.owner(run['active_user_id'])
+        return run, self.owner(run['active_user_id'], connection)
+
+    def require_current_in(self, conn, run, owner):
+        current, current_owner = self.active(run, run['active_message_id'], connection=conn)
+        if (current_owner != owner or current['deleted_at'] or current['deletion_requested_at']
+                or current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}):
+            raise HTTPException(409, 'The memory capability changed. Use the current authenticated turn.')
+        if not self.preferences(owner, conn)['enabled']:
+            raise HTTPException(403, 'Personal memory is paused. Manage it in Settings → Memory.')
+        return current
 
     def tools(self, run):
         try:
@@ -188,8 +197,9 @@ class Memory:
             return TOOLS[:2]
         return TOOLS
 
-    def recall_only(self, run):
-        return bool(run.get('parent_run_id') or self.store.rows('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],)))
+    def recall_only(self, run, *, connection=None):
+        return bool(run.get('parent_run_id') or self.store.rows(
+            'SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],), connection=connection))
 
     def unpack(self, row):
         return {**json.loads(self.security.decrypt(row['encrypted'])),
@@ -227,7 +237,7 @@ class Memory:
             deny_export(self.store, run['id'], conn)
         if source and source.get('run_id'):
             deny_export(self.store, source['run_id'], conn)
-        confirmed = self.repository_scopes(run) if run else []
+        confirmed = self.repository_scopes(run, connection=conn) if run else []
         if body.repository_id is not None:
             chosen = next((r for r in confirmed if r['id'] == body.repository_id), None)
             if not chosen or (body.repo_url and body.repo_url != chosen['url']):
@@ -240,7 +250,7 @@ class Memory:
         digest = fingerprint({'note': payload, 'revision': body.revision, 'id': note_id})
         operation = fingerprint([run['id'], run['active_message_id'], body.request_id]) if run else body.request_id
         if run:
-            fresh, fresh_owner = self.active(run, body.turn_id)
+            fresh, fresh_owner = self.active(run, body.turn_id, connection=conn)
             if fresh_owner != owner or fresh['active_user_id'] != run['active_user_id']:
                 raise HTTPException(409, 'The requester changed. Start a new memory request.')
             prefs = self.preferences(owner, conn)
@@ -279,9 +289,15 @@ class Memory:
         conn.execute('INSERT INTO memory_operations VALUES(?,?,?,?,?)', (owner, operation, digest, note_id, revision))
         return {'saved': True, 'id': note_id, 'revision': revision}
 
-    def forget(self, owner, note_id, revision):
+    def forget(self, owner, note_id, revision, *, run=None):
         with self.store.connect() as conn:
             conn.begin_write()
+            if run is not None:
+                # An offloaded call can wait after its initial authorization.
+                # Fence the deletion with the same transaction as its write.
+                current = self.require_current_in(conn, run, owner)
+                if self.recall_only(current, connection=conn):
+                    raise HTTPException(403, 'Subagents and automations may recall memory but cannot change personal memories.')
             row = self.get(conn, owner, note_id)
             if row['revision'] != revision:
                 raise HTTPException(409, 'This memory changed. Review it before deleting.')
@@ -310,6 +326,7 @@ class Memory:
             [owner, query, repo_url, [(n['id'], n['revision']) for n in matches]])
         with self.store.connect() as conn:
             conn.begin_write()
+            self.require_current_in(conn, run, owner)
             conn.execute('DELETE FROM memory_selections WHERE run_id=?', (run['id'],))
             for note in selected:
                 conn.execute('INSERT INTO memory_selections(run_id,turn_id,actor_id,owner_id,memory_id) VALUES(?,?,?,?,?)',
@@ -322,6 +339,7 @@ class Memory:
     def read(self, run, owner, args):
         with self.store.connect() as conn:
             conn.begin_write()
+            self.require_current_in(conn, run, owner)
             row = self.get(conn, owner, args.id)
             note = self.unpack(row)
             if row['revision'] != args.revision:
@@ -352,7 +370,7 @@ class Memory:
         if self.recall_only(run):
             raise HTTPException(403, 'Subagents and automations may recall memory but cannot change personal memories.')
         if name == 'memory_forget':
-            return self.forget(owner, args.id, args.revision)
+            return self.forget(owner, args.id, args.revision, run=run)
         if args.observation is not None:
             # These are agent-reported observations, not authenticated tool receipts.
             # Bind provenance to the server-owned turn without copying raw tool data.
@@ -446,14 +464,12 @@ class Memory:
             return self.owner(self.store.identity(self.security.session_info(request)))
 
         @router.get('/api/memory')
-        async def listing(request: Request):
+        def listing(request: Request):
             owner = actor(request)
             return {'preferences': self.preferences(owner), 'memories': self.listing(owner), 'limit': None,
                     'review': self.reviewer.status(owner) if self.reviewer else None}
 
-        @router.put('/api/memory/preferences')
-        async def preferences(body: Preferences, request: Request):
-            owner = actor(request, True)
+        def save_preferences(owner, body):
             with self.store.connect() as conn:
                 conn.begin_write()
                 if self.preferences(owner, conn)['revision'] != body.revision:
@@ -463,24 +479,33 @@ class Memory:
                 self.capture_barrier_in(conn, owner)
                 if not body.enabled:
                     conn.execute('DELETE FROM memory_selections WHERE owner_id=?', (owner,))
-            await self.checkpoints.flush()
             return self.preferences(owner)
+
+        @router.put('/api/memory/preferences')
+        async def preferences(body: Preferences, request: Request):
+            owner = await database(actor, request, True)
+            result = await database(save_preferences, owner, body)
+            await self.checkpoints.flush()
+            return result
 
         @router.post('/api/memory', status_code=201)
         async def create(body: Note, request: Request):
-            result = self.save(actor(request, True), body)
+            owner = await database(actor, request, True)
+            result = await database(self.save, owner, body)
             await self.checkpoints.flush()
             return result
 
         @router.put('/api/memory/{note_id}')
         async def update(note_id: str, body: Note, request: Request):
-            result = self.save(actor(request, True), body, note_id=note_id)
+            owner = await database(actor, request, True)
+            result = await database(self.save, owner, body, note_id=note_id)
             await self.checkpoints.flush()
             return result
 
         @router.delete('/api/memory/{note_id}')
         async def delete(note_id: str, body: Revision, request: Request):
-            result = self.forget(actor(request, True), note_id, body.revision)
+            owner = await database(actor, request, True)
+            result = await database(self.forget, owner, note_id, body.revision)
             await self.checkpoints.flush()
             return result
 

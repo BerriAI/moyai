@@ -93,6 +93,35 @@ async def test_whitespace_handoff_rejection_keeps_http_contract_and_no_effect(ac
     assert len(dispatches(store, scope)) == 1
 
 
+@pytest.mark.parametrize('traced_tool_runtime', [False, True], indirect=True)
+async def test_typed_rejection_survives_dispatch_receipt_cleanup_failure(traced_tool_runtime, monkeypatch):
+    probe = traced_tool_runtime
+    private = bool(probe.store.run(probe.scope.run_id)['private_owner_id'])
+    name = 'credentials_request' if private else 'computer_handoff'
+    arguments = ({
+        'provider': 'generic', 'name': 'local-rejection-proof', 'format': 'env',
+        'reason': 'Verify the private guard; no secret is supplied.',
+        'request_key': 'receipt-failure-proof',
+    } if private else {'reason': '   '})
+    calls = []
+
+    def unavailable(*args, **kwargs):
+        calls.append(1)
+        raise OSError('PRIVATE_RECEIPT_CLEANUP_FAILURE')
+
+    monkeypatch.setattr('app.tool_dispatch.ToolDispatch.finish', unavailable)
+    with pytest.raises(ApplicationError) as caught:
+        await probe.runtime._call_tool(probe.scope, 'receipt-failure', name, arguments)
+    assert caught.value.type == 'ToolNotDispatched' and caught.value.non_retryable
+    final, encoded = await converted(caught.value)
+    assert final['exception_type'] == ('PrivateExportDenied' if private else 'ToolRejected')
+    assert final['action'] == {'dispatched': False, 'outcome': 'rejected', 'retryable': False}
+    assert 'PRIVATE_RECEIPT_CLEANUP_FAILURE' not in str(encoded)
+    assert calls == [1]
+    assert not probe.store.rows('SELECT * FROM credential_requests')
+    assert not probe.store.rows("SELECT * FROM events WHERE kind='computer'")
+
+
 @pytest.mark.parametrize('after_write', [False, True])
 @pytest.mark.parametrize('spoof_headers', [False, True])
 async def test_ordinary_403_remains_uncertain_even_with_rejection_text_or_headers(

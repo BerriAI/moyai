@@ -7,7 +7,7 @@ import urllib.error
 
 
 MODEL_ROUTES = {'/v1/chat/completions', '/v1/messages', '/v1/responses'}
-TOOL_ROUTES = {'/tools/call', '/credentials/materialize', '/credentials/invoke'}
+TOOL_ROUTES = {'/tools/call', '/credentials/materialize', '/credentials/invoke', '/credentials/aws/writeback'}
 BROKER_ROUTES = MODEL_ROUTES | TOOL_ROUTES | {
     '/tools', '/v1/models', '/control', '/context/native', '/context/window',
     '/context/compact', '/context/maintenance',

@@ -12,6 +12,7 @@ import modal
 from fastapi import HTTPException
 
 from sandbox.broker_failure import safe_error
+from sandbox.project_environment import REPAIR_NOTICE
 from .computer_operations import ComputerOperations
 from .db import database
 from .environments import EnvironmentPending
@@ -128,7 +129,7 @@ class IndependentRuntime:
             if outcome is None:
                 return False
             result = outcome['result']
-            if result.get('error') or result.get('isError') or not result.get('workspace'):
+            if outcome['status'] != 'completed' or result.get('error') or result.get('isError') or not result.get('workspace'):
                 run = await database(r.store.run, run_id)
                 if (run['harness'] == 'deepagents-temporal' and computer.get('preparation_input_id') !=
                         await database(self.preparation_input, run_id, state['message_id'])):
@@ -139,7 +140,15 @@ class IndependentRuntime:
                     return False
                 raise HTTPException(503, result.get('error') or 'Computer preparation could not be confirmed.')
             computer.update(phase='ready', workspace=result['workspace'])
+            if result.get('project_health'):
+                computer['project_health'] = result['project_health']
             await database(r.save, run_id, state)
+            if computer.get('project_health', {}).get('status') == 'needs_repair':
+                try:
+                    await database(r.store.event, run_id, 'status', REPAIR_NOTICE,
+                        {'phase': 'environment', 'project_health': computer['project_health']}, turn_id=state['message_id'])
+                except Exception:
+                    pass
         return computer['phase'] == 'ready'
 
     def preparation_input(self, run_id, turn_id):
@@ -170,6 +179,8 @@ class IndependentRuntime:
             spec['broker_tool_scope'] = {'input_id': input_id, 'request_id': request_id}
         spec.update(independent_runtime=False, computer_operation=True,
                     workspace=state.get('computer', {}).get('workspace', '/workspace'), **fields)
+        if state.get('computer', {}).get('project_health'):
+            spec['project_health'] = state['computer']['project_health']
         directory = (f"/session/computer-operations/{state['message_id']}-{state['segment']}-"
                      f"{state.get('computer_generation', 0)}-{identity}")
         spec_path = directory.replace('/session/computer-operations/', '/tmp/computer-')+'.json'
@@ -273,6 +284,16 @@ class IndependentRuntime:
                     except Exception:
                         pass  # The authoritative receipt already carries this warning.
             await database(self.operations.settle, operation, result['status'], result['result'])
+            health = result['result'].get('project_health')
+            if result['status'] == 'completed' and health and health != computer.get('project_health'):
+                computer['project_health'] = health
+                try:
+                    await database(r.save, run_id, state)
+                    if health['status'] == 'needs_repair':
+                        await database(r.store.event, run_id, 'status', REPAIR_NOTICE,
+                            {'phase': 'environment', 'project_health': health}, turn_id=state['message_id'])
+                except Exception:
+                    pass
 
     async def checkpoint(self, run_id, state):
         r = self.runner

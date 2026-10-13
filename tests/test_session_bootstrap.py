@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import threading
 
 import pytest
@@ -13,6 +14,36 @@ from test_cloudflare_access import access_key  # noqa: F401
 async def drain(maintenance):
     if maintenance.worker:
         await maintenance.worker
+
+
+@contextmanager
+def held_schema_writer(store):
+    ready, release = threading.Event(), threading.Event()
+    errors = []
+
+    def hold():
+        try:
+            # Competing reads must not inherit the writer's connection scope.
+            with store.connect() as writer:
+                writer.begin_write()
+                ready.set()
+                assert release.wait(10), 'The test did not release its schema writer.'
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            ready.set()
+
+    holder = threading.Thread(target=hold, name='session-bootstrap-test-writer')
+    holder.start()
+    try:
+        assert ready.wait(5), 'Schema writer did not acquire its lock.'
+        assert not errors, errors
+        yield
+    finally:
+        release.set()
+        holder.join(5)
+        assert not holder.is_alive(), 'Schema writer did not release its connection.'
+        assert not errors, errors
 
 
 def test_conversation_bootstrap_does_not_wait_for_writer_but_preserves_accounting(login, monkeypatch):
@@ -36,8 +67,7 @@ def test_conversation_bootstrap_does_not_wait_for_writer_but_preserves_accountin
 
     monkeypatch.setattr(store, 'touch_access_identity', observed_touch)
     # Real PostgreSQL exclusive advisory writer lock / SQLite WAL writer lock.
-    with ThreadPoolExecutor(max_workers=1) as requests, store.connect() as writer:
-        writer.begin_write()
+    with ThreadPoolExecutor(max_workers=1) as requests, held_schema_writer(store):
         response = requests.submit(client.get, '/api/session').result(timeout=2)
         assert response.status_code == 200
         assert response.json() == first
@@ -83,8 +113,7 @@ def test_first_conversation_bootstrap_persists_enrollment_before_authenticating(
 
     monkeypatch.setattr(store, 'access_identity', observed_enrollment)
     with ThreadPoolExecutor(max_workers=1) as requests:
-        with store.connect() as writer:
-            writer.begin_write()
+        with held_schema_writer(store):
             pending = requests.submit(client.get, '/api/session')
             assert started.wait(2)
             assert not pending.done()

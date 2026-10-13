@@ -256,6 +256,10 @@ class RunManager:
     async def client(self):
         return await self.modal_clients.get(self.settings)
 
+    async def submit_async(self, run):
+        # Local execution registers asyncio tasks on its owning event loop.
+        self.submit(run)
+
     def submit(self, run):
         if self.closing or run.get('deleted_at') or run.get('deletion_requested_at') or run["id"] in self.jobs:
             return
@@ -498,6 +502,8 @@ class RunManager:
             spec["project_environment"] = self.environments.context(run)
             if spec['project_environment']:
                 spec['repo_url'] = 'https://github.com/' + spec['project_environment']['repository']
+        if self.credentials:
+            spec['credential_discovery'] = self.credentials.discovery_context(run)
         return spec
 
     async def cloud(self, run):

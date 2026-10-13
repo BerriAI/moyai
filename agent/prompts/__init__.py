@@ -1,5 +1,7 @@
 """Load the same instructions for production and evaluations."""
+import json
 from pathlib import Path
+import json
 from agent.skills import catalog
 from agent.repository_guidance import resolve as repository_guidance
 from agent.context_views import context_view
@@ -21,6 +23,16 @@ def system_prompt(spec, *, workspace=Path('/workspace'), session=Path('/session'
         delegation=_read('delegation') + ' ' if spec.get('is_child_agent') else '',
         slack=_read('slack') + ' ' if spec.get('slack_thread_chat') else '',
     )
+    if spec.get('credential_discovery') is not None:
+        # Counts only: no labels, identities, secret handles, or secret values.
+        # Keep this orientation and the core skill trigger outside optional context
+        # truncation, including on resumed turns and low-context models.
+        message += (
+            '\nCredential discovery snapshot for the current requester and session '
+            '(metadata only; this inventory does not verify task access):\n'
+            + json.dumps(spec['credential_discovery'], sort_keys=True)
+            + '\nRefresh credentials_list before relying on this snapshot. '
+            'An empty snapshot does not rule out native connections, browser sessions or runtime roles.')
     # Optional source components share a conservative byte allocation derived
     # from this model's input window. Full contents survive as immutable files;
     # core orientation, actual tools and inference admission remain independent.
@@ -52,4 +64,10 @@ def system_prompt(spec, *, workspace=Path('/workspace'), session=Path('/session'
         )
     if spec.get('project_environment'):
         message += '\nPrepared project environment (admin configuration):\n' + component('Project environment instructions', spec['project_environment'].get('instructions', ''))
+    if spec.get('project_health'):
+        message += '\nProject health (last preparation check): ' + json.dumps(spec['project_health'])
+        if spec['project_health']['status'] == 'needs_repair':
+            message += ('\nProject readiness is not confirmed. Workspace files are preserved; use authorized terminal, file '
+                        'and GitHub tools to inspect and repair them. Do not assume the old recipe applies to another '
+                        'checkout or automatically retry uncertain operations.')
     return message
