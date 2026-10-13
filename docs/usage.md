@@ -23,7 +23,7 @@ Use **+** beside Sessions to create a named folder. Drag a session onto a folder
 
 **Settings** is the sidebar's single configuration entry. It groups Skills, Memory, Connections, Secrets, and Runtime, plus admin-only Users, Spend, and Environments. Available automation features appear under Workflows. Each section links back to Settings in the header; existing direct links such as `#skills` still work.
 
-Assistant replies render Markdown headings, lists, links, tables, and copyable code blocks. The pinned local Marked and DOMPurify libraries are listed with their source tarballs and hashes in `app/static/vendor/versions.json`; licenses ship alongside them. Raw HTML is escaped, the resulting markup is sanitized, and only HTTP(S)/mailto links are enabled. No external script or image is loaded to format replies.
+Assistant replies render Markdown headings, lists, links, tables, and copyable code blocks. The pinned local Marked and DOMPurify libraries are listed with their source tarballs and hashes in `app/static/vendor/versions.json`; licenses ship alongside them. Raw HTML is escaped, the resulting markup is sanitized, and links are limited to HTTP(S)/mailto URLs plus strictly validated root-relative `/api/runs/<run_id>/artifacts/content` URLs with a valid relative file path and exact revision; the server authorizes access to the referenced artifact. No external script or image is loaded to format replies.
 
 Browser acceptance covered desktop and a 390px narrow viewport, session search, multiline input, Enter-to-send, queued follow-ups, per-session drafts, live status, activity controls, and hostile HTML/URL rendering. The 49 existing automated tests pass.
 

@@ -1,4 +1,25 @@
 /* Assistant output is untrusted. Render Markdown, then enforce a narrow HTML allowlist. */
+function isArtifactDownloadLink(href) {
+  if(/[\\\s\x00-\x1f\x7f]/.test(href))return false;
+  const query=href.match(/^\/api\/runs\/[a-f0-9]{32}\/artifacts\/content\?([^#]+)$/)?.[1];
+  if(!query)return false;
+  const parameters=new Map();
+  try{
+    for(const field of query.split('&')){
+      const separator=field.indexOf('=');
+      if(separator<1)return false;
+      const name=decodeURIComponent(field.slice(0,separator).replace(/\+/g,' '));
+      const value=decodeURIComponent(field.slice(separator+1).replace(/\+/g,' '));
+      if(!['path','revision'].includes(name)||parameters.has(name))return false;
+      parameters.set(name,value);
+    }
+  }catch{return false;}
+  const path=parameters.get('path'),revision=parameters.get('revision')||'';
+  // The server authorizes the referenced run and immutable revision, including child outputs.
+  return !!path&&!/[\\\x00-\x1f\x7f]/.test(path)&&!path.split('/').some(part=>!part||part==='.'||part==='..')
+    &&revision.length===64&&/^[a-f0-9]{64}$/.test(revision);
+}
+
 function renderMarkdown(content) {
   const renderer = new marked.Renderer();
   const fileReferences = [];
@@ -35,7 +56,7 @@ function renderMarkdown(content) {
       link.dataset.fileRef=file.href;if(file.image)link.dataset.fileImage='true';
       link.removeAttribute('href');link.setAttribute('aria-disabled','true');
       link.title='Available only when this file is in the session’s saved files.';
-    }else if(/^(https?:\/\/|mailto:)/i.test(href)){link.target='_blank';link.rel='noopener noreferrer';}
+    }else if(/^(https?:\/\/|mailto:)/i.test(href)||isArtifactDownloadLink(href)){link.target='_blank';link.rel='noopener noreferrer';}
     else link.replaceWith(...link.childNodes);
   });
   template.content.querySelectorAll('pre').forEach(pre => {

@@ -66,6 +66,169 @@ def recorded_browser(manager, machine, run_id, monkeypatch):
     return browser, hub, calls
 
 
+async def native_capture(durable, monkeypatch, name):
+    """A running native turn with an acquired computer and launch-once receipts."""
+    manager, cloud, run_id = durable
+    manager.settings.independent_agent_runtime = True
+    manager.store.execute("UPDATE runs SET harness='codex' WHERE id=?", (run_id,))
+    await drive(manager, run_id, phase='monitor')
+    machine = await cloud.create(name='capture-fixture')
+    state = manager.state(run_id)
+    state['computer'] = {'phase': 'ready', 'sandbox_id': machine.object_id, 'workspace': '/workspace'}
+    manager.save(run_id, state)
+    manager.store.update_run(run_id, sandbox_id=machine.object_id)
+    manager.store.objects = MemoryObjects()
+    browser, hub, calls = recorded_browser(manager, machine, run_id, monkeypatch)
+    browser.recording.update(actor='agent', tab='')
+    recording = browser.recording
+    browser.open = AsyncMock()
+    browser.page = SimpleNamespace(is_closed=lambda: False, url='about:blank')
+    browser.desktop_image = lambda image_format='PNG': png()
+    owner = manager.store.run(run_id)
+    body = {'action': 'computer_call', 'request_id': uuid4().hex, 'name': name,
+            'arguments': {'name': 'native-proof'} if name == 'browser_screenshot' else {}}
+    manager.agent_runtime.operations.exchange(owner, body)
+    original_command, executions = manager.command, []
+
+    async def command(sandbox, action, directory, value, **kwargs):
+        if sandbox is machine:
+            if action == 'start' and directory not in machine.operations:
+                await original_command(sandbox, action, directory, value, **kwargs)
+                executions.append(directory)
+                result = await browser.command({'action': name.removeprefix('browser_'),
+                                                'args': body['arguments']})
+                content = [{'type': 'text', 'text': json.dumps(result)}]
+                if name == 'browser_screenshot':
+                    content.append({'type': 'image', 'mimeType': 'image/png',
+                                    'data': base64.b64encode(Path(result['path']).read_bytes()).decode()})
+                machine.operations[directory]['tool_result'] = {'content': content, 'isError': False}
+                return ''
+            if action == 'read':
+                return json.dumps({'state': 'done', 'events': [], 'cursor': 0, 'exit_code': 0,
+                                   'final': machine.operations[directory]})
+        return await original_command(sandbox, action, directory, value, **kwargs)
+
+    # The native agent waits on its tool receipt; keep the real monitor loop,
+    # including advance's exception handling, without its two-second delays.
+    cloud.finished = False
+    sleep = asyncio.sleep
+    async def monitor_pause(seconds):
+        await sleep(0 if seconds == 2 else seconds)
+    monkeypatch.setattr(manager, 'command', command)
+    monkeypatch.setattr('app.durable_runner.asyncio.sleep', monitor_pause)
+    return SimpleNamespace(manager=manager, cloud=cloud, run_id=run_id, owner=owner, body=body,
+        browser=browser, hub=hub, calls=calls, executions=executions, recording=recording,
+        media=MediaShares(manager.store, manager.settings, None))
+
+
+@pytest.mark.parametrize('name', ['browser_screenshot', 'browser_record_stop'])
+@pytest.mark.parametrize('interruption', ['none', 'cancel'])
+async def test_native_capture_is_listable_before_success_without_panel(durable, monkeypatch, name, interruption):
+    from app.independent_runtime import IndependentRuntime
+    case = await native_capture(durable, monkeypatch, name)
+    manager, run_id = case.manager, case.run_id
+    if interruption == 'cancel':
+        execute = case.hub.execute
+        async def cancelled(*args, **kwargs):
+            raise asyncio.CancelledError()
+        case.hub.execute = cancelled
+        with pytest.raises(asyncio.CancelledError):
+            await manager.advance(run_id)
+        case.hub.execute = execute
+        assert manager.agent_runtime.operations.read(case.owner, {
+            'request_id': case.body['request_id']})['status'] == 'dispatched'
+        assert case.media.call(case.owner, 'media_list', {})['sources'] == []
+        assert manager.state(run_id)['phase'] == 'monitor'
+        assert manager.store.run(run_id)['token_hash'] == case.owner['token_hash']
+        # A replacement owner must recover the saved native receipt.
+        manager.agent_runtime = IndependentRuntime(manager)
+    await manager.advance(run_id)
+    receipt = manager.agent_runtime.operations.read(case.owner, {'request_id': case.body['request_id']})
+    assert receipt['status'] == 'completed' and not receipt['result']['isError']
+    capture = json.loads(receipt['result']['content'][0]['text'])
+    listing = case.media.call(case.owner, 'media_list', {})
+    assert [row['source'] for row in listing['sources']] == ['capture:' + capture['name']]
+    assert case.media.source_bytes(case.owner, SimpleNamespace(**listing['sources'][0])) == Path(capture['path']).read_bytes()
+    assert listing['shares'] == []
+    assert len(case.executions) == 1 and len(case.cloud.launches) == 2
+    assert case.cloud.snapshots == 0 and manager.state(run_id)['phase'] == 'monitor'
+    assert manager.store.messages(run_id)[0]['status'] == 'running'
+    assert 'request' not in case.calls, 'Copying must not send finish or poll the Computer panel.'
+    if name == 'browser_screenshot':
+        assert case.browser.recording is case.recording
+        assert case.recording['process'].returncode is None
+    else:
+        assert case.browser.recording is None
+
+
+@pytest.mark.parametrize(('failure', 'status_code'), [
+    ('storage', 503), ('storage_event', 503), ('budget', 413), ('catalog', 502), ('hub', None),
+])
+async def test_native_capture_copy_failure_preserves_receipt_and_reports_without_blocking(durable, monkeypatch, failure, status_code):
+    case = await native_capture(durable, monkeypatch, 'browser_screenshot')
+    manager, run_id = case.manager, case.run_id
+    with monkeypatch.context() as fault:
+        if failure in {'storage', 'storage_event'}:
+            fault.setattr(manager.store.objects, 'fail', True)
+        elif failure == 'budget':
+            fault.setattr(captures, 'MAX_TOTAL', 1)
+        elif failure == 'catalog':
+            fault.setattr(case.hub, 'execute', AsyncMock(return_value={}))
+        else:
+            fault.delattr(manager, 'computer')
+        if failure == 'storage_event':
+            event = manager.store.event
+            def unavailable_warning(run_id, kind, message, data=None, **kwargs):
+                if (data or {}).get('stage') == 'capture_sync':
+                    raise HTTPException(503, 'Fixture warning-event storage unavailable.')
+                return event(run_id, kind, message, data, **kwargs)
+            fault.setattr(manager.store, 'event', unavailable_warning)
+        await manager.advance(run_id)
+    assert manager.state(run_id)['phase'] == 'monitor'
+    assert manager.store.run(run_id)['token_hash'] == case.owner['token_hash']
+    receipt = manager.agent_runtime.operations.read(case.owner, {'request_id': case.body['request_id']})
+    assert receipt['status'] == 'completed' and not receipt['result']['isError']
+    content = receipt['result']['content']
+    native = next(iter(case.cloud.machines[1].operations.values()))['tool_result']
+    assert len(content) == len(native['content']) + 1, 'Copy failure needs an explicit notice after the native receipt.'
+    assert content[:-1] == native['content']
+    capture, notice = json.loads(content[0]['text']), json.loads(content[-1]['text'])
+    assert Path(capture['path']).is_file()
+    assert notice['capture_persistence'] == {
+        'status': 'unconfirmed', 'error_type': 'AttributeError' if failure == 'hub' else 'HTTPException',
+        'status_code': status_code}
+    assert 'Do not repeat the capture' in notice['notice']
+    assert case.media.call(case.owner, 'media_list', {})['sources'] == []
+    errors = [row for row in manager.store.events(run_id) if row['data'].get('stage') == 'capture_sync']
+    if failure == 'storage_event':
+        assert errors == [], 'The native receipt must survive a failed diagnostic write.'
+    else:
+        assert len(errors) == 1 and errors[0]['kind'] == 'error'
+        assert errors[0]['data']['request_id'] == case.body['request_id']
+    # A later existing save/poll path can copy the same bytes without recapture.
+    await case.hub.sync(case.cloud.machines[1], run_id)
+    assert case.media.call(case.owner, 'media_list', {})['sources'][0]['source'] == 'capture:' + capture['name']
+    await manager.advance(run_id)
+    assert len(case.executions) == 1 and case.browser.recording is case.recording
+    assert manager.agent_runtime.operations.read(case.owner, {'request_id': case.body['request_id']}) == receipt
+
+
+@pytest.mark.parametrize(('name', 'status', 'error'), [
+    ('browser_screenshot', 'completed', True),
+    ('browser_record_stop', 'unknown', True),
+    ('browser_read', 'completed', False),
+])
+async def test_native_capture_sync_excludes_failed_uncertain_and_other_tools(durable, monkeypatch, name, status, error):
+    case = await native_capture(durable, monkeypatch, name)
+    result = {'isError': error, 'content': [{'type': 'text', 'text': '{}'}]}
+    case.hub.sync = AsyncMock()
+    monkeypatch.setattr(case.manager.agent_runtime, 'job', AsyncMock(return_value={'status': status, 'result': result}))
+    await case.manager.advance(case.run_id)
+    receipt = case.manager.agent_runtime.operations.read(case.owner, {'request_id': case.body['request_id']})
+    assert (receipt['status'], receipt['result']) == (status, result)
+    case.hub.sync.assert_not_awaited()
+
+
 async def test_stop_finalizes_and_copies_human_recording_before_provider_shutdown(runner, monkeypatch):
     row = runner.store.create_run('Stop recording', '', 'modal', [])
     run_id = row['id']
