@@ -151,8 +151,11 @@ commands can themselves copy data or create service caches; this is not a
 boundary against malicious sandbox code. Revocation prevents subsequent loads,
 not an already-running command or use at the upstream service.
 
-New images include `aws`, `kubectl`, `helm` and 1Password CLI `op` 2.30.0. Restored older images install a
-missing supported CLI when a credential command references it. Installation
+New images include AWS CLI **2.38.0**, `kubectl`, `helm` and 1Password CLI `op` 2.30.0.
+AWS uses the official Linux x86_64/aarch64 bundles, pinned by SHA-256 after
+verification of their release signatures against AWS's published signing key.
+Restored older images upgrade AWS CLI v1 (or another version) on demand.
+Other supported CLIs are installed when missing. Installation
 errors are separate from authentication failures. Generic access is a deliberate
 policy expansion: approved credentials can now reach sandbox commands, with the
 permissions the user supplied. Organization connection policies still apply.
@@ -166,6 +169,119 @@ return their observed revisions so the agent can identify the failed connection;
 ambiguous failures do not invalidate every credential. Completed or uncertain
 writes are never automatically replayed. The agent verifies updated access and
 continues from the saved task.
+
+### Personal AWS IAM Identity Center login
+
+`credentials_aws_login` implements AWS's device authorization flow without
+holding a sandbox command open. It uses unsigned SSO OIDC calls with fixed AWS
+endpoints, independent of Moyai's AWS infrastructure credentials. It neither
+changes IAM permissions nor transfers the server's AWS access to an agent.
+
+First inspect `credentials_list`. Reuse a matching saved login through
+`credentials_request` with `provider=generic`, `format=aws-sso`,
+`name=aws-sso/<profile>` and its `secret_id`. When login is needed, start it:
+
+```json
+{
+  "action": "start",
+  "request_key": "aws-development-login",
+  "lifetime": "persistent",
+  "profile": {
+    "profile": "development",
+    "start_url": "https://your-portal.awsapps.com/start",
+    "sso_region": "us-east-1",
+    "account_id": "123456789012",
+    "role_name": "ReadOnly",
+    "region": "us-west-2"
+  }
+}
+```
+
+Use the account, role, and portal supplied by the requester or administrator.
+`persistent` requires the user's authorization to reuse access in future
+sessions; the default is `session`. The requester must have a personal
+Google/Cloudflare identity (local previews are the development exception).
+Organization sharing is rejected, including later edits through the Secrets API.
+
+Show the returned `verification_uri` and `user_code` to the requester. They
+approve on their own device; the agent must not approve on their behalf.
+Poll with `{"action":"poll","login_id":"<returned id>"}` no more frequently than
+the returned `interval`. Pending/slow-down responses retain the encrypted
+authorization and enforce backoff. Cancel with
+`{"action":"cancel","login_id":"<returned id>"}`. Duplicate start calls with the
+same key return the existing attempt. An interrupted/uncertain token exchange
+is not repeated: inspect saved access, cancel, and start a fresh authorization.
+Expired pending payloads are cleared when the login tool next runs.
+
+Completion returns only the new saved credential ID and capability name.
+Request that credential, then run a harmless verification:
+
+```json
+{
+  "request_ids": ["<credentials_request handle>"],
+  "command": "aws sts get-caller-identity",
+  "timeout": 60
+}
+```
+
+`credentials_run` restores a generated `sso-session` config and the selected
+profile's SSO token/role cache into a fresh **0700 Linux tmpfs home**. Credential
+files are **0600**. The command receives that profile, no inherited `AWS_*`
+settings, no default credentials file, and disabled EC2 instance metadata.
+AWS automatic retries are disabled for this execution. Do not mix an SSO
+profile with another AWS environment binding or multiple SSO profiles.
+Approved commands may use their supplied permissions; this is not a boundary
+against malicious sandbox code copying credentials elsewhere.
+
+The AWS CLI can refresh its token and role credentials normally. After the
+process group stops, the executor collects only that profile's two expected
+cache files, rejects symlinks and nonregular/oversized/malformed files, and
+redacts both restored and collected values before returning output. Unsafe
+cache collection suppresses output. It removes the temporary home on every
+normal exit, failure or timeout. Abrupt sandbox termination loses uncollected
+refreshes; tmpfs is not an on-disk workspace credential store.
+
+Refreshed state goes directly to the authenticated internal
+`/broker/{run_id}/credentials/aws/writeback` endpoint, never through model tool
+arguments, tool receipts or Temporal payloads. The broker rechecks the active
+requester, ownership, expiry, revocation and both handle/secret revisions.
+Concurrent refreshes use compare-and-swap: a stale result cannot overwrite a
+newer login. A rejected or lost writeback is reported separately from the
+command's exit status; it may require reauthentication. **Never repeat an
+uncertain AWS write just because login or cache persistence failed.**
+
+Settings → Secrets shows metadata and **Revoke access** for these profiles.
+To change account/role/reuse period, revoke and log in again. Revocation clears
+Moyai's encrypted copy and prevents subsequent loads and late writeback; it
+cannot cancel an already-running command or revoke an AWS session upstream.
+AWS logout/provider-side revocation remains an administrator/user action.
+
+The typed `aws-sso` format is also accepted by the authenticated Secrets API for
+secure imports: `value` is a JSON document with `version:1`, `profile` (the six
+fields above), and `cache` keyed by the CLI's hashed `sso/cache/*.json` and
+`cli/cache/*.json` names. Use `sandbox.aws_credentials.cache_paths` to derive
+them. Arbitrary config, credential processes, endpoints and paths are rejected.
+Never put this value in chat. Existing generic AWS env/file credentials remain
+supported without SSO cache persistence.
+
+Scope: AWS access-portal URLs (`https://<portal>.awsapps.com/start`) and IAM
+Identity Center `sso-session` profiles. This does not implement `aws login`
+console sessions, custom issuer URLs, GovCloud/China portal variants, arbitrary
+assume-role chains, organization-wide SSO sharing, or an AWS login settings
+wizard. Upstream account/role authorization is checked by AWS on first use,
+not inferred from a completed device login.
+
+PostgreSQL deployments using verified schema admission must run the normal
+offline migration to **schema revision 20** before starting this revision.
+SQLite initializes the additional durable login-attempt table at startup.
+No production migration is performed by the implementation or tests.
+
+Official references:
+[CLI v2 install and signature verification](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html),
+[SSO sessions and device-code login](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html),
+[RegisterClient](https://docs.aws.amazon.com/singlesignon/latest/OIDCAPIReference/API_RegisterClient.html),
+[StartDeviceAuthorization](https://docs.aws.amazon.com/singlesignon/latest/OIDCAPIReference/API_StartDeviceAuthorization.html),
+[CreateToken](https://docs.aws.amazon.com/singlesignon/latest/OIDCAPIReference/API_CreateToken.html).
 
 A command using Shared may fail because a retrieved destination key is invalid
 while the 1Password service-account token remains valid. The executor reports

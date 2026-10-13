@@ -102,7 +102,7 @@ def test_actual_https_relay_carries_both_auth_layers_on_every_transport(access_o
         with httpx.Client(base_url=relay.url, headers={'Authorization': 'Bearer test-run'}) as client:
             assert client.get('/tools').status_code == 200
             assert client.get('/v1/models').status_code == 200
-            for path in ('/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize'):
+            for path in ('/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize', '/credentials/aws/writeback'):
                 assert client.post(path, json={}).status_code == 200
             relay.repository_startup = True
             assert client.post('/tools/call', json={'name': 'github_checkout'}).status_code == 200
@@ -119,7 +119,7 @@ def test_actual_https_relay_carries_both_auth_layers_on_every_transport(access_o
                 'size': len(content), 'sha256': hashlib.sha256(content).hexdigest()}]}
         prepare_attachments(spec, 'test-run', root=tmp_path / 'uploads')
         assert (tmp_path / 'uploads' / ('a' * 32) / 'note.txt').read_bytes() == content
-        assert len(calls) == 16
+        assert len(calls) == 17
     finally:
         relay.close()
 
@@ -131,6 +131,31 @@ def test_edge_credentials_never_follow_redirects(access_origin):
         open_broker(request, timeout=3)
     assert error.value.code == 302
     assert [path for path, _ in calls] == ['/broker/test-run-id/redirect']
+
+
+def test_aws_writeback_is_sealed_and_not_replayed_after_unavailable(access_origin, edge_backend):
+    from sandbox.broker_transport import unseal
+    remote, calls = access_origin
+    received = []
+    def unavailable(handler, raw):
+        received.append(json.loads(unseal('test-run', '/credentials/aws/writeback', raw)))
+        body = b'{"detail":"Unavailable"}'
+        handler.send_response(503)
+        handler.send_header('Content-Type', 'application/json')
+        handler.send_header('Content-Length', str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+    edge_backend['handle'] = unavailable
+    relay = BrokerRelay(remote, 'test-run').start()
+    try:
+        with httpx.Client(base_url=relay.url, headers={'Authorization': 'Bearer test-run'}) as client:
+            result = client.post('/credentials/aws/writeback', json={'value': 'synthetic-cache'})
+        assert result.status_code == 503
+        assert received == [{'value': 'synthetic-cache'}] and len(calls) == 1
+        assert relay.uncertain_tool
+        assert 'synthetic-cache' not in str(relay.last_failure)
+    finally:
+        relay.close()
 
 
 def test_real_git_sends_both_credentials_but_refuses_redirects(access_origin):

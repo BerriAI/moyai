@@ -46,7 +46,7 @@ from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
-from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
+from .credentials import AWSWriteback, Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
@@ -1725,6 +1725,20 @@ def _create_app(settings, store):
         await checkpoints.flush()
         # This route is consumed only by the sandbox executor, never returned
         # as an agent tool result or saved in runner/Temporal state.
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+
+    @app.post('/broker/{run_id}/credentials/aws/writeback')
+    async def credential_aws_writeback(run_id: str, request: Request):
+        run = await database(require_run, run_id, request)
+        privacy.require_no_export(run)
+        if not credentials.tools(run):
+            raise HTTPException(403, 'Credential access requires a durable chat session.')
+        try:
+            args = AWSWriteback.model_validate(await broker_body(request, '/credentials/aws/writeback'))
+            result = await database(credentials.aws_writeback, run, args)
+        except (ValueError, ValidationError):
+            raise HTTPException(422, 'Invalid AWS cache update.') from None
+        await checkpoints.flush()
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
     @app.post('/broker/{run_id}/credentials/invoke')
