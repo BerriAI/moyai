@@ -33,7 +33,8 @@ def test_publication_preserves_commentary_and_survives_failure(workspace, monkey
     store.finish_message(run['id'], turn['id'], 'Codex stopped (TypeError).', status='failed')
     store.update_run(run['id'], status='failed')
     with store.connect() as conn:
-        result = projection(conn, store.run(run['id']), store.messages(run['id']))
+        result = projection(conn, store.run(run['id'], connection=conn),
+                            store.messages(run['id'], connection=conn))
     assert {event['id'] for event in updates} <= {event['id'] for event in result['events']}
     assert len([call for call in provider.calls if call[0] == 'POST' and call[1].endswith('/pulls')]) == 1
 
@@ -89,7 +90,8 @@ def test_later_turn_confirmation_announces_in_recovering_turn_once(workspace, mo
     # to the turn that confirmed it, including after reloading the conversation.
     assert store.rows('SELECT message_id FROM github_publications')[0]['message_id'] == original_turn['id']
     with store.connect() as conn:
-        visible = projection(conn, store.run(run['id']), store.messages(run['id']))
+        visible = projection(conn, store.run(run['id'], connection=conn),
+                             store.messages(run['id'], connection=conn))
     assert str(original_turn['id']) in visible['deferred_activity']
     assert milestone['id'] in {event['id'] for event in visible['events']}
     assert milestone['id'] in {event['id'] for event in history_page(store, run['id'], recovering_turn['id'])['events']}

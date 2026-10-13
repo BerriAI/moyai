@@ -1,6 +1,6 @@
 """Stream polling remains fresh and replayable with bounded database reads."""
 import asyncio
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager
 import json
 import threading
 from types import SimpleNamespace
@@ -12,6 +12,7 @@ from app.config import Settings
 from app.db import now
 from app.main import create_app
 from scripts.event_polling_probe import Reads
+from test_background_database_latency import responsive_pool
 
 
 @pytest.fixture(params=[False, True], ids=['local', 'durable'])
@@ -238,19 +239,24 @@ async def test_stream_authentication_is_off_loop_and_still_required(stream_app, 
     assert len(calls) == 3
 
 
-async def test_pool_waiting_stream_keeps_event_loop_responsive(stream_app):
+async def test_pool_waiting_stream_keeps_event_loop_responsive(stream_app, record_property):
     app, store = stream_app, stream_app.state.store
     if not store.database:
         pytest.skip('Pool exhaustion requires PostgreSQL')
+    assert store.database.pool.max_size == 1
     run_id = idle_run(app)
     stream = await open_stream(app, run_id)
     store.database.pool.timeout = 2
-    with ExitStack() as held:
-        held.enter_context(store.connect())  # This fixture has one pool slot.
-        polling = asyncio.create_task(anext(stream))
-        await asyncio.wait_for(asyncio.sleep(.05), .5)
-        assert not polling.done()
+    polling = None
     try:
-        assert data(await asyncio.wait_for(polling, 1))['status'] == 'idle'
+        async with responsive_pool(store, record_property) as waiting:
+            # The holder owns the checkout outside the polling task's context.
+            await asyncio.to_thread(waiting.hold)
+            polling = asyncio.create_task(anext(stream))
+            await asyncio.wait_for(asyncio.sleep(.05), .5)
+            assert not polling.done()
+            assert data(await asyncio.wait_for(polling, 1))['status'] == 'idle'
     finally:
+        if polling is not None:
+            await asyncio.gather(polling, return_exceptions=True)
         await stream.aclose()

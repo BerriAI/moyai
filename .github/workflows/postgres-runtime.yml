@@ -39,6 +39,8 @@ jobs:
         run: |
           uv run --frozen --python 3.13 pytest -q --tb=short tests/test_harness_gateway.py -k 'admitted_request_is_finalized or cancelled_request_preserves'
           uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_harness_gateway.py -k 'admitted_request_is_finalized or cancelled_request_preserves'
+      - name: Verify Slack file preparation yields during pool waits and drains publication
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_slack_files.py -k 'pool_wait_yields or cancelled_file_publication'
   storage:
     runs-on: ubuntu-latest
     timeout-minutes: 10

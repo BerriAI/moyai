@@ -411,14 +411,43 @@ async def test_collection_database_wait_does_not_block_loop(notifications):
     app, _ = notifications
     run_id, turn = create(app)
     finish(app, run_id, turn)
-    with app.state.store.connect() as conn:
-        conn.begin_write()
-        conn.execute('UPDATE runs SET display_title=? WHERE id=?', ('Locked', run_id))
-        task = asyncio.create_task(database(app.state.slack.notifications.collect))
+    ready, release, entered = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+
+    def hold_writer():
+        try:
+            with app.state.store.connect() as conn:
+                conn.begin_write()
+                conn.execute('UPDATE runs SET display_title=? WHERE id=?', ('Locked', run_id))
+                ready.set()
+                assert release.wait(5)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            ready.set()
+
+    def collect():
+        entered.set()
+        return app.state.slack.notifications.collect()
+
+    writer = threading.Thread(target=hold_writer)
+    writer.start()
+    task = None
+    try:
+        assert await asyncio.to_thread(ready.wait, 3)
+        assert not errors
+        task = asyncio.create_task(database(collect))
+        assert await asyncio.to_thread(entered.wait, 3)
         # The collection waits on the real database writer while the loop stays usable.
         await asyncio.sleep(0.05)
         assert not task.done()
-    await asyncio.wait_for(task, 3)
+    finally:
+        release.set()
+        await asyncio.to_thread(writer.join, 3)
+        if task is not None:
+            await asyncio.wait_for(task, 3)
+    assert not writer.is_alive() and not errors
+    assert app.state.store.run(run_id)['display_title'] == 'Locked'
 
 
 def test_personal_toggle_persists_without_overwriting_other_preferences(notifications):

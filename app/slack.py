@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
-from .db import now
+from .db import database, now
 from .slack_chat import SlackChat, USER_MENTION
 from .slack_notifications import SlackNotifications
 from .slack_files import SlackFiles, file_ids as slack_file_ids
@@ -220,7 +220,7 @@ class SlackSessions:
 
     async def prepare(self, run_id):
         await self.prepare_source(run_id)
-        self.files.include_context(run_id)
+        await database(self.files.include_context, run_id)
         await self.files.prepare(run_id)
 
     async def prepare_source(self, run_id):
