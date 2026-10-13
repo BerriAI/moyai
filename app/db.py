@@ -1121,10 +1121,11 @@ class Store:
         )
 
     def events(self, run_id: str, after: int = 0, limit: int = 200, *, connection=None):
+        from .failure_explanations import project_event
         rows = self.rows("SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?", (run_id, after, limit), connection=connection)
         for row in rows:
             row["data"] = json.loads(row["data"])
-        return rows
+        return [project_event(row) for row in rows]
 
     def goal(self, run_id: str, *, connection=None):
         if self.goals:

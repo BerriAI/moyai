@@ -29,7 +29,8 @@ from agent.prompts import system_prompt
 from agent.tools import computer_tools, github_tools
 from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
 from agent.tools.remote_computer import requires_computer
-from sandbox.broker_failure import TRANSIENT_STATUSES, exception_diagnostic, safe_error
+from sandbox.broker_failure import (TRANSIENT_STATUSES, exception_diagnostic, safe_error, tool_evidence,
+                                   upstream_diagnostic, tool_rejection_diagnostic)
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
 from .database import DatabaseBusyError
 from .db import database, now
@@ -101,8 +102,9 @@ class DeepAgentsRuntime:
     def url(self, scope):
         return self.runner.settings.public_url.rstrip('/') + '/broker/' + scope.run_id
 
-    async def broker(self, scope, route, body=None):
+    async def broker(self, scope, route, body=None, *, _tool_request_id=None):
         await database(self.current, scope)
+        tool_request_id = body.get('request_id', _tool_request_id) if isinstance(body, dict) else None
         raw = json.dumps(body, ensure_ascii=False, allow_nan=False).encode() if body is not None else None
         if raw is not None and len(raw) > body_limit(route):
             checksum = hashlib.sha256(raw).hexdigest()
@@ -111,7 +113,8 @@ class DeepAgentsRuntime:
                 await self.broker(scope, '/payloads', {'route': route, 'digest': checksum,
                     'part': index, 'data': base64.b64encode(chunk).decode()})
             return await self.broker(scope, route, {'moyai_payload': {'digest': checksum, 'parts': len(chunks)},
-                **({'name': body['name']} if route == '/tools/call' else {})})
+                **({'name': body['name']} if route == '/tools/call' else {})},
+                _tool_request_id=tool_request_id)
         headers = self.headers(scope)
         if raw is not None:
             headers['Content-Type'] = CONTENT_TYPE
@@ -122,8 +125,15 @@ class DeepAgentsRuntime:
         if response.status_code >= 400:
             # Provider bodies can contain prompts/credentials. Do not put them
             # into exception messages, logs or public activity records.
+            diagnostic = upstream_diagnostic(response.headers)
+            if route == '/tools/call' and (rejection := tool_rejection_diagnostic(response.headers, tool_request_id)):
+                raise ApplicationError(f'The tool request was rejected before dispatch ({response.status_code}).',
+                    {**diagnostic, **rejection, 'http_status': response.status_code},
+                    type='ToolNotDispatched', non_retryable=True) from None
             raise ApplicationError(f'Broker request failed ({response.status_code}).', response.status_code,
-                type='BrokerRejected', non_retryable=response.status_code in {400, 401, 403, 404, 409, 413, 422})
+                *([diagnostic] if diagnostic else []), type='BrokerRejected',
+                non_retryable=(response.status_code in {400, 401, 403, 404, 409, 413, 422}
+                               or diagnostic.get('upstream_status') in {401, 403}))
         return response.json()
 
     @asynccontextmanager
@@ -184,7 +194,11 @@ class DeepAgentsRuntime:
                     raise ValueError('Empty model stream')
                 result = message_chunk_to_message(result)
             except APIStatusError as exc:
-                raise ApplicationError(f'Model request failed ({exc.status_code}).', type='ModelRequestFailed',
+                diagnostic = safe_error({'http_status': exc.status_code,
+                    'error_code': exc.response.headers.get('x-moyai-error-code'),
+                    'stage': exc.response.headers.get('x-moyai-error-stage'),
+                    'request_ids': dict(exc.response.headers)})
+                raise ApplicationError(f'Model request failed ({exc.status_code}).', diagnostic, type='ModelRequestFailed',
                     non_retryable=exc.status_code not in {408, 429, 500, 502, 503, 504}) from None
             except Exception as exc:
                 raise ApplicationError('Model transport failed; no tool action was replayed.',
@@ -222,19 +236,52 @@ class DeepAgentsRuntime:
 
     async def catalog(self, scope):
         """Retry only pre-dispatch reads, with fresh authorization on each attempt."""
-        async with asyncio.timeout(45):
-            for attempt in range(3):
-                try:
-                    tools = await self.broker(scope, '/tools')
-                    return github_tools.advertised_tools(tools) + BROWSER_TOOLS + [GUIDANCE_TOOL] + computer_tools.TOOLS
-                except (ApplicationError, DatabaseBusyError, httpx.TimeoutException,
-                        httpx.NetworkError, httpx.RemoteProtocolError) as exc:
-                    if isinstance(exc, ApplicationError) and (exc.type != 'BrokerRejected' or exc.non_retryable
-                            or not exc.details or exc.details[0] not in TRANSIENT_STATUSES):
-                        raise
-                    if attempt == 2:
-                        raise
-                    await asyncio.sleep(2 ** attempt)
+        deadline = asyncio.timeout(45)
+        attempt = 0
+        try:
+            async with deadline:
+                for attempt in range(3):
+                    try:
+                        tools = await self.broker(scope, '/tools')
+                        break
+                    except (ApplicationError, DatabaseBusyError, httpx.TimeoutException,
+                            httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                        if isinstance(exc, ApplicationError) and (exc.type != 'BrokerRejected' or exc.non_retryable
+                                or not exc.details or exc.details[0] not in TRANSIENT_STATUSES):
+                            raise self.catalog_failure(exc, 'not_retryable', attempt + 1) from None
+                        if attempt == 2:
+                            raise self.catalog_failure(exc, 'exhausted', attempt + 1) from None
+                        await asyncio.sleep(2 ** attempt)
+        except TimeoutError as exc:
+            if deadline.expired():
+                raise self.catalog_failure(exc, 'deadline', attempt + 1) from None
+            raise
+        if attempt:
+            await self.catalog_recovery(scope, 'recovered', attempt + 1)
+        return github_tools.advertised_tools(tools) + BROWSER_TOOLS + [GUIDANCE_TOOL] + computer_tools.TOOLS
+
+    @staticmethod
+    def catalog_failure(exc, decision, attempts):
+        recovery = {'method': 'catalog_read', 'decision': decision, 'attempts': attempts, 'limit': 3}
+        # Do not borrow another database connection during a catalog outage.
+        # Persist the bounded observations with the eventual failure receipt.
+        if isinstance(exc, ApplicationError):
+            return ApplicationError(exc.message, *exc.details, {'recovery': recovery},
+                                    type=exc.type, non_retryable=exc.non_retryable)
+        # Temporal does not serialize arbitrary attributes on ordinary errors.
+        # Preserve its original safe type and default retryability in supported
+        # details, without copying the exception message or provider request.
+        error_type = safe_error({'exception_type': type(exc).__name__}).get('exception_type', 'Exception')
+        return ApplicationError('Tool catalog read failed.', {'recovery': recovery}, type=error_type)
+
+    async def catalog_recovery(self, scope, decision, attempts):
+        try:
+            await database(self.runner.store.event, scope.run_id, 'status', 'Tool catalog recovery',
+                {'phase': 'recovery_decision', 'recovery': {
+                    'method': 'catalog_read', 'decision': decision, 'attempts': attempts, 'limit': 3}},
+                turn_id=scope.message_id)
+        except Exception:
+            pass  # Optional diagnostics cannot turn a recovered read into failure.
 
     def append(self, scope, entries):
         self.journal.exchange(self.current(scope), {'action': 'append', 'entries': entries})
@@ -306,7 +353,8 @@ class DeepAgentsRuntime:
             await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _call_tool(self, scope, call_id, name, arguments):
-        observation = {'tool': name, 'start_ns': time.time_ns(), 'failure_stage': 'tool_catalog', 'call_id':
+        observation = {'tool': name, 'start_ns': time.time_ns(), 'failure_stage': 'tool_catalog',
+            'evidence': {'action': {'dispatched': False, 'outcome': 'rejected'}}, 'call_id':
             hashlib.sha256(f'{scope.run_id}:{scope.message_id}:{scope.segment}:{call_id}'.encode()).hexdigest()[:32]}
         failed = False
         try:
@@ -328,7 +376,8 @@ class DeepAgentsRuntime:
             try:
                 if diagnostic := observation.get('diagnostic'):
                     await database(self.runner.store.event, scope.run_id, 'error', 'Tool execution failed.',
-                        {'phase': 'tool_failure', **diagnostic}, turn_id=scope.message_id)
+                        {'phase': 'tool_failure', 'tool': name, **diagnostic,
+                         **observation.get('evidence', {})}, turn_id=scope.message_id)
             except Exception:
                 pass  # Diagnostic storage cannot change the original outcome.
             except asyncio.CancelledError:
@@ -347,6 +396,8 @@ class DeepAgentsRuntime:
     async def _invoke_tool(self, scope, call_id, name, arguments, observation):
         if name not in {t['name'] for t in await self.catalog(scope)}:
             observation.update(status='error', error_type='ToolRejected')
+            observation['diagnostic'] = {'exception_type': 'ToolRejected', 'failure_stage': 'tool_catalog',
+                                         'request_id': observation['call_id']}
             return {'isError': True, 'error': 'Tool is not in the authorized catalog. No action was attempted.'}
         identity = observation['call_id']
         r = self.runner
@@ -355,6 +406,7 @@ class DeepAgentsRuntime:
         reporter.prefix = identity
         observation['failure_stage'] = 'tool_activity'
         await database(reporter.start, call_id, name, arguments)
+        observation['evidence'] = {'action': {'dispatched': None, 'outcome': 'unknown'}}
         try:
             if requires_computer(name):
                 body = {'action': 'computer_call', 'request_id': identity, 'name': name, 'arguments': arguments,
@@ -383,6 +435,13 @@ class DeepAgentsRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if (isinstance(exc, ApplicationError) and exc.type == 'ToolNotDispatched' and exc.details
+                    and (rejection := safe_error(exc.details[0])).get('outcome_type') == 'ToolNotDispatched'
+                    and rejection.get('request_id') == identity):
+                observation.update(status='error', error_type=rejection.get('exception_type', 'ToolRejected'),
+                    diagnostic=rejection, evidence={'action': {
+                        'dispatched': False, 'outcome': 'rejected', 'retryable': False}})
+                raise  # A known rejection stays terminal; never replay this POST.
             diagnostic = {}
             try:
                 diagnostic = exception_diagnostic(exc, stage=observation['failure_stage'], request_id=identity)
@@ -393,7 +452,12 @@ class DeepAgentsRuntime:
             # uncertainty to a retryable tool error that could repeat a write.
             raise ApplicationError('Tool outcome could not be confirmed. Inspect saved receipts before retrying.',
                                    diagnostic, type='UncertainToolOutcome', non_retryable=True) from None
-        observation.update(status=result_status(value)[0], end_ns=time.time_ns())
+        observation['evidence'] = tool_evidence(value, receipt_status=observation.get('receipt_status'))
+        observation.update(status=result_status(value, receipt_status=observation.get('receipt_status'))[0],
+                           end_ns=time.time_ns())
+        if observation['status'] == 'completed':
+            observation['evidence']['action'] = {
+                **observation['evidence'].get('action', {}), 'outcome': 'completed'}
         if observation['status'] == 'error':
             observation['error_type'] = value.get('error_type') if isinstance(value, dict) else None
             if isinstance(value, dict) and (diagnostic := safe_error(value.get('diagnostic'))):
@@ -401,7 +465,8 @@ class DeepAgentsRuntime:
         # Keep persistence outside the dispatch exception boundary: a confirmed
         # action must not be reported as an unexecuted/retryable action.
         observation['failure_stage'] = 'tool_receipt'
-        await database(reporter.complete, call_id, name, arguments, value)
+        await database(reporter.complete, call_id, name, arguments, value,
+                       receipt_status=observation.get('receipt_status'))
         observation['failure_stage'] = 'tool_journal'
         await database(self.append, scope, [
             {'id': identity + ':call', 'message': {'role': 'assistant', 'content': '', 'tool_calls': [{

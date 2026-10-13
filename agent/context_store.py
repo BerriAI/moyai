@@ -30,6 +30,10 @@ class ContextUnavailable(RuntimeError):
     pass
 
 
+class ContextImportIncomplete(ContextUnavailable):
+    """The original source is required; never repair by discarding history."""
+
+
 class ContextStore:
     def __init__(self, path, run_id):
         self.path = Path(path)
@@ -150,7 +154,7 @@ class ContextStore:
         state = relay.journal({'action': 'state'})
         if not state['imported']:
             if not allow_import:
-                raise ContextUnavailable('Restore the original conversation checkpoint to finish its durable import.')
+                raise ContextImportIncomplete('Restore the original conversation checkpoint to finish its durable import.')
             digest = hashlib.sha256()
             for row in self.db.execute('SELECT message FROM journal ORDER BY seq'):
                 digest.update(row['message'].encode())

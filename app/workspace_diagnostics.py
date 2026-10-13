@@ -9,6 +9,7 @@ from sandbox.broker_failure import BROKER_ROUTES, safe_id, safe_error
 from agent.harnesses.sdk_failure import CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
 from .connectors import TOOLS
 from .deepagents_diagnostics import ACTIVITY_TYPES
+from .failure_explanations import explain
 
 
 class DiagnosticArgs(BaseModel):
@@ -25,7 +26,10 @@ DIAGNOSTIC_TOOL = {
 
 def failure_record(row):
     data = json.loads(row['data'])
-    result = {**safe_error(data), 'event_id': row['id'], 'recorded_at': row['created_at'], 'phase': data['phase']}
+    phase = data.get('phase')
+    phase = phase if phase in ('sdk_failure', 'broker_failure', 'tool_failure', 'supervisor_failure', 'slack_attachment_read', 'response_completion', 'error') else 'capture_sync' if data.get('stage') == 'capture_sync' else 'unknown'
+    result = {**safe_error(data), 'event_id': row['id'], 'recorded_at': row['created_at'], 'phase': phase,
+              'turn_id': data.get('turn_id') if type(data.get('turn_id')) is int and data['turn_id'] > 0 else None}
     for key in ('pending_tools', 'model_calls', 'response_bytes'):
         value = data.get(key)
         if type(value) is int and value >= 0:
@@ -42,6 +46,7 @@ def failure_record(row):
     for key in ('request_id', 'broker_request_id'):
         if value := safe_id(data.get(key)):
             result[key] = value
+    result['explanation'] = explain(data)
     return result
 
 
@@ -55,8 +60,10 @@ def inspect_workspace(store, connectors, run, catalog):
         connections.append({'provider': provider, 'connected': connected, 'selected_for_session': selected,
             'enabled': policy['enabled'], 'read_only': policy['read_only'],
             'available_tools': [name for name in names if name in TOOLS and TOOLS[name][0] == provider]})
-    rows = store.rows("SELECT id,created_at,data FROM events WHERE run_id=? AND kind='error' "
-                      "AND json_text(data,'phase') IN ('broker_failure','sdk_failure','tool_failure','supervisor_failure') "
+    rows = store.rows("SELECT id,created_at,data FROM events WHERE run_id=? AND ("
+                      "(kind='tool' AND json_text(data,'phase')='error') OR (kind='error' "
+                      "AND (json_text(data,'phase') IN ('broker_failure','sdk_failure','tool_failure','supervisor_failure','slack_attachment_read','response_completion') "
+                      "OR json_text(data,'stage')='capture_sync'))) "
                       'ORDER BY id DESC LIMIT 20', (run['id'],))
     revision = os.environ.get('RENDER_GIT_COMMIT', '')
     return {

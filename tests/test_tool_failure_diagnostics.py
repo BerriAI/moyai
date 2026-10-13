@@ -187,7 +187,10 @@ async def test_confirmed_receipt_failure_is_identifiable_but_never_uncertain(tra
     monkeypatch.setattr(probe.runtime, 'append', fail_append)
     with pytest.raises(error_type) as caught:
         await probe.invoke()
-    assert caught.value is failure
+    # The cancellation-draining database helper may wrap a worker cancellation,
+    # but must retain that original cause and its confirmed-action semantics.
+    assert caught.value is failure or (
+        error_type is asyncio.CancelledError and caught.value.__cause__ is failure)
     records = probe.store.events(probe.scope.run_id)
     diagnostic = next(event['data'] for event in records if event['data'].get('phase') == 'tool_failure')
     assert diagnostic['failure_stage'] == 'tool_journal'

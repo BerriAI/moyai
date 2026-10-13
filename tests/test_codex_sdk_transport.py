@@ -1315,18 +1315,23 @@ def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, h
                 'pending_tools': len(store.pending), 'exit_code': exit_code, 'final_response': final['message']}
             progress(json.dumps(evidence))
             assert [receipt['phase'] for receipt in receipts] == ['error', 'completed']
-            # Feed actual native activity to the same projection used by chat,
-            # the sidebar and side chats; raw failed receipts remain in events.
+            # Keep the failed attempt inspectable after recovery, without
+            # exposing its private validation input or changing the final answer.
             public_run = {'status': 'idle' if final['completed'] else 'failed', 'active_message_id': 1,
                 'messages': [{'id': 1, 'role': 'user', 'status': 'completed' if final['completed'] else 'failed'}],
                 'events': [{'id': index, 'created_at': '2026-10-09T00:00:00Z', **event,
                             'data': {**event['data'], 'turn_id': 1}} for index, event in enumerate(events, 1)]}
             projection = subprocess.run(['node', '-e',
                 "const fs=require('fs'),ui=require(process.argv[1]);const run=JSON.parse(fs.readFileSync(0,'utf8'));"
-                "process.stdout.write(JSON.stringify(ui.groups(run).get('1').rows.filter(r=>r.tool==='automation_create').map(r=>r.state)));",
+                "const group=ui.groups(run).get('1');"
+                "process.stdout.write(JSON.stringify({states:group.rows.filter(r=>r.tool==='automation_create').map(r=>r.state),html:ui.html(group)}));",
                 str(Path(__file__).resolve().parents[1] / 'app/static/activity.js')],
                 input=json.dumps(public_run), text=True, capture_output=True, check=True)
-            assert json.loads(projection.stdout) == ['completed']
+            projected = json.loads(projection.stdout)
+            assert projected['states'] == ['error', 'completed']
+            assert 'Observed cause' in projected['html']
+            assert 'private-script-marker' not in projected['html']
+            assert 'Input should be a valid string' not in projected['html']
 
             assert final['completed'] is (terminal == 'complete')
             if terminal == 'complete':
