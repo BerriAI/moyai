@@ -532,7 +532,7 @@ test('an unclaimed follow-up shows its stop reason instead of the previous answe
 });
 
 
-test('legacy streaming replaces failed starts with sanitized explanations and retains expanded activity',()=>{
+for(const standalone of [false,true])test(`legacy streaming replaces failed starts with ${standalone?'standalone diagnostics':'receipts'} and retains expanded activity`,()=>{
   const script=readFileSync('app/static/app.js','utf8'),context={MoyaiActivity,esc:value=>String(value)};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncEventTimeline('),script.indexOf('function renderApprovals(')),context);
   const nodes=new Map(),removedRegions=[],target={querySelectorAll:()=>[...nodes.values()],insertAdjacentHTML(position,markup){
@@ -542,7 +542,8 @@ test('legacy streaming replaces failed starts with sanitized explanations and re
   }};
   const events=[focus(0,'Preparing the task'),tool(1,'failed','started'),tool(2,'retained','completed')];
   context.syncEventTimeline(target,events);const retained=nodes.get('2');
-  events.push(tool(3,'failed','error'),event(4,'error','Temporary outage'));
+  events.push(standalone?standaloneToolFailure(3,'failed'):tool(3,'failed','error'),
+    event(4,'error','Temporary outage'));
   context.syncEventTimeline(target,events);
   assert.deepEqual(removedRegions,['1']);
   assert.deepEqual([...nodes.keys()],['2','3']);assert.equal(nodes.get('2'),retained);assert.equal(retained.open,true);
@@ -661,6 +662,83 @@ test('legacy tool errors use safe explanations in Ready, failed and deferred his
       assert.deepEqual(groups(JSON.parse(before)),groups(snapshot));
     }
   }
+});
+
+function standaloneToolFailure(id,request,extra={}){
+  return {...event(id,'error','PRIVATE_FAILURE_PROSE',{
+    phase:'tool_failure',turn_id:1,request_id:request,tool:'media_share',...extra}),
+    failure_explanation:{version:1,component:'Media sharing',observed_cause:'The operation was rejected.',
+      stage:'Calling the tool',action:{dispatched:false,outcome:'rejected'},retryability:'not_retryable',
+      next_action:'Keep the content in the private session.',support:{}}};
+}
+
+test('standalone tool failures settle one scoped operation in live, Ready and failed histories',()=>{
+  for(const status of ['running','idle','failed']){
+    const snapshot=run();snapshot.status=status;
+    snapshot.messages[0].status=status==='running'?'running':status==='idle'?'completed':'failed';
+    snapshot.events.push(tool(2,'request-1:model-call','started',{input_id:1,tool:'media_share'}),
+      standaloneToolFailure(3,'request-1'));
+    if(status!=='running')snapshot.events.push(event(4,'chat','Response saved',{message_id:1}));
+    const before=JSON.stringify(snapshot),turn=groups(snapshot).get('1');
+    assert.equal(turn.rows.length,1,'one failed operation must replace its unfinished start');
+    assert.equal(turn.rows[0].kind,'tool');assert.equal(turn.rows[0].state,'error');
+    assert.equal(turn.count,1);
+    for(const markup of [html(turn),...timeline(snapshot).get('1').filter(x=>x.block).map(x=>html(x.block))]){
+      assert.match(markup,/The operation was rejected/);
+      assert.doesNotMatch(markup,/PRIVATE_FAILURE_PROSE|Unconfirmed|In progress/);
+    }
+    const visible=MoyaiActivity.visibleEvents(snapshot.events);
+    assert.equal(visible.some(x=>x.id===2),false);
+    assert.equal(visible.filter(x=>x.kind==='tool'&&x.data.phase==='error').length,1);
+    assert.equal(JSON.stringify(snapshot),before);
+    assert.deepEqual(groups(JSON.parse(before)),groups(snapshot));
+  }
+});
+
+test('duplicate diagnostics for one call collapse without replacing a terminal receipt',()=>{
+  const snapshot=run();
+  snapshot.events.push(tool(2,'request-1:model-call','started'),
+    standaloneToolFailure(3,'request-1'),standaloneToolFailure(4,'request-1'));
+  assert.equal(groups(snapshot).get('1').rows.length,1);
+  assert.deepEqual(MoyaiActivity.visibleEvents(snapshot.events).map(x=>x.id),[1,4]);
+  snapshot.events.push(tool(5,'request-1:model-call','error'));
+  assert.deepEqual(MoyaiActivity.visibleEvents(snapshot.events).map(x=>x.id),[1,5]);
+
+  const confirmed=run();
+  confirmed.events.push(tool(2,'request-1:model-call','started'),
+    tool(3,'request-1:model-call','completed'),
+    standaloneToolFailure(4,'request-1',{failure_stage:'tool_journal'}));
+  const rows=groups(confirmed).get('1').rows;
+  assert.equal(rows.length,2);
+  assert.equal(rows[0].state,'completed','a later diagnostic cannot rewrite a completion receipt');
+  assert.equal(rows[1].phase,'error');
+});
+
+test('failure correlation requires an unambiguous call in the same turn and preserves its input',()=>{
+  const snapshot=run();
+  snapshot.messages[1].steering_parent_id=1;snapshot.messages[1].status='injected';
+  snapshot.events.push(tool(2,'request-1:model-call','started',{input_id:1}),
+    event(3,'status','Follow-up delivered',{phase:'steering',turn_id:1,message_id:2}),
+    standaloneToolFailure(4,'request-1',{turn_id:'1'}));
+  const items=timeline(snapshot);
+  assert.equal(items.get('1').flatMap(x=>x.block?.rows||[]).length,1);
+  assert.equal(items.get('1').flatMap(x=>x.block?.rows||[])[0].state,'error');
+  assert.equal(items.get('2').flatMap(x=>x.block?.rows||[]).length,0);
+
+  const wrongTurn=run();
+  wrongTurn.events.push(tool(2,'shared:model-call','started'),
+    standaloneToolFailure(3,'shared',{turn_id:2}));
+  assert.equal(groups(wrongTurn).get('1').rows[0].state,'running');
+
+  const ambiguous=run();
+  ambiguous.events.push(tool(2,'shared:first','started'),tool(3,'shared:second','started'),
+    standaloneToolFailure(4,'shared'));
+  assert.equal(groups(ambiguous).get('1').rows.length,3,'a shared prefix is not a unique call identity');
+  ambiguous.events[3]=standaloneToolFailure(4,'shared:first');
+  const rows=groups(ambiguous).get('1').rows;
+  assert.equal(rows.length,2);
+  assert.equal(rows.find(x=>x.id==='shared:second').state,'running');
+  assert.equal(rows.find(x=>x.id==='shared:first').state,'error');
 });
 
 test('credential replay and content encoding use fixed labels with independent recorded presence',()=>{

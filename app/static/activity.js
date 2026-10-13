@@ -8,22 +8,54 @@
   const labels={reconnecting:'Reconnecting to workspace',running:'Reviewing the task',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',stopping:'Stopping',deleting:'Deleting session',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Earlier activity',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
   const isFocus=event=>event.kind==='status'&&event.data?.phase==='focus';
   function visibleEvents(events){
-    const failures=new Set(),failedCalls=new Set();
+    const scoped=(data,id)=>data.turn_id&&typeof id==='string'&&id?
+      JSON.stringify([String(data.turn_id),id]):'';
+    const calls=new Map(),owners=new Map(),diagnostics=new Map();
     for(const event of events){
       const data=event.data||{};
-      if(event.kind==='tool'&&data.phase==='error'&&typeof data.call_id==='string'){
-        failures.add(JSON.stringify([data.turn_id,data.call_id.split(':')[0]]));
-        failedCalls.add(JSON.stringify([data.turn_id,data.call_id]));
+      const key=event.kind==='tool'&&scoped(data,data.call_id);
+      if(!key)continue;
+      if(!calls.has(key))calls.set(key,{start:null,terminal:false,failed:false});
+      const call=calls.get(key);
+      if(data.phase==='started'&&data.activity_version===1)call.start??=event;
+      if(['completed','error','backgrounded'].includes(data.phase))call.terminal=true;
+      if(data.phase==='error')call.failed=true;
+      for(const id of [data.call_id,data.call_id.split(':')[0]]){
+        const alias=scoped(data,id);
+        owners.set(alias,owners.has(alias)&&owners.get(alias)!==key?null:key);
       }
     }
+    const diagnosticCall=data=>owners.get(scoped(data,
+      typeof data.call_id==='string'&&data.call_id?data.call_id:data.request_id));
+    for(const event of events){
+      const data=event.data||{},key=diagnosticCall(data),call=calls.get(key);
+      if(event.kind==='error'&&data.phase==='tool_failure'&&call?.start&&!call.terminal)
+        diagnostics.set(key,event);
+    }
     // Failed operations belong in work history even when the response succeeds.
-    // A diagnostic for the same tool supplements its receipt, never a second row.
-    // Model/recovered errors remain separate from the authoritative final cause.
-    return events.filter(event=>!(event.kind==='tool'&&event.data?.phase==='started'&&
-      failedCalls.has(JSON.stringify([event.data.turn_id,event.data.call_id])))&&
-      (event.kind!=='error'||event.data?.turn_id&&(
-        ['slack_attachment_read','response_completion','supervisor_failure'].includes(event.data.phase)||event.data.stage==='capture_sync'||
-        event.data.phase==='tool_failure'&&!failures.has(JSON.stringify([event.data.turn_id,event.data.request_id])))));
+    // A standalone failure can settle an unfinished start only when its identity
+    // names one call in this turn. Shared reporter prefixes are not sufficient.
+    return events.flatMap(event=>{
+      const data=event.data||{},key=scoped(data,data.call_id);
+      if(event.kind==='tool'&&data.phase==='started'&&(calls.get(key)?.failed||diagnostics.has(key)))return [];
+      if(event.kind!=='error')return [event];
+      if(!data.turn_id)return [];
+      if(data.phase==='tool_failure'){
+        const owner=diagnosticCall(data),call=calls.get(owner);
+        if(call?.failed)return [];
+        if(diagnostics.has(owner)){
+          if(diagnostics.get(owner)!==event)return [];
+          const start=call.start.data;
+          return [{...event,kind:'tool',message:call.start.message,data:{...data,
+            activity_version:1,call_id:start.call_id,phase:'error',
+            tool:start.tool||data.tool,category:start.category||'tool',label:start.label,
+            ...(start.input_id!=null?{input_id:start.input_id}:{})}}];
+        }
+        return [event];
+      }
+      return ['slack_attachment_read','response_completion','supervisor_failure'].includes(data.phase)||
+        data.stage==='capture_sync'?[event]:[];
+    });
   }
   function terminalAnswer(run){
     // The transcript moves unstarted inputs after answers. Persisted IDs retain
