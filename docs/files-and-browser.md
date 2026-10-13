@@ -121,13 +121,18 @@ closing its temporary file. Authentication, scope, location, redirect and hard
 storage-limit failures stop without retrying. Slack's numeric `Retry-After` is
 honored; missing/invalid intervals or intervals beyond the remaining budget stop
 the read instead of retrying early. A known cooldown also applies to subsequent
-attachment reads by the same process.
+attachment reads by the same process. Other retries wait a random 0.5–1.5 seconds
+within the existing transfer budget. This jitter never reduces `Retry-After`.
 
 If recovery fails, the existing turn records a safe error event and missing-input
 explanation: stage, fixed error code, declared/received byte counts when known,
-attempt history, remaining blocker and next action. Headers rejected before body
-consumption have no observed byte count; their advertised length is recorded
-separately. URLs, file identifiers/names, credentials, provider exception text
+attempt history, remaining blocker and next action. Response encoding is recorded
+only as `identity`, `gzip`, `br`, `deflate`, `zstd` or `unsupported`, with a boolean
+indicating whether the header was present. An absent encoding header is treated
+as identity; failures before response headers omit both fields. Headers rejected
+before body consumption have no observed byte count; their advertised length is
+recorded separately. A failed first read also has no observed byte count; a clean
+empty body records zero. URLs, file identifiers/names, credentials, provider exception text
 and file contents are excluded from these diagnostics. A partial stream is
 distinguished from a complete stream whose byte count disagrees with metadata.
 No Slack sends or uploads are retried by this path.
@@ -138,6 +143,8 @@ its default decoding can make representation differences relevant to byte-count
 checks. This is a possible mismatch mechanism, not an established explanation
 for historical incidents. [Slack's rate-limit guidance](https://docs.slack.dev/apis/web-api/rate-limits/)
 specifies waiting for `Retry-After` before retrying.
+[AWS's retry guidance](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)
+explains why bounded retries and jitter help avoid synchronized retry bursts.
 
 Initial context can recover files absent from an `app_mention` and files in the
 explicitly invoked thread. Nearby channel files and future queued replies are

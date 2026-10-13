@@ -158,6 +158,54 @@ async def test_unverifiable_read_stops_after_two_attempts_with_safe_detail(reade
     assert detail['remaining_blocker'] and detail['next_action']
 
 
+@pytest.mark.parametrize('header,encoding', [
+    (None, 'identity'), ('identity', 'identity'), (' GZip ', 'gzip'),
+    ('br', 'br'), ('deflate', 'deflate'), ('zstd', 'zstd'),
+    ('gzip, br', 'unsupported'), ('', 'unsupported'), (PRIVATE, 'unsupported'),
+])
+async def test_failure_representation_is_allowlisted_and_header_rejection_has_no_byte_count(
+        reader, monkeypatch, header, encoding):
+    files, _ = reader
+    headers = {} if header is None else {'Content-Encoding': header}
+    downloads(monkeypatch, {'headers': headers, 'chunks': [b'x']})
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    detail = caught.value.diagnostic()
+    assert detail['content_encoding'] == encoding
+    assert detail['content_encoding_present'] is (header is not None)
+    assert detail['attempts'] == 2
+    assert all(attempt['content_encoding'] == encoding for attempt in detail['attempt_history'])
+    assert f'content_encoding={encoding}' in str(caught.value)
+    if encoding == 'identity':
+        assert detail['code'] == 'metadata_size_mismatch' and detail['received_bytes'] == 1
+    else:
+        assert detail['code'] == 'encoded_response' and detail['stage'] == 'headers'
+        assert 'received_bytes' not in detail
+        assert all('received_bytes' not in attempt for attempt in detail['attempt_history'])
+    assert PRIVATE not in json.dumps(detail) + str(caught.value)
+
+
+@pytest.mark.parametrize('failure', ['first_read', 'storage', 'empty_body'])
+async def test_missing_byte_observation_is_not_reported_as_zero(reader, monkeypatch, failure):
+    files, _ = reader
+    downloads(monkeypatch, {'chunks': [aiohttp.ClientPayloadError(PRIVATE)] if failure == 'first_read' else []})
+    if failure == 'storage':
+        def unavailable():
+            raise OSError(PRIVATE)
+        monkeypatch.setattr(slack_files.tempfile, 'TemporaryFile', unavailable)
+    with pytest.raises(SlackFileError) as caught:
+        await files.read(FILE['id'], TEAM)
+    detail = caught.value.diagnostic()
+    assert detail['content_encoding'] == 'identity'
+    assert detail['content_encoding_present'] is False
+    if failure == 'empty_body':
+        assert detail['code'] == 'metadata_size_mismatch' and detail['received_bytes'] == 0
+    else:
+        assert detail['code'] == ('storage' if failure == 'storage' else 'truncated_stream')
+        assert 'received_bytes' not in detail
+        assert all('received_bytes' not in attempt for attempt in detail['attempt_history'])
+
+
 @pytest.mark.parametrize('response,code', [
     ({'status': 401}, 'authentication'),
     ({'status': 403}, 'authentication'),
@@ -204,6 +252,9 @@ async def test_metadata_errors_are_classified_without_copying_provider_text(read
     assert connectors.request.await_count == retries
     assert not calls and not handles
     assert PRIVATE not in str(caught.value)
+    assert 'content_encoding' not in caught.value.diagnostic()
+    assert 'content_encoding_present' not in caught.value.diagnostic()
+    assert 'received_bytes' not in caught.value.diagnostic()
 
 
 @pytest.mark.parametrize('at', ['metadata', 'download'])
@@ -211,6 +262,8 @@ async def test_retry_after_is_observed_before_fresh_request(reader, monkeypatch,
     files, connectors = reader
     loop = asyncio.get_running_loop()
     requests = []
+    monkeypatch.setattr(slack_files.random, 'uniform',
+                        lambda *args: pytest.fail('Retry-After must never be jittered.'))
 
     async def info(*args, **kwargs):
         requests.append(loop.time())
@@ -225,6 +278,31 @@ async def test_retry_after_is_observed_before_fresh_request(reader, monkeypatch,
     raw.close()
     assert len(requests) == 2 and requests[1]-requests[0] >= .03
     assert len(calls) == (2 if at == 'download' else 1)
+
+
+@pytest.mark.parametrize('endpoint', ['minimum', 'maximum'])
+async def test_non_rate_retry_uses_bounded_jitter_and_still_refreshes_metadata(reader, monkeypatch, endpoint):
+    files, connectors = reader
+    loop = asyncio.get_running_loop()
+    requests, bounds = [], []
+    monkeypatch.setattr(slack_files, 'RETRY_DELAY_SECONDS', .02)
+
+    def jitter(low, high):
+        bounds.append((low, high))
+        return low if endpoint == 'minimum' else high
+
+    async def info(*args, **kwargs):
+        requests.append(loop.time())
+        return metadata()
+
+    monkeypatch.setattr(slack_files.random, 'uniform', jitter)
+    connectors.request.side_effect = info
+    downloads(monkeypatch, {'status': 503}, {})
+    _, raw, _ = await files.read(FILE['id'], TEAM)
+    raw.close()
+    assert bounds == [(.01, .03)]
+    assert len(requests) == 2
+    assert requests[1]-requests[0] >= (.01 if endpoint == 'minimum' else .03)
 
 
 @pytest.mark.parametrize('interval', [None, 'invalid', 'NaN', '-1', '99999'])
@@ -378,6 +456,8 @@ def test_failed_attachment_records_safe_attempt_history_on_existing_turn(slack_a
     detail = failures[0]['data']
     assert detail['turn_id'] == message['id'] and detail['attempts'] == 2
     assert detail['code'] == 'metadata_size_mismatch' and detail['declared_bytes'] == 1
+    assert detail['content_encoding'] == 'identity' and detail['content_encoding_present'] is False
+    assert 'received_bytes' not in detail  # Content-Length disagreed before consuming the body.
     assert len(detail['attempt_history']) == 2
     for private in ('bot-token', 'private file contents', 'https://', FILE['id']):
         assert private not in str(failures) + row['content']

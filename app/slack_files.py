@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from pathlib import PurePath
+import random
 import re
 import tempfile
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ RETRY_DELAY_SECONDS = 1
 INSPECTION_BUDGET_SECONDS = 90
 DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=45, sock_connect=10, sock_read=15)
 TRANSIENT_STATUSES = {408, 500, 502, 503, 504}
+CONTENT_ENCODINGS = {'identity', 'gzip', 'br', 'deflate', 'zstd'}
 
 # Only application-owned prose/codes enter errors and events. Never copy a
 # provider exception, URL, filename, response body or arbitrary header value.
@@ -73,7 +75,7 @@ class SlackFileError(ValueError):
 
     def __str__(self):
         detail = self.diagnostic()
-        counts = ', '.join(f'{key}={detail[key]}' for key in ('declared_bytes', 'received_bytes')
+        counts = ', '.join(f'{key}={detail[key]}' for key in ('declared_bytes', 'received_bytes', 'content_encoding')
                            if detail.get(key) is not None)
         return (f'{FAILURES[self.code][0]} '
                 f'[stage={detail["stage"]}, code={self.code}, attempts={detail["attempts"]}'
@@ -151,7 +153,10 @@ class SlackFiles:
                         exc.history = list(history)
                         if not exc.retryable or attempt + 1 >= READ_ATTEMPTS:
                             raise
-                        delay = exc.retry_after if exc.code == 'rate_limited' else RETRY_DELAY_SECONDS
+                        # Spread independent readers without ever jittering or
+                        # shortening a provider-mandated Retry-After interval.
+                        delay = (exc.retry_after if exc.code == 'rate_limited' else
+                                 random.uniform(.5 * RETRY_DELAY_SECONDS, 1.5 * RETRY_DELAY_SECONDS))
                         if delay is None:
                             exc.retry_blocker = 'Slack did not supply a usable Retry-After interval; no early retry was made.'
                             raise
@@ -236,6 +241,10 @@ class SlackFiles:
             async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT, auto_decompress=False) as client:
                 async with client.get(url, headers=headers, allow_redirects=False) as response:
                     state['http_status'] = response.status
+                    encoding_header = response.headers.get('Content-Encoding')
+                    encoding = encoding_header.strip().lower() if encoding_header is not None else 'identity'
+                    state.update(content_encoding=encoding if encoding in CONTENT_ENCODINGS else 'unsupported',
+                                 content_encoding_present=encoding_header is not None)
                     if response.status == 429:
                         raise SlackFileError('rate_limited', retryable=True,
                                              retry_after=retry_seconds(response.headers.get('Retry-After')))
@@ -249,7 +258,7 @@ class SlackFiles:
                         raise SlackFileError('partial_response', retryable=True)
                     if response.status != 200:
                         raise SlackFileError('unavailable')
-                    if response.headers.get('Content-Encoding', 'identity').strip().lower() != 'identity':
+                    if state['content_encoding'] != 'identity':
                         raise SlackFileError('encoded_response', retryable=True)
                     length = response.headers.get('Content-Length')
                     if length is not None:
@@ -260,10 +269,12 @@ class SlackFiles:
                             raise SlackFileError('hard_limit')
                         if int(length) != size:
                             raise SlackFileError('metadata_size_mismatch', retryable=True)
-                    state.update(stage='download', received_bytes=0)
+                    state['stage'] = 'download'
                     raw = tempfile.TemporaryFile()
+                    received = 0
                     async for chunk in response.content.iter_chunked(64 * 1024):
-                        state['received_bytes'] += len(chunk)
+                        received += len(chunk)
+                        state['received_bytes'] = received
                         # Independent actual-byte cap; metadata is not authority
                         # to consume more storage. Check before writing the chunk.
                         if state['received_bytes'] > hard_limit:
@@ -271,7 +282,10 @@ class SlackFiles:
                         if state['received_bytes'] > size:
                             raise SlackFileError('metadata_size_mismatch', retryable=True)
                         await file_operation(raw.write, chunk)
-            if state['received_bytes'] != size:
+            # Zero is observed only after a clean empty body, not a headers-only
+            # rejection, temporary-file failure or interrupted first read.
+            state['received_bytes'] = received
+            if received != size:
                 raise SlackFileError('metadata_size_mismatch', retryable=True)
             self.check_access(team)
             raw.seek(0)
