@@ -66,6 +66,12 @@ retrying a write. Confirmed receipts remain outside the ambiguous dispatch
 handler; a later journal failure records its stage without changing the confirmed
 tool span to an uncertain action.
 
+When a terminal computer envelope is returned, its `completed`, `unknown`,
+`cancelled` or `rejected` enum is also exported as `moyai.tool.receipt_status`.
+This does not change the tool result or its status classification. Tool activity
+events and trace privacy preferences remain bound to the originating turn even
+if a later turn becomes active before the observation is saved.
+
 The detached supervisor saves a bounded `diagnostic.json` alongside its execution
 journal. Status reads return that record independently of the 30-event page, so
 the original remote failure is available even when later journal pages have not

@@ -320,6 +320,8 @@ class AgentTracing:
             return
         if run['mode'] != 'modal' or not isinstance(data, dict):
             return
+        if message_id is not None:
+            run = {**run, 'active_message_id': message_id}
         now = time.time_ns()
         start, end = int(data['start_ns']), int(data['end_ns'])
         if not (0 < start <= end <= now + 60_000_000_000):
@@ -329,12 +331,15 @@ class AgentTracing:
         failed = data.get('status') in {'error', 'cancelled'}
         error_type = safe_error({'exception_type': data.get('error_type')}).get(
             'exception_type', 'ToolError' if 'error_type' in data else 'OperationError')
+        receipt_status = data.get('receipt_status')
+        receipt = ({'moyai.tool.receipt_status': receipt_status}
+                   if isinstance(receipt_status, str) and receipt_status in {'completed', 'unknown', 'cancelled', 'rejected'} else {})
         self.emit(run, run.get('active_message_id') if message_id is None else message_id, name, str(data['call_id']), start, end,
                   {'gen_ai.operation.name': 'execute_tool', 'openinference.span.kind': 'TOOL',
                    'gen_ai.tool.name': name, 'gen_ai.tool.call.id': str(data['call_id']),
                    'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if omit else data.get('input')),
                    'output.value': self.content('[private tool payload omitted]' if omit else data.get('output')),
-                   'moyai.status': str(data.get('status', 'completed')),
+                   'moyai.status': str(data.get('status', 'completed')), **receipt,
                    **({'error.type': self.content(error_type)} if failed else {}),
                    **(self.error_attributes(data['diagnostic']) if failed and safe_error(data.get('diagnostic')) else {})},
                   failed=failed)

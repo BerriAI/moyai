@@ -312,7 +312,8 @@ class DeepAgentsRuntime:
             return {'isError': True, 'error': 'Tool is not in the authorized catalog. No action was attempted.'}
         identity = observation['call_id']
         r = self.runner
-        reporter = ActivityReporter(lambda kind, message, data: r.store.event(scope.run_id, kind, message, data))
+        reporter = ActivityReporter(lambda kind, message, data: r.store.event(
+            scope.run_id, kind, message, data, turn_id=scope.message_id))
         reporter.prefix = identity
         observation['failure_stage'] = 'tool_activity'
         await database(reporter.start, call_id, name, arguments)
@@ -324,7 +325,9 @@ class DeepAgentsRuntime:
                     observation['failure_stage'] = 'computer_poll'
                     value = await self.broker(scope, '/agent-runtime', body)
                     if value['status'] in {'completed', 'unknown', 'cancelled', 'rejected'}:
+                        receipt_status = value['status']
                         value = value['result']
+                        observation['receipt_status'] = receipt_status
                         break
                     # Computer acquisition and observation use tool capacity,
                     # not the controller slots needed by other conversations.
