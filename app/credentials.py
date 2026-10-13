@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_val
 from .database import Connection, DatabaseRow
 from .db import database, now
 from .identities import PROFILE_MAX_AGE_SECONDS
+from .aws_login import AWSLogin, AWS_LOGIN_DESCRIPTION, login_required
+from sandbox.aws_credentials import bundle as aws_bundle
 
 
 # Inference keys retain fixed origins/routes and never enter the sandbox.
@@ -34,7 +36,7 @@ PROVIDERS = {
 Provider = Literal['fireworks', 'openai', 'anthropic', 'together', 'groq', 'generic']
 Scope = Literal['session', 'personal', 'organization']
 Lifetime = Literal['session', 'persistent']
-Format = Literal['env', 'file']
+Format = Literal['env', 'file', 'aws-sso']
 ACCESSIBLE = {'running', 'awaiting_approval', 'saving', 'waiting_credential', 'queued',
               'provisioning', 'reconnecting', 'waiting_environment', 'waiting_children', 'idle', 'completed'}
 ENV_NAME = re.compile(r'^[A-Z_][A-Z0-9_]{0,127}$')
@@ -78,7 +80,10 @@ class Capability(Arguments):
         if self.provider == 'generic':
             if not self.name or not re.fullmatch(r'[a-z0-9][a-z0-9 _./:-]{0,79}', self.name):
                 raise ValueError('Provide a stable capability name.')
-            if self.format == 'file':
+            if self.format == 'aws-sso':
+                if not re.fullmatch(r'aws-sso/[a-z0-9_-]{1,64}', self.name) or self.env_var:
+                    raise ValueError('AWS SSO uses name=aws-sso/<profile> and no environment variable.')
+            elif self.format == 'file':
                 environment_name(self.env_var)
             elif self.env_var:
                 raise ValueError('Environment credentials carry variable names in their JSON value.')
@@ -158,6 +163,12 @@ class RunCredential(Materialize):
     timeout: int = Field(default=120, ge=1, le=600)
 
 
+class AWSWriteback(Arguments):
+    request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    revision: int = Field(ge=1)
+    value: SecretStr
+
+
 class ReportFailure(Arguments):
     request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
     revision: int = Field(ge=1)
@@ -192,6 +203,8 @@ class SaveSecret(Capability):
             if self.provider == 'generic':
                 raise ValueError('Choose this session or future sessions.')
             self.lifetime = 'persistent'  # Existing inference-key clients.
+        if self.format == 'aws-sso' and self.scope != 'personal':
+            raise ValueError('AWS login profiles are personal to the requester.')
         self.expires_at = expiry(self.expires_at)
         if not self.label.strip():
             raise ValueError('Provide a credential name.')
@@ -262,6 +275,7 @@ ONEPASSWORD_GUIDANCE = (
 
 TOOLS = {
     **slack_secrets.TOOLS,
+    'credentials_aws_login': (AWSLogin, AWS_LOGIN_DESCRIPTION),
     'credentials_list': (ListCredentials, 'Before declaring access blocked or asking for it, list without filters to discover authorized personal and organization access and credential_sources. A filtered miss is not proof that access is missing; inspect discovery before concluding. Returns metadata and pending request IDs/generations, never secret values. Shared vault sources remain visible with a provider filter; inspect an available source before asking for another provider key.'),
     'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
@@ -431,6 +445,14 @@ class Credentials:
                             raise ValueError()
                 except (ValueError, TypeError, UnicodeError):
                     raise HTTPException(422, 'Use a JSON object of credential environment names and nonempty string values, without runtime settings.') from None
+            elif body.format == 'aws-sso':
+                try:
+                    saved = aws_bundle(value)
+                    if body.name != 'aws-sso/' + saved['profile']['profile']:
+                        raise ValueError()
+                    value = json.dumps(saved, sort_keys=True)
+                except ValueError:
+                    raise HTTPException(422, 'Invalid AWS SSO profile or cache.') from None
         return value
 
     def insert_secret(self, conn, body, user_id, admin, root_id=''):
@@ -665,6 +687,8 @@ class Credentials:
             if not valid_prior and not terminal_prior and not permission_retry:
                 secret = self.saved_choice(conn, run, args.model_dump(), args.secret_id)
                 if not secret:
+                    if args.format == 'aws-sso':
+                        return login_required()
                     lookup = self.source_lookup(conn, run, args)
                     if lookup:
                         return lookup
@@ -876,12 +900,20 @@ class Credentials:
             raise HTTPException(403, 'Request access for the current requester.')
         return dict(row), dict(secret) if secret else None
 
+    def aws_turn_current(self, conn, run):
+        live = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
+        return bool(live and not live['deleted_at'] and not live['deletion_requested_at']
+                    and live['status'] in {'running', 'reconnecting', 'awaiting_approval'}
+                    and all(live[key] == run[key] for key in ('active_user_id', 'active_message_id', 'token_hash')))
+
     def materialize(self, run, args):
         with self.store.connect() as conn:
             conn.begin_write()
             accepted = []
             for request_id in args.request_ids:
                 row, secret = self.authorized_request(conn, run, request_id)
+                if row['format'] == 'aws-sso' and not self.aws_turn_current(conn, run):
+                    return {'status': 'stale', 'message': 'The requesting turn changed. No AWS credentials were loaded.'}
                 if row['provider'] == 'generic' and row['name'] == 'slack-personal':
                     raise HTTPException(403, 'Use the server-side personal Slack tools; this token cannot be exported to a command.')
                 if row['provider'] != 'generic':
@@ -892,8 +924,12 @@ class Credentials:
                     self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
                     return self.ready(row)
                 if not secret or not self.permitted(secret, run, run['active_user_id'], connection=conn):
+                    if row['format'] == 'aws-sso':
+                        return login_required()
                     return self.ready(self.reopen_in(conn, row, 'unavailable', run))
                 if self.status(secret) != 'active':
+                    if row['format'] == 'aws-sso':
+                        return login_required()
                     return self.ready(self.reopen_in(conn, row, self.status(secret), run))
                 accepted.append((self.binding_in(conn, row, secret), secret))
             # No plaintext is produced until every selected handle is authorized.
@@ -906,6 +942,35 @@ class Credentials:
             return {'status': 'ready', 'bindings': [{'request_id': row['id'], 'revision': row['revision'],
                     'name': secret['name'], 'format': secret['format'], 'env_var': secret['env_var'],
                     'value': self.security.decrypt(secret['encrypted'])} for row, secret in accepted]}
+
+    def aws_writeback(self, run, args):
+        """CAS the encrypted cache; revocation, replacement and requester changes win."""
+        updated = aws_bundle(args.value.get_secret_value())
+        with self.store.connect() as conn:
+            conn.begin_write()
+            if not self.aws_turn_current(conn, run):
+                return {'status': 'stale', 'message': 'The requesting turn changed. AWS cache was not saved; do not replay the command.'}
+            row, secret = self.authorized_request(conn, run, args.request_id)
+            if (row['status'] != 'provided' or not secret or secret['format'] != 'aws-sso'
+                    or secret['scope'] != 'personal' or not self.permitted(secret, run, run['active_user_id'], connection=conn)
+                    or self.status(secret) != 'active' or row['revision'] != args.revision
+                    or row['secret_revision'] != secret['revision']):
+                return {'status': 'stale', 'message': 'AWS access changed; refreshed cache was not saved. Do not replay the command.'}
+            original = aws_bundle(self.security.decrypt(secret['encrypted']))
+            if original['profile'] != updated['profile']:
+                raise ValueError('AWS cache writeback cannot change the profile.')
+            if original != updated:
+                encrypted = self.security.encrypt(json.dumps(updated, sort_keys=True))
+                count = conn.execute("UPDATE provider_secrets SET encrypted=?,revision=revision+1 "
+                                     "WHERE id=? AND revision=? AND revoked_at='' AND invalid_reason='' "
+                                     "AND (expires_at='' OR expires_at>?)",
+                                     (encrypted, secret['id'], secret['revision'], now())).rowcount
+                if not count:
+                    return {'status': 'stale'}
+                secret['revision'] += 1
+                row = self.binding_in(conn, row, secret)
+                self.audit_in(conn, run['active_user_id'], secret['id'], 'AWS cache refreshed', run['id'])
+            return {'status': 'saved', 'revision': row['revision']}
 
     def report_failure(self, run, args):
         with self.store.connect() as conn:
@@ -922,6 +987,9 @@ class Credentials:
             if args.failure != 'permission':
                 conn.execute('UPDATE provider_secrets SET invalid_reason=? WHERE id=? AND revision=?',
                              (args.failure, secret['id'], secret['revision']))
+            if secret['format'] == 'aws-sso':
+                self.audit_in(conn, run['active_user_id'], secret['id'], 'authentication ' + args.failure, run['id'])
+                return login_required(permission=args.failure == 'permission')
             replacement = self.saved_choice(conn, run, row) if args.failure != 'permission' else None
             if replacement:
                 row = self.reuse_in(conn, row, replacement)
@@ -943,6 +1011,9 @@ class Credentials:
         args = TOOLS[name][0].model_validate(arguments)
         if name in slack_secrets.TOOLS:
             return await slack_secrets.call(self, run, name, args)
+        if name == 'credentials_aws_login':
+            from .aws_login import call
+            return await call(self, run, args)
         if name == 'credentials_list':
             return await database(self.inventory, run, args)
         if name == 'credentials_request':
@@ -1026,6 +1097,8 @@ class Credentials:
             values = dict(row)
             for key in body.model_fields_set - {'revision', 'value'}:
                 values[key] = getattr(body, key)
+            if row['format'] == 'aws-sso' and values['scope'] != 'personal':
+                raise HTTPException(422, 'AWS login profiles cannot be shared with the organization.')
             if values['scope'] == 'organization' and not admin:
                 raise HTTPException(403, 'Only an administrator can manage organization credentials.')
             if values['scope'] == 'personal' and row['scope'] == 'organization':
@@ -1140,6 +1213,14 @@ def initialize_schema(store):
                 run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL,
                 secret_id TEXT NOT NULL, revision INTEGER NOT NULL,
                 PRIMARY KEY(run_id,message_id,secret_id,revision)
+            );
+            CREATE TABLE IF NOT EXISTS aws_login_requests (
+                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                message_id INTEGER NOT NULL, actor_id TEXT NOT NULL, request_key TEXT NOT NULL,
+                profile_json TEXT NOT NULL, lifetime TEXT NOT NULL, status TEXT NOT NULL,
+                encrypted TEXT NOT NULL DEFAULT '', expires_at INTEGER NOT NULL,
+                interval_seconds INTEGER NOT NULL DEFAULT 5, next_poll INTEGER NOT NULL DEFAULT 0,
+                secret_id TEXT NOT NULL DEFAULT '', UNIQUE(run_id,message_id,request_key)
             );
         ''')
         for table, fields in {

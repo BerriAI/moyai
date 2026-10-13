@@ -11,10 +11,10 @@ import json
 
 from .database import DatabaseError, identifier
 
-SCHEMA_REVISION = 19
+SCHEMA_REVISION = 20
 # Physical additive expansions can keep this contract after a reviewed online
 # manifest step. Incompatible changes advance it and require maintenance.
-SCHEMA_COMPATIBILITY_REVISION = 19
+SCHEMA_COMPATIBILITY_REVISION = 20
 # Dependency order; optional features are prepared even when disabled at runtime.
 COMPONENTS = (
     'session_privacy', 'personal_slack', 'user_roles', 'sandbox_settings', 'github_repositories', 'github_write_access',

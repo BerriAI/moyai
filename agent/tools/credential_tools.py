@@ -12,6 +12,8 @@ from typing import Callable
 from urllib.parse import quote
 
 from sandbox.install_access_tools import ensure_tools
+from sandbox.aws_credentials import secret_values
+from agent.tools.aws_credentials import AWSHome
 
 MAX_OUTPUT = 128 * 1024
 
@@ -35,7 +37,7 @@ def redact(text: str, secrets: list[str]) -> str:
 def failure_kind(output: str) -> str:
     # Only recognizable authentication errors trigger replacement. A nonzero
     # exit, network error, 403, or quota failure does not prove an expired key.
-    if re.search(r'(?i)ExpiredToken(?:Exception)?|\btoken (?:has |is )?expired\b|\bcredentials? (?:have |has |are |is )?expired\b', output):
+    if re.search(r'(?i)ExpiredToken(?:Exception)?|\btoken (?:has |is )?expired\b|\bcredentials? (?:have |has |are |is )?expired\b|SSO session .{0,150}has expired', output):
         return 'expired'
     if re.search(r'(?i)InvalidClientTokenId|UnrecognizedClientException|\binvalid[_ ](?:api[_ ]key|token)\b|\bUnauthorized\b', output):
         return 'invalid'
@@ -105,12 +107,27 @@ def run(arguments: dict, broker: Callable) -> dict:
     secrets: list[str] = []
     fds: list[int] = []
     additions: dict[str, str] = {}
+    aws_home = None
+    aws_binding = None
+    cache_result = None
     try:
         with ExitStack() as stack:
+            if sum(binding['format'] == 'aws-sso' for binding in bindings) > 1:
+                return {'error': 'Select one AWS login profile per command.'}
+            aws_selected = any(binding['format'] == 'aws-sso' for binding in bindings)
             for binding in bindings:
                 value = binding['value']
                 secrets.append(value)
-                if binding['format'] == 'env':
+                if binding['format'] == 'aws-sso':
+                    try:
+                        ensure_tools('aws')
+                        aws_home = stack.enter_context(AWSHome(value))
+                    except Exception:
+                        return {'error': 'AWS login requires CLI v2 and a private Linux tmpfs home. No command was executed.'}
+                    aws_binding = binding
+                    secrets.extend(secret_values(aws_home.original['cache']))
+                    fields = aws_home.environment()
+                elif binding['format'] == 'env':
                     fields = json.loads(value)
                     secrets.extend(fields.values())
                 else:
@@ -137,6 +154,9 @@ def run(arguments: dict, broker: Callable) -> dict:
                         pass
                     secrets.extend(match.group(1).strip(' \"\'') for match in
                                    re.finditer(r'(?im)^\s*(?:token|password|client-key-data|client-certificate-data|private_key):\s*(.+)$', value))
+                if (aws_selected and binding['format'] != 'aws-sso'
+                        and any(key.startswith('AWS_') or key == 'BOTO_CONFIG' for key in fields)):
+                    return {'error': 'Do not combine an AWS login profile with another AWS credential binding.'}
                 if additions.keys() & fields.keys():
                     return {'error': 'The selected credentials define the same environment variable. Choose one binding per variable.'}
                 additions.update(fields)
@@ -144,16 +164,44 @@ def run(arguments: dict, broker: Callable) -> dict:
             token = os.environ.get('WORKSPACE_RUN_TOKEN')
             env = {key: value for key, value in os.environ.items()
                    if not key.startswith(('WORKSPACE_', 'MOYAI_')) and (not token or value != token)}
+            if aws_home:
+                env = {key: value for key, value in env.items() if not key.startswith('AWS_') and key != 'BOTO_CONFIG'}
             code, output, timed_out = execute(command, {**env, **additions}, fds, timeout)
+            if aws_home:
+                # Collect refreshed tokens BEFORE redaction, even after a failed
+                # or timed-out command. If parsing fails we cannot scrub new
+                # secrets reliably, so no command output leaves this boundary.
+                try:
+                    refreshed = aws_home.collect()
+                    secrets.extend(secret_values(refreshed['cache']))
+                except Exception:
+                    return {'exit_code': code, 'timed_out': timed_out, 'output': '',
+                            'error': 'AWS cache could not be safely collected. Output withheld; inspect the destination before retrying.',
+                            'cache_status': 'not_saved'}
+                if refreshed != aws_home.original:
+                    try:
+                        cache_result = broker('/credentials/aws/writeback', {
+                            'request_id': aws_binding['request_id'], 'revision': aws_binding['revision'],
+                            'value': json.dumps(refreshed)})
+                        if cache_result.get('status') == 'saved':
+                            aws_binding['revision'] = cache_result['revision']
+                    except Exception:
+                        cache_result = {'status': 'unknown'}
+                else:
+                    cache_result = {'status': 'unchanged'}
             clean = redact(output, secrets)
             limited = len(output.encode()) > MAX_OUTPUT
         result = {'exit_code': code, 'output': clean[:MAX_OUTPUT], 'timed_out': timed_out,
                   'output_limited': limited,
                   'credentials': [{'request_id': b['request_id'], 'revision': b['revision']} for b in bindings]}
+        if cache_result:
+            result['cache_status'] = cache_result.get('status', 'unknown')
+            if result['cache_status'] not in {'saved', 'unchanged'}:
+                result['instruction'] = 'The command ran, but its refreshed login cache was not confirmed saved. Inspect the destination; do not replay the command.'
         kind = failure_kind(output) if code and not timed_out else 'unknown'
         if code:
             result['failure'] = kind
-            result['instruction'] = 'Inspect the result before retrying; a command may have partially completed.'
+            result['instruction'] = result.get('instruction', '') + ' Inspect the result before retrying; a command may have partially completed.'
         source_binding = any(binding.get('name') == '1password-shared' for binding in bindings)
         if kind in {'expired', 'invalid', 'permission'} and source_binding:
             # An op-run child may reject a key fetched from Shared while the
