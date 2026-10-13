@@ -419,7 +419,7 @@ async def live_owner(request, monkeypatch):
         value = await measure(payload)
         if value.input_tokens > value.input_budget: raise ContextPressure(value.public())
         return value
-    async def summarize(run, req, history, model, size):
+    async def summarize(run, req, history, model):
         async with proof.slots:
             call = SimpleNamespace(history=deepcopy(history), release=asyncio.Event(), fail=False,
                 task=asyncio.current_task(), summary=f'private-working-summary-{len(proof.calls)}')
@@ -609,6 +609,26 @@ async def test_live_failed_summary_can_retry_and_close_cancels_owned_work(live_o
     await p.owner.close()
     assert retry.task.cancelled() and not p.owner.states
     assert (await p.prepare())[0][p.field] == p.items
+
+
+async def test_live_nonshrinking_summary_preserves_original_and_rejects_oversized_request(live_owner):
+    from app.context_budget import ContextPressure
+
+    proof = live_owner
+    history = proof.items + [proof.message('assistant', 'new-result ' + 'z' * 10000)]
+    waiting = asyncio.create_task(proof.prepare(history))
+    try:
+        summary = await proof.next()
+        summary.summary = 'not-a-reduction ' + 'y' * proof.limit
+        await proof.settle(summary)
+        with pytest.raises(ContextPressure):
+            await asyncio.wait_for(waiting, 2)
+        state = proof.owner.states[(proof.run['id'], proof.route)]
+        assert not state.projections and not state.pending
+        assert (await proof.prepare())[0][proof.field] == proof.items
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
 
 
 async def test_live_delayed_completion_cannot_remove_replacement_for_the_same_prefix(live_owner):

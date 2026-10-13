@@ -107,6 +107,102 @@ def summary_response(text, finish='stop'):
         'usage': {'prompt_tokens': 100, 'completion_tokens': 3552, 'total_tokens': 3652}})
 
 
+@pytest.mark.parametrize('harness', ['codex', 'deepagents-temporal'])
+@pytest.mark.parametrize('summary_text', ['private-size-regression ' + 'x' * 6598,
+                                         'private-size-regression ' + '界' * 2200],
+                         ids=['incident-sized-ascii', 'multibyte'])
+def test_live_complete_large_summary_recovers_pressure_without_losing_tail(
+        workspace, monkeypatch, harness, summary_text):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app.context_budget import ModelContextLimits, counting_input
+    from app.harness_gateway import HarnessGateway
+
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    entered, release, pressured = (threading.Event() for _ in range(3))
+    owner, summaries, inferences = [], [], []
+    items = [{'role': 'user', 'content': 'Preserve the original task.'}] + [
+        {'role': 'assistant', 'content': f'receipt-{index}: ' + 'x' * 10000} for index in range(16)]
+    tail = [{'role': 'assistant', 'content': 'new-tool-receipt ' + 'z' * 30000},
+            {'role': 'user', 'content': 'Newest correction: do not publish. ' + 'y' * 5000}]
+    original_forward = HarnessGateway.forward
+    original_measure = app.state.context_budget.measure
+
+    async def limits(model):
+        return ModelContextLimits(context_window=250000, max_input_tokens=250000,
+                                  max_output_tokens=81920, default_output_tokens=40960)
+
+    async def forward(self, *args):
+        if not owner:
+            owner.append(self.live_context)
+        return await original_forward(self, *args)
+
+    async def measure(payload, **kwargs):
+        budget = await original_measure(payload, **kwargs)
+        if payload.get('input') == items + tail and budget.input_tokens > budget.input_budget:
+            pressured.set()
+        return budget
+
+    async def upstream(request):
+        body = json.loads(request.content)
+        if request.url.path == '/utils/token_counter':
+            return httpx.Response(503)
+        if request.url.path == '/v1/chat/completions':
+            summaries.append(body)
+            entered.set()
+            while not release.is_set():
+                await asyncio.sleep(.01)
+            return summary_response(summary_text)
+        assert request.url.path == '/v1/responses'
+        if inferences:
+            assert release.is_set()
+            assert body['input'][-len(tail):] == tail
+            assert summary_text in json.dumps(body, ensure_ascii=False)
+        input_tokens = counting_input(body)[1]
+        assert input_tokens <= 188136
+        inferences.append(body)
+        return httpx.Response(200, json={'id': 'response', 'status': 'completed', 'output': [],
+            'usage': {'input_tokens': input_tokens, 'output_tokens': 2, 'total_tokens': input_tokens + 2}})
+
+    actual = httpx.AsyncClient
+    monkeypatch.setattr(app.state.context_budget, 'limits', limits)
+    monkeypatch.setattr(app.state.context_budget, 'measure', measure)
+    monkeypatch.setattr(HarnessGateway, 'forward', forward)
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kwargs: actual(
+        transport=httpx.MockTransport(upstream), **kwargs))
+    store = app.state.store
+    run = store.create_run('task', '', 'modal', [], model='openai/gpt-6-astra', harness=harness)
+    store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    url = f"/broker/{run['id']}/v1/responses"
+    headers = {'Authorization': 'Bearer cap', 'Content-Type': CONTENT_TYPE}
+
+    def exchange(history):
+        return client.post(url, headers=headers,
+                           content=seal('cap', '/v1/responses', json.dumps({'input': history}).encode()))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            assert exchange(items).status_code == 200
+            assert entered.wait(2)
+            waiting = pool.submit(exchange, items + tail)
+            assert pressured.wait(2)
+            assert not waiting.done() and len(inferences) == 1
+            release.set()
+            response = waiting.result(timeout=5)
+            assert response.status_code == 200, response.text
+            assert len(summaries) == 1 and len(inferences) == 2
+            assert 'new-tool-receipt' not in json.dumps(summaries)
+            rows = store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))
+            assert len(rows) == 3 and all(row['status'] == 'completed' for row in rows)
+            assert summary_text not in json.dumps(store.events(run['id']), ensure_ascii=False)
+        finally:
+            release.set()
+            if owner:
+                client.portal.call(owner[0].close)
+
+
 @pytest.mark.parametrize('harness', ['hermes', 'deepagents-temporal'])
 def test_live_http_pressure_wait_survives_idle_sweep_and_preserves_new_tail(workspace, monkeypatch, harness):
     import asyncio
@@ -225,7 +321,7 @@ def private_summary_route(monkeypatch):
         body = await self.read_body(request, route)
         model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
         summary = await self.model_slots.run_maintenance(
-            self.summarize_private(run, request, body['history'], model, body['summary_bytes']))
+            self.summarize_private(run, request, body['history'], model))
         return JSONResponse({'summary': summary})
     monkeypatch.setattr(HarnessGateway, 'forward', forward)
 
@@ -274,7 +370,7 @@ def test_private_summary_waits_unbilled_behind_foreground_and_cancels_cleanly(wo
             foreground = pool.submit(client.post, url + '/v1/responses', headers=headers, json={'input': 'Current task'})
             assert entered.wait(2)
             summary = pool.submit(client.post, url + '/context/compact', headers=headers,
-                json={'history': ['Private original prefix'], 'summary_bytes': 1024})
+                json={'history': ['Private original prefix']})
             assert queued.wait(2) and not summary.done()
             assert len(calls) == db.run(run['id'])['model_calls'] == len(db.rows('SELECT * FROM model_requests')) == 1
             if cancel:
@@ -292,17 +388,18 @@ def test_private_summary_waits_unbilled_behind_foreground_and_cancels_cleanly(wo
             release.set()
 
 
-@pytest.mark.parametrize('history,budget', [(None, 1024), ([], 1024), ([{}], 1024),
-    (['x' * (5 * 1024 * 1024)], 1024), (['\ud800'], 1024), (['ok'], True), (['ok'], 0), (['ok'], -1)])
-def test_private_summary_rejects_invalid_complete_prefix(history, budget):
+@pytest.mark.parametrize('history', [None, [], [{}], ['x' * (5 * 1024 * 1024)], ['\ud800']])
+def test_private_summary_rejects_invalid_complete_prefix(history):
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as error:
-        private_compaction_payload(history, 'selected-model', budget)
+        private_compaction_payload(history, 'selected-model')
     assert error.value.status_code == 422
 
 
-@pytest.mark.parametrize('outcome', ['complete', 'retry', 'failed', 'refused', 'input-budget', 'provider-context', 'limit', 'default-model'])
+@pytest.mark.parametrize('outcome', ['complete', 'retry', 'failed', 'refused', 'oversized',
+                                   'input-budget', 'provider-context', 'limit', 'default-model'])
 def test_private_summary_is_complete_scoped_tool_free_and_accounted(workspace, monkeypatch, outcome):
+    from sandbox.broker_transport import MAX_BODY
     app, client = workspace
     private_summary_route(monkeypatch)
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
@@ -340,20 +437,23 @@ def test_private_summary_is_complete_scoped_tool_free_and_accounted(workspace, m
         assert set(body) == {'model', 'stream', 'messages'} and not body['stream']
         assert body['model'] == 'openai/gpt-6-astra'
         assert json.loads(body['messages'][1]['content']) == history
+        assert 'UTF-8 bytes' not in body['messages'][0]['content']
         if outcome == 'provider-context':
             return httpx.Response(400, json={'error': {'code': 'context_length_exceeded'}})
         if outcome == 'refused': return summary_response('', 'content_filter')
-        if outcome == 'failed': return summary_response('private-summary-marker' * 100)
+        if outcome == 'failed': return summary_response('private-summary-marker', 'length')
+        if outcome == 'oversized': return summary_response('x' * (MAX_BODY + 1))
         if outcome == 'retry' and len(requests) == 1: return summary_response('private-partial-marker', 'length')
         return summary_response(summary)
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
     url = f"/broker/{run['id']}/context/compact"
-    body = {'history': history, 'summary_bytes': 1024}
+    body = {'history': history}
     assert client.post(url, json=body).status_code == 401
     response = client.post(url, headers={'Authorization': 'Bearer cap'}, json=body)
-    expected = {'complete': 1, 'retry': 2, 'failed': 3, 'refused': 1, 'provider-context': 1, 'default-model': 1,
+    expected = {'complete': 1, 'retry': 2, 'failed': 3, 'refused': 1, 'oversized': 3,
+                'provider-context': 1, 'default-model': 1,
                 'input-budget': 0, 'limit': 0}[outcome]
     succeeded = outcome in {'complete', 'retry', 'default-model'}
     assert len(requests) == expected
@@ -369,9 +469,29 @@ def test_private_summary_is_complete_scoped_tool_free_and_accounted(workspace, m
     assert not app.state.store.rows('SELECT * FROM context_jobs')
     persisted = json.dumps([rows, traces, app.state.store.messages(run['id']), app.state.store.events(run['id'])])
     assert all(marker not in persisted for marker in ['private-native-prefix-marker', 'private-summary-marker', 'private-partial-marker'])
+    reason = {'retry': 'incomplete_output', 'failed': 'incomplete_output', 'refused': 'refused',
+              'oversized': 'summary_too_large', 'provider-context': 'summary_input_too_large'}.get(outcome)
+    if reason:
+        failed_errors = [metadata['error'] for _, metadata in traces if metadata.get('error')]
+        assert failed_errors and all(error['compaction_reason'] == reason for error in failed_errors)
     app.state.store.update_run(run['id'], status='cancelled', token_hash='')
     assert client.post(url, headers={'Authorization': 'Bearer cap'}, json=body).status_code == 401
     assert len(requests) == expected
+
+
+@pytest.mark.parametrize('reason', ['incomplete_output', 'summary_too_large', 'refused', 'private-provider-body'])
+def test_summary_failure_diagnostics_retain_only_known_reasons(reason):
+    from app.broker_diagnostics import model_error
+    from app.context_compaction import SummaryFailure
+    from app.tracing import AgentTracing
+
+    attributes = AgentTracing.error_attributes(model_error(SummaryFailure(reason)))
+    if reason == 'private-provider-body':
+        assert 'moyai.error.compaction_reason' not in attributes
+        assert reason not in json.dumps(attributes)
+    else:
+        assert attributes['moyai.error.compaction_reason'] == reason
+        assert reason in attributes['error.message']
 
 
 @pytest.mark.parametrize('change', ['token_hash', 'active_message_id', 'active_user_id', 'active_model', 'model'])
@@ -411,7 +531,7 @@ def test_inference_rechecks_origin_after_await(workspace, monkeypatch, change, b
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(lambda request: pytest.fail('Stale prefix inferred')), **kw))
-    body = ({'history': ['private-native-prefix-marker'], 'summary_bytes': 1024} if private else
+    body = ({'history': ['private-native-prefix-marker']} if private else
             {'input' if route == 'v1/responses' else 'messages': [{'role': 'user', 'content': 'Current task'}]})
     response = client.post(f"/broker/{run['id']}/{route}", headers={'Authorization': 'Bearer cap'}, json=body)
     assert response.status_code == (401 if change == 'token_hash' else 409)

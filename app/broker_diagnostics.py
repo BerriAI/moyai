@@ -60,6 +60,7 @@ def model_error(exc=None, *, stage='upstream', status=None, headers=None, code='
         'http_status': status or getattr(exc, 'status_code', None),
         'upstream_status': http_status(headers.get('x-moyai-upstream-status')),
         'exception_type': type(exc).__name__ if exc is not None else None,
+        'compaction_reason': getattr(exc, 'reason', None),
         'cause_type': type(exc.__cause__).__name__ if exc is not None and exc.__cause__ is not None else None,
         'request_ids': request_ids(headers)})
 

@@ -23,6 +23,11 @@ ERROR_CODES = {
     'max_output_tokens', 'content_filter', 'stream_incomplete', 'cancelled', 'unknown',
 }
 ERROR_STAGES = {'validation', 'context_preparation', 'admission', 'upstream', 'stream'}
+COMPACTION_REASONS = {
+    'invalid_response', 'refused', 'incomplete_output', 'unexpected_tool_call',
+    'incomplete_response', 'empty_summary', 'summary_too_large', 'summary_input_too_large',
+    'upstream_unavailable', 'upstream_rejected', 'gateway_unreachable',
+}
 CLAUDE_ERRORS = {'authentication_failed', 'billing_error', 'rate_limit', 'invalid_request', 'server_error', 'unknown'}
 
 CODEX_ERRORS = {
@@ -43,6 +48,7 @@ def safe_error(data):
     """One additive, body-free projection for traces, events and diagnostics."""
     result = {}
     for key, values in {'error_code': ERROR_CODES, 'stage': ERROR_STAGES, 'sdk_error': CLAUDE_ERRORS,
+                        'compaction_reason': COMPACTION_REASONS,
                         'route': BROKER_ROUTES, 'code': CODEX_ERRORS, 'native_status': CLAUDE_RESULTS,
                         'terminal_reason': CLAUDE_TERMINAL_REASONS}.items():
         if isinstance(data.get(key), str) and data[key] in values:
@@ -110,7 +116,7 @@ def error_summary(data, *, technical=True):
         return reason + (' (HTTP ' + str(data['http_status']) + ')' if data.get('http_status') else '') + '.'
     facts = [value for value in (code if code != 'unknown' else '', data.get('sdk_error'),
                                  data.get('code'), data.get('native_status'), data.get('terminal_reason'),
-                                 data.get('exception_type'), data.get('stage')) if value]
+                                 data.get('exception_type'), data.get('compaction_reason'), data.get('stage')) if value]
     if data.get('http_status'):
         facts.append('HTTP ' + str(data['http_status']))
     return reason + (' (' + '; '.join(facts) + ')' if facts else ' (cause unavailable)') + '.'

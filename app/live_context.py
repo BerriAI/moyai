@@ -265,9 +265,9 @@ class LiveContext:
         return state
 
     async def generate(self, state: State, captured: Prefix, run: dict, request,
-                       route: str, model: str, summary_bytes: int) -> None:
+                       route: str, model: str) -> None:
         try:
-            text = await self.gateway.summarize_private(run, request, captured.history, model, summary_bytes)
+            text = await self.gateway.summarize_private(run, request, captured.history, model)
             current = self.gateway.require_run(run['id'], request)
             current_model = self.gateway.settings.resolve_model(fallback=current['active_model'] or current['model'])
             if (self.closed or self.scope(current, current_model) != state.scope
@@ -343,7 +343,7 @@ class LiveContext:
                         and (state.rejected.get(captured.hashes, 0) <= time.monotonic() or pressured and attempt == 0)
                         and len(state.pending) < MAX_PENDING and len(self.tasks) < MAX_TASKS and not self.closed):
                     task = self.gateway.model_slots.run_maintenance(self.generate(state, captured, run, request,
-                        route, payload['model'], max(512, min(6000, budget.input_budget // 12))))
+                        route, payload['model']))
                     state.pending[captured.hashes] = task
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
