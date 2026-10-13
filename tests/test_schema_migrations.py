@@ -364,6 +364,33 @@ def test_schema_initializers_have_a_versioned_manifest():
         'Schema changed. Increment SCHEMA_REVISION and append its source digest to app/schema_versions.json: ' + signature)
 
 
+def test_publication_upgrade_preserves_legacy_receipt_without_inventing_intent(split_settings):
+    api = main.create_app(split_settings)
+    store = api.state.store
+    receipt = '{"number":12,"repository_id":101,"branch":"moyai/legacy","commit":"' + 'a' * 40 + '"}'
+    store.execute('''INSERT INTO github_publications
+        (id,run_id,message_id,arguments_hash,branch,commit_sha,result,connection_version,created_at)
+        VALUES(?,?,0,?,?,?,?,?,?)''', ('legacy', 'historical-run', 'historical-hash', 'moyai/legacy',
+                                    'a' * 40, receipt, 'old-connection', 'before-upgrade'))
+    saved = store.rows('SELECT * FROM github_publications')
+    for table in ('github_publication_effects', 'github_publication_intents', 'github_owned_branches'):
+        store.execute('DROP TABLE ' + table)
+    store.close()
+    settings = ready(split_settings)
+    replacement = main.create_app(settings)
+    try:
+        store = replacement.state.store
+        assert store.rows('SELECT * FROM github_publications') == saved
+        assert not store.rows('SELECT * FROM github_publication_intents')
+        assert not store.rows('SELECT * FROM github_owned_branches')
+        claim = "INSERT INTO github_publication_effects(publication_id,effect) VALUES('operation','branch') ON CONFLICT DO NOTHING"
+        assert store.execute(claim) == 1
+        assert store.execute(claim) == 0
+        assert store.rows('SELECT response FROM github_publication_effects') == [{'response': ''}]
+    finally:
+        replacement.state.store.close()
+
+
 def test_opt_in_preserves_existing_data_keys_and_runtime_policy(split_settings):
     api = main.create_app(split_settings)
     store = api.state.store

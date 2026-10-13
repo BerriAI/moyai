@@ -1,8 +1,11 @@
 import copy
+import asyncio
+import hashlib
 
 import pytest
 
-from app.github import GitHub
+from app.github import GitHub, Publish
+from app.connector_errors import ConnectorError
 from test_github import GitHubAPI, PAYLOAD, connected
 from test_workspace import workspace
 
@@ -71,3 +74,21 @@ def test_legacy_incomplete_publication_migration_is_conservative(workspace):
         store.execute('INSERT INTO github_publications VALUES(?,?,1,?,?,?,?,?,?)',(identity,'run','hash','branch',commit,result,'connection','now'))
     GitHub(store, app.state.security, app.state.settings, app.state.connectors)
     assert {r['id']:r['attempted'] for r in store.rows('SELECT * FROM github_publications')} == {'unsent':0,'uncertain':1,'done':0}
+
+
+@pytest.mark.parametrize('commit', ['', 'd' * 40])
+def test_legacy_unfinished_row_cannot_invent_frozen_base(workspace, monkeypatch, commit):
+    app, _ = workspace
+    run_id, _ = connected(app)
+    github = app.state.connectors.github
+    api = GitHubAPI(github, monkeypatch)
+    args = Publish.model_validate(PAYLOAD)
+    identity = hashlib.sha256(f'{run_id}:{args.request_key}'.encode()).hexdigest()
+    app.state.store.execute('''INSERT INTO github_publications
+        (id,run_id,message_id,arguments_hash,branch,commit_sha,connection_version,created_at)
+        VALUES(?,?,0,?,?,?,?,?)''', (identity, run_id, github.arguments_hash(args, 101),
+        f'moyai/{run_id[:12]}/{identity[:16]}', commit, github.connection_version(), 'before-upgrade'))
+    with pytest.raises(ConnectorError, match='frozen repository and base'):
+        asyncio.run(github.publish(app.state.store.run(run_id), args))
+    assert all(method == 'GET' for method, _, _ in api.calls)
+    assert not app.state.store.rows('SELECT * FROM github_publication_intents')

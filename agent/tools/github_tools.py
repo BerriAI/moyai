@@ -10,6 +10,11 @@ import subprocess
 ROOT = Path('/workspace')
 from sandbox.access_transport import git_environment
 from agent.github_paths import publishable_path
+from agent.github_refs import validate_branch_name, validate_checkout_ref
+
+PUBLICATION_TOOLS = frozenset({'github_create_pull_request', 'github_update_pull_request',
+                               'github_publish_branch', 'github_rebase_pull_request'})
+LOCAL_TOOLS = PUBLICATION_TOOLS | {'github_checkout'}
 
 
 class GitHubToolError(ValueError):
@@ -51,12 +56,21 @@ def metadata(directory):
     return data
 
 
-def checkout(broker, remote, token, directory='', repository='', number=None, repository_id=None, *, env=None):
+def checkout(broker, remote, token, directory='', repository='', number=None, repository_id=None, ref=None, *, env=None):
+    if number is not None and ref is not None:
+        raise GitHubToolError('Choose a PR number or a source ref, not both.')
+    if ref is not None:
+        try:
+            ref = validate_checkout_ref(ref)
+        except ValueError:
+            raise GitHubToolError('Choose a valid branch or full commit SHA as the source ref.') from None
     arguments = {'repository': repository} if repository else {}
     if repository_id is not None:
         arguments['repository_id'] = repository_id
     if number is not None:
         arguments['number'] = number
+    if ref:
+        arguments['ref'] = ref
     repo = broker('/tools/call', {'name': 'github_checkout', 'arguments': arguments})
     if repo.get('error'):
         return repo
@@ -77,6 +91,8 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
                 raise GitHubToolError('This directory belongs to another repository. Choose an empty directory.')
             if number is not None and (data.get('number') != number or data['base_sha'] != repo['base_sha']):
                 raise GitHubToolError('Choose a fresh directory to check out the current PR head; local files were preserved.')
+            if ref and (data.get('ref') != ref or data['base_sha'] != repo['base_sha']):
+                raise GitHubToolError('Choose a fresh directory to check out this source ref; local files were preserved.')
             git(target, 'cat-file', '-e', data['base_sha'] + '^{commit}')
             data['repository'] = repo['repository']
             (target / '.git/moyai.json').write_text(json.dumps(data))
@@ -84,8 +100,8 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
             return {**data, 'directory': str(target), 'reused': True, 'instruction': 'Existing files and local changes were preserved.'}
         if not (target / '.git').is_dir() or (target / '.git').is_symlink():
             raise GitHubToolError('The destination already exists. Choose an empty directory; files will not be overwritten.')
-        if number is not None:
-            raise GitHubToolError('Choose a fresh directory for a PR checkout; local files were preserved.')
+        if number is not None or ref:
+            raise GitHubToolError('Choose a fresh directory for a PR or source-ref checkout; local files were preserved.')
         origin = git(target, 'remote', 'get-url', 'origin').decode().strip().removesuffix('.git')
         if origin.lower() != canonical.removesuffix('.git').lower():
             if not origin.startswith('https://github.com/'):
@@ -97,7 +113,7 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
     else:
         # Capability is sent in a temporary environment, never in argv, URL or Git config.
         env = env if env is not None else git_environment(remote, token)
-        if number is not None:
+        if number is not None or ref:
             target.mkdir()
             git(target, 'init')
             git(target, 'remote', 'add', 'origin', canonical)
@@ -109,17 +125,24 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
                 '--', remote.rstrip('/') + git_path, str(target), env=env)
         git(target, 'remote', 'set-url', 'origin', canonical)
         base = git(target, 'rev-parse', 'HEAD').decode().strip()
-    data = {'repository_id': repo['repository_id'], 'repository': repo['repository'], 'base_sha': base, 'default_branch': repo['default_branch']}
+        if (number is not None or ref) and base != repo['base_sha']:
+            raise GitHubToolError('The source ref changed during checkout. Choose a fresh directory and inspect the current revision.')
+    data = {'repository_id': repo['repository_id'], 'repository': repo['repository'], 'base_sha': base,
+            'default_branch': repo['default_branch'], 'base_branch': repo.get('base_branch', repo['default_branch'])}
+    if repo.get('checkout_ref'):
+        data['checkout_ref'] = repo['checkout_ref']
+    if ref:
+        data['ref'] = ref
     if number is not None:
         data['number'] = number
     (target / '.git/moyai.json').write_text(json.dumps(data))
     return {**data, 'directory': str(target), 'reused': False,
             'instruction': ('Use github_update_pull_request to publish follow-up edits to this PR. An external PR requires explicit requester approval through github_request_pull_request_write_access for this saved chat.' if number is not None else
-                            'Use github_create_pull_request to publish actual files as a normal PR without an administrator approval step.')
+                            'Use github_create_pull_request to publish actual files as a normal PR without an administrator approval step, or github_publish_branch to publish without a PR.')
                            + ' Git push is unavailable.'}
 
 
-def collect(directory, title, body, request_key):
+def collect(directory, title, body, request_key, *, allow_empty=False):
     target = directory_path(directory)
     data = metadata(target)
     raw = git(target, 'diff', '--no-ext-diff', '--no-renames', '--name-only', '-z', data['base_sha'], '--')
@@ -135,7 +158,7 @@ def collect(directory, title, body, request_key):
         if entry:
             info, name = entry.split(b'\t', 1)
             base_entries[name] = info.decode().split()
-    if not paths:
+    if not paths and not allow_empty:
         raise GitHubToolError('There are no changed files to publish.')
     files = []
     for name in paths:
@@ -170,7 +193,7 @@ def collect(directory, title, body, request_key):
             content = base64.b64encode(raw).decode()
             encoding = {'encoding': 'base64'}
         files.append({'path': name, 'content': content, 'executable': bool(mode & 0o111), **encoding})
-    if not files:
+    if not files and not allow_empty:
         raise GitHubToolError('There are no changed files to publish.')
     return {**({'repository_id': data['repository_id']} if data.get('repository_id') else {'repository': data['repository']}), 'base_sha': data['base_sha'], 'request_key': request_key,
             'title': title, 'body': body, 'files': files}
@@ -179,25 +202,48 @@ def collect(directory, title, body, request_key):
 def advertised_tools(tools):
     result = []
     for tool in tools:
-        if tool['name'] in {'github_checkout', 'github_create_pull_request', 'github_update_pull_request'}:
+        if tool['name'] in LOCAL_TOOLS:
             properties = {'directory': {'type': 'string', 'description': 'Repository directory inside /workspace; defaults to /workspace/repo.'}}
             required = []
             if tool['name'] == 'github_checkout':
                 properties['repository_id'] = {'type': 'integer', 'minimum': 1, 'description': 'Permanent ID from github_repositories. Preferred over a repository name.'}
                 properties['repository'] = {'type': 'string', 'description': 'Allowed owner/repository, such as BerriAI/moyai. Use github_repositories to list choices; defaults to the session repository.'}
                 properties['number'] = {'type': 'integer', 'minimum': 1, 'description': 'Optional PR number; use a fresh directory to check out its current head.'}
-            if tool['name'] in {'github_create_pull_request', 'github_update_pull_request'}:
+                properties['ref'] = {'type': 'string', 'minLength': 1, 'maxLength': 1024,
+                                     'description': 'Optional branch or full commit SHA; mutually exclusive with number. Use a fresh directory.'}
+            if tool['name'] in PUBLICATION_TOOLS:
                 properties.update({
                     'title': {'type': 'string', 'minLength': 3, 'maxLength': 250},
                     'body': {'type': 'string', 'minLength': 1, 'maxLength': 20000},
                     'request_key': {'type': 'string', 'pattern': '^[A-Za-z0-9_-]{8,80}$',
                                     'description': 'Unique name for this publication. Keep unchanged to recover an uncertain result; never retry writes automatically.'}})
                 required = ['title', 'body', 'request_key']
-                if tool['name'] == 'github_update_pull_request':
+                if tool['name'] in {'github_update_pull_request', 'github_rebase_pull_request'}:
                     properties.pop('body')
                     properties['number'] = {'type': 'integer', 'minimum': 1}
                     required = ['title', 'number', 'request_key']
+                    if tool['name'] == 'github_rebase_pull_request':
+                        properties['directory']['description'] = (
+                            'Fresh checkout of the current PR target base branch or full SHA, with feature edits reapplied; '
+                            'do not use a checkout of the old PR head.')
+                        properties['expected_head_sha'] = {'type': 'string', 'pattern': '^[0-9a-f]{40}$',
+                                                           'description': 'Exact old PR head SHA being replaced; distinct from the checkout base SHA.'}
+                        required += ['directory', 'expected_head_sha']
+                elif tool['name'] == 'github_publish_branch':
+                    properties.pop('body')
+                    properties['branch'] = {'type': 'string', 'minLength': 1, 'maxLength': 1024,
+                                            'description': 'Destination branch; never publishes a pull request.'}
+                    properties['expected_head_sha'] = {'type': 'string', 'pattern': '^[0-9a-f]{40}$',
+                                                       'description': 'Current remote head required when updating an owned branch.'}
+                    required = ['title', 'branch', 'request_key']
+                else:
+                    properties['base_branch'] = {'type': 'string', 'minLength': 1, 'maxLength': 1024,
+                                                 'description': 'Optional PR base branch; omission preserves default-branch publication.'}
+                    properties['head_branch'] = {'type': 'string', 'minLength': 1, 'maxLength': 1024,
+                                                 'description': 'Optional new PR head branch; existing foreign branches cannot be overwritten.'}
             tool = {**tool, 'inputSchema': {'type': 'object', 'properties': properties, 'required': required, 'additionalProperties': False}}
+            if tool['name'] == 'github_checkout':
+                tool['inputSchema']['not'] = {'required': ['number', 'ref']}
         result.append(tool)
     return result
 
@@ -208,33 +254,79 @@ def call(name, args, broker, remote, token, *, relay=None):
         remote, token = relay.url, relay.token
         options['env'] = relay.git_environment()
     if name == 'github_checkout':
-        if set(args) - {'directory', 'repository', 'repository_id', 'number'}:
-            raise GitHubToolError('Checkout accepts only a directory, repository and optional PR number.')
+        if set(args) - {'directory', 'repository', 'repository_id', 'number', 'ref'}:
+            raise GitHubToolError('Checkout accepts only a directory, repository and optional PR number or source ref.')
         return checkout(broker, remote, token, **args, **options)
-    if name in {'github_create_pull_request', 'github_update_pull_request'}:
-        payload = collect(directory=args.get('directory', ''), title=args['title'], body=args.get('body', ''), request_key=args['request_key'])
-        if name == 'github_update_pull_request':
+    if name in PUBLICATION_TOOLS:
+        fields = ('branch',) if name == 'github_publish_branch' else (
+            ('base_branch', 'head_branch') if name == 'github_create_pull_request' else ())
+        try:
+            branches = {field: validate_branch_name(args[field]) for field in fields if field in args}
+        except ValueError as exc:
+            raise GitHubToolError(str(exc)) from None
+        payload = collect(directory=args.get('directory', ''), title=args['title'], body=args.get('body', ''),
+                          request_key=args['request_key'], allow_empty=name == 'github_rebase_pull_request')
+        if name in {'github_update_pull_request', 'github_rebase_pull_request'}:
             payload.pop('body')
             payload['number'] = args['number']
+            if name == 'github_rebase_pull_request':
+                if type(payload.get('repository_id')) is not int or payload['repository_id'] <= 0:
+                    raise GitHubToolError('Use github_checkout to confirm the repository ID before rebasing a PR.')
+                payload['expected_head_sha'] = args['expected_head_sha']
+        elif name == 'github_publish_branch':
+            if type(payload.get('repository_id')) is not int or payload['repository_id'] <= 0:
+                raise GitHubToolError('Use github_checkout to confirm the repository ID before publishing a branch.')
+            payload.pop('body')
+            payload['branch'] = branches['branch']
+            if 'expected_head_sha' in args:
+                payload['expected_head_sha'] = args['expected_head_sha']
+        else:
+            payload.update(branches)
         result = broker('/tools/call', {'name': name, 'arguments': payload})
         if result.get('commit') and not result.get('error'):
             target = directory_path(args.get('directory', ''))
             try:
                 sync_publication(target, result, remote, token, **options)
             except (ValueError, OSError):
-                result = {**result, 'checkout_warning': 'Publication succeeded, but local base synchronization failed. Recover with github_checkout using this PR number in a fresh directory before further edits.'}
+                source = 'this branch as ref' if result.get('kind') == 'branch' else 'this PR number'
+                result = {**result, 'checkout_warning': 'Publication succeeded, but local base synchronization failed. '
+                          f'Recover with github_checkout using {source} in a fresh directory before further edits.'}
         return result
     raise GitHubToolError('Unknown local GitHub tool.')
 
 
 def sync_publication(target, result, remote, token, *, env=None):
     data = metadata(target)
-    if not re.fullmatch(r'[0-9a-f]{40}', result.get('commit', '')) or not result.get('repository_id') or (data.get('repository_id') and result['repository_id'] != data['repository_id']):
+    if (not isinstance(result.get('commit'), str) or not re.fullmatch(r'[0-9a-f]{40}', result['commit'])
+            or type(result.get('repository_id')) is not int or result['repository_id'] <= 0
+            or not isinstance(result.get('repository'), str) or not result['repository']
+            or (data.get('repository_id') and result['repository_id'] != data['repository_id'])):
         raise GitHubToolError('Invalid publication receipt.')
+    branch_only = result.get('kind') == 'branch'
+    if branch_only:
+        if not isinstance(result.get('branch'), str) or not isinstance(result.get('base_branch'), str):
+            raise GitHubToolError('Invalid branch publication receipt.')
+        try:
+            checkout_ref = 'refs/heads/' + validate_branch_name(result['branch'])
+        except ValueError:
+            raise GitHubToolError('Invalid branch publication receipt.') from None
+    else:
+        if type(result.get('number')) is not int or result['number'] <= 0:
+            raise GitHubToolError('Invalid PR publication receipt.')
+        checkout_ref = result['commit']
     env = env if env is not None else git_environment(remote, token)
     git(target, 'fetch', '--no-tags', '--', remote.rstrip('/') + f"/github/repositories/{result['repository_id']}.git",
-        result['commit'], env=env)
-    data.update(base_sha=result['commit'], number=result['number'], repository_id=result['repository_id'], repository=result['repository'])
+        checkout_ref, env=env)
+    if git(target, 'rev-parse', 'FETCH_HEAD').decode().strip() != result['commit']:
+        raise GitHubToolError('The published branch changed before local synchronization. Recover its current head in a fresh directory.')
+    data.update(base_sha=result['commit'], repository_id=result['repository_id'], repository=result['repository'])
+    if branch_only:
+        data.pop('number', None)
+        data.update(branch=result['branch'], ref=result['branch'], checkout_ref=checkout_ref, base_branch=result['base_branch'])
+    else:
+        data['number'] = result['number']
+        if 'base_branch' in result:
+            data['base_branch'] = result['base_branch']
     path = target / '.git/moyai.json'
     temporary = path.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(data))

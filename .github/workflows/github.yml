@@ -1,0 +1,67 @@
+name: GitHub developer workflows
+on:
+  pull_request:
+    paths:
+      - 'app/github*.py'
+      - 'app/connectors.py'
+      - 'app/runtime_compatibility.py'
+      - 'app/schema_migrations.py'
+      - 'app/schema_versions.json'
+      - 'agent/github*.py'
+      - 'agent/tools/github_tools.py'
+      - 'agent/tools/mcp_bridge.py'
+      - 'agent/tools/remote_computer.py'
+      - 'agent/skills/coding/SKILL.md'
+      - 'tests/test_github*.py'
+      - 'tests/test_access_transport.py'
+      - 'tests/test_workspace.py'
+      - 'scripts/github_coding_fixture.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/github.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  github:
+    name: GitHub (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-github-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-github-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify complete GitHub and sandbox adapter surface
+        if: matrix.backend == 'sqlite'
+        run: >-
+          uv run --frozen --python 3.13 pytest -q --tb=line
+          tests/test_github*.py tests/test_access_transport.py
+          tests/test_workspace.py::test_every_broker_tool_has_an_audited_replay_classification
+      - name: Verify durable publication and authority on PostgreSQL
+        if: matrix.backend == 'postgres'
+        run: >-
+          uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=line
+          tests/test_github.py tests/test_github_followups.py
+          tests/test_github_recovery.py tests/test_github_write_access.py
+          tests/test_github_coding.py tests/test_github_stacks.py
+          -k 'rebase or publication_intent or selected_base or frozen or branch_only or owned_branch or lost_ref_creation or saved_create_ack or retarget or stack or concurrent or two_brokers or initial_branch_policy'

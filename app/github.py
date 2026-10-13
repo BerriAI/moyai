@@ -19,12 +19,16 @@ import jwt
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 from agent.github_paths import publishable_path
+from agent.github_refs import validate_branch_name, validate_checkout_ref
 from .connector_errors import ConnectorError
 from .db import now
 from .github_repositories import GitHubRepositories
 from .github_write_access import GitHubWriteAccess
+from .github_publications import GitHubPublications
+from .github_request_policy import validate_request
 from .github_ci import GitHubCI
 from .github_coding import GitHubCoding, TOOLS as CODING_TOOLS, SCOPES as CODING_SCOPES
+from .github_stacks import GitHubStacks, TOOLS as STACK_TOOLS
 from .repository_context import RepositoryContext, TOOLS as CONTEXT_TOOLS
 
 API = 'https://api.github.com'
@@ -117,6 +121,15 @@ class RulesetReviewers(Ruleset):
 
 class Checkout(Repository):
     number: int | None = Field(default=None, ge=1, description="Optional PR number to check out its head in a fresh directory.")
+    ref: str = Field(default='', max_length=1024)
+
+    @model_validator(mode='after')
+    def checkout_source(self):
+        if self.number and self.ref:
+            raise ValueError('Choose a PR number or a ref, not both.')
+        if self.ref:
+            validate_checkout_ref(self.ref)
+        return self
 
 
 class Feedback(PullRequest):
@@ -189,6 +202,23 @@ class Publish(Repository):
     title: str = Field(min_length=3, max_length=250)
     body: str = Field(min_length=1)
     files: list[Change] = Field(min_length=1)
+    base_branch: str = Field(default='', max_length=1024)
+    head_branch: str = Field(default='', max_length=1024)
+
+    @model_serializer(mode='wrap')
+    def compatible_publication(self, handler):
+        value = handler(self)
+        for field in ('base_branch', 'head_branch'):
+            if not value[field]:
+                value.pop(field)
+        return value
+
+    @field_validator('base_branch', 'head_branch')
+    @classmethod
+    def selected_branch(cls, value):
+        if value:
+            validate_branch_name(value)
+        return value
 
     @model_validator(mode='after')
     def bounded_changes(self):
@@ -200,6 +230,54 @@ class Update(Changes):
     title: str = Field(min_length=3, max_length=250, description="Commit message for these follow-up changes.")
 
 
+class Rebase(Changes):
+    repository_id: int = Field(gt=0, strict=True)
+    number: int = Field(gt=0, strict=True)
+    expected_head_sha: str = Field(pattern='^' + SHA + '$')
+    title: str = Field(min_length=3, max_length=250)
+    files: list[Change] = Field(description='Prepared changes relative to the target base; [] creates an empty replacement commit.')
+
+    @field_validator('base_sha', 'expected_head_sha')
+    @classmethod
+    def existing_commit(cls, value):
+        if value == '0' * 40:
+            raise ValueError('A rebase requires existing nonzero base and head commits.')
+        return value
+
+
+class CreateBranch(Repository):
+    repository_id: int = Field(gt=0, strict=True)
+    branch: str = Field(min_length=1, max_length=1024)
+    source_sha: str = Field(pattern='^' + SHA + '$')
+    request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
+
+    @field_validator('branch')
+    @classmethod
+    def selected_branch(cls, value):
+        return validate_branch_name(value)
+
+
+class PublishBranch(Changes):
+    repository_id: int = Field(gt=0, strict=True)
+    branch: str = Field(min_length=1, max_length=1024)
+    title: str = Field(min_length=3, max_length=250)
+    expected_head_sha: str = Field(default='', pattern='^(?:' + SHA + ')?$')
+
+    _branch = field_validator('branch')(validate_branch_name)
+
+
+class OpenPullRequest(Repository):
+    repository_id: int = Field(gt=0, strict=True)
+    base_branch: str = Field(min_length=1, max_length=1024)
+    head_branch: str = Field(min_length=1, max_length=1024)
+    expected_head_sha: str = Field(pattern='^' + SHA + '$')
+    title: str = Field(min_length=3, max_length=250)
+    body: str = Field(min_length=1)
+    request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
+
+    _branches = field_validator('base_branch', 'head_branch')(validate_branch_name)
+
+
 def workflow_changes(args):
     """Workflow edits/deletions need extra GitHub scope; composite actions do not."""
     return any(change.path.lower().startswith('.github/workflows/') for change in args.files)
@@ -208,6 +286,7 @@ def workflow_changes(args):
 TOOLS = {
     **CONTEXT_TOOLS,
     **CODING_TOOLS,
+    **STACK_TOOLS,
     'github_ci_checks': ('github', False, CIChecks, 'Read check runs and commit statuses for an exact PR head SHA from github_pull_request. Follow next_page until null; an empty list does not mean CI passed. No writes.'),
     'github_workflow_runs': ('github', False, WorkflowRuns, 'List GitHub Actions workflow runs, optionally filtered by exact head_sha or branch. Follow next_page until null. Returns run IDs for github_workflow_jobs. No reruns or cancellation.'),
     'github_workflow_jobs': ('github', False, WorkflowJobs, 'Read jobs and step conclusions for the latest attempt of one workflow run. Follow next_page until null. Use job IDs with github_job_logs. No writes.'),
@@ -218,16 +297,20 @@ TOOLS = {
     'github_update_ruleset_reviewers': ('github', True, RulesetReviewers, 'Change required reviewing teams/file patterns in one repository branch ruleset when requested by the user. Read github_ruleset first and pass its revision. Preserves approval count, code owner review, status checks and all other rules/settings. Requires GitHub Administration write access. Cannot edit inherited organization rulesets. On an uncertain result, read the ruleset before retrying; never retry blindly.'),
     'github_repositories': ('github', False, Args, 'List the repositories enabled for the shared organization GitHub connection. Pass an entry’s id as repository_id in checkout and PR tools. Names are display labels.'),
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
-    'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. To continue an existing Moyai PR from any chat, pass its number and use a fresh directory. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
-    'github_pull_request': ('github', False, ReadPullRequest, 'Read the complete pull request description and a page of provider-supplied file patches. Follow next_arguments for every file page at the same head/base revisions. Missing patches and provider file limits are explicit; use github_checkout and verify the head for complete local diffs. Cannot approve, review, merge or enable auto-merge.'),
-    'github_create_pull_request': ('github', True, Publish, 'Publish local text and binary changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. Workflow files require Workflows write permission on the selected installation. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change credential/access-control files, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
-    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text and binary changes to an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
+    'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository using read-only Git access. Optionally select a branch/full commit SHA with ref, or an existing PR with number, never both. Use a fresh directory. Returns the immutable repository ID, checkout_ref and selected base_branch. Never grants a GitHub credential or push access.'),
+    'github_pull_request': ('github', False, ReadPullRequest, 'Read the complete pull request description and a page of provider-supplied file patches. Follow next_arguments for every file page at the same head/base revisions. Missing patches and provider file limits are explicit; use github_checkout and verify the head for complete local diffs. Cannot approve, merge or enable auto-merge.'),
+    'github_create_pull_request': ('github', True, Publish, 'Publish local text and binary changes to a new branch and open a regular ready-for-review PR. Optional base_branch selects its base; head_branch names a new non-default head permitted by verified branch-creation policy and never overwrites an existing branch. Omitted fields retain default-base/generated-head behavior. Workflow files require Workflows write permission. Use github_update_pull_request for later edits. Cannot change credential/access-control files, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
+    'github_create_branch': ('github', True, CreateBranch, 'Create a new non-default branch from a verified exact commit after checking classic and ruleset creation policy in the selected repository. Never overwrites an existing branch or opens a PR. Creation does not grant permission to update a protected branch.'),
+    'github_publish_branch': ('github', True, PublishBranch, 'Publish local files without opening a PR. New refs require verified branch-creation policy. Updates require a confirmed Moyai-owned branch and its exact expected_head_sha. Never updates default/protected branches or force pushes.'),
+    'github_open_pull_request': ('github', True, OpenPullRequest, 'Open a regular ready-for-review PR from an existing exact head to a selected base. Does not grant write ownership of that head branch.'),
+    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text and binary changes to an open PR with a confirmed Moyai-owned head branch or explicit requester approval for this exact PR/chat via github_request_pull_request_write_access. Opening a PR alone does not grant branch ownership. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, default/protected branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result.'),
+    'github_rebase_pull_request': ('github', True, Rebase, 'Replace an authorized feature PR head with one prepared commit based on its exact current target-base SHA. Files must be prepared relative to that base; expected_head_sha fences the old PR head atomically. This is a single-commit rebase/squash, not replay of a local commit series. Preserves the PR number and inherited protected base files. Requires trusted branch ownership or exact-PR requester approval; refuses default/protected heads. No arbitrary force flag, raw push, PR approval or merge.'),
     'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
 }
 
 
-class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
+class GitHub(GitHubPublications, GitHubStacks, GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
     def __init__(self, store, security, settings, connectors):
         self.store, self.security, self.settings, self.connectors = store, security, settings, connectors
         self.write_lock = asyncio.Lock()
@@ -259,9 +342,13 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
         except Exception:
             raise ConnectorError('The GitHub App signing key is invalid. An administrator must reconnect it.') from None
 
-    async def request(self, method, path, *, token='', missing=False, repository_redirect=False, **kwargs):
+    async def request(self, method, path, *, token='', missing=False, repository_redirect=False,
+                      api_version='2022-11-28', include_status=False, **kwargs):
+        validate_request(method, path, kwargs.get('json'))
+        if api_version not in {'2022-11-28', '2026-03-10'}:
+            raise ConnectorError('Unsupported GitHub API version.', dispatched=False)
         # Every caller below constructs a fixed GitHub API path; no user URL.
-        headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+        headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': api_version}
         if token:
             headers['Authorization'] = 'Bearer ' + token
         try:
@@ -276,7 +363,8 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
                     return None
                 if not 200 <= response.status_code < 300:
                     raise GitHubError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.', response.status_code)
-                return response.json() if response.content else {}
+                data = response.json() if response.content else {}
+                return {'status_code': response.status_code, 'data': data} if include_status else data
         except (httpx.HTTPError, ValueError):
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
 
@@ -364,6 +452,8 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 'url': repo['html_url'], 'private': repo['private']}
 
     async def call(self, run, name, arguments):
+        if name in STACK_TOOLS:
+            return await self.stack_call(run, name, arguments)
         if name in CODING_TOOLS:
             return await self.coding_call(run, name, arguments)
         if name in CONTEXT_TOOLS:
@@ -378,6 +468,12 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
         if name == 'github_update_ruleset_reviewers':
             async with self.write_lock:
                 return await self.update_ruleset_reviewers(run, RulesetReviewers.model_validate(arguments))
+        if name == 'github_rebase_pull_request':
+            async with self.write_lock:
+                return await self.rebase_pull_request(run, Rebase.model_validate(arguments))
+        if name in {'github_create_branch', 'github_publish_branch', 'github_open_pull_request'}:
+            async with self.write_lock:
+                return await self.controlled_publication(run, TOOLS[name][2].model_validate(arguments), name)
         if name in {'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request'}:
             async with self.write_lock:
                 if name == 'github_create_pull_request':
@@ -418,10 +514,24 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             self.ensure_read_allowed(read_version, target)
         if name in {'github_repository', 'github_checkout'}:
             repo = {**await self.repository(token, target), 'git_path': f'/github/repositories/{target}.git'}
-            if name == 'github_checkout' and arguments.get('number'):
-                number = Checkout.model_validate(arguments).number
-                pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
-                repo.update(base_sha=pr['head']['sha'], number=number, checkout_ref=f'refs/pull/{number}/head')
+            if name == 'github_checkout':
+                args = Checkout.model_validate(arguments)
+                repo.update(base_branch=repo['default_branch'], checkout_ref='refs/heads/' + repo['default_branch'])
+                if args.number:
+                    pr = await self.request('GET', f'/repositories/{target}/pulls/{args.number}', token=token)
+                    if (pr.get('number') != args.number or (pr.get('base', {}).get('repo') or {}).get('id') != target):
+                        raise ConnectorError('GitHub returned a different pull request or repository.')
+                    repo.update(base_sha=pr['head']['sha'], number=args.number, checkout_ref=f'refs/pull/{args.number}/head',
+                                base_branch=pr['base']['ref'])
+                elif args.ref:
+                    if re.fullmatch(SHA, args.ref):
+                        commit = await self.request('GET', f'/repositories/{target}/git/commits/{args.ref}', token=token)
+                        if commit.get('sha') != args.ref:
+                            raise ConnectorError('GitHub did not confirm the selected commit.')
+                        repo.update(base_sha=args.ref, checkout_ref=args.ref, base_branch='')
+                    else:
+                        ref = await self.publication_ref(token, target, args.ref)
+                        repo.update(base_sha=ref, checkout_ref='refs/heads/' + args.ref, base_branch=args.ref)
             return repo
         if name == 'github_pull_request_comments':
             args = Feedback.model_validate(arguments)
@@ -535,8 +645,16 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             raise ConnectorError('The ruleset update could not be verified exactly. Read its current state before making another change; no automatic retry was sent.')
         return {**self.ruleset_result(target, after), 'changed': True}
 
+    @staticmethod
+    def compatible_arguments(args, **kwargs):
+        value = args.model_dump(**kwargs)
+        for field in ('base_branch', 'head_branch'):
+            if value.get(field) in ('', None):
+                value.pop(field, None)
+        return value
+
     def arguments_hash(self, args, target):
-        value = args.model_dump()
+        value = self.compatible_arguments(args)
         value.pop('repository', None)
         value['repository_id'] = target
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -544,7 +662,7 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
     def upgrade_receipt_hash(self, table, row, args, fingerprint):
         # Only completed receipts and the exact original payload can be upgraded.
         if row['arguments_hash'] != fingerprint and row['result']:
-            legacy = args.model_dump(exclude={'repository_id'})
+            legacy = self.compatible_arguments(args, exclude={'repository_id'})
             legacy['repository'] = json.loads(row['result']).get('repository', args.repository)
             if hashlib.sha256(json.dumps(legacy).encode()).hexdigest() == row['arguments_hash']:
                 self.store.execute(f'UPDATE {table} SET arguments_hash=? WHERE id=?', (fingerprint, row['id']))
@@ -571,6 +689,7 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
         if (not current or current.get('deleted_at') or current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                 or current['active_message_id'] != run['active_message_id'] or not current['token_hash']
                 or current['token_hash'] != run['token_hash'] or 'github' not in current['plugins']
+                or current.get('active_user_id') != run.get('active_user_id')
                 or connection_version != self.connection_version()
                 or not self.connectors.allowed(tool)):
             raise ConnectorError('The session or GitHub connection changed. Publication has stopped; inspect the destination before retrying.')
@@ -607,99 +726,7 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 raise ConnectorError('Cannot delete a file that does not exist in the checkout base.')
 
     async def publish(self, run, args):
-        if run.get('github_connection_version'):
-            self.ensure_publish_allowed(run, run['github_connection_version'])
-        target = await self.selected_target(run, args.repository, args.repository_id)
-        version = run.get('github_connection_version') or self.connection_version()
-        self.ensure_publish_allowed(run, version)
-        # Stable across chat turns so a lost ACK can be resolved on a follow-up.
-        identity = hashlib.sha256(f"{run['id']}:{args.request_key}".encode()).hexdigest()
-        fingerprint = self.arguments_hash(args, target)
-        branch = f"moyai/{run['id'][:12]}/{identity[:16]}"
-        self.store.execute('''INSERT INTO github_publications
-            (id,run_id,message_id,arguments_hash,branch,connection_version,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING''',
-            (identity, run['id'], run['active_message_id'] or 0, fingerprint, branch, version, now()))
-        row = self.store.rows('SELECT * FROM github_publications WHERE id=?', (identity,))[0]
-        self.upgrade_receipt_hash('github_publications', row, args, fingerprint)
-        if row['arguments_hash'] != fingerprint:
-            raise ConnectorError('That request_key already describes different changes. Use a new key.')
-        if row['connection_version'] != version:
-            raise ConnectorError('The GitHub installation changed since this publication. Inspect the existing branch before continuing.')
-        if row['result']:
-            result = self.receipt(row['result'], target)
-            self.record_publication(identity, result, turn_id=run['active_message_id'] or 0)
-            return result
-        token = await self.installation_token(repository=target, write=True, workflows=workflow_changes(args))
-        repo = await self.repository(token, target)
-        prefix = f'/repositories/{target}'
-        commit = row['commit_sha']
-        if not commit:
-            if repo['base_sha'] != args.base_sha:
-                comparison = await self.request('GET', prefix + '/compare/' + args.base_sha + '...' + repo['base_sha'], token=token, params={'per_page': 1})
-                if comparison.get('status') not in {'ahead', 'identical'}:
-                    raise ConnectorError('The checkout base is not on the current default branch. Rebase and prepare a new publication with a new request_key.')
-            commit = await self.create_change_commit(run, args, token, target, version, 'github_create_pull_request')
-            self.store.execute('UPDATE github_publications SET commit_sha=? WHERE id=?', (commit, identity))
-        existing = await self.request('GET', prefix + '/git/ref/heads/' + branch, token=token, missing=True)
-        if existing and existing['object']['sha'] != commit:
-            raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
-        if not existing:
-            self.ensure_publish_allowed(run, version)
-            await self.request('POST', prefix + '/git/refs', token=token, json={'ref': 'refs/heads/' + branch, 'sha': commit})
-        def receipt(pr):
-            if not isinstance(pr, dict):
-                raise ConnectorError('The PR response is not an object.')
-            head, base = pr.get('head'), pr.get('base')
-            if not isinstance(head, dict) or not isinstance(base, dict):
-                raise ConnectorError('The PR response has no valid head and base.')
-            def repository_name(value):
-                return value.get('id') if isinstance(value, dict) else None
-            number = pr.get('number')
-            if (type(number) is not int or number <= 0
-                    or pr.get('html_url') != f'https://github.com/{self.repository_name(target)}/pull/{number}'
-                    or type(pr.get('draft')) is not bool or pr.get('state') not in ('open', 'closed')
-                    or head.get('ref') != branch or head.get('sha') != commit
-                    or repository_name(head.get('repo')) != target
-                    or repository_name(base.get('repo')) != target or base.get('ref') != repo['default_branch']):
-                raise ConnectorError('The PR response does not match the expected publication.')
-            return {'number': number, 'url': pr['html_url'], 'branch': branch, 'commit': commit,
-                    'draft': pr['draft'], 'state': pr['state'], 'repository_id': target, 'repository': self.repository_name(target), 'title': args.title}
-
-        async def lookup():
-            self.ensure_publish_allowed(run, version)
-            pulls = await self.request('GET', prefix + '/pulls', token=token,
-                                       params={'state': 'all', 'head': self.repository_name(target).split('/')[0] + ':' + branch, 'base': repo['default_branch']})
-            self.ensure_publish_allowed(run, version)
-            if not isinstance(pulls, list) or len(pulls) > 1:
-                raise ConnectorError('Readback did not return a unique PR list.')
-            return receipt(pulls[0]) if pulls else None
-
-        try:
-            result = await lookup()
-            if result is None:
-                if row['attempted']:
-                    raise ConnectorError('Creation was already attempted; readback has not confirmed the PR.')
-                self.ensure_publish_allowed(run, version)
-                self.store.execute('UPDATE github_publications SET attempted=1 WHERE id=?', (identity,))
-                try:
-                    pr = await self.request('POST', prefix + '/pulls', token=token,
-                                            json={'title': args.title, 'body': args.body, 'head': branch, 'base': repo['default_branch'],
-                                                  'draft': False, 'maintainer_can_modify': True})
-                    result = receipt(pr)
-                except ConnectorError as creation_error:
-                    try:
-                        result = await lookup()
-                        if result is None:
-                            raise ConnectorError('Readback has not confirmed the PR.')
-                    except ConnectorError as read_error:
-                        raise ConnectorError(f'{creation_error} Read-only recovery: {read_error}') from None
-            self.ensure_publish_allowed(run, version)
-        except ConnectorError as error:
-            raise ConnectorError(f'Publication unconfirmed for {target}, branch {branch}: {error} '
-                                 'No creation retry was sent. Inspect this destination; use the same request_key '
-                                 'and unchanged arguments for read-only recovery after an attempted creation.') from None
-        self.record_publication(identity, result, turn_id=run['active_message_id'] or 0)
-        return result
+        return await self.controlled_publication(run, args, 'github_create_pull_request')
 
     def record_publication(self, identity, result, *, turn_id):
         # Receipt and announcement commit together. Only this trusted publication
@@ -708,6 +735,9 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             conn.begin_write()
             row = conn.execute('SELECT run_id FROM github_publications WHERE id=?', (identity,)).fetchone()
             conn.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), identity))
+            conn.execute("UPDATE github_publication_intents SET phase='complete' WHERE id=?", (identity,))
+            if result.get('kind') == 'branch':
+                return
             activity_id = 'github-publication:' + identity
             if conn.execute("SELECT 1 FROM events WHERE run_id=? AND kind='message' AND json_text(data,'activity_id')=?",
                             (row['run_id'], activity_id)).fetchone():
@@ -721,26 +751,32 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'message',?,?,?)",
                          (row['run_id'], message, json.dumps(metadata), now()))
 
-    async def create_change_commit(self, run, args, token, target, version, tool):
+    async def create_change_commit(self, run, args, token, target, version, tool, operation='', *, verify_source=False):
         prefix = f'/repositories/{target}'
         base = await self.request('GET', prefix + '/git/commits/' + args.base_sha, token=token)
+        if verify_source and (not isinstance(base, dict) or base.get('sha') != args.base_sha
+                              or not isinstance(base.get('tree'), dict)
+                              or not re.fullmatch(SHA, str(base['tree'].get('sha', '')))
+                              or base['tree']['sha'] == '0' * 40):
+            raise ConnectorError('GitHub did not confirm the exact rebase source commit and tree.', dispatched=False)
         await self.validate_tree_paths(token, base['tree']['sha'], args.files, target)
         tree = []
-        for change in args.files:
+        for index, change in enumerate(args.files):
             sha = None
             if change.content is not None:
                 self.ensure_publish_allowed(run, version, tool)
-                blob = await self.request('POST', prefix + '/git/blobs', token=token,
-                                          json={'content': change.content, 'encoding': change.encoding})
+                blob = await self.publication_effect(operation, f'blob:{index}', 'POST', prefix + '/git/blobs', token=token,
+                                                     json={'content': change.content, 'encoding': change.encoding})
                 sha = blob['sha']
             tree.append({'path': change.path, 'mode': '100755' if change.executable else '100644',
                          'type': 'blob', 'sha': sha})
         self.ensure_publish_allowed(run, version, tool)
-        created_tree = await self.request('POST', prefix + '/git/trees', token=token,
-                                          json={'base_tree': base['tree']['sha'], 'tree': tree})
+        created_tree = (await self.publication_effect(operation, 'tree', 'POST', prefix + '/git/trees', token=token,
+                                                     json={'base_tree': base['tree']['sha'], 'tree': tree})
+                        if tree else {'sha': base['tree']['sha']})
         self.ensure_publish_allowed(run, version, tool)
-        created_commit = await self.request('POST', prefix + '/git/commits', token=token,
-                                            json={'message': args.title, 'tree': created_tree['sha'], 'parents': [args.base_sha]})
+        created_commit = await self.publication_effect(operation, 'commit', 'POST', prefix + '/git/commits', token=token,
+                                                      json={'message': args.title, 'tree': created_tree['sha'], 'parents': [args.base_sha]})
         return created_commit['sha']
 
     def owned_publication(self, target, number, version):
@@ -754,11 +790,13 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 return row
         raise ConnectorError('Only confirmed Moyai PRs published in this workspace under the current GitHub connection can be updated or commented on.')
 
-    async def owned_pr(self, token, target, number, publication):
+    async def owned_pr(self, token, target, number, publication, *, allow_closed=False):
         pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
         head = pr.get('head', {})
-        if (pr.get('state') != 'open' or pr.get('merged') or head.get('ref') != publication['branch']
-                or (head.get('repo') or {}).get('id') != target):
+        if (pr.get('number') != number or pr.get('state') not in ({'open', 'closed'} if allow_closed else {'open'})
+                or pr.get('merged') or head.get('ref') != publication['branch']
+                or (head.get('repo') or {}).get('id') != target
+                or (pr.get('base', {}).get('repo') or {}).get('id') != target):
             raise ConnectorError('The published PR is closed, merged or no longer points to its original Moyai branch.')
         return pr
 
@@ -793,16 +831,19 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
         if row['result']:
             return self.receipt(row['result'], target)
         head_target = publication.get('head_repository_id', target)
+        operation = self.freeze_followup(run, row, args, target, head_target, pr, version, tool)
         # Workflow scope belongs to the repository whose head is being changed,
         # including a fork. Keep base-PR authorization and ordinary writes narrow.
         head_token = (token if head_target == target and not workflow_changes(args)
                       else await self.installation_token(repository=self.target(head_target), write=True,
                                                          workflows=workflow_changes(args)))
+        await self.writable_branch(run, head_token, head_target, publication['branch'], version, tool, existing=True, operation=operation)
+        self.publication_check(run, version, tool, target)
         commit = row['commit_sha']
         if pr['head']['sha'] != args.base_sha and (not commit or pr['head']['sha'] != commit):
             raise ConnectorError('The PR head changed. Check out its current head in a fresh directory and reapply the changes with a new request_key.')
         if not commit:
-            commit = await self.create_change_commit(run, args, head_token, head_target, version, tool)
+            commit = await self.create_change_commit(run, args, head_token, head_target, version, tool, operation)
             self.store.execute('UPDATE github_followups SET commit_sha=? WHERE id=?', (commit, row['id']))
         prefix = f'/repositories/{head_target}'
         branch_path = quote(publication['branch'], safe='/')
@@ -811,9 +852,18 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             if ref['object']['sha'] != args.base_sha:
                 raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
             await self.authorized_pr(run, token, target, args.number, publication, version, tool)
+            await self.writable_branch(run, head_token, head_target, publication['branch'], version, tool, existing=True, operation=operation)
+            ref = await self.publication_ref(head_token, head_target, publication['branch'])
+            if ref != args.base_sha:
+                raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
             self.ensure_publish_allowed(run, version, tool)
-            await self.request('PATCH', prefix + '/git/refs/heads/' + branch_path, token=head_token,
-                               json={'sha': commit, 'force': False})
+            if self.effect_claimed(operation, 'branch'):
+                raise ConnectorError('The earlier branch update is unconfirmed. No write was repeated.')
+            await self.publication_effect(operation, 'branch', 'PATCH', prefix + '/git/refs/heads/' + branch_path,
+                                          token=head_token, json={'sha': commit, 'force': False})
+            if await self.publication_ref(head_token, head_target, publication['branch']) != commit:
+                raise ConnectorError('GitHub did not confirm the branch update.')
+        self.ensure_publish_allowed(run, version, tool)
         result = {**self.receipt(publication['result'], target), 'commit': commit, 'state': pr['state'], 'draft': pr['draft']}
         self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
         return result
@@ -832,9 +882,10 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
         if row['result'] and not publication.get('grant'):
             return self.receipt(row['result'], target)
         token = await self.installation_token(repository=target, write=True)
-        await self.authorized_pr(run, token, target, args.number, publication, version, tool)
+        pr = await self.authorized_pr(run, token, target, args.number, publication, version, tool)
         if row['result']:
             return self.receipt(row['result'], target)
+        self.freeze_followup(run, row, args, target, publication.get('head_repository_id', target), pr, version, tool)
         path = f'/repositories/{target}/issues/{args.number}/comments'
         marker = '<!-- moyai-comment:' + row['id'] + ' -->'
         comment = None
@@ -851,7 +902,8 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 raise ConnectorError('The earlier comment was not confirmed. Inspect the PR before choosing a new request_key; it will not be posted again automatically.')
         else:
             self.ensure_publish_allowed(run, version, tool)
-            self.store.execute('UPDATE github_followups SET sent=1 WHERE id=?', (row['id'],))
+            if not self.store.execute("UPDATE github_followups SET sent=1 WHERE id=? AND sent=0 AND result=''", (row['id'],)):
+                raise ConnectorError('The comment was already claimed. Read-only recovery is required.')
             comment = await self.request('POST', path, token=token, json={'body': args.body + '\n\n' + marker})
         result = {'id': comment['id'], 'url': comment['html_url'], 'number': args.number, 'repository_id': target, 'repository': self.repository_name(target)}
         self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
@@ -873,3 +925,5 @@ def initialize_schema(store):
         id TEXT PRIMARY KEY, arguments_hash TEXT NOT NULL, connection_version TEXT NOT NULL,
         commit_sha TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0,
         result TEXT NOT NULL DEFAULT '')""")
+    from .github_publications import initialize_schema as initialize_publications
+    initialize_publications(store)

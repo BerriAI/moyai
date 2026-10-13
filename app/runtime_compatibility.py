@@ -28,13 +28,13 @@ from .schema_migrations import SCHEMA_COMPATIBILITY_REVISION
 # codec require a coordinated upgrade beyond the native protocol-17 release.
 # Independent control guests can now be warm. Older workers would resume these
 # as full workspace computers, so adoption/rollback requires matching roles.
-API_PROTOCOL_REVISION = 18
+API_PROTOCOL_REVISION = 19
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 18
-BROKER_PROTOCOL_REVISION = 18
-COORDINATOR_PROTOCOL_REVISION = 18
+WORKER_PROTOCOL_REVISION = 19
+BROKER_PROTOCOL_REVISION = 19
+COORDINATOR_PROTOCOL_REVISION = 19
 
 
 def api_fingerprint(settings):

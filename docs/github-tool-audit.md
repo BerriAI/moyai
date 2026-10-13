@@ -1,5 +1,10 @@
 # GitHub coding-tool audit
 
+The October 11 audit below is historical. The October 13 follow-up at the end
+extends its fixed publication pipeline with controlled branch/base/head
+selection, PR lifecycle and non-approval reviews, native stacks, and a bounded
+feature-head rebase. It does not expose PR approval or merging.
+
 Audited against main `2d106bfba6cd1bd4af568298cd37a30ec07c770a` and the connected GitHub
 connector catalog on October 11, 2026. Scope: the full coding workflow. Merging,
 auto-merge, approval, review dismissal, repository administration and generic
@@ -211,3 +216,97 @@ Open `http://127.0.0.1:8797/demo`. The first action runs the real Git packager a
 broker path validator; subsequent actions call the actual authenticated broker
 with fixture GitHub responses. The boundary check rejects merge/approval and
 stale heads. This is a localhost demonstration, not a deployed GitHub integration.
+
+## October 13: workflow-level parity follow-up
+
+The reported session began in `BerriAI/agent-shin` and requested publication in
+another selected repository. Its source PR was already merged, so ordinary file
+publication against the default branch had no new diff. Repository switching
+was available; selecting a historical base, publishing a branch without a PR,
+and opening a PR from an existing chosen head were not.
+
+Internal use of GitHub branch/commit APIs did not make those workflows available
+to the model. This follow-up compares the public developer workflows in
+[Devin's GitHub integration](https://docs.devin.ai/integrations/gh),
+[native stacks](https://docs.devin.ai/work-with-devin/stacked-prs),
+[review workflow](https://docs.devin.ai/work-with-devin/devin-review) and
+[stale-PR rebasing](https://docs.devin.ai/automation-templates/stale-pr-cleanup).
+Devin's private tool catalog is not public, and its permission inventory is not
+evidence of a separately exposed tool for every GitHub API.
+
+| Workflow | Moyai surface |
+| --- | --- |
+| Switch selected repositories | Existing permanent-ID repository selection; checkout into a fresh directory and pass it on publication |
+| Choose a source branch/commit | `github_checkout(ref=...)`, mutually exclusive with a PR number |
+| Choose new PR base/head | `github_create_pull_request` accepts `base_branch` and `head_branch`; omission retains default publication |
+| Create a named branch at an exact commit | `github_create_branch` |
+| Publish files without opening a PR | `github_publish_branch`; its confirmation is not a PR receipt |
+| Open a PR from an existing head | `github_open_pull_request`, pinned to the expected head |
+| Rebase or squash prepared feature changes | `github_rebase_pull_request`, with atomic expected-head fencing and the same PR identity |
+| Reopen or retarget an authorized PR | `github_reopen_pull_request`, `github_retarget_pull_request` |
+| Explicitly requested draft conversion | `github_convert_pull_request_to_draft`; creation remains ready for review |
+| Comment, request changes, or prepare a pending review | `github_create_review`; existing `github_comment_review` remains COMMENT-only |
+| Submit/edit/delete this chat's confirmed pending review | `github_submit_review`, `github_edit_pending_review`, `github_delete_pending_review` |
+| Inspect native GitHub stacks | `github_stacks`, `github_stack` |
+| Create/add/unstack authorized native stacks | `github_create_stack`, `github_add_to_stack`, `github_unstack` |
+| Issues, reviewer requests, comments, CI reads/reruns, artifacts | Existing audited tools remain available under their existing policies |
+| Repository PR templates | Read the applicable template through checkout/file tools; bundled coding guidance requires using it |
+| GitHub event-driven work | Existing authenticated automation sources cover issues/comments, PRs/reviews, check runs and pushes |
+| PR approval, merge, auto-merge, merge queue, stack merge | Unavailable; the broker rejects these effects before provider dispatch |
+
+This adds 16 model-visible operations and extends existing checkout/publication
+schemas. It is not a promise of raw Git push, arbitrary local commit-series
+replication, native GitHub media uploads, or every administrative capability
+listed in another product's installation permissions. A prepared rebase creates
+one commit on the selected current base. GitHub-triggered automation is existing
+functionality; a provider-specific slash-command UI is not implied by its event
+support.
+
+### Authority and durable outcomes
+
+Publication freezes permanent repository ID, connection revision, selected
+base/head, source commit and operation kind before effects. Database claims,
+not only a process-local lock, prevent competing brokers from dispatching the
+same phase. Read-only reconciliation can confirm an attempted effect; missing
+confirmation never triggers an automatic repeat.
+
+PR authorship and head-branch ownership are separate. Opening a PR over an
+existing head does not make that branch writable. File changes require trusted
+branch provenance or the existing requester/session/exact-PR grant, along with
+the current head and branch policy. A confirmed retarget invalidates the old
+base-scoped grant without changing historical creation provenance.
+
+Protected/default branch checks and the no-approval/no-merge policy remain
+independent of repository selection, admin identity and App token permissions.
+No App credential enters the sandbox. The low-level GitHub client accepts only
+fixed mutation paths and exact GraphQL documents. The explicit rebase workflow
+uses GitHub's atomic `beforeOid` contract; it does not offer an unconditional
+force flag or a target-branch write shortcut.
+
+Native stack operations authorize and recheck every affected PR and the
+membership snapshot. A grant for one member is not authority over the rest.
+Unstack can leave locked members: HTTP 200 is not automatically a dissolved
+stack, while the documented 204 result represents dissolution. No operation
+clears merge-queue blockers or invokes stack merge.
+
+### Discovery and verification boundary
+
+The default Deep Agents integration retains its two model-facing functions,
+`workspace_tools` and `workspace_call`; catalog discovery returns the actual
+operation schemas. A combined-connection request-builder regression covers
+all additions without truncation or reordering. Catalog byte sizes are not
+token counts or evidence of a provider context limit.
+
+Required live proof starts with the real local baseline and final applications,
+using isolated PostgreSQL/Temporal and the actual API, coordinator, broker and
+worker roles. The test begins in `agent-shin`, switches to `moyai`, publishes
+without a PR, then opens the chosen base/head PR and verifies its actual
+repository, author, refs, contents and ready-for-review status. Capture the real
+UI or service workflow. Provider fixtures and schema tests remain supplementary.
+Never send a real approval/merge request merely to test rejection.
+
+The schema advances to revision 20 and all runtime-role protocols to 19. Stop incompatible runtime owners and use
+the supported migration/release procedure; rebuild the sandbox runtime so
+packager code, shared ref validation and bundled guidance agree with the broker.
+Changing this branch does not deploy production, alter an App installation's
+permissions or upgrade an existing computer automatically.

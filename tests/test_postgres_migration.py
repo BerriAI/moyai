@@ -95,6 +95,27 @@ def test_real_postgres_preserves_every_table_and_enforces_constraints(source, ta
                          (source.state.test_run_id, 'user', 'Duplicate', 'queued', 'initial', '2026-10-09'))
 
 
+def test_publication_intents_and_claims_survive_sqlite_import(source, target):
+    store, (url, name) = source.state.store, target
+    store.execute('''INSERT INTO github_publication_intents
+        (id,repository_id,tool,base_branch,base_sha,source_sha,expected_head_sha,actor_id,
+         head_repository_id,head_branch,connection_version,phase)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', ('publication', 101, 'github_publish_branch', '', 'a' * 40,
+        'a' * 40, '', 'requester', 101, 'feature/confirmed', 'connection', 'branch_attempted'))
+    store.execute("INSERT INTO github_publication_effects(publication_id,effect) VALUES('publication','branch')")
+    store.execute('INSERT INTO github_owned_branches VALUES(?,?,?,?,?,?)',
+                  (101, 'feature/prior', 'connection', 'prior-publication', source.state.test_run_id, 'b' * 40))
+    expected = {table: store.rows('SELECT * FROM ' + table)
+                for table in ('github_publication_intents', 'github_publication_effects', 'github_owned_branches')}
+    assert migration.transfer(store.path.parent, url, name)['verified']
+    with psycopg.connect(url, row_factory=psycopg.rows.dict_row) as conn:
+        conn.execute(f'SET search_path TO {migration.identifier(name)}, pg_catalog')
+        for table, rows in expected.items():
+            assert conn.execute('SELECT * FROM ' + table).fetchall() == rows
+        assert conn.execute("""INSERT INTO github_publication_effects(publication_id,effect)
+            VALUES('publication','branch') ON CONFLICT DO NOTHING""").rowcount == 0
+
+
 @pytest.mark.parametrize('change', ["status='stopping'", "status='cancelled'", "deleted_at='2026-10-09'"])
 def test_permission_revocation_trigger_survives_the_migration(source, target, change):
     store, (url, name) = source.state.store, target

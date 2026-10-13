@@ -26,7 +26,12 @@ class CodingProvider:
         self.wrong_comment = self.wrong_run = self.wrong_thread = False
         self.archive = bytes(range(256)) * 600
         self.after_read = None
+        self.after_pr_read = None
+        self.after_write = None
         self.push_run = False
+        self.reviews = {}
+        self.branches = {'main': COMMIT, 'release/candidate': 'e' * 40}
+        self.write_response = None
 
     def handle(self, request):
         path, method = request.url.path, request.method
@@ -56,7 +61,10 @@ class CodingProvider:
         permissions = self.tokens[token]
         if path == PREFIX + '/pulls/100' and method == 'GET':
             assert permissions.get('pull_requests') in {'read', 'write'}
-            return httpx.Response(200, json=self.pr)
+            response = httpx.Response(200, json=self.pr)
+            if self.after_pr_read:
+                self.after_pr_read()
+            return response
         if path == '/graphql':
             assert permissions.get('pull_requests') in {'read', 'write'}
             if body['query'].startswith('query'):
@@ -66,14 +74,54 @@ class CodingProvider:
                                  'pageInfo': {'hasNextPage': False, 'endCursor': None}}}]
                 return httpx.Response(200, json={'data': {'repository': {'databaseId': 101, 'pullRequest': {'reviewThreads': {
                     'nodes': nodes, 'pageInfo': {'hasNextPage': False, 'endCursor': None}}}}}})
-        if method in {'POST', 'PATCH', 'DELETE'}:
+        if method in {'POST', 'PATCH', 'PUT', 'DELETE'}:
             required = 'actions' if '/actions/' in path else 'issues' if '/issues' in path else 'pull_requests'
             # PR triage is also permitted with pull_requests write by GitHub.
             assert permissions.get(required) == 'write' or ('/issues/100' in path and permissions.get('pull_requests') == 'write')
-            assert '/merge' not in path and body.get('event') not in {'APPROVE', 'REQUEST_CHANGES'}
+            assert '/merge' not in path and body.get('event') != 'APPROVE'
             self.dispatches.append((method, path, body))
+            data = None
+            if path == PREFIX + '/pulls/100' and method == 'PATCH':
+                self.pr.update({key: value for key, value in body.items() if key != 'base'})
+                if 'base' in body:
+                    self.pr['base']['ref'] = body['base']
+                data = self.pr
+            if path == PREFIX + '/pulls/100/reviews' and method == 'POST':
+                review_id = 40 + len(self.reviews)
+                state = {'COMMENT': 'COMMENTED', 'REQUEST_CHANGES': 'CHANGES_REQUESTED'}.get(body.get('event'), 'PENDING')
+                data = {'id': review_id, 'state': state, 'commit_id': body['commit_id'], 'body': body['body'],
+                        'user': {'id': 77, 'type': 'Bot', 'login': 'fixture-app[bot]'},
+                        'pull_request_url': 'https://api.github.com/repos/BerriAI/litellm/pulls/100'}
+                self.reviews[review_id] = copy.deepcopy(data)
+            if path.startswith(PREFIX + '/pulls/100/reviews/'):
+                review_id = int(path.split('/')[6])
+                review = self.reviews[review_id]
+                assert review['state'] == 'PENDING' and review['user']['id'] == 77
+                if method == 'POST' and path.endswith('/events'):
+                    assert body['event'] in {'COMMENT', 'REQUEST_CHANGES'}
+                    review['state'] = {'COMMENT': 'COMMENTED', 'REQUEST_CHANGES': 'CHANGES_REQUESTED'}[body['event']]
+                    if 'body' in body:
+                        review['body'] = body['body']
+                elif method == 'PUT':
+                    review['body'] = body['body']
+                elif method == 'DELETE':
+                    self.reviews.pop(review_id)
+                else:
+                    raise AssertionError((method, path))
+                data = copy.deepcopy(review)
+            if path == '/graphql' and 'convertPullRequestToDraft' in body['query']:
+                assert body['variables'] == {'id': self.pr['node_id']}
+                self.pr['draft'] = True
+                data = {'data': {'convertPullRequestToDraft': {'pullRequest': {
+                    'number': 100, 'isDraft': True, 'url': 'https://github.com/BerriAI/litellm/pull/100'}}}}
+            if self.after_write:
+                self.after_write()
             if self.lose_response:
                 return httpx.Response(502, json={'message': 'Response lost'})
+            if self.write_response is not None:
+                return httpx.Response(200, json=self.write_response)
+            if data is not None:
+                return httpx.Response(200, json=data)
             if path == '/graphql':
                 return httpx.Response(200, json={'data': {'result': {'confirmed': True}}})
             if '/actions/' in path:
@@ -82,6 +130,17 @@ class CodingProvider:
         assert method == 'GET'
         if self.after_read:
             self.after_read(path)
+        if path.startswith(PREFIX + '/branches/'):
+            assert permissions == {'contents': 'read'}
+            branch = path.removeprefix(PREFIX + '/branches/')
+            if branch not in self.branches:
+                return httpx.Response(404, json={'message': 'Not Found'})
+            return httpx.Response(200, json={'name': branch, 'commit': {'sha': self.branches[branch]}})
+        if path.startswith(PREFIX + '/pulls/100/reviews/'):
+            review_id = int(path.split('/')[6])
+            if review_id not in self.reviews:
+                return httpx.Response(404, json={'message': 'Not Found'})
+            return httpx.Response(200, json=self.reviews[review_id])
         if path == PREFIX + '/issues/10':
             assert permissions.get('issues') in {'read', 'write'}
             return httpx.Response(200, json=self.issue)

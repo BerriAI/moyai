@@ -71,6 +71,9 @@ def test_read_catalog_dispatch_pagination_and_readonly_scopes(coding, name, args
 
 WRITE_CASES = [
     ('github_close_pull_request', {}, 'PATCH', '/pulls/100'),
+    ('github_reopen_pull_request', {}, 'PATCH', '/pulls/100'),
+    ('github_retarget_pull_request', {'base_branch': 'release/candidate'}, 'PATCH', '/pulls/100'),
+    ('github_convert_pull_request_to_draft', {'intent': 'user_requested_draft_for_this_pr'}, 'POST', '/graphql'),
     ('github_create_issue', {'title': 'Bug'}, 'POST', '/issues'),
     ('github_update_issue', {'number': 10, 'state': 'closed'}, 'PATCH', '/issues/10'),
     ('github_comment_issue', {'number': 10, 'body': 'Fixed'}, 'POST', '/issues/10/comments'),
@@ -84,6 +87,12 @@ WRITE_CASES = [
     ('github_set_review_thread_resolved', {'thread_id': 'THREAD_1', 'resolved': True}, 'POST', '/graphql'),
     ('github_mark_pull_request_ready', {}, 'POST', '/graphql'),
     ('github_comment_review', {'body': 'One comment', 'comments': [{'path': 'fix.py', 'line': 1, 'body': 'Please fix'}]}, 'POST', '/pulls/100/reviews'),
+    *[('github_create_review', {'body': 'Review summary', 'event': event}, 'POST', '/pulls/100/reviews')
+      for event in ['COMMENT', 'REQUEST_CHANGES', 'PENDING']],
+    *[('github_submit_review', {'body': 'Review summary', 'event': event, 'review_id': 40, 'creation_request_key': 'pending-origin'},
+       'POST', '/pulls/100/reviews/40/events') for event in ['COMMENT', 'REQUEST_CHANGES']],
+    ('github_edit_pending_review', {'body': 'Updated summary', 'review_id': 40, 'creation_request_key': 'pending-origin'}, 'PUT', '/pulls/100/reviews/40'),
+    ('github_delete_pending_review', {'review_id': 40, 'creation_request_key': 'pending-origin'}, 'DELETE', '/pulls/100/reviews/40'),
     *[('github_workflow_action', {'run_id': 7, 'run_attempt': 2, 'action': action, **extra}, 'POST', path)
       for action, extra, path in [('rerun_failed', {}, '/actions/runs/7/rerun-failed-jobs'),
           ('rerun_all', {}, '/actions/runs/7/rerun'), ('cancel', {}, '/actions/runs/7/cancel'),
@@ -96,9 +105,24 @@ def write_args(name, args):
     return {'request_key': 'coding-test-write', **({} if issue else {'number': 100, 'head_sha': COMMIT}), **args}
 
 
+def prepare_write(coding, name):
+    *_, provider, call = coding
+    if name == 'github_reopen_pull_request':
+        provider.pr['state'] = 'closed'
+    if name == 'github_convert_pull_request_to_draft':
+        provider.pr['draft'] = False
+    if name in {'github_submit_review', 'github_edit_pending_review', 'github_delete_pending_review'}:
+        result = call('github_create_review', **write_args('pr', {
+            'request_key': 'pending-origin', 'event': 'PENDING', 'body': 'Pending review',
+        })).json()
+        assert result.get('confirmed'), result
+        provider.dispatches.clear()
+
+
 @pytest.mark.parametrize('name,args,method,path', WRITE_CASES)
 def test_writes_replay_saved_confirmation_without_repeating_dispatch(coding, name, args, method, path):
     _, _, _, _, _, provider, call = coding
+    prepare_write(coding, name)
     args = write_args(name, args)
     first = call(name, **args)
     assert first.status_code == 200, first.text
@@ -109,15 +133,32 @@ def test_writes_replay_saved_confirmation_without_repeating_dispatch(coding, nam
     assert (sent_method, sent_path) == (method, path if path == '/graphql' else PREFIX + path)
     if name == 'github_comment_review':
         assert body['event'] == 'COMMENT'
+    if name == 'github_create_review':
+        assert body.get('event') == (None if args['event'] == 'PENDING' else args['event'])
+        assert body['commit_id'] == COMMIT
+    if name == 'github_retarget_pull_request':
+        assert body == {'base': 'release/candidate'}
+        assert provider.pr['base']['ref'] == 'release/candidate'
+        assert provider.pr['head']['sha'] == COMMIT
+    if name == 'github_reopen_pull_request':
+        assert body == {'state': 'open'}
+    if name == 'github_convert_pull_request_to_draft':
+        assert body == {'query': 'mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id}){pullRequest{number isDraft url}}}',
+                        'variables': {'id': 'PR_100'}}
 
 
 @pytest.mark.parametrize('name,args,method,path', WRITE_CASES)
-def test_uncertain_write_is_never_redispatched(coding, name, args, method, path):
-    _, _, _, _, _, provider, call = coding
+def test_uncertain_write_is_never_redispatched(coding, monkeypatch, name, args, method, path):
+    from app.github import GitHub
+    app, _, _, _, github, provider, call = coding
+    prepare_write(coding, name)
     provider.lose_response = True
     args = write_args(name, args)
     assert 'error' in call(name, **args).json()
     provider.lose_response = False
+    restored = GitHub(github.store, github.security, github.settings, github.connectors)
+    monkeypatch.setattr(restored, 'app_jwt', lambda config=None: 'fixture-jwt')
+    monkeypatch.setattr(app.state.connectors, 'github', restored)
     result = call(name, **args).json()
     assert result['code'] == 'outcome_unknown' and result['outcome_uncertain']
     assert len(provider.dispatches) == 1
@@ -229,7 +270,9 @@ def test_invalid_search_is_rejected_before_provider_access(coding, kind, query):
 def test_no_merge_or_approval_surface(coding):
     *_, provider, call = coding
     for name, args in [('github_merge_pull_request', {}), ('github_enable_auto_merge', {}),
-                       ('github_approve_pull_request', {}), ('github_comment_review', {'event': 'APPROVE'})]:
+                       ('github_approve_pull_request', {}), ('github_comment_review', {'event': 'APPROVE'}),
+                       ('github_create_review', {'event': 'APPROVE'}),
+                       ('github_submit_review', {'event': 'APPROVE', 'review_id': 40, 'creation_request_key': 'pending-origin'})]:
         response = call(name, **write_args(name, {'body': 'review', **args}))
         assert response.status_code in {403, 404, 422} or 'error' in response.json(), response.text
     assert not provider.dispatches
@@ -310,14 +353,25 @@ def test_binary_pages_are_not_modified_by_text_redaction():
     assert 'secret' not in clean(payload, 'server-token')['body']
 
 
-def test_two_brokers_cannot_dispatch_the_same_receipt(coding, monkeypatch):
+@pytest.mark.parametrize('name,args', [
+    ('github_update_pull_request_details', {'title': 'Concurrent title'}),
+    ('github_create_review', {'body': 'Concurrent review', 'event': 'PENDING'}),
+    ('github_reopen_pull_request', {}),
+    ('github_retarget_pull_request', {'base_branch': 'release/candidate'}),
+    ('github_convert_pull_request_to_draft', {'intent': 'user_requested_draft_for_this_pr'}),
+    ('github_submit_review', {'body': 'Submit', 'event': 'REQUEST_CHANGES', 'review_id': 40, 'creation_request_key': 'pending-origin'}),
+    ('github_edit_pending_review', {'body': 'Edit', 'review_id': 40, 'creation_request_key': 'pending-origin'}),
+    ('github_delete_pending_review', {'review_id': 40, 'creation_request_key': 'pending-origin'}),
+])
+def test_two_brokers_cannot_dispatch_the_same_receipt(coding, monkeypatch, name, args):
     import asyncio
     from app.github import GitHub
     from app.connector_errors import ConnectorError
     app, _, rid, _, first, provider, _ = coding
+    prepare_write(coding, name)
     second = GitHub(first.store, first.security, first.settings, first.connectors)
     monkeypatch.setattr(second, 'app_jwt', lambda config=None: 'fixture-jwt')
-    args = {'repository_id': 101, **write_args('pr', {'title': 'Concurrent title'})}
+    args = {'repository_id': 101, **write_args('pr', args)}
     run = app.state.store.run(rid)
     async def exercise():
         ready = asyncio.Event()
@@ -336,9 +390,439 @@ def test_two_brokers_cannot_dispatch_the_same_receipt(coding, monkeypatch):
                 return result
             monkeypatch.setattr(broker, 'authorized_pr', fenced)
         return await asyncio.wait_for(asyncio.gather(*[
-            broker.call(run, 'github_update_pull_request_details', args) for broker in (first, second)
+            broker.call(run, name, args) for broker in (first, second)
         ], return_exceptions=True), timeout=10)
     results = asyncio.run(exercise())
     assert len(provider.dispatches) == 1
     assert sum(isinstance(result, dict) and result.get('confirmed') for result in results) == 1
     assert sum(isinstance(result, ConnectorError) and result.code == 'outcome_unknown' for result in results) == 1
+
+
+PARITY_CASES = [case[:2] for case in WRITE_CASES if case[0] in {
+    'github_reopen_pull_request', 'github_retarget_pull_request', 'github_convert_pull_request_to_draft',
+    'github_create_review', 'github_submit_review', 'github_edit_pending_review', 'github_delete_pending_review',
+}]
+
+
+@pytest.mark.parametrize('name,args', PARITY_CASES)
+@pytest.mark.parametrize('restriction', ['head', 'no_grant', 'readonly', 'wrong_repository', 'scope', 'requester', 'connection'])
+def test_parity_writes_keep_current_authority(coding, name, args, restriction):
+    app, _, rid, _, github, provider, call = coding
+    prepare_write(coding, name)
+    args = write_args('pr', args)
+    if restriction == 'head':
+        args['head_sha'] = 'a' * 40
+    elif restriction == 'no_grant':
+        app.state.store.execute('DELETE FROM github_publications')
+    elif restriction == 'readonly':
+        app.state.store.execute("INSERT INTO connection_policies(provider,read_only) VALUES('github',1)")
+    elif restriction == 'wrong_repository':
+        args['repository_id'] = 202
+    elif restriction == 'scope':
+        provider.permissions['pull_requests'] = 'read'
+        github.tokens.clear()
+    else:
+        def change_authority():
+            if restriction == 'requester':
+                app.state.store.execute('UPDATE runs SET active_user_id=? WHERE id=?', ('different-requester', rid))
+            else:
+                app.state.connectors.save('github', {'installation_id': 11}, 'Changed installation')
+        provider.after_pr_read = change_authority
+    response = call(name, **args)
+    assert response.status_code != 200 or 'error' in response.json(), response.text
+    assert provider.dispatches == []
+
+
+@pytest.mark.parametrize('state,merged', [('open', False), ('closed', True)])
+def test_reopen_rejects_open_or_merged_pr(coding, state, merged):
+    *_, provider, call = coding
+    provider.pr.update(state=state, merged=merged)
+    response = call('github_reopen_pull_request', **write_args('pr', {}))
+    assert 'error' in response.json() and not provider.dispatches
+
+
+@pytest.mark.parametrize('name,args', PARITY_CASES)
+def test_parity_writes_recheck_head_after_resource_reads(coding, name, args):
+    *_, provider, call = coding
+    prepare_write(coding, name)
+    reads = []
+    def change_head():
+        reads.append(True)
+        if len(reads) == 1:
+            provider.pr['head']['sha'] = 'a' * 40
+    provider.after_pr_read = change_head
+    response = call(name, **write_args('pr', args))
+    assert 'error' in response.json() and not provider.dispatches, response.text
+
+
+@pytest.mark.parametrize('base', ['', 'HEAD', '@', '-option', '../main', 'a..b', 'main~1', 'a.lock', 'a//b', 'a\\b', 'a b', 'a\nb', 'main?x', 'refs/heads/../main'])
+def test_retarget_rejects_invalid_refs(coding, base):
+    *_, provider, call = coding
+    response = call('github_retarget_pull_request', **write_args('pr', {'base_branch': base}))
+    assert response.json()['code'] == 'invalid_arguments', response.text
+    assert not provider.calls and not provider.minted and not provider.dispatches
+
+
+def test_retarget_requires_existing_branch_and_rechecks_original_base(coding):
+    *_, provider, call = coding
+    args = write_args('pr', {'base_branch': 'missing'})
+    assert 'error' in call('github_retarget_pull_request', **args).json()
+    assert not provider.dispatches
+    def retarget_during_read(path):
+        if '/branches/' in path:
+            provider.pr['base']['ref'] = 'other-base'
+    provider.after_read = retarget_during_read
+    args.update(base_branch='release/candidate', request_key='base-changed')
+    assert 'error' in call('github_retarget_pull_request', **args).json()
+    assert not provider.dispatches
+
+
+@pytest.mark.parametrize('intent', [None, False, True, 'draft', 'pending_ci', 'user_requested_draft'])
+def test_draft_requires_exact_explicit_intent(coding, intent):
+    *_, provider, call = coding
+    args = write_args('pr', {} if intent is None else {'intent': intent})
+    response = call('github_convert_pull_request_to_draft', **args)
+    assert response.json()['code'] == 'invalid_arguments'
+    assert not provider.calls and not provider.minted
+
+
+@pytest.mark.parametrize('change', ['already_draft', 'closed', 'merged', 'node', 'during_read'])
+def test_draft_requires_ready_unmerged_current_pr(coding, change):
+    *_, provider, call = coding
+    provider.pr['draft'] = False
+    if change == 'already_draft':
+        provider.pr['draft'] = True
+    elif change == 'closed':
+        provider.pr['state'] = 'closed'
+    elif change == 'merged':
+        provider.pr['merged'] = True
+    elif change == 'node':
+        provider.pr.pop('node_id')
+    else:
+        provider.after_pr_read = lambda: provider.pr.update(draft=True)
+    response = call('github_convert_pull_request_to_draft', **write_args('pr', {'intent': 'user_requested_draft_for_this_pr'}))
+    assert 'error' in response.json() and not provider.dispatches
+
+
+@pytest.mark.parametrize('name,event', [
+    ('github_create_review', 'APPROVE'), ('github_create_review', 'DISMISS'),
+    ('github_create_review', 'comment'), ('github_create_review', None),
+    ('github_submit_review', 'APPROVE'), ('github_submit_review', 'PENDING'),
+    ('github_submit_review', 'DISMISS'), ('github_comment_review', 'COMMENT'),
+])
+def test_nonapproval_review_schemas_are_finite(coding, name, event):
+    *_, provider, call = coding
+    args = {'body': 'Review', 'event': event}
+    if name == 'github_submit_review':
+        args.update(review_id=40, creation_request_key='pending-origin')
+    response = call(name, **write_args('pr', args))
+    assert response.json()['code'] == 'invalid_arguments', response.text
+    assert not provider.calls and not provider.minted and not provider.dispatches
+
+
+@pytest.mark.parametrize('event', ['COMMENT', 'REQUEST_CHANGES'])
+@pytest.mark.parametrize('body', [None, '', ' \n '])
+def test_submitted_review_creation_requires_summary(coding, event, body):
+    *_, provider, call = coding
+    args = {'event': event}
+    if body is not None:
+        args['body'] = body
+    response = call('github_create_review', **write_args('pr', args))
+    assert response.json()['code'] == 'invalid_arguments'
+    assert not provider.calls and not provider.dispatches
+
+
+def test_pending_review_can_start_without_summary(coding):
+    *_, provider, call = coding
+    result = call('github_create_review', **write_args('pr', {
+        'event': 'PENDING', 'comments': [{'path': 'fix.py', 'line': 1, 'body': 'Please fix'}],
+    })).json()
+    assert result['confirmed'] and result['data']['state'] == 'PENDING'
+    assert 'event' not in provider.dispatches[0][2]
+
+
+@pytest.mark.parametrize('event', ['COMMENT', 'REQUEST_CHANGES'])
+def test_submit_pending_review_preserves_saved_summary_when_omitted(coding, event):
+    *_, provider, call = coding
+    prepare_write(coding, 'github_submit_review')
+    result = call('github_submit_review', **write_args('pr', {
+        'event': event, 'review_id': 40, 'creation_request_key': 'pending-origin',
+    })).json()
+    assert result['confirmed'] and result['data']['body'] == 'Pending review'
+    assert provider.dispatches[0][2] == {'event': event}
+
+
+@pytest.mark.parametrize('name', ['github_submit_review', 'github_edit_pending_review', 'github_delete_pending_review'])
+@pytest.mark.parametrize('mismatch', ['no_receipt', 'other_key', 'unconfirmed', 'version', 'repository', 'id',
+                                     'author', 'human', 'state', 'commit', 'pr', 'changed_head', 'missing',
+                                     'during_read', 'other_chat'])
+def test_pending_review_is_owned_exact_and_still_pending(coding, name, mismatch):
+    app, _, _, _, _, provider, call = coding
+    prepare_write(coding, name)
+    args = {'review_id': 40, 'creation_request_key': 'pending-origin'}
+    if name != 'github_delete_pending_review':
+        args['body'] = 'Updated review'
+    if name == 'github_submit_review':
+        args['event'] = 'REQUEST_CHANGES'
+    review = provider.reviews[40]
+    if mismatch == 'no_receipt':
+        app.state.store.execute('DELETE FROM github_followups')
+    elif mismatch in {'unconfirmed', 'version', 'repository'}:
+        row = app.state.store.rows("SELECT * FROM github_followups WHERE result!=''")[0]
+        if mismatch == 'unconfirmed':
+            app.state.store.execute("UPDATE github_followups SET result='' WHERE id=?", (row['id'],))
+        elif mismatch == 'version':
+            app.state.store.execute("UPDATE github_followups SET connection_version='old' WHERE id=?", (row['id'],))
+        else:
+            result = json.loads(row['result'])
+            result['repository_id'] = 202
+            app.state.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
+    elif mismatch == 'other_key':
+        args['creation_request_key'] = 'different-origin'
+    elif mismatch == 'id':
+        review['id'] = 41
+    elif mismatch == 'author':
+        review['user']['id'] = 88
+    elif mismatch == 'human':
+        review['user']['type'] = 'User'
+    elif mismatch == 'state':
+        review['state'] = 'COMMENTED'
+    elif mismatch == 'commit':
+        review['commit_id'] = 'a' * 40
+    elif mismatch == 'pr':
+        review['pull_request_url'] = 'https://api.github.com/repos/BerriAI/litellm/pulls/999'
+    elif mismatch == 'changed_head':
+        provider.pr['head']['sha'] = args['head_sha'] = 'a' * 40
+    elif mismatch == 'missing':
+        provider.reviews.clear()
+    elif mismatch == 'other_chat':
+        import hashlib
+        other_id = hashlib.sha256(b'other-chat:github_create_review:pending-origin').hexdigest()
+        app.state.store.execute('UPDATE github_followups SET id=?', (other_id,))
+    else:
+        reads = []
+        def submit_during_read(path):
+            if '/reviews/' in path:
+                reads.append(path)
+                if len(reads) == 2:
+                    review['state'] = 'COMMENTED'
+        provider.after_read = submit_during_read
+    response = call(name, **write_args('pr', args))
+    assert 'error' in response.json() and not provider.dispatches, response.text
+
+
+def test_pending_review_persists_across_brokers_then_edits_and_submits(coding, monkeypatch):
+    import asyncio
+    from app.github import GitHub
+    app, _, rid, _, first, provider, call = coding
+    prepare_write(coding, 'github_edit_pending_review')
+    second = GitHub(first.store, first.security, first.settings, first.connectors)
+    monkeypatch.setattr(second, 'app_jwt', lambda config=None: 'fixture-jwt')
+    args = {'repository_id': 101, **write_args('pr', {
+        'body': 'Updated summary', 'review_id': 40, 'creation_request_key': 'pending-origin',
+    })}
+    result = asyncio.run(second.call(app.state.store.run(rid), 'github_edit_pending_review', args))
+    assert result['confirmed'] and provider.reviews[40]['body'] == 'Updated summary'
+    result = call('github_submit_review', **write_args('pr', {
+        'body': 'Please fix', 'review_id': 40, 'creation_request_key': 'pending-origin',
+        'event': 'REQUEST_CHANGES', 'request_key': 'submit-pending',
+    })).json()
+    assert result['confirmed'] and provider.reviews[40]['state'] == 'CHANGES_REQUESTED'
+    assert len(provider.dispatches) == 2
+    response = call('github_delete_pending_review', **write_args('pr', {
+        'review_id': 40, 'creation_request_key': 'pending-origin', 'request_key': 'delete-submitted',
+    }))
+    assert 'error' in response.json() and len(provider.dispatches) == 2
+
+
+@pytest.mark.parametrize('name,args', PARITY_CASES)
+def test_wrong_write_confirmation_stays_uncertain_without_replay(coding, name, args):
+    *_, provider, call = coding
+    prepare_write(coding, name)
+    provider.write_response = {'data': {'convertPullRequestToDraft': {'pullRequest': {'number': 999, 'isDraft': True}}}}
+    args = write_args('pr', args)
+    first = call(name, **args)
+    assert first.json()['code'] == 'outcome_unknown', first.text
+    assert call(name, **args).json()['code'] == 'outcome_unknown'
+    assert len(provider.dispatches) == 1
+
+
+def test_pending_review_confirmation_failure_cannot_be_used_as_ownership(coding):
+    *_, provider, call = coding
+    provider.write_response = {}
+    response = call('github_create_review', **write_args('pr', {
+        'event': 'PENDING', 'body': 'Pending', 'request_key': 'pending-origin',
+    }))
+    assert response.json()['code'] == 'outcome_unknown'
+    provider.write_response = None
+    response = call('github_delete_pending_review', **write_args('pr', {
+        'review_id': 40, 'creation_request_key': 'pending-origin',
+    }))
+    assert 'error' in response.json()
+    assert len(provider.dispatches) == 1
+
+
+@pytest.fixture
+def exact_pr_coding(coding):
+    from app.security import digest
+    app, client, _, headers, github, provider, _ = coding
+    app.state.store.execute('DELETE FROM github_publications')
+    run = app.state.store.create_run('Exact PR work', '', 'modal', ['github'],
+                                    chat_enabled=True, user_id='shared:local:admin')
+    rid = run['id']
+    app.state.store.claim_message(rid)
+    app.state.store.update_run(rid, status='running', token_hash=digest('run-capability-only'))
+    def call(name, **args):
+        return client.post(f'/broker/{rid}/tools/call', headers=headers,
+                           json={'name': name, 'arguments': {'repository_id': 101, **args}})
+    return app, client, rid, headers, github, provider, call
+
+
+@pytest.mark.parametrize('name,args', PARITY_CASES)
+def test_parity_uses_existing_exact_pr_grant_and_respects_revocation(exact_pr_coding, name, args):
+    from test_github_write_access import approved, decide
+    *_, provider, call = exact_pr_coding
+    args = write_args('pr', args)
+    assert 'error' in call(name, **args).json()
+    assert not provider.dispatches
+    grant = approved(exact_pr_coding[:6])
+    prepare_write(exact_pr_coding, name)
+    result = call(name, **args).json()
+    assert result.get('confirmed'), result
+    assert decide(exact_pr_coding[:6], grant['id'], 'revoke').status_code == 200
+    assert 'error' in call(name, **{**args, 'request_key': 'revoked-action'}).json()
+    assert len(provider.dispatches) == 1
+
+
+def test_retarget_does_not_transfer_an_exact_pr_grant(exact_pr_coding):
+    from test_github_write_access import approved
+    app, _, _, _, _, provider, call = exact_pr_coding
+    grant = approved(exact_pr_coding[:6])
+    result = call('github_retarget_pull_request', **write_args('pr', {'base_branch': 'release/candidate'})).json()
+    assert result.get('confirmed'), result
+    assert app.state.store.rows('SELECT status FROM github_write_access WHERE id=?', (grant['id'],))[0]['status'] == 'revoked'
+    result = call('github_create_review', **write_args('pr', {'body': 'New base review', 'event': 'COMMENT'})).json()
+    assert 'error' in result
+    assert len(provider.dispatches) == 1
+
+
+def test_retarget_same_base_keeps_exact_pr_grant(exact_pr_coding):
+    from test_github_write_access import approved
+    app, _, _, _, _, provider, call = exact_pr_coding
+    grant = approved(exact_pr_coding[:6])
+    result = call('github_retarget_pull_request', **write_args('pr', {'base_branch': 'main'})).json()
+    assert result.get('confirmed'), result
+    assert app.state.store.rows('SELECT status FROM github_write_access WHERE id=?', (grant['id'],))[0]['status'] == 'approved'
+
+
+def test_unknown_retarget_never_broadens_or_replays_grant(exact_pr_coding):
+    from test_github_write_access import approved
+    *_, provider, call = exact_pr_coding
+    approved(exact_pr_coding[:6])
+    provider.lose_response = True
+    args = write_args('pr', {'base_branch': 'release/candidate'})
+    assert 'error' in call('github_retarget_pull_request', **args).json()
+    provider.lose_response = False
+    assert provider.pr['base']['ref'] == 'release/candidate'
+    assert call('github_retarget_pull_request', **args).json()['code'] == 'outcome_unknown'
+    assert 'error' in call('github_create_review', **write_args('pr', {'body': 'New review', 'event': 'COMMENT'})).json()
+    assert len(provider.dispatches) == 1
+
+
+def test_late_requester_change_revokes_grant_after_confirmed_retarget(exact_pr_coding, monkeypatch):
+    from test_github_write_access import approved
+    app, _, rid, _, github, provider, call = exact_pr_coding
+    grant = approved(exact_pr_coding[:6])
+    actor = app.state.store.run(rid)['active_user_id']
+    revoke = github.revoke_retargeted_pr_access
+    invalidations = []
+    def invalidate(authority):
+        invalidations.append((authority['id'], app.state.store.run(rid)['active_user_id']))
+        revoke(authority)
+    async def forbid_ui_decision(*args, **kwargs):
+        raise AssertionError('Confirmed retargets must use the required invalidation owner, not UI consent.')
+    monkeypatch.setattr(github, 'revoke_retargeted_pr_access', invalidate)
+    monkeypatch.setattr(github, 'decide_write_access', forbid_ui_decision)
+    provider.after_write = lambda: app.state.store.execute('UPDATE runs SET active_user_id=? WHERE id=?', ('different-requester', rid))
+    args = write_args('pr', {'base_branch': 'release/candidate'})
+    response = call('github_retarget_pull_request', **args)
+    assert response.status_code == 200 and response.json().get('confirmed'), response.text
+    assert response.json()['data']['base']['ref'] == 'release/candidate'
+    assert invalidations == [(grant['id'], 'different-requester')]
+    assert app.state.store.rows('SELECT status FROM github_write_access WHERE id=?', (grant['id'],))[0]['status'] == 'revoked'
+    receipts = app.state.store.rows('SELECT sent,result FROM github_followups')
+    assert len(receipts) == 1 and receipts[0]['sent'] == 1
+    assert json.loads(receipts[0]['result']) == response.json()
+    assert 'error' in call('github_retarget_pull_request', **args).json()
+    provider.after_write = None
+    app.state.store.execute('UPDATE runs SET active_user_id=? WHERE id=?', (actor, rid))
+    assert 'error' in call('github_retarget_pull_request', **args).json()
+    assert 'error' in call('github_create_review', **write_args('pr', {'body': 'New review', 'event': 'COMMENT'})).json()
+    assert invalidations == [(grant['id'], 'different-requester')]
+    assert len(provider.dispatches) == 1
+
+
+def test_retarget_invalidation_failure_never_falls_back_or_replays(exact_pr_coding, monkeypatch):
+    from test_github_write_access import approved
+    app, _, _, _, github, provider, call = exact_pr_coding
+    approved(exact_pr_coding[:6])
+    invalidations, decisions = [], []
+    def unavailable_invalidation(authority):
+        invalidations.append(authority['id'])
+        raise RuntimeError('Invalidation persistence failed after dispatch')
+    async def forbid_ui_decision(*args, **kwargs):
+        decisions.append(True)
+        raise AssertionError('No parallel revocation fallback is permitted.')
+    monkeypatch.setattr(github, 'revoke_retargeted_pr_access', unavailable_invalidation)
+    monkeypatch.setattr(github, 'decide_write_access', forbid_ui_decision)
+    args = write_args('pr', {'base_branch': 'release/candidate'})
+    assert 'error' in call('github_retarget_pull_request', **args).json()
+    assert provider.pr['base']['ref'] == 'release/candidate'
+    receipts = app.state.store.rows('SELECT sent,result FROM github_followups')
+    assert len(receipts) == 1 and receipts[0]['sent'] == 1 and not receipts[0]['result']
+    assert call('github_retarget_pull_request', **args).json()['code'] == 'outcome_unknown'
+    assert len(invalidations) == 1 and not decisions
+    assert len(provider.dispatches) == 1
+
+
+@pytest.mark.parametrize('name,args', PARITY_CASES)
+def test_grant_revocation_during_read_prevents_dispatch(exact_pr_coding, name, args):
+    from test_github_write_access import approved
+    app, _, _, _, _, provider, call = exact_pr_coding
+    grant = approved(exact_pr_coding[:6])
+    prepare_write(exact_pr_coding, name)
+    provider.after_pr_read = lambda: app.state.store.execute(
+        "UPDATE github_write_access SET status='revoked' WHERE id=?", (grant['id'],))
+    result = call(name, **write_args('pr', args)).json()
+    assert 'error' in result and not provider.dispatches
+
+
+def test_reopen_rechecks_state_before_dispatch(coding):
+    *_, provider, call = coding
+    provider.pr['state'] = 'closed'
+    provider.after_pr_read = lambda: provider.pr.update(state='open')
+    result = call('github_reopen_pull_request', **write_args('pr', {})).json()
+    assert 'error' in result and not provider.dispatches
+
+
+@pytest.mark.parametrize('name,args', PARITY_CASES)
+def test_parity_result_persistence_failure_never_replays(coding, monkeypatch, name, args):
+    import asyncio
+    from app.connector_errors import ConnectorError
+    app, _, rid, _, github, provider, _ = coding
+    prepare_write(coding, name)
+    execute = app.state.store.execute
+    def failing_save(sql, params=()):
+        if sql.startswith('UPDATE github_followups SET result='):
+            raise RuntimeError('Save failed after dispatch')
+        return execute(sql, params)
+    monkeypatch.setattr(app.state.store, 'execute', failing_save)
+    args = {'repository_id': 101, **write_args('pr', args)}
+    run = app.state.store.run(rid)
+    with pytest.raises(RuntimeError, match='Save failed'):
+        asyncio.run(github.call(run, name, args))
+    monkeypatch.setattr(app.state.store, 'execute', execute)
+    with pytest.raises(ConnectorError) as error:
+        asyncio.run(github.call(run, name, args))
+    assert error.value.code == 'outcome_unknown'
+    assert len(provider.dispatches) == 1

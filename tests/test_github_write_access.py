@@ -7,8 +7,8 @@ from app.connector_errors import ConnectorError
 from app.github import GitHub
 from app.security import digest
 from test_workspace import workspace
-from test_github import COMMIT, BASE, TREE, connected, select
-from test_github_followups import FollowupAPI, NEXT, update_args, comment_args
+from test_github import COMMIT, CURRENT, BASE, TREE, connected, select
+from test_github_followups import FollowupAPI, NEXT, REBASE_TREE, rebase_args, update_args, comment_args
 
 REQUEST = 'github_request_pull_request_write_access'
 
@@ -17,6 +17,7 @@ class ExternalAPI(FollowupAPI):
     def __init__(self, github, monkeypatch):
         super().__init__(github, monkeypatch)
         self.branch = COMMIT
+        self.named_branches['human/fix'] = COMMIT
         self.pr = {'number': 100, 'html_url': 'https://github.com/BerriAI/litellm/pull/100',
                    'title': '<untrusted> External fix', 'state': 'open', 'draft': False,
                    'head': {'ref': 'human/fix', 'sha': COMMIT, 'repo': {'id': 101}},
@@ -29,6 +30,10 @@ class ExternalAPI(FollowupAPI):
         monkeypatch.setattr(github, 'installation_token', token)
 
     async def request(self, method, path, **kwargs):
+        if path.startswith('/repositories/202/branches/'):
+            return {'name': 'human/fix', 'protected': False, 'commit': {'sha': self.branch}}
+        if path.startswith('/repositories/202/rules/branches/'):
+            return []
         if '/git/ref/heads/human/' in path or '/git/refs/heads/human/' in path:
             self.calls.append((method, path, kwargs))
             if self.on_call:
@@ -151,6 +156,125 @@ def test_only_authenticated_requester_can_decide(external, boundary):
         response = call(external, arguments={'repository_id': 101, 'number': 100, 'approved': True})
     assert response.status_code >= 400 or 'error' in response.json(), response.text
     assert app.state.store.rows('SELECT status FROM github_write_access')[0]['status'] == 'pending'
+
+
+def test_existing_head_pr_authorship_does_not_grant_branch_writes(external):
+    import asyncio
+    from app.github import OpenPullRequest, Update
+    app, _, rid, _, github, api = external
+    api.pr = None
+    run = app.state.store.run(rid)
+    receipt = asyncio.run(github.controlled_publication(run, OpenPullRequest(repository_id=101,
+        base_branch='main', head_branch='human/fix', expected_head_sha=COMMIT, title='Existing human work',
+        body='Open a regular PR without taking branch ownership.', request_key='open-human-123'),
+        'github_open_pull_request'))
+    assert receipt['number'] == 100 and receipt['draft'] is False
+    assert not github.branch_owned(101, 'human/fix', github.connection_version())
+    api.calls.clear()
+    with pytest.raises(ConnectorError, match='explicit requester approval'):
+        asyncio.run(github.update(run, Update.model_validate(update_args().model_dump())))
+    assert all(method == 'GET' for method, _, _ in api.calls)
+    access = call(external).json()
+    assert access['status'] == 'pending'
+    assert decide(external, access['id']).json() == {'status': 'approved'}
+    assert call(external, 'github_update_pull_request', update_args().model_dump()).json()['commit'] == NEXT
+
+
+@pytest.mark.parametrize('branch', ['main', 'human/fix'])
+def test_exact_pr_grant_never_bypasses_default_or_protected_branch(external, branch):
+    app, _, _, _, github, api = external
+    api.pr['head']['ref'] = branch
+    api.named_branches[branch] = COMMIT
+    if branch == 'human/fix':
+        api.protected.add(branch)
+    approved(external)
+    api.calls.clear()
+    result = call(external, 'github_update_pull_request', update_args().model_dump()).json()
+    assert 'error' in result
+    assert all(method == 'GET' for method, _, _ in api.calls)
+
+
+def test_allow_closed_requires_exact_identity_and_never_merged(external):
+    import asyncio
+    app, _, rid, _, github, api = external
+    approved(external)
+    run, version = app.state.store.run(rid), github.connection_version()
+    authority = github.write_authority(run, 101, 100, version, 'github_update_pull_request')
+    api.pr['state'] = 'closed'
+    with pytest.raises(ConnectorError):
+        asyncio.run(github.authorized_pr(run, 'fixture', 101, 100, authority, version, 'github_update_pull_request'))
+    assert asyncio.run(github.authorized_pr(run, 'fixture', 101, 100, authority, version,
+        'github_update_pull_request', allow_closed=True))['state'] == 'closed'
+    api.pr['base']['ref'] = 'other'
+    with pytest.raises(ConnectorError, match='retargeted'):
+        asyncio.run(github.authorized_pr(run, 'fixture', 101, 100, authority, version,
+            'github_update_pull_request', allow_closed=True))
+    api.pr['base']['ref'] = 'main'
+    api.pr['merged'] = True
+    with pytest.raises(ConnectorError):
+        asyncio.run(github.authorized_pr(run, 'fixture', 101, 100, authority, version,
+            'github_update_pull_request', allow_closed=True))
+
+
+def test_confirmed_retarget_revokes_saved_scope_after_requester_changes(external):
+    app, _, rid, _, github, _ = external
+    access = approved(external)
+    authority = github.write_authority(app.state.store.run(rid), 101, 100,
+                                      github.connection_version(), 'github_update_pull_request')
+    original_publications = app.state.store.rows('SELECT * FROM github_publications')
+    other = dict(app.state.store.rows('SELECT * FROM github_write_access WHERE id=?', (access['id'],))[0])
+    other.update(id='different-saved-grant', number=101)
+    app.state.store.execute('INSERT INTO github_write_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                           tuple(other.values()))
+    app.state.store.execute("UPDATE runs SET active_user_id='different-requester' WHERE id=?", (rid,))
+    github.revoke_retargeted_pr_access(authority)
+    github.revoke_retargeted_pr_access(authority)
+    states = {row['id']: row['status'] for row in app.state.store.rows('SELECT id,status FROM github_write_access')}
+    assert states[access['id']] == 'revoked' and states['different-saved-grant'] == 'approved'
+    assert app.state.store.rows('SELECT * FROM github_publications') == original_publications
+
+
+def test_retarget_revocation_never_matches_a_different_saved_scope(external):
+    app, _, rid, _, github, _ = external
+    access = approved(external)
+    authority = github.write_authority(app.state.store.run(rid), 101, 100,
+                                      github.connection_version(), 'github_update_pull_request')
+    github.revoke_retargeted_pr_access({**authority, 'base_branch': 'different-base'})
+    assert app.state.store.rows('SELECT status FROM github_write_access WHERE id=?', (access['id'],))[0]['status'] == 'approved'
+    github.revoke_retargeted_pr_access({'id': 'publication', 'grant': False})
+
+
+@pytest.mark.parametrize('head_repository', [101, 202])
+def test_rebase_uses_exact_pr_grant_and_independently_selected_head(external, monkeypatch, head_repository):
+    import asyncio
+    from app.github_publications import REBASE_REF_MUTATION
+    app, _, rid, _, github, api = external
+    if head_repository == 202:
+        select(app, (101, 202))
+    api.pr['head']['repo']['id'] = head_repository
+    api.pr['base']['sha'] = CURRENT
+    run = app.state.store.run(rid)
+    with pytest.raises(ConnectorError, match='explicit requester approval'):
+        asyncio.run(github.rebase_pull_request(run, rebase_args()))
+    approved(external)
+    atomic = []
+    async def request(method, path, **kwargs):
+        if method == 'GET' and path.endswith('/git/commits/' + CURRENT):
+            return {'sha': CURRENT, 'tree': {'sha': REBASE_TREE}}
+        if path == '/graphql' and kwargs['json']['query'] == REBASE_REF_MUTATION:
+            atomic.append(kwargs)
+            assert kwargs['token'] == f'test-token-{head_repository}'
+            assert kwargs['json']['variables']['repositoryId'] == f'R_{head_repository}'
+            assert kwargs['json']['variables']['name'] == 'refs/heads/human/fix'
+            assert kwargs['json']['variables']['beforeOid'] == api.branch
+            api.branch = kwargs['json']['variables']['afterOid']
+            return {'data': {'updateRefs': {'clientMutationId': None}}}
+        return await api.request(method, path, **kwargs)
+    monkeypatch.setattr(github, 'request', request)
+    result = asyncio.run(github.rebase_pull_request(run, rebase_args()))
+    assert result['number'] == 100 and result['commit'] == NEXT
+    assert len(atomic) == 1 and not app.state.store.rows('SELECT * FROM github_publications')
+    assert not github.branch_owned(head_repository, 'human/fix', github.connection_version())
 
 
 @pytest.mark.parametrize('operation', ['update', 'comment'])

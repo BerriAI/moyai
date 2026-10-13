@@ -273,7 +273,8 @@ def test_real_mcp_git_checkout_and_publication_through_access(
         else:
             if path == '/tools':
                 value = [{'name': name, 'description': name, 'inputSchema': {'type': 'object'}}
-                         for name in ('github_checkout', 'github_create_pull_request', 'github_update_pull_request')]
+                         for name in ('github_checkout', 'github_create_pull_request', 'github_update_pull_request',
+                                      'github_publish_branch', 'github_rebase_pull_request')]
             else:
                 assert path == '/tools/call'
                 request = json.loads(unseal('test-run', path, raw))
@@ -282,20 +283,48 @@ def test_real_mcp_git_checkout_and_publication_through_access(
                     if request['arguments'].get('number'):
                         value = {**metadata, 'number': 100, 'checkout_ref': 'refs/heads/moyai/test',
                                  'base_sha': git(source, 'rev-parse', 'HEAD')}
+                    elif request['arguments'].get('ref'):
+                        ref = request['arguments']['ref']
+                        assert ref in {'moyai/test', 'main'}
+                        value = {**metadata, 'checkout_ref': 'refs/heads/' + ref, 'base_branch': 'main',
+                                 'base_sha': metadata['base_sha'] if ref == 'main' else git(source, 'rev-parse', 'HEAD')}
                 else:
                     # Simulate server-side publication to a local provider. The
                     # MCP subprocess still performs a real authenticated fetch.
-                    assert request['name'] in {'github_create_pull_request', 'github_update_pull_request'}
+                    assert request['name'] in {'github_create_pull_request', 'github_update_pull_request',
+                                               'github_publish_branch', 'github_rebase_pull_request'}
+                    if request['name'] == 'github_create_pull_request':
+                        assert request['arguments']['base_branch'] == 'main'
+                        assert request['arguments']['head_branch'] == 'moyai/test'
+                    if request['name'] == 'github_rebase_pull_request':
+                        assert request['arguments']['base_sha'] == metadata['base_sha']
+                        assert request['arguments']['number'] == 100
+                        assert set(request['arguments']) == {'repository_id', 'base_sha', 'files', 'title',
+                                                              'number', 'expected_head_sha', 'request_key'}
+                        git(source, 'checkout', '--detach', request['arguments']['base_sha'])
                     changes = request['arguments']['files']
                     publications.append(changes)
                     for change in changes:
                         (source / change['path']).write_text(change['content'])
                     git(source, 'add', '.')
                     git(source, 'commit', '-m', request['arguments']['title'])
-                    git(source, 'push', str(bare), 'HEAD:refs/heads/moyai/test')
+                    if request['name'] == 'github_rebase_pull_request':
+                        commit = git(source, 'rev-parse', 'HEAD')
+                        git(bare, 'fetch', '--no-tags', str(source), commit)
+                        git(bare, 'update-ref', 'refs/heads/moyai/test', commit, request['arguments']['expected_head_sha'])
+                    else:
+                        git(source, 'push', str(bare), 'HEAD:refs/heads/moyai/test')
                     value = {'repository_id': 101, 'repository': 'BerriAI/moyai', 'number': 100,
                              'branch': 'moyai/test', 'commit': git(source, 'rev-parse', 'HEAD'),
                              'url': 'https://github.com/BerriAI/moyai/pull/100'}
+                    if request['name'] == 'github_rebase_pull_request':
+                        value['base_branch'] = 'main'
+                    if request['name'] == 'github_publish_branch':
+                        assert request['arguments']['branch'] == 'moyai/test'
+                        assert 'body' not in request['arguments'] and 'number' not in request['arguments']
+                        value.pop('number')
+                        value.pop('url')
+                        value.update(kind='branch', base_branch='main')
             body = json.dumps(value).encode()
             handler.send_response(200)
             handler.send_header('Content-Type', 'application/json')
@@ -345,17 +374,32 @@ def test_real_mcp_git_checkout_and_publication_through_access(
         assert result['base_sha'] == metadata['base_sha']
         assert (repo / 'change.txt').read_text() == 'before\n'
         print('PASS real MCP subprocess: authenticated Git clone' + (' through Access gate' if access_enabled else ' without Access configured'))
-        for index, name in enumerate(('github_create_pull_request', 'github_update_pull_request'), 1):
+        for index, name in enumerate(('github_create_pull_request', 'github_update_pull_request', 'github_publish_branch'), 1):
             (repo / 'change.txt').write_text(f'after {index}\n')
             args = {'directory': 'fresh', 'title': f'Change {index}', 'request_key': f'fixture-{index}'}
-            args.update({'body': 'Local provider fixture'} if index == 1 else {'number': 100})
+            args.update({'body': 'Local provider fixture', 'base_branch': 'main', 'head_branch': 'moyai/test'} if index == 1 else
+                        {'number': 100} if index == 2 else {'branch': 'moyai/test', 'expected_head_sha': result['commit']})
             result = invoke(name, args)
             assert 'checkout_warning' not in result
             assert json.loads((repo / '.git/moyai.json').read_text())['base_sha'] == result['commit']
+            if name == 'github_publish_branch':
+                assert 'number' not in result and 'number' not in json.loads((repo / '.git/moyai.json').read_text())
         checked_out = invoke('github_checkout', {'repository_id': 101, 'number': 100, 'directory': 'pr-head'})
         assert checked_out['base_sha'] == result['commit']
-        assert (workspace / 'pr-head/change.txt').read_text() == 'after 2\n'
-        assert len(publications) == 2 and all(len(files) == 1 for files in publications)
+        assert (workspace / 'pr-head/change.txt').read_text() == 'after 3\n'
+        branch_checkout = invoke('github_checkout', {'repository_id': 101, 'ref': 'moyai/test', 'directory': 'branch-head'})
+        assert branch_checkout['base_sha'] == result['commit'] and branch_checkout['base_branch'] == 'main'
+        assert (workspace / 'branch-head/change.txt').read_text() == 'after 3\n'
+        rebase_checkout = invoke('github_checkout', {'repository_id': 101, 'ref': 'main', 'directory': 'rebase-base'})
+        assert rebase_checkout['base_sha'] == metadata['base_sha'] and 'number' not in rebase_checkout
+        (workspace / 'rebase-base/change.txt').write_text('after rebase\n')
+        rebased = invoke('github_rebase_pull_request', {'directory': 'rebase-base', 'title': 'Rebase feature',
+            'number': 100, 'expected_head_sha': result['commit'], 'request_key': 'fixture-rebase'})
+        assert 'checkout_warning' not in rebased and rebased['number'] == 100 and rebased['base_branch'] == 'main'
+        assert rebased['branch'] == 'moyai/test' and rebased['url'] == 'https://github.com/BerriAI/moyai/pull/100'
+        synchronized = json.loads((workspace / 'rebase-base/.git/moyai.json').read_text())
+        assert synchronized['number'] == 100 and synchronized['base_sha'] == rebased['commit']
+        assert len(publications) == 4 and all(len(files) == 1 for files in publications)
         print('PASS publication and revision: authenticated fetch updates local checkout base')
         config_text = (repo / '.git/config').read_text()
         assert 'test-run' not in config_text and 'test-edge-secret' not in config_text
@@ -369,6 +413,164 @@ def test_real_mcp_git_checkout_and_publication_through_access(
         print('PASS no Cloudflare credentials in MCP configuration or repository config')
     finally:
         relay.close()
+
+
+def test_github_packager_classification_is_shared_across_runtime_paths(monkeypatch):
+    from agent.tools import github_tools, mcp_bridge, remote_computer
+    from app import deepagents_runtime
+
+    monkeypatch.delenv('MOYAI_REMOTE_COMPUTER', raising=False)
+    packaged, forwarded = [], []
+    names = github_tools.LOCAL_TOOLS | {'github_create_branch', 'github_open_pull_request'}
+    catalog = [{'name': name} for name in names]
+
+    def broker(path, body=None):
+        if path == '/tools':
+            return catalog
+        forwarded.append(body['name'])
+        return {'operation': body['name']}
+
+    def local_call(name, *args, **kwargs):
+        packaged.append(name)
+        return {'operation': name}
+
+    monkeypatch.setattr(mcp_bridge, 'broker', broker)
+    monkeypatch.setattr(github_tools, 'call', local_call)
+    assert deepagents_runtime.requires_computer is remote_computer.requires_computer
+    for name in sorted(names):
+        assert remote_computer.requires_computer(name) == (name in github_tools.LOCAL_TOOLS)
+        result = mcp_bridge.call_tool({'name': name, 'arguments': {}}, catalog)
+        assert not result['isError']
+    assert set(packaged) == github_tools.LOCAL_TOOLS
+    assert set(forwarded) == {'github_create_branch', 'github_open_pull_request'}
+    catalog.clear()
+    result = mcp_bridge.call_tool({'name': 'github_publish_branch', 'arguments': {}}, catalog)
+    assert result['isError'] and len(packaged) == len(github_tools.LOCAL_TOOLS)
+
+
+async def test_deepagents_combined_catalog_preserves_all_tools_with_two_wire_functions(tmp_path, monkeypatch):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from cryptography.fernet import Fernet
+    from fastapi.testclient import TestClient
+    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langchain_core.messages import HumanMessage, ToolMessage
+    from langchain_core.tools import StructuredTool
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+    from app.config import Settings
+    from app.main import create_app
+    from app.deepagents_context import BrokerModel, _runtime
+    from app.deepagents_runtime import DeepAgentsRuntime, SealedModelTransport
+    from app.deepagents_workflow import MoyaiControl, TurnScope, workspace_call, workspace_tools
+    from agent.tools import computer_tools, github_tools
+    from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
+    from sandbox.broker_transport import CONTENT_TYPE, unseal
+    from deepagents_provider import answer, response_stream
+    from test_spend import active, sign_in
+
+    settings = Settings(_env_file=None, data_dir=tmp_path, temporal_enabled=True,
+        session_secret='test-session-secret', encryption_key=Fernet.generate_key().decode(),
+        agent_model='openai/gpt-6-astra', session_titles_enabled=False, memory_review_enabled=False,
+        repository_context_enabled=False, bundled_skills_enabled=False, litellm_api_key='',
+        modal_token_id='', modal_token_secret='')
+    app = create_app(settings)
+    client = TestClient(app, base_url=settings.public_url)
+    requests, wire_sizes = [], []
+    runtime_token = None
+    try:
+        sign_in(app, client)
+        connections = ['github', 'slack', 'notion', 'linear']
+        for provider in connections:
+            app.state.connectors.save(provider, {'access_token': 'catalog-test-token', 'kind': 'personal'}, 'Synthetic catalog')
+        run = active(app)
+        app.state.store.execute('UPDATE runs SET plugins=?,harness=? WHERE id=?',
+                               (json.dumps(connections), settings.agent_harness, run['id']))
+        scope = TurnScope(run['id'], run['active_message_id'], actor_id=run['active_user_id'], model=settings.resolve_model())
+        assert settings.agent_harness == 'deepagents-temporal'
+        broker_response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
+        assert broker_response.status_code == 200
+        broker_catalog = broker_response.json()
+        runtime = object.__new__(DeepAgentsRuntime)
+        runtime.runner = SimpleNamespace(settings=settings, token=lambda *args: 'capability')
+        runtime.current = lambda selected: app.state.store.run(selected.run_id)
+        runtime.stream_text = lambda *args: None
+        runtime.broker_transport = httpx.ASGITransport(app=app)
+        runtime.model_request = runtime._model_request
+        runtime_token = _runtime.set(runtime)
+
+        def provider(request):
+            assert request.url.path == f"/broker/{run['id']}/v1/responses"
+            assert request.headers['content-type'] == CONTENT_TYPE
+            raw = unseal('capability', '/v1/responses', request.read())
+            body = json.loads(raw)
+            requests.append(body)
+            wire_sizes.append(len(raw))
+            assert [tool['name'] for tool in body['tools']] == ['workspace_tools', 'workspace_call']
+            assert all(tool['type'] == 'function' for tool in body['tools'])
+            assert not any(tool.get('defer_loading') for tool in body['tools'])
+            assert all(not {'scope', 'call_id'} & tool['parameters']['properties'].keys() for tool in body['tools'])
+            response = {**answer('Catalog inspected.', identity=f'catalog-{len(requests)}'), 'model': scope.model}
+            if len(requests) == 1:
+                response['output'] = [{'id': 'fc_catalog', 'type': 'function_call', 'name': 'workspace_tools',
+                                       'arguments': '{}', 'call_id': 'catalog-discovery', 'status': 'completed'}]
+            return httpx.Response(200, content=b''.join(response_stream(response)),
+                                  headers={'Content-Type': 'text/event-stream'})
+
+        class CapturedModelTransport(SealedModelTransport):
+            def __init__(self, token):
+                self.token = token
+                self.transport = httpx.MockTransport(provider)
+
+        async def wait_condition(predicate):
+            while not predicate():
+                await asyncio.sleep(0)
+
+        monkeypatch.setattr('app.deepagents_runtime.SealedModelTransport', CapturedModelTransport)
+        monkeypatch.setattr('app.deepagents_workflow.workflow.wait_condition', wait_condition)
+        control = object.__new__(MoyaiControl)
+        control.scope, control.requests, control.applied = scope, 1, []
+        control.inbox, control.result = [], None
+        unscoped = StructuredTool.from_function(lambda: 'unused', name='unscoped_helper', description='Not model-visible.')
+        offered_tools = [workspace_tools, unscoped, workspace_call]
+
+        async def request_model(request):
+            bound = request.model.bind_tools([convert_to_openai_tool(tool) for tool in request.tools])
+            response = await bound.ainvoke(request.messages, **request.model_settings)
+            return ModelResponse(result=[response])
+
+        messages = [HumanMessage(content='Inspect the catalog without executing connector writes.')]
+        first = await control.awrap_model_call(
+            ModelRequest(model=BrokerModel(), messages=messages, tools=offered_tools), request_model)
+        assert first.result[0].tool_calls[0]['name'] == 'workspace_tools'
+        catalog_json = await workspace_tools.ainvoke({'scope': asdict(scope)})
+        catalog = json.loads(catalog_json)
+        expected = github_tools.advertised_tools(broker_catalog) + BROWSER_TOOLS + [GUIDANCE_TOOL] + computer_tools.TOOLS
+        assert catalog == expected
+        names = [tool['name'] for tool in catalog]
+        assert len(names) == len(set(names))
+        added = set('''github_create_branch github_publish_branch github_open_pull_request github_rebase_pull_request
+            github_reopen_pull_request github_retarget_pull_request github_convert_pull_request_to_draft
+            github_create_review github_submit_review github_edit_pending_review github_delete_pending_review
+            github_stacks github_stack github_create_stack github_add_to_stack github_unstack'''.split())
+        assert len(added) == 16 and added <= set(names)
+        assert {'github_repositories', 'slack_search', 'notion_search', 'linear_my_issues', 'computer_operation_read'} <= set(names)
+        messages += [first.result[0], ToolMessage(content=catalog_json, tool_call_id='catalog-discovery', name='workspace_tools')]
+        second = await control.awrap_model_call(
+            ModelRequest(model=BrokerModel(), messages=messages, tools=offered_tools), request_model)
+        assert second.result[0].text == 'Catalog inspected.'
+        assert len(requests) == 2 and all(body['model'] == scope.model and body['store'] is False for body in requests)
+        assert not any(item.get('type') == 'function_call_output' for item in requests[0]['input'])
+        output = next(item['output'] for item in requests[1]['input'] if item.get('type') == 'function_call_output')
+        assert json.loads(output) == expected
+        assert requests[0]['tools'] == requests[1]['tools']
+        print(json.dumps({'broker_tools': len(broker_catalog), 'catalog_tools': len(catalog),
+            'new_github_operations': len(added), 'bound_tools_each_request': [len(body['tools']) for body in requests],
+            'catalog_utf8_bytes': len(catalog_json.encode()), 'unsealed_request_utf8_bytes': wire_sizes}))
+    finally:
+        if runtime_token is not None:
+            _runtime.reset(runtime_token)
+        client.close()
+        app.state.store.close()
 
 
 @pytest.mark.parametrize(('method', 'path', 'headers', 'content', 'status'), [

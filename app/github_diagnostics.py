@@ -4,11 +4,16 @@ import json
 
 from .connector_errors import ConnectorError
 from .github_coding import READS, WRITES, clean
+from .github_stacks import READS as STACK_READS, WRITES as STACK_WRITES
 
 
 def required_permissions(name):
     if name == 'github_capabilities':
         return {}
+    if name in STACK_READS:
+        return {'pull_requests': 'read'}
+    if name in STACK_WRITES:
+        return {'contents': 'read', 'pull_requests': 'write'}
     if name == 'github_ci_checks':
         return {'checks': 'read', 'statuses': 'read'}
     if name == 'github_workflow_action':
@@ -20,10 +25,13 @@ def required_permissions(name):
         return {'administration': 'write'}
     if name in {'github_repositories', 'github_rulesets', 'github_ruleset'}:
         return {'metadata': 'read'}
-    if name in {'github_create_pull_request', 'github_update_pull_request'}:
+    if name in {'github_create_pull_request', 'github_update_pull_request', 'github_rebase_pull_request', 'github_create_branch',
+                'github_publish_branch', 'github_open_pull_request'}:
         return {'contents': 'write', 'pull_requests': 'write'}
     if name in {'github_comment_pull_request', 'github_request_pull_request_write_access'}:
         return {'contents': 'write', 'pull_requests': 'write'}
+    if name == 'github_retarget_pull_request':
+        return {'contents': 'read', 'pull_requests': 'write'}
     if name in WRITES:
         return {'issues' if 'issue' in name and 'pull_request' not in name else 'pull_requests': 'write'}
     if name in {'github_issues', 'github_issue', 'github_issue_comments', 'github_labels', 'github_milestones'}:
@@ -73,6 +81,7 @@ async def read_diagnostic(github, run, name, args, version, target):
             'prohibited_operations': ['merge', 'auto_merge', 'approve_review'],
             'limitations': 'Registration and installation permissions do not prove execution will succeed. '
                           'Exact PR grants, current heads, repository rules and token issuance still apply. '
+                          'New refs also require a complete readable classic branch-protection policy; denied or incomplete reads block creation. '
                           'Only an organization owner can change installation permissions.'}
 
     identity = hashlib.sha256(f"{run['id']}:{args.request_key}".encode()).hexdigest()
@@ -80,6 +89,9 @@ async def read_diagnostic(github, run, name, args, version, target):
     if not rows:
         return {**result, 'status': 'not_recorded', 'instruction': 'No publication receipt exists for this key in this session.'}
     row = rows[0]
+    intent = github.publication_intent(identity)
+    if intent and intent['repository_id'] != target:
+        raise ConnectorError('This publication belongs to a different repository.', dispatched=False)
     if row['connection_version'] != version:
         raise ConnectorError('The GitHub connection changed since this publication.', dispatched=False)
     if row['result']:
@@ -87,10 +99,18 @@ async def read_diagnostic(github, run, name, args, version, target):
             raise ConnectorError('This receipt belongs to a different repository.', dispatched=False)
         saved = github.receipt(row['result'], target)
         return clean({**result, 'status': 'confirmed_receipt', 'receipt': saved,
-                      'instruction': 'Historical confirmation; use github_pull_request for current PR state.'}, '')
+                      'instruction': 'Historical confirmation; read the branch or PR for current state.'}, '')
     if not row['commit_sha']:
         return {**result, 'status': 'preparation_unconfirmed',
                 'instruction': 'No prepared commit or PR confirmation was saved. This tool performs no publication.'}
+    if intent and intent['tool'] in {'github_create_branch', 'github_publish_branch'}:
+        token = await github.installation_token(repository=target)
+        check()
+        current = await github.publication_ref(token, target, row['branch'], missing=True)
+        check()
+        return {**result, 'kind': 'branch', 'status': 'observed_match' if current == row['commit_sha'] else 'unconfirmed',
+                'branch': row['branch'], 'commit': row['commit_sha'], 'base_branch': intent['base_branch'],
+                'receipt_saved': False, 'instruction': 'Read-only observation; no branch write or PR was performed.'}
     token = await github.installation_token(repository=target, coding='pull_requests_read')
     check()
     pulls = await github.request('GET', f'/repositories/{target}/pulls', token=token,
@@ -109,6 +129,7 @@ async def read_diagnostic(github, run, name, args, version, target):
         if (type(number) is not int or number <= 0 or not isinstance(head, dict) or not isinstance(base, dict)
                 or repository_id(head) != target or repository_id(base) != target
                 or head.get('ref') != row['branch'] or head.get('sha') != row['commit_sha']
+                or intent and base.get('ref') != intent['base_branch']
                 or pr.get('html_url') != f'https://github.com/{github.repository_name(target)}/pull/{number}'
                 or pr.get('state') not in {'open', 'closed'} or type(pr.get('draft')) is not bool):
             raise ConnectorError('Readback does not match the recorded branch and commit.', dispatched=False)

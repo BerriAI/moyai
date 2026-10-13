@@ -8,11 +8,12 @@ from urllib.error import HTTPError, URLError
 from uuid import uuid4
 
 from agent.tools.computer_tools import TOOLS as COMPUTER_TOOLS, call as local_computer_call
+from agent.tools.github_tools import LOCAL_TOOLS as GITHUB_LOCAL_TOOLS
 from sandbox.broker_transport import send_payload
 
 
-LOCAL_TOOLS = frozenset({tool['name'] for tool in COMPUTER_TOOLS} | {
-    'repository_guidance', 'github_checkout', 'github_create_pull_request', 'github_update_pull_request',
+LOCAL_TOOLS = frozenset({tool['name'] for tool in COMPUTER_TOOLS} | GITHUB_LOCAL_TOOLS | {
+    'repository_guidance',
     'credentials_run', 'artifact_publish', 'artifact_fetch',
 })
 

@@ -1,4 +1,5 @@
 """Authenticated, exact-chat consent; never publication provenance."""
+from collections.abc import Mapping
 import hashlib
 import json
 import re
@@ -6,6 +7,7 @@ from typing import Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
+from agent.github_refs import validate_branch_name
 
 from .connector_errors import ConnectorError
 from .db import now
@@ -55,14 +57,14 @@ class GitHubWriteAccess:
 
     @staticmethod
     def valid_branch(value):
-        return (isinstance(value, str) and 0 < len(value) <= 1024
-                and value != '@' and not value.endswith('.')
-                and not any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c in '~^:?*[\\' for c in value)
-                and '..' not in value and '@{' not in value
-                and all(part and not part.startswith('.') and not part.endswith('.lock') for part in value.split('/')))
+        try:
+            validate_branch_name(value)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
-    def pr_identity(pr, target, number):
+    def pr_identity(pr, target, number, *, allow_closed=False):
         if not isinstance(pr, dict):
             raise ConnectorError('GitHub returned invalid PR metadata.')
         head, base = pr.get('head') or {}, pr.get('base') or {}
@@ -72,7 +74,8 @@ class GitHubWriteAccess:
         repo = (head.get('repo') or {}).get('id')
         branch, base_branch = head.get('ref', ''), base.get('ref', '')
         if (pr.get('number') != number or (base.get('repo') or {}).get('id') != target
-                or pr.get('state') != 'open' or pr.get('merged') or type(repo) is not int or repo <= 0
+                or pr.get('state') not in ({'open', 'closed'} if allow_closed else {'open'})
+                or pr.get('merged') or type(repo) is not int or repo <= 0
                 or not GitHubWriteAccess.valid_branch(branch) or not GitHubWriteAccess.valid_branch(base_branch)
                 or not isinstance(head.get('sha'), str) or not re.fullmatch(r'[0-9a-f]{40}', head['sha'])):
             raise ConnectorError('GitHub did not confirm an open PR and its exact base/head identity.')
@@ -87,7 +90,7 @@ class GitHubWriteAccess:
             publication = self.owned_publication(target, args.number, version)
         except ConnectorError:
             publication = None
-        if publication:
+        if publication and self.publication_owns_branch(publication, target, version):
             await self.owned_pr(token, target, args.number, publication)
             self.write_actor(run, version, 'github_request_pull_request_write_access')
             return {**self.receipt(publication['result'], target), 'status': 'publication_access',
@@ -163,19 +166,66 @@ class GitHubWriteAccess:
 
     def write_authority(self, run, target, number, version, tool):
         try:
-            return self.owned_publication(target, number, version)
+            publication = self.owned_publication(target, number, version)
+            if tool in {'github_update_pull_request', 'github_rebase_pull_request', 'github_create_stack',
+                        'github_add_to_stack', 'github_unstack'} and not self.publication_owns_branch(publication, target, version):
+                raise ConnectorError('PR authorship does not grant branch write ownership.')
+            return publication
         except ConnectorError:
             row = self.grant(run, target, number, version, tool)
             return {**row, 'grant': True, 'result': json.dumps({'repository_id': target,
                 'repository': self.repository_name(target), 'number': number, 'branch': row['branch'],
                 'url': f'https://github.com/{self.repository_name(target)}/pull/{number}'})}
 
-    async def authorized_pr(self, run, token, target, number, authority, version, tool):
+    def revoke_retargeted_pr_access(self, authority: Mapping[str, object]) -> None:
+        """Invalidate the dispatched grant, independently of the current actor."""
         if not authority.get('grant'):
-            return await self.owned_pr(token, target, number, authority)
+            return
+        fields = ('id', 'run_id', 'actor_id', 'connection_version', 'repository_id', 'number',
+                  'head_repository_id', 'branch', 'base_branch')
+        self.store.execute('''UPDATE github_write_access SET status='revoked'
+            WHERE id=? AND run_id=? AND actor_id=? AND connection_version=? AND repository_id=?
+                AND number=? AND head_repository_id=? AND branch=? AND base_branch=?
+                AND status IN ('pending','approved')''', tuple(authority[field] for field in fields))
+
+    async def rebase_authority(self, run: Mapping[str, object], token: str, target: int,
+                               number: int, version: str) -> dict[str, object]:
+        tool = 'github_rebase_pull_request'
+        try:
+            return self.write_authority(run, target, number, version, tool)
+        except ConnectorError as denied:
+            self.ensure_publish_allowed(run, version, tool)
+            pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
+            head_target, branch, base_branch = self.pr_identity(pr, target, number)
+            self.ensure_publish_allowed(run, version, tool)
+            self.target(head_target)
+            if not self.branch_owned(head_target, branch, version):
+                raise denied
+            return {'branch_owned': True, 'head_repository_id': head_target, 'branch': branch, 'base_branch': base_branch,
+                    'result': json.dumps({'repository_id': target, 'repository': self.repository_name(target),
+                        'number': number, 'branch': branch, 'url': f'https://github.com/{self.repository_name(target)}/pull/{number}'})}
+
+    async def authorized_pr(self, run, token, target, number, authority, version, tool, *, allow_closed=False):
+        if authority.get('branch_owned'):
+            if tool != 'github_rebase_pull_request':
+                raise ConnectorError('Branch ownership does not grant PR metadata authority.')
+            self.ensure_publish_allowed(run, version, tool)
+            pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
+            if (self.pr_identity(pr, target, number) != (
+                    authority['head_repository_id'], authority['branch'], authority['base_branch'])
+                    or not self.branch_owned(authority['head_repository_id'], authority['branch'], version)):
+                raise ConnectorError('The PR or its trusted branch ownership changed.')
+            self.ensure_publish_allowed(run, version, tool)
+            self.target(authority['head_repository_id'])
+            return pr
+        if not authority.get('grant'):
+            self.ensure_publish_allowed(run, version, tool)
+            pr = await self.owned_pr(token, target, number, authority, allow_closed=allow_closed)
+            self.ensure_publish_allowed(run, version, tool)
+            return pr
         self.grant(run, target, number, version, tool)
         pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
-        identity = self.pr_identity(pr, target, number)
+        identity = self.pr_identity(pr, target, number, allow_closed=allow_closed)
         if identity != (authority['head_repository_id'], authority['branch'], authority['base_branch']):
             raise ConnectorError('The PR was retargeted or its head changed identity; approval no longer applies.')
         self.grant(run, target, number, version, tool)
