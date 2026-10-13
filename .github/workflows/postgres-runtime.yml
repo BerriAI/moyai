@@ -83,7 +83,7 @@ jobs:
   scheduling:
     # Keep real Temporal and database-contention guarantees on every PR.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine
@@ -107,6 +107,10 @@ jobs:
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_deepagents_runtime.py tests/test_deepagents_acceptance.py tests/test_deepagents_workers.py tests/test_deepagents_publication.py tests/test_deepagents_failures.py tests/test_tool_dispatch.py
       - name: Demonstrate responsive scheduling during Postgres writer and pool waits
         run: uv run --frozen --python 3.13 python scripts/scheduling_stall_demo.py
+      - name: Verify goal reads and streaming remain responsive with a constrained pool
+        run: |
+          uv run --frozen --python 3.13 pytest -q --tb=short tests/test_goal_scheduling.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_harness_gateway.py -k streaming_pool_wait
 
   distributed:
     runs-on: ubuntu-latest

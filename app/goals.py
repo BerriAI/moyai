@@ -120,7 +120,7 @@ class Goals:
         workflow = conn.execute('''SELECT m.id,m.user_id,m.source_json,a.automation_id,a.revision
             FROM messages m JOIN automation_runs a ON a.run_id=m.run_id
             WHERE m.run_id=? AND m.id=? AND m.input_kind='automation' ''',
-            (caller['id'], caller['active_message_id'])).fetchone() if 'automation_runs' in self.store.table_names() else None
+            (caller['id'], caller['active_message_id'])).fetchone() if 'automation_runs' in conn.table_names() else None
         if workflow:
             saved = json.loads(workflow['source_json'])
             if (saved.get('automation_id') == workflow['automation_id'] and saved.get('revision') == workflow['revision']
@@ -146,7 +146,14 @@ class Goals:
                 raise HTTPException(422, 'This control requires an exact authenticated user command.')
             return self.exchange(caller, {'action': 'resume' if arg == 'resume' else 'cancel' if arg == 'clear' else 'pause', 'source_input_id': source_id})
         with self.store.connect(write_scope=caller['id']) as conn:
-            conn.begin_write()
+            # Both harness polling and the public get action are read-only.
+            # Keep all source reads on this connection: borrowing another one
+            # while holding a session lock can exhaust the pool and strand the
+            # schema's other writers behind that lock.
+            if body.get('action') == 'get':
+                conn.begin_read()
+            else:
+                conn.begin_write()
             self.require(conn, caller)
             state = self.current(conn, caller['id'])
             if internal:
