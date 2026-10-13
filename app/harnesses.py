@@ -7,7 +7,7 @@ def validate_harness(harness, model):
     # Model authorization belongs to Settings.resolve_model, not the harness.
     # The gateway handles compatibility with each harness's native protocol.
     resolve(harness)
-    if model == ASTRA_ULTRAFAST and harness not in {'codex', 'deepagents-temporal'}:
+    if model == ASTRA_ULTRAFAST and harness not in {'codex', 'deepagents-temporal', 'deepagents-native'}:
         raise ValueError('GPT-6 Astra Ultrafast requires the Responses API. Choose Deep Agents for a new session or select regular GPT-6 Astra.')
     return harness
 

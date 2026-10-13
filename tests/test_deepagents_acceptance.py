@@ -33,7 +33,7 @@ async def until(predicate, seconds=10):
 
 
 @asynccontextmanager
-async def web_worker(app, *, activity_slots=1):
+async def web_worker(app, *, activity_slots=1, port=0):
     manager, settings = app.state.manager, app.state.settings
     settings.modal_token_id, settings.modal_token_secret = 'fixture-id', 'fixture-secret'
     settings.litellm_api_key = 'fixture-provider-key'
@@ -41,7 +41,8 @@ async def web_worker(app, *, activity_slots=1):
     settings.repository_context_enabled = False
     settings.temporal_worker_activities = activity_slots
     listener = socket.socket()
-    listener.bind(('127.0.0.1', 0))
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('127.0.0.1', port))
     settings.public_url = f'http://127.0.0.1:{listener.getsockname()[1]}'
     app.state.connectors.security.origin = settings.public_url
     manager.deepagents_runtime.broker_transport = None

@@ -146,7 +146,7 @@ def sandbox_harness_catalog(monkeypatch):
     # Preserve coverage for saved mixed-harness teams; the real workflow path
     # has its own controller/child/recovery tests in test_deepagents_runtime.
     from app import harnesses
-    catalog = [item for item in harnesses.choices() if item['id'] != 'deepagents-temporal']
+    catalog = [item for item in harnesses.choices() if item['engine'] != 'temporal']
     monkeypatch.setattr(harnesses, 'choices', lambda: catalog)
 
 

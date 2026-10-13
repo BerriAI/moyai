@@ -105,7 +105,7 @@ class MessageQueue:
             return
         with self.store.connect() as conn:
             conn.begin_write()
-            durable_agent = conn.execute("SELECT 1 FROM runs WHERE id=? AND harness='deepagents-temporal'", (run_id,)).fetchone()
+            durable_agent = conn.execute("SELECT 1 FROM runs WHERE id=? AND harness IN ('deepagents-temporal','deepagents-native')", (run_id,)).fetchone()
             for message_id in ids:
                 applied_at = now()
                 changed = conn.execute("UPDATE messages SET status='injected',started_at=? WHERE id=? AND run_id=? AND steering_parent_id=? AND status='queued' AND queue_locked=1",

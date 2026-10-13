@@ -62,6 +62,8 @@ def key():
     ('codex', False, []),
     ('deepagents-temporal', True, []),
     ('deepagents-temporal', False, ['TEMPORAL_ENABLED']),
+    ('deepagents-native', True, []),
+    ('deepagents-native', False, ['TEMPORAL_ENABLED']),
 ])
 def test_readiness_only_requires_selected_provider(tmp_path, harness, temporal, missing):
     _, signing = key()

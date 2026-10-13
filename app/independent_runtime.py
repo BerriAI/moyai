@@ -29,7 +29,7 @@ class IndependentRuntime:
         self.operations = ComputerOperations(runner.store, runner.submit_in)
 
     def supports(self, run):
-        if run['harness'] == 'deepagents-temporal':
+        if run['harness'] in {'deepagents-temporal', 'deepagents-native'}:
             # The graph runs on workers for every computer provider. Only
             # Codex uses the Modal control guest below; ensure_computer routes
             # Deep Agents tools through DurableRunner's selected provider.
@@ -129,7 +129,7 @@ class IndependentRuntime:
             result = outcome['result']
             if result.get('error') or result.get('isError') or not result.get('workspace'):
                 run = await database(r.store.run, run_id)
-                if (run['harness'] == 'deepagents-temporal' and computer.get('preparation_input_id') !=
+                if (run['harness'] in {'deepagents-temporal', 'deepagents-native'} and computer.get('preparation_input_id') !=
                         await database(self.preparation_input, run_id, state['message_id'])):
                     # The old job has ended. Only now can the corrected request
                     # start a fresh preparation in this same workspace.
@@ -151,7 +151,7 @@ class IndependentRuntime:
         r = self.runner
         run = await database(r.store.run, run_id)
         spec = await database(r.spec, {**run, 'message_id': state['message_id']})
-        if run['harness'] == 'deepagents-temporal' and identity != 'finish':
+        if run['harness'] in {'deepagents-temporal', 'deepagents-native'} and identity != 'finish':
             if identity == 'prepare':
                 computer = state.setdefault('computer', {})
                 if not computer.get('preparation_input_id'):

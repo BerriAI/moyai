@@ -33,7 +33,7 @@ def failure_record(row):
     for key in ('response_started', 'transient', 'transport_interrupted', 'uncertain_tool', 'boundary_failed'):
         if type(data.get(key)) is bool:
             result[key] = data[key]
-    for key, values in {'route': BROKER_ROUTES, 'sdk': {'codex', 'claude-agent-sdk', 'deepagents-temporal'},
+    for key, values in {'route': BROKER_ROUTES, 'sdk': {'codex', 'claude-agent-sdk', 'deepagents-temporal', 'deepagents-native'},
                         'activity_type': ACTIVITY_TYPES,
                         'code': CODEX_ERRORS, 'native_status': CLAUDE_RESULTS,
                         'terminal_reason': CLAUDE_TERMINAL_REASONS}.items():

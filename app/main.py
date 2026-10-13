@@ -1458,7 +1458,7 @@ def _create_app(settings, store):
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
         dispatch = None
-        if run['harness'] == 'deepagents-temporal':
+        if run['harness'] in {'deepagents-temporal', 'deepagents-native'}:
             if body.input_id is None or body.request_id is None:
                 raise HTTPException(422, 'Durable tools require their input and stable request identities.')
             dispatch = ToolDispatch(store, run, body)

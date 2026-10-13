@@ -107,7 +107,7 @@ def summary_response(text, finish='stop'):
         'usage': {'prompt_tokens': 100, 'completion_tokens': 3552, 'total_tokens': 3652}})
 
 
-@pytest.mark.parametrize('harness', ['hermes', 'deepagents-temporal'])
+@pytest.mark.parametrize('harness', ['hermes', 'deepagents-temporal', 'deepagents-native'])
 def test_live_http_pressure_wait_survives_idle_sweep_and_preserves_new_tail(workspace, monkeypatch, harness):
     import asyncio
     import threading

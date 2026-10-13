@@ -99,10 +99,10 @@ def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
 
 
 @pytest.mark.parametrize(('model', 'harness'), [
-    ('astra', 'deepagents-temporal'), ('6-astra', 'deepagents-temporal'), ('GPT-6 Astra', 'deepagents-temporal'),
-    ('opus', 'deepagents-temporal'), ('Claude Opus 5.5', 'deepagents-temporal'),
-    ('glm', 'deepagents-temporal'), ('sol', 'deepagents-temporal'), ('GPT-6.1 Sol', 'deepagents-temporal'),
-    ('custom-gateway-model', 'deepagents-temporal'),
+    ('astra', 'deepagents-native'), ('6-astra', 'deepagents-native'), ('GPT-6 Astra', 'deepagents-native'),
+    ('opus', 'deepagents-native'), ('Claude Opus 5.5', 'deepagents-native'),
+    ('glm', 'deepagents-native'), ('sol', 'deepagents-native'), ('GPT-6.1 Sol', 'deepagents-native'),
+    ('custom-gateway-model', 'deepagents-native'),
 ])
 def test_new_session_default_harness_resolves_models(model, harness, monkeypatch):
     monkeypatch.delenv('AGENT_HARNESS', raising=False)
@@ -113,12 +113,12 @@ def test_new_session_default_harness_resolves_models(model, harness, monkeypatch
 
 
 @pytest.mark.parametrize(('model', 'harness'), [
-    ('openai/future-model', 'deepagents-temporal'),
-    ('anthropic/future-model', 'deepagents-temporal'),
-    ('openai-compatible/gpt-next', 'deepagents-temporal'),
-    ('other/openai/gpt-next', 'deepagents-temporal'),
-    ('custom-gateway-model', 'deepagents-temporal'),
-    ('openai', 'deepagents-temporal'),
+    ('openai/future-model', 'deepagents-native'),
+    ('anthropic/future-model', 'deepagents-native'),
+    ('openai-compatible/gpt-next', 'deepagents-native'),
+    ('other/openai/gpt-next', 'deepagents-native'),
+    ('custom-gateway-model', 'deepagents-native'),
+    ('openai', 'deepagents-native'),
 ])
 def test_custom_models_share_durable_default(model, harness, monkeypatch):
     monkeypatch.delenv('AGENT_HARNESS', raising=False)

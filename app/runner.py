@@ -484,7 +484,7 @@ class RunManager:
         return spec
 
     async def cloud(self, run):
-        if run.get('harness') == 'deepagents-temporal':
+        if run.get('harness') in {'deepagents-temporal', 'deepagents-native'}:
             raise ValueError('Deep Agents requires Temporal. Configure TEMPORAL_ENABLED=true and a reachable Temporal server.')
         run_id = run["id"]
         self.store.update_run(run_id, status="provisioning")

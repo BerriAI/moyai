@@ -806,7 +806,7 @@ class DurableRunner(RunManager):
     async def _step(self, run_id, state):
         phase = state['phase']
         run = await database(self.store.run, run_id)
-        if run['harness'] == 'deepagents-temporal' and phase in {'provision', 'install', 'launch', 'monitor'}:
+        if run['harness'] in {'deepagents-temporal', 'deepagents-native'} and phase in {'provision', 'install', 'launch', 'monitor'}:
             if not hasattr(self, 'deepagents_execution'):
                 raise ValueError('Deep Agents requires Temporal execution.')
             return await self.deepagents_execution.step(run_id, state)
@@ -1116,7 +1116,7 @@ class DurableRunner(RunManager):
                                  {'group_id': state['wait_group']})
                 await database(self.save, run_id, state)
             elif continuing:
-                if run['harness'] == 'deepagents-temporal':
+                if run['harness'] in {'deepagents-temporal', 'deepagents-native'}:
                     state['phase'] = 'provision'
                 elif time.time() - state['machine_started'] >= self.rotation_seconds(state):
                     await self.cleanup(state, run_id)

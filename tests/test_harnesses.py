@@ -21,7 +21,7 @@ OPUS = 'anthropic/claude-opus-5-5'
 def test_session_harness_validation_persistence_and_idempotency(workspace, monkeypatch, harness):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
-    assert len(client.get('/api/config').json()['harnesses']) == 8
+    assert len(client.get('/api/config').json()['harnesses']) == 9
     assert client.post('/api/runs', json={'prompt': 'bad choice', 'harness': 'unknown'}).status_code == 422
     assert client.post('/api/runs', json={'prompt': 'bad model', 'harness': 'claude-agent-sdk', 'model': 'unconfigured/model'}).status_code == 422
     body = {'prompt': 'SDK task', 'harness': harness, 'model': OPUS, 'client_id': 'harness-test-1'}
@@ -41,7 +41,7 @@ def test_session_harness_validation_persistence_and_idempotency(workspace, monke
     assert client.post(endpoint, json={'content': 'follow up', 'client_id': 'harness-followup'}).status_code == 202
     assert app.state.manager.spec(app.state.store.run(run['id']))['harness'] == harness
     fresh = client.post('/api/runs', json={'prompt': 'default task'}).json()
-    assert fresh['harness'] == 'deepagents-temporal'
+    assert fresh['harness'] == 'deepagents-native'
 
 
 def test_slack_harness_command_and_followups(slack_app):
@@ -75,17 +75,17 @@ def test_slack_harness_with_initial_task(slack_app, harness):
 
 def use_model_defaults(settings):
     # The shared fixtures explicitly opt into Hermes for historical assertions.
-    settings.agent_harness = 'deepagents-temporal'
+    settings.agent_harness = 'deepagents-native'
     settings.model_fields_set.discard('agent_harness')
 
 
-@pytest.mark.parametrize(('model', 'harness'), [('astra', 'deepagents-temporal'), ('sol', 'deepagents-temporal'), ('opus', 'deepagents-temporal'), ('glm', 'deepagents-temporal')])
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'deepagents-native'), ('sol', 'deepagents-native'), ('opus', 'deepagents-native'), ('glm', 'deepagents-native')])
 def test_web_new_session_pairs_model_once_and_exposes_effective_defaults(workspace, monkeypatch, model, harness):
     app, client = workspace
     use_model_defaults(app.state.settings)
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     catalog = client.get('/api/config').json()
-    assert catalog['harness'] == 'deepagents-temporal'
+    assert catalog['harness'] == 'deepagents-native'
     canonical = app.state.settings.resolve_model(model)
     assert next(item for item in catalog['models'] if item['id'] == canonical)['default_harness'] == harness
     response = client.post('/api/runs', json={'prompt': 'Use the model default', 'model': model})
@@ -103,9 +103,9 @@ def test_web_new_session_pairs_model_once_and_exposes_effective_defaults(workspa
 
 
 @pytest.mark.parametrize(('model', 'harness'), [
-    ('openai/future-model', 'deepagents-temporal'),
-    ('anthropic/future-model', 'deepagents-temporal'),
-    ('other/future-model', 'deepagents-temporal'),
+    ('openai/future-model', 'deepagents-native'),
+    ('anthropic/future-model', 'deepagents-native'),
+    ('other/future-model', 'deepagents-native'),
 ])
 def test_new_catalog_models_inherit_provider_default(workspace, monkeypatch, model, harness):
     app, client = workspace
@@ -123,7 +123,7 @@ def test_new_catalog_models_inherit_provider_default(workspace, monkeypatch, mod
 
 
 @pytest.mark.parametrize('thread_chat', [True, False])
-@pytest.mark.parametrize(('model', 'harness'), [('openai/gpt-6-astra', 'deepagents-temporal'), ('openai/gpt-6.1-sol', 'deepagents-temporal'), (OPUS, 'deepagents-temporal')])
+@pytest.mark.parametrize(('model', 'harness'), [('openai/gpt-6-astra', 'deepagents-native'), ('openai/gpt-6.1-sol', 'deepagents-native'), (OPUS, 'deepagents-native')])
 def test_slack_new_sessions_pair_configured_model(slack_app, thread_chat, model, harness):
     app, client, submitted, _ = slack_app
     use_model_defaults(app.state.settings)
@@ -143,13 +143,13 @@ def test_slack_selected_model_pairs_only_new_thread(slack_app, model):
     response = client.post('/hooks/slack/events', **signed(event(text=f'<@U99999999> model {model}')))
     assert response.status_code == 200, response.text
     run = app.state.store.rows('SELECT * FROM runs')[0]
-    assert (run['model'], run['harness']) == (app.state.settings.resolve_model(model), 'deepagents-temporal')
+    assert (run['model'], run['harness']) == (app.state.settings.resolve_model(model), 'deepagents-native')
     send(client, 1, '<@U99999999> model opus')
     current = app.state.store.run(run['id'])
-    assert (current['model'], current['harness']) == (OPUS, 'deepagents-temporal')
+    assert (current['model'], current['harness']) == (OPUS, 'deepagents-native')
 
 
-@pytest.mark.parametrize(('model', 'harness'), [('astra', 'deepagents-temporal'), ('sol', 'deepagents-temporal'), ('opus', 'deepagents-temporal')])
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'deepagents-native'), ('sol', 'deepagents-native'), ('opus', 'deepagents-native')])
 def test_new_automation_default_persists_across_edits_and_launches(workspace, monkeypatch, model, harness):
     app, client = workspace
     use_model_defaults(app.state.settings)

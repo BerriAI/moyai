@@ -390,7 +390,7 @@ def durable_app(tmp_path):
     import httpx
     from app.config import Settings
     from app.main import create_app
-    settings = Settings(_env_file=None, data_dir=tmp_path, temporal_enabled=True,
+    settings = Settings(_env_file=None, data_dir=tmp_path, temporal_enabled=True, agent_harness='deepagents-temporal',
         session_secret='test-session-secret', encryption_key=Fernet.generate_key().decode(),
         agent_model='test-model', session_titles_enabled=False, memory_review_enabled=False,
         model_context_limits={'test-model': {'context_window': 100000, 'max_input_tokens': 90000,

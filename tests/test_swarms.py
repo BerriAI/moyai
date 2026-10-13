@@ -75,7 +75,8 @@ def test_initial_team_commits_twenty_workers_with_pinned_diverse_runtimes(durabl
     assert len(children) == INITIAL_TEAM_SIZE == 20
     assert len({child['agent_label'] for child in children}) == INITIAL_TEAM_SIZE
     assert {child['harness'] for child in children} == {
-        'codex', 'claude-agent-sdk', 'hermes', 'opencode', 'deepagents', 'tool-loop', 'pi', 'deepagents-temporal'}
+        'codex', 'claude-agent-sdk', 'hermes', 'opencode', 'deepagents', 'tool-loop', 'pi',
+        'deepagents-temporal', 'deepagents-native'}
     counts = [sum(child['harness'] == harness for child in children) for harness in {child['harness'] for child in children}]
     assert max(counts) - min(counts) <= 1
     for child in children:

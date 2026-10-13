@@ -7,6 +7,9 @@ from sandbox.broker_failure import safe_error
 ACTIVITY_TYPES = {
     'deepagents.invoke_model', 'deepagents.invoke_tool', 'deepagents_prepare_v1',
     'deepagents_boundary_v1', 'deepagents_publish_v1', 'deepagents_computer_v1',
+    'native_agent_admission_v1', 'native_agent_prepare_v1', 'native_agent_catalog_v1',
+    'native_agent_model_v1', 'native_agent_tool_v1', 'native_agent_checkpoint_v1',
+    'native_agent_activity_v1',
 }
 
 

@@ -1,6 +1,12 @@
 # Moyai agent
 
-Start with `agent.py`. It owns the conversation, prompt, goals, steering, and saved context. Production and evaluations call the same `run()` function with a prepared workspace, session directory, broker, and event callback.
+For the default native Deep Agents engine, start with `app/native_agent.py`.
+The SDK owns execution; this directory supplies shared instructions, task skills,
+tools and context. Its durable host is described in
+[the native integration](../docs/deepagents-native.md).
+
+`agent.py` remains the entry point for sandbox-based harnesses and their evaluations,
+with a prepared workspace, session directory, broker and event callback.
 
 ```text
 agent.py     Agent setup and conversation lifecycle

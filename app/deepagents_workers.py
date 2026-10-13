@@ -48,6 +48,9 @@ def agent_workers(client, runtime, task_queue, *, max_concurrent_activities=100,
     from temporalio.deepagents import DeepAgentsPlugin
     from .deepagents_context import RuntimeInterceptor, deepagents_plugin
     from .deepagents_workflow import DeepAgentsTurnWorkflow
+    from .native_agent_workflow import NativeAgentWorkflow
+    from .native_agent_activities import NativeActivities
+    native = NativeActivities(runtime)
     plugins = [] if any(isinstance(p, DeepAgentsPlugin) for p in client.config().get('plugins', [])) else [deepagents_plugin()]
     options = dict(plugins=plugins, interceptors=[RuntimeInterceptor(runtime)],
                    max_concurrent_activities=max_concurrent_activities,
@@ -55,8 +58,12 @@ def agent_workers(client, runtime, task_queue, *, max_concurrent_activities=100,
     if graceful_shutdown_timeout is not None:
         options['graceful_shutdown_timeout'] = graceful_shutdown_timeout
     return AgentWorkers(
-        Worker(client, task_queue=task_queue, workflows=[DeepAgentsTurnWorkflow], **options),
+        Worker(client, task_queue=task_queue, workflows=[DeepAgentsTurnWorkflow, NativeAgentWorkflow], **options),
+        Worker(client, task_queue=task_queue + '-native-model',
+               activities=[native.model, native.catalog, native.checkpoint], **options),
+        Worker(client, task_queue=task_queue + '-native-tools', activities=[native.tool], **options),
         Worker(client, task_queue=task_queue + '-tools',
                activities=[runtime.computer] if hasattr(runtime, 'computer') else [], **options),
         Worker(client, task_queue=task_queue + '-control',
-               activities=[runtime.prepare, runtime.boundary, runtime.publish], **options))
+               activities=[runtime.prepare, runtime.boundary, runtime.publish,
+                           native.admission, native.prepare, native.report], **options))

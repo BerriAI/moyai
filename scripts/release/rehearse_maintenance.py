@@ -23,7 +23,7 @@ OLD_CONTRACT = {**deepcopy(CONTRACT), 'schema_support': {'protocol': 1, 'require
                 'source_policy': 'f' * 64, 'default_harness': 'codex', 'source_schema_digest': 'a' * 64}
 CANDIDATE = {**deepcopy(OLD_CONTRACT), 'contracts': {role: str(index) * 64
     for index, role in enumerate(CONTRACT['contracts'], 1)}, 'source_policy': 'e' * 64,
-    'default_harness': 'deepagents-temporal'}
+    'default_harness': 'deepagents-native'}
 
 
 class MaintenanceRender(APIRender):
@@ -63,7 +63,7 @@ class MaintenanceRender(APIRender):
             self.before_write(method, sid, body)
         if method == 'PUT':
             if path.endswith('/env-vars/AGENT_HARNESS'):
-                assert body == {'value': 'deepagents-temporal'}
+                assert body == {'value': 'deepagents-native'}
                 assert 'AGENT_HARNESS' in self.env[sid]
                 assert self.env[sid]['RENDER_MIGRATION_STAGE'] == 'true'
                 assert self.env[sid]['MOYAI_BUILD_SHA'] == NEW
@@ -182,15 +182,15 @@ def rehearse(output, *, pace=0, log=print):
             say('EXPECTED SAFE STOP | ' + str(error))
         harness_receipts = [entry for entry in release.record['changes'] if entry['key'] == 'AGENT_HARNESS']
         assert len(harness_receipts) == 4 and all(entry['confirmed'] and entry['previous'] == 'codex'
-            and entry['value'] == 'deepagents-temporal' for entry in harness_receipts)
+            and entry['value'] == 'deepagents-native' for entry in harness_receipts)
         assert render.history[0]['env']['AGENT_HARNESS'] == 'codex'
-        assert all(entry['env']['AGENT_HARNESS'] == 'deepagents-temporal' for entry in render.history[1:])
+        assert all(entry['env']['AGENT_HARNESS'] == 'deepagents-native' for entry in render.history[1:])
         say('DEFAULT MIGRATION | Old worker drained with Codex; four recorded overrides changed only for candidate staging')
         if scenario == 'success':
             assert release.record['status'] == 'success' and len(render.history) == 10
             assert len(migrations) == 1 and all(len(owners) == 1 for owners in render.owners.values())
             assert all(env['MOYAI_BUILD_SHA'] == NEW and env['RENDER_MIGRATION_STAGE'] == 'false'
-                       and env['AGENT_HARNESS'] == 'deepagents-temporal' for env in render.env.values())
+                       and env['AGENT_HARNESS'] == 'deepagents-native' for env in render.env.values())
             assert render.env[WORKER]['MAINTENANCE_DRAIN'] == 'false'
             say('VERIFIED | Four matching roles default to Deep Agents; six old identities retired; execution resumed')
         else:
@@ -202,7 +202,7 @@ def rehearse(output, *, pace=0, log=print):
                          'deployments': len(render.history), 'migration_attempts': len(migrations),
                          'confirmed_default_changes': len(harness_receipts),
                          'old_worker_drain_default': render.history[0]['env']['AGENT_HARNESS'],
-                         'candidate_default': 'deepagents-temporal'})
+                         'candidate_default': 'deepagents-native'})
     (output / 'results.json').write_text(json.dumps({'synthetic': True, 'scenarios': evidence}, indent=2) + '\n')
     return evidence
 

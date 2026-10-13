@@ -21,6 +21,8 @@ def system_prompt(spec, *, workspace=Path('/workspace'), session=Path('/session'
         delegation=_read('delegation') + ' ' if spec.get('is_child_agent') else '',
         slack=_read('slack') + ' ' if spec.get('slack_thread_chat') else '',
     )
+    if spec.get('harness') == 'deepagents-native':
+        message += '\n' + _read('deepagents')
     # Optional source components share a conservative byte allocation derived
     # from this model's input window. Full contents survive as immutable files;
     # core orientation, actual tools and inference admission remain independent.

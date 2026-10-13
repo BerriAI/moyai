@@ -53,7 +53,7 @@ def test_preflight_performs_no_writes_and_reports_effective_harness(setup):
     release.preflight_only = True
     release.run()
     assert release.record['status'] == 'preflight_passed' and not render.calls
-    assert release.record['candidate_default_harness'] == 'deepagents-temporal'
+    assert release.record['candidate_default_harness'] == 'deepagents-native'
     assert all(v['default_harness'] == 'codex' for v in release.record['previous'].values())
 
 
@@ -340,7 +340,7 @@ def test_demo_runs_real_controller_and_records_all_safety_scenarios(tmp_path):
     assert [(v['status'], v['migration_attempts']) for v in result] == [
         ('success', 1), ('failed', 0), ('failed', 1)]
     assert all(v['confirmed_default_changes'] == 4 and v['old_worker_drain_default'] == 'codex'
-               and v['candidate_default'] == 'deepagents-temporal' for v in result)
+               and v['candidate_default'] == 'deepagents-native' for v in result)
 
 
 def test_compatible_coordinator_preserves_existing_cluster_policy(setup, monkeypatch):
@@ -372,7 +372,7 @@ def explicit_harnesses(release, render, values):
     contract_environments = []
     def contract(env):
         contract_environments.append(deepcopy(env))
-        return {**deepcopy(CANDIDATE), 'default_harness': env.get('AGENT_HARNESS', 'deepagents-temporal')}
+        return {**deepcopy(CANDIDATE), 'default_harness': env.get('AGENT_HARNESS', 'deepagents-native')}
     def probe(service):
         options = service.probe_options()
         actual = {key: render.installed[service.id].get(key) for key in options['env_keys']}
@@ -386,14 +386,14 @@ def explicit_harnesses(release, render, values):
         if method != 'PUT' or not path.endswith('/AGENT_HARNESS'):
             return original_call(method, path, body)
         assert 'AGENT_HARNESS' not in MUTABLE
-        assert body == {'value': 'deepagents-temporal'}
+        assert body == {'value': 'deepagents-native'}
         assert render.env[sid]['RENDER_MIGRATION_STAGE'] == 'true'
         assert render.env[sid]['MOYAI_BUILD_SHA'] == NEW
         assert release.drained and not release.selected
         assert render.installed[sid]['AGENT_HARNESS'] == values[sid]
         assert release.running[sid].original['AGENT_HARNESS'] == values[sid]
         assert release.record['changes'][-1] == {'service': sid, 'key': 'AGENT_HARNESS',
-            'previous': values[sid], 'value': 'deepagents-temporal', 'confirmed': False}
+            'previous': values[sid], 'value': 'deepagents-native', 'confirmed': False}
         render.before_write(method, sid, body)
         render.calls.append((method, sid, 'AGENT_HARNESS', body['value']))
         render.env[sid]['AGENT_HARNESS'] = body['value']
@@ -413,13 +413,13 @@ def test_explicit_native_default_changes_only_for_each_staged_candidate(setup, h
     original = deepcopy(render.env)
     release.run()
     assert len(contract_envs) == 4
-    assert all(env['AGENT_HARNESS'] == 'deepagents-temporal' for env in contract_envs)
+    assert all(env['AGENT_HARNESS'] == 'deepagents-native' for env in contract_envs)
     changes = [call for call in render.calls if call[0] == 'PUT' and call[2] == 'AGENT_HARNESS']
     assert [call[1] for call in changes] == [API_ID, WORKER, BROKER, COORDINATOR]
     assert render.history[0]['env']['AGENT_HARNESS'] == harness  # Drain redeploy remains the old engine.
-    assert all(history['env']['AGENT_HARNESS'] == 'deepagents-temporal' for history in render.history[1:])
+    assert all(history['env']['AGENT_HARNESS'] == 'deepagents-native' for history in render.history[1:])
     for sid, env in original.items():
-        assert render.env[sid] == {**env, 'MOYAI_BUILD_SHA': NEW, 'AGENT_HARNESS': 'deepagents-temporal'}
+        assert render.env[sid] == {**env, 'MOYAI_BUILD_SHA': NEW, 'AGENT_HARNESS': 'deepagents-native'}
     assert all(entry['confirmed'] and entry['previous'] == harness
                for entry in release.record['changes'] if entry['key'] == 'AGENT_HARNESS')
     assert release.record['status'] == 'success'
@@ -432,14 +432,14 @@ def test_explicit_default_migration_preflight_is_read_only_and_reviewable(setup)
     release.run()
     assert not render.calls
     assert len(release.record['default_harness_migration']) == 4
-    assert all(entry['previous'] == 'codex' and entry['value'] == 'deepagents-temporal'
+    assert all(entry['previous'] == 'codex' and entry['value'] == 'deepagents-native'
                for entry in release.record['default_harness_migration'])
     assert all(env['AGENT_HARNESS'] == 'codex' for env in render.env.values())
 
 
 def test_mixed_native_defaults_are_normalized_without_creating_absent_keys(setup):
     release, render, _ = setup
-    values = {API_ID: 'codex', WORKER: 'claude-agent-sdk', BROKER: 'deepagents-temporal'}
+    values = {API_ID: 'codex', WORKER: 'claude-agent-sdk', BROKER: 'deepagents-native'}
     explicit_harnesses(release, render, values)
     release.run()
     changes = [call[1] for call in render.calls if call[0] == 'PUT' and call[2] == 'AGENT_HARNESS']
@@ -450,7 +450,7 @@ def test_mixed_native_defaults_are_normalized_without_creating_absent_keys(setup
 
 def test_already_deepagents_override_is_not_rewritten(setup):
     release, render, _ = setup
-    explicit_harnesses(release, render, {sid: 'deepagents-temporal' for sid in render.env})
+    explicit_harnesses(release, render, {sid: 'deepagents-native' for sid in render.env})
     release.run()
     assert not [call for call in render.calls if call[0] == 'PUT' and call[2] == 'AGENT_HARNESS']
     assert release.record['default_harness_migration'] == []
@@ -461,7 +461,7 @@ def test_ambiguous_default_write_never_retries_or_launches_candidate(setup, sid)
     release, render, _ = setup
     explicit_harnesses(release, render, {service: 'codex' for service in render.env})
     def after(method, target, body):
-        if method == 'PUT' and target == sid and body['value'] == 'deepagents-temporal':
+        if method == 'PUT' and target == sid and body['value'] == 'deepagents-native':
             render.unknown_put = True
     render.after_write = after
     with pytest.raises(ReleaseError, match='lost default harness'):
@@ -476,7 +476,7 @@ def test_default_write_response_cannot_hide_other_environment_drift(setup):
     release, render, _ = setup
     explicit_harnesses(release, render, {sid: 'codex' for sid in render.env})
     def after(method, sid, body):
-        if method == 'PUT' and body['value'] == 'deepagents-temporal':
+        if method == 'PUT' and body['value'] == 'deepagents-native':
             render.env[sid]['SESSION_SECRET'] = 'external-change'
     render.after_write = after
     with pytest.raises(ReleaseError, match='Saved environment'):
@@ -509,5 +509,5 @@ def test_same_build_with_native_override_is_not_a_noop(setup):
     explicit_harnesses(release, render, {sid: 'codex' for sid in render.env})
     release.run()
     assert len(render.history) == 10
-    assert all(env['AGENT_HARNESS'] == 'deepagents-temporal' for env in render.env.values())
+    assert all(env['AGENT_HARNESS'] == 'deepagents-native' for env in render.env.values())
     assert release.record['status'] == 'success'

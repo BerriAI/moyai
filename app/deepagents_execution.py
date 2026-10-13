@@ -24,6 +24,9 @@ class DeepAgentsExecution:
         r = self.runner
         run = await database(r.store.run, run_id)
         if state['phase'] in {'provision', 'install', 'launch'}:
+            from .native_agent_workflow import NativeAgentWorkflow
+            native = run['harness'] == 'deepagents-native'
+            agent_workflow = NativeAgentWorkflow if native else DeepAgentsTurnWorkflow
             if state.get('context_pending') and r.prepare_context:
                 await r.prepare_context(run_id)
             state.pop('context_pending', None)
@@ -31,7 +34,8 @@ class DeepAgentsExecution:
             if not await database(r.running_status, run_id, 'running', digest(r.token(run_id, state['message_id']))):
                 return True
             scope = TurnScope(run_id, state['message_id'], state['segment'], run['active_user_id'])
-            identity = f'moyai-deepagents-{run_id}-{scope.message_id}-{scope.segment}'
+            engine = 'native-deepagents' if native else 'deepagents'
+            identity = f'moyai-{engine}-{run_id}-{scope.message_id}-{scope.segment}'
             state.update(deepagents_workflow_id=identity, machine_started=state['turn_started'])
             await database(r.save, run_id, state)  # Same ID even after a lost start ACK.
             remaining = (r.settings.run_timeout_seconds - (time.time() - state['turn_started'])
@@ -40,7 +44,7 @@ class DeepAgentsExecution:
                 await database(r.fail, run_id, state, 'This response reached its configured time limit.')
                 return True
             try:
-                await r.temporal.start_workflow(DeepAgentsTurnWorkflow.run, scope, id=identity,
+                await r.temporal.start_workflow(agent_workflow.run, scope, id=identity,
                     task_queue=r.settings.temporal_task_queue + '-agents-v1',
                     id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
                     id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
@@ -57,7 +61,7 @@ class DeepAgentsExecution:
         await self.steer(run_id)
         if state.get('computer_requested'):
             try:
-                await r.temporal.get_workflow_handle(state['deepagents_workflow_id']).signal(DeepAgentsTurnWorkflow.request_computer)
+                await r.temporal.get_workflow_handle(state['deepagents_workflow_id']).signal('request_computer')
             except RPCError as exc:
                 if exc.status != RPCStatusCode.NOT_FOUND:
                     raise
@@ -69,7 +73,7 @@ class DeepAgentsExecution:
             completed = await handle.result()
         except WorkflowFailureError as exc:
             await database(r.store.event, run_id, 'error', 'Durable agent workflow failed.',
-                {'phase': 'sdk_failure', **workflow_failure(exc)}, turn_id=state['message_id'])
+                {'phase': 'sdk_failure', **workflow_failure(exc), 'sdk': run['harness']}, turn_id=state['message_id'])
             await database(r.fail, run_id, state,
                 'The durable agent could not continue. Completed results are saved. '
                 'Inspect saved action receipts before retrying any unconfirmed write.')
@@ -77,7 +81,7 @@ class DeepAgentsExecution:
         scope = [run_id, state['message_id'], run['active_user_id'],
                  gateway_model(r.settings.resolve_model(fallback=run['active_model'] or run['model']))]
         checkpoint = json.dumps({'scope': scope, 'messages': completed.messages,
-                                 'applied': completed.applied}).encode()
+                                 'applied': completed.applied, 'native_state': completed.native_state}).encode()
         pointer = await asyncio.to_thread(self.payloads.put, checkpoint)
         result = {**completed.result, 'message_id': state['message_id']}
         state.pop('computer_requested', None)
@@ -93,7 +97,7 @@ class DeepAgentsExecution:
         identity = state.get('deepagents_workflow_id')
         if identity and await database(r.message_queue.accept_steer, run_id, state['message_id']):
             try:
-                await r.temporal.get_workflow_handle(identity).signal(DeepAgentsTurnWorkflow.steer)
+                await r.temporal.get_workflow_handle(identity).signal('steer')
             except RPCError as exc:
                 if exc.status != RPCStatusCode.NOT_FOUND:
                     raise

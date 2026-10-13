@@ -2,6 +2,15 @@
 
 
 def tool_guidance(harness):
+    if harness == 'deepagents-native':
+        return (
+            'Authorized Moyai capabilities are exposed directly as typed moyai_ tools. '
+            'Prompts, skills and context use canonical capability names: invoke the advertised '
+            'moyai_ equivalent, for example moyai_bundled_skill_read for bundled_skill_read '
+            'and moyai_skills_load for skills_load. Use each tool’s actual schema. '
+            'For missing capabilities or runtime failures, use moyai_workspace_diagnostics '
+            'to inspect the current authorized catalog and sanitized failures. '
+            'Tool availability does not grant permission for an action.')
     if harness == 'deepagents-temporal':
         discovery = ('Use workspace_tools to discover authorized names and input schemas, then workspace_call '
                      'with the exact name and a JSON arguments object. Load bundled_skill_read or personal skills '

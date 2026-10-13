@@ -49,6 +49,8 @@ class TurnInput:
     messages: list[dict] = field(default_factory=list)
     max_requests: int | None = None
     applied: list[int] = field(default_factory=list)
+    native_state: dict = field(default_factory=dict)
+    native_lease: str = ''
 
 
 @dataclass
@@ -56,6 +58,7 @@ class TurnResult:
     result: dict
     messages: list[dict]
     applied: list[int]
+    native_state: dict = field(default_factory=dict)
 
 
 # Use the public profile API, never mutate library internals. Files and agents

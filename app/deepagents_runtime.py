@@ -78,7 +78,7 @@ class DeepAgentsRuntime:
         state = r.state(scope.run_id, connection=connection)
         if (not run or run['deleted_at'] or run['deletion_requested_at']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
-                or run['harness'] != 'deepagents-temporal'
+                or run['harness'] not in {'deepagents-temporal', 'deepagents-native'}
                 or run['active_message_id'] != scope.message_id or run['active_user_id'] != scope.actor_id
                 or run['token_hash'] != digest(r.token(scope.run_id, scope.message_id))
                 or state.get('message_id') != scope.message_id or state.get('segment') != scope.segment):
@@ -218,6 +218,33 @@ class DeepAgentsRuntime:
                 AND deleted_at='' AND deletion_requested_at='' """,
                 (text, json.dumps(metadata), now(), scope.run_id,
                  digest(self.runner.token(scope.run_id, scope.message_id)), scope.message_id, scope.actor_id))
+
+    def native_activity(self, scope, identity, name, phase, input_id):
+        """Report SDK work without copying private notebook or subagent content."""
+        labels = {'write_todos': 'Update plan', 'task': 'Delegate work',
+                  'read_file': 'Read notebook', 'write_file': 'Write notebook',
+                  'edit_file': 'Edit notebook', 'delete': 'Delete notebook file',
+                  'ls': 'List notebook', 'glob': 'Find notebook files', 'grep': 'Search notebook'}
+        label = labels.get(name, 'Deep Agents tool')
+        identity = f'native:{scope.message_id}:{scope.segment}:{identity}'
+        r = self.runner
+        with r.store.connect(write_scope=scope.run_id) as conn:
+            conn.begin_write()
+            try:
+                self.current(scope, connection=conn)
+            except ApplicationError:
+                return
+            if (not r.message_queue.current_input(conn, scope.run_id, scope.message_id, input_id)
+                    or r.message_queue.pending_input(conn, scope.run_id, scope.message_id)):
+                return
+            if conn.execute("""SELECT 1 FROM events WHERE run_id=? AND kind='tool'
+                    AND json_text(data,'call_id')=? AND json_text(data,'phase')=?""",
+                    (scope.run_id, identity, phase)).fetchone():
+                return
+            data = {'activity_version': 1, 'tool': name, 'label': label, 'category': 'tool',
+                    'call_id': identity, 'phase': phase, 'turn_id': scope.message_id, 'input_id': input_id}
+            conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'tool',?,?,?)",
+                         (scope.run_id, label, json.dumps(data), now()))
 
     async def catalog(self, scope):
         """Retry only pre-dispatch reads, with fresh authorization on each attempt."""
@@ -376,7 +403,7 @@ class DeepAgentsRuntime:
             entries = [{'id': f'initial:{i}', 'message': message} for i, message in enumerate(spec['history_fallback'])]
             await database(self.journal.exchange, run, {'action': 'import', 'entries': entries,
                 'manifest': {'id': 'deepagents-v1', 'count': len(entries)}, 'complete': True})
-        messages, applied = [], []
+        messages, applied, native_state = [], [], {}
         prompt = conversation_prompt(spec) + resumed_context(spec)
         taint = await database(r.store.rows,
             'SELECT tainted FROM native_sessions WHERE run_id=? AND turn_id=? AND actor_id IS NOT DISTINCT FROM ?',
@@ -390,6 +417,8 @@ class DeepAgentsRuntime:
                 raise ApplicationError('Saved conversation scope changed.', non_retryable=True)
             messages = checkpoint['messages']
             applied = checkpoint['applied']
+            if run['harness'] == 'deepagents-native':
+                native_state = checkpoint.get('native_state', {})
             prompt = ('Continue the same unfinished request using saved results. Inspect uncertain actions before retrying. '
                       'Do not repeat completed work.\n' + resumed_context(spec))
         else:
@@ -419,7 +448,8 @@ class DeepAgentsRuntime:
             prompt += await database(r.swarms.prompt, scope.run_id)
         await database(r.store.event, scope.run_id, 'status', 'Starting durable agent work.',
                        {'activity_version': 1, 'phase': 'execution_started'})
-        return TurnInput(scope, prompt, instructions, messages, r.settings.max_agent_iterations or None, applied)
+        return TurnInput(scope, prompt, instructions, messages, r.settings.max_agent_iterations or None,
+                         applied, native_state)
 
     @activity.defn(name='deepagents_publish_v1')
     async def publish(self, scope: TurnScope, identity: str, text: str, input_id: int = 0) -> None:

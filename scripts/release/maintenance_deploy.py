@@ -20,7 +20,7 @@ from scripts.release.rolling_deploy import (RollingRelease, candidate_migration_
 COUNTS = ('unsafe_sessions', 'executing_sessions', 'legacy_active_sessions',
           'model_requests', 'live_leases')
 INVENTORIES = ('owners', 'coordinators', 'brokers', 'broker_leaders')
-DEFAULT_HARNESS = 'deepagents-temporal'
+DEFAULT_HARNESS = 'deepagents-native'
 
 
 def maintenance_contract(environment):

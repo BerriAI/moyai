@@ -1,10 +1,14 @@
 # Agent harnesses
 
-New web sessions, Slack threads and saved automations default to **Deep Agents +
-Temporal** (`deepagents-temporal`) for every model. See [the durable engine contract](deepagents-temporal.md)
-for architecture, recovery guarantees and release requirements. Skills still load
-on demand through the existing broker. Claude and OpenAI remain model choices;
-the default path no longer launches their native agent SDKs.
+New web sessions, Slack threads and saved automations default to **Deep Agents SDK**
+(`deepagents-native`) for every model. The native SDK owns the graph, planning,
+conversation notebook, summarization and in-graph subagents. Moyai supplies typed,
+permission-checked application tools and durable hosting. See [the native SDK
+integration](deepagents-native.md) for setup, boundaries, recovery and a local demo.
+
+The older `deepagents-temporal` graph and `deepagents` LiteLLM adapter remain
+available for saved sessions and explicit configurations. Their contracts are
+separate from the native SDK path; see [the previous durable engine](deepagents-temporal.md).
 
 Persisted native harness IDs remain supported for existing sessions and explicit
 legacy configurations. Their implementation details below describe those paths.
