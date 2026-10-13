@@ -162,13 +162,13 @@ async def test_native_capture_is_listable_before_success_without_panel(durable, 
 
 
 @pytest.mark.parametrize(('failure', 'status_code'), [
-    ('storage', 503), ('budget', 413), ('catalog', 502), ('hub', None),
+    ('storage', 503), ('storage_event', 503), ('budget', 413), ('catalog', 502), ('hub', None),
 ])
 async def test_native_capture_copy_failure_preserves_receipt_and_reports_without_blocking(durable, monkeypatch, failure, status_code):
     case = await native_capture(durable, monkeypatch, 'browser_screenshot')
     manager, run_id = case.manager, case.run_id
     with monkeypatch.context() as fault:
-        if failure == 'storage':
+        if failure in {'storage', 'storage_event'}:
             fault.setattr(manager.store.objects, 'fail', True)
         elif failure == 'budget':
             fault.setattr(captures, 'MAX_TOTAL', 1)
@@ -176,7 +176,16 @@ async def test_native_capture_copy_failure_preserves_receipt_and_reports_without
             fault.setattr(case.hub, 'execute', AsyncMock(return_value={}))
         else:
             fault.delattr(manager, 'computer')
+        if failure == 'storage_event':
+            event = manager.store.event
+            def unavailable_warning(run_id, kind, message, data=None, **kwargs):
+                if (data or {}).get('stage') == 'capture_sync':
+                    raise HTTPException(503, 'Fixture warning-event storage unavailable.')
+                return event(run_id, kind, message, data, **kwargs)
+            fault.setattr(manager.store, 'event', unavailable_warning)
         await manager.advance(run_id)
+    assert manager.state(run_id)['phase'] == 'monitor'
+    assert manager.store.run(run_id)['token_hash'] == case.owner['token_hash']
     receipt = manager.agent_runtime.operations.read(case.owner, {'request_id': case.body['request_id']})
     assert receipt['status'] == 'completed' and not receipt['result']['isError']
     content = receipt['result']['content']
@@ -190,11 +199,12 @@ async def test_native_capture_copy_failure_preserves_receipt_and_reports_without
         'status_code': status_code}
     assert 'Do not repeat the capture' in notice['notice']
     assert case.media.call(case.owner, 'media_list', {})['sources'] == []
-    assert manager.state(run_id)['phase'] == 'monitor'
-    assert manager.store.run(run_id)['token_hash'] == case.owner['token_hash']
     errors = [row for row in manager.store.events(run_id) if row['data'].get('stage') == 'capture_sync']
-    assert len(errors) == 1 and errors[0]['kind'] == 'error'
-    assert errors[0]['data']['request_id'] == case.body['request_id']
+    if failure == 'storage_event':
+        assert errors == [], 'The native receipt must survive a failed diagnostic write.'
+    else:
+        assert len(errors) == 1 and errors[0]['kind'] == 'error'
+        assert errors[0]['data']['request_id'] == case.body['request_id']
     # A later existing save/poll path can copy the same bytes without recapture.
     await case.hub.sync(case.cloud.machines[1], run_id)
     assert case.media.call(case.owner, 'media_list', {})['sources'][0]['source'] == 'capture:' + capture['name']

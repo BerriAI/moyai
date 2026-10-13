@@ -265,9 +265,12 @@ class IndependentRuntime:
                               'Normal Computer polling or workspace saving can retry the copy; use media_list to confirm.')
                     result['result'] = {**result['result'], 'content': [*result['result']['content'],
                         {'type': 'text', 'text': json.dumps({'capture_persistence': persistence, 'notice': notice})}]}
-                    await database(r.store.event, run_id, 'error', notice,
-                                   {'stage': 'capture_sync', 'tool': operation['name'],
-                                    'request_id': operation['request_id'], **persistence})
+                    try:
+                        await database(r.store.event, run_id, 'error', notice,
+                                       {'stage': 'capture_sync', 'tool': operation['name'],
+                                        'request_id': operation['request_id'], **persistence})
+                    except Exception:
+                        pass  # The authoritative receipt already carries this warning.
             await database(self.operations.settle, operation, result['status'], result['result'])
 
     async def checkpoint(self, run_id, state):

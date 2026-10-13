@@ -27,6 +27,76 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   return page;
 }
 
+for (const width of [1440, 768, 320]) test(`Markdown artifact download links preserve exact revisions across sessions at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  const run = 'a'.repeat(32);
+  const revision = '7'.repeat(64);
+  const route = `/api/runs/${run}/artifacts/content`;
+  const url = `${route}?path=acceptance-artifacts%2Fsynthetic-counter-final-3-ecae952a9865.png&revision=${revision}`;
+  const links = [
+    ['Artifact', url],
+    ['Child artifact', url.replace(run, 'b'.repeat(32))],
+    ['Older revision', url.replace(revision, '0'.repeat(64))],
+    ['Unicode path', `${route}?revision=${revision}&path=reports%2Fcounter+%E6%BC%A2%26%3D%25.png`],
+    ['Literal percent path', `${route}?path=%252e%252e%2Freport.png&revision=${revision}`],
+    ['Public media', 'https://example.test/media/' + 'c'.repeat(32) + '?token=synthetic'],
+  ];
+  const requests = [];
+  await page.context().route(url => url.origin === new URL(base).origin && url.pathname.endsWith('/artifacts/content'), async request => {
+    requests.push(request.request().url());
+    await request.fulfill({contentType:'text/plain',body:'Synthetic artifact bytes for the requested revision.'});
+  });
+  await page.evaluate(links => {
+    const content = links.map(([label, url]) => `[${label}](${url})`).join('\n\n') + `\n\n![Image download](${links[0][1]})`;
+    MoyaiUI.render(document.querySelector('#content'), `<article class="chat-message assistant"><h1>Published artifact links</h1><div class="markdown">${renderMarkdown(content)}</div></article>`);
+  }, links);
+  for (const [label, href] of [...links, ['Image download', url]]) {
+    const link = page.getByRole('link', {name:label,exact:true});
+    assert.equal(await link.getAttribute('href'), href, label);
+    assert.equal(await link.getAttribute('target'), '_blank');
+    assert.equal(await link.getAttribute('rel'), 'noopener noreferrer');
+  }
+  assert.equal(await page.locator('#content .markdown img').count(), 0, 'Markdown images remain explicit links');
+  assert.deepEqual(requests, [], 'Rendering must not fetch artifact bytes');
+  const opened = page.context().waitForEvent('page');
+  await page.getByRole('link', {name:'Child artifact',exact:true}).focus();
+  await page.keyboard.press('Enter');
+  const popup = await opened;
+  try {
+    await popup.waitForLoadState();
+    assert.equal(popup.url(), base + links[1][1], 'Navigation retains the child identity, encoded path and exact revision');
+    assert.equal(await popup.locator('body').innerText(), 'Synthetic artifact bytes for the requested revision.');
+    assert.deepEqual(requests, [base + links[1][1]]);
+  } finally { await popup.close(); }
+});
+
+test('Markdown artifact download links reject unsafe routes, paths and query parameters', async t => {
+  const page = await pageFor(t);
+  const route = `/api/runs/${'a'.repeat(32)}/artifacts/content`;
+  const revision = '7'.repeat(64);
+  const valid = `${route}?path=proof.png&revision=${revision}`;
+  const invalid = [
+    '/api/admin/pull-requests', valid.replace('/artifacts/content', '/artifact'),
+    valid.replace('a'.repeat(32), 'A'.repeat(32)), valid.replace('a'.repeat(32), 'a'.repeat(31)),
+    `//example.test${valid}`, valid.replace('/api/', '/api/../api/'), 'javascript:alert%281%29', 'data:text/html,unsafe',
+    `${route}?revision=${revision}`, `${route}?path=proof.png`, `${valid}&path=other.png`,
+    `${valid}&%70ath=other.png`, `${valid}&revision=${revision}`, `${valid}&preview=true`, `${valid}&`,
+    `${valid}#fragment`, valid.replace(revision, '7'.repeat(63)), valid.replace(revision, 'A'.repeat(64)),
+    valid.replace(revision, revision + '%0A'), valid.replace('path=', 'pa%ZZth='),
+    ...['', '%2Fproof.png', '%2F%2Fevil.test%2Fproof.png', '..%2Fproof.png', 'dir%2F..%2Fproof.png',
+      'dir%2F.%2Fproof.png', 'dir%2F%2Fproof.png', 'dir%5Cproof.png', 'proof%00.png', 'proof%0A.png',
+      'proof%7F.png', 'bad%ZZ.png', 'bad%FF.png'].map(path => `${route}?path=${path}&revision=${revision}`),
+  ];
+  const failures = await page.evaluate(({invalid, valid}) => {
+    const host = document.querySelector('#content');
+    return [...invalid.map(url => `[Rejected](${url})`), `<a href="${valid}">Raw HTML</a>`].flatMap(content => {
+      MoyaiUI.render(host, `<div class="markdown">${renderMarkdown(content)}</div>`);
+      return host.querySelector('a') ? [content] : [];
+    });
+  }, {invalid, valid});
+  assert.deepEqual(failures, [], 'Untrusted Markdown must not gain arbitrary internal links');
+});
+
 for (const width of [1440, 768, 320]) for (const fixture of ['populated', 'member']) test(`Settings gear survives tooltip updates for ${fixture} at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', fixture, width);
   const gear = page.getByRole('button', { name: 'Settings', exact: true });
