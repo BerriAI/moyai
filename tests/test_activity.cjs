@@ -638,6 +638,51 @@ test('Ready sessions keep scoped missing-answer, attachment and capture observat
   }
 });
 
+test('legacy tool errors use safe explanations in Ready, failed and deferred history',()=>{
+  for(const metadata of [{},{activity_version:1},{call_id:'legacy'},{activity_version:0,call_id:'legacy'}]){
+    for(const status of ['idle','failed']){
+      const snapshot=run();snapshot.status=status;
+      snapshot.messages=[{id:1,role:'user',status:status==='idle'?'completed':'failed'},
+        {id:4,role:'assistant',response_to_id:1,status:status==='idle'?'completed':'failed',content:'Authoritative final answer'}];
+      snapshot.deferred_activity=['1'];snapshot.loaded_activity=['1'];
+      const failed=event(2,'tool','PRIVATE_PROVIDER_PROSE_SENTINEL',{
+        ...metadata,turn_id:1,phase:'error',tool:'github_checkout',input:'PRIVATE_INPUT',output:'PRIVATE_OUTPUT',command:'PRIVATE_COMMAND'});
+      failed.failure_explanation={version:1,component:'Repository checkout',observed_cause:'Safe observed failure.',
+        stage:'Reading the tool catalog',action:{dispatched:false,outcome:'rejected'},retryability:'not_retryable',
+        next_action:'Inspect the receipt.',support:{}};
+      snapshot.events.push(failed,event(3,'chat','Response saved',{message_id:1}));
+      const before=JSON.stringify(snapshot),turn=groups(snapshot).get('1');
+      assert.equal(turn.rows.length,1);assert.equal(turn.rows[0].phase,'error');
+      for(const markup of [html(turn),...timeline(snapshot).get('1').filter(item=>item.block).map(item=>html(item.block))]){
+        assert.match(markup,/Safe observed failure/);assert.doesNotMatch(markup,/PRIVATE_/);
+      }
+      assert.equal(snapshot.messages.at(-1).content,'Authoritative final answer');
+      assert.equal(JSON.stringify(snapshot),before);
+      assert.deepEqual(groups(JSON.parse(before)),groups(snapshot));
+    }
+  }
+});
+
+test('credential replay and content encoding use fixed labels with independent recorded presence',()=>{
+  const value={version:1,component:'Slack credential acquisition',observed_cause:'Credential outcome unconfirmed.',
+    stage:'Obtaining Slack credentials',action:{outcome:'unknown',dispatched:null},
+    retryability:'credential_replay_blocked',recovery:{method:'attachment_read',decision:'credential_replay_blocked',attempts:1},
+    next_action:'Inspect saved connection state.'};
+  const render=representation=>MoyaiActivity.explanationHTML({...value,...(representation?{representation}:{})});
+  assert.match(render(),/does not replay credential acquisition/);
+  assert.match(render(),/read-attempt index \(not HTTP count\): 1/);
+  assert.doesNotMatch(render(),/Content encoding|Content-Encoding header|Observed bytes/);
+  for(const present of [true,false]){
+    const markup=render({content_encoding:'identity',content_encoding_present:present});
+    assert.match(markup,/identity \(uncompressed\)/);
+    assert.match(markup,new RegExp(`Content-Encoding header</dt><dd>${present?'Present':'Absent'}`));
+  }
+  assert.match(render({content_encoding_present:true}),/Unknown — encoding not recorded/);
+  assert.doesNotMatch(render({content_encoding:'PRIVATE_RAW_HEADER',content_encoding_present:'false'}),/PRIVATE|identity|Content-Encoding header/);
+  assert.doesNotThrow(()=>render({content_encoding:{toString:'PRIVATE_RAW_HEADER'}}));
+  assert.match(render({content_encoding:'unsupported',content_encoding_present:true}),/Unsupported encoding/);
+});
+
 test('saved recovery decisions retain turn boundaries and label read-attempt index honestly',()=>{
   const answer={id:7,role:'assistant',status:'failed',response_to_id:1};
   const snapshot={chat_enabled:true,messages:[answer],events:[

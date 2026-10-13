@@ -77,6 +77,7 @@
     const decisions={retrying:'another attempt was scheduled',recovered:'recovered',exhausted:'attempt limit reached',
       deadline:'recovery deadline reached',not_retryable:'the recorded failure was not retryable',
       unconfirmed_action:'unconfirmed tool outcomes blocked automatic replay',unknown:'stop reason not recorded',
+      credential_replay_blocked:'credential acquisition may refresh a token; automatic replay is blocked',
       retry_after_unavailable:'no usable retry interval was supplied; no early retry was made',
       retry_after_budget:'the required retry interval exceeded the remaining read budget; no early retry was made'};
     if(!value||!Object.hasOwn(methods,value.method)||!Object.hasOwn(decisions,value.decision))return '';
@@ -95,6 +96,7 @@
     const retries={unknown:'Unknown — no decision recorded',not_retryable:'Not retryable for the recorded condition',
       blocked_unknown_outcome:'Automatic replay blocked: outcome unknown',do_not_repeat:'Do not repeat the confirmed action',
       bounded_recovery_stopped:'The recorded attempt or time limit stopped automatic recovery',
+      credential_replay_blocked:'Attachment recovery does not replay credential acquisition or token-refresh requests',
       reported_retryable:'The tool reported retry eligibility; this is not authorization to replay a write'};
     const recovery=[recoveryText(data.recovery),...recoveries.map(recoveryText)].filter(Boolean);
     const rows=row('What failed',text(data.component))+row('Observed cause',text(data.observed_cause))+
@@ -106,9 +108,14 @@
       ['declared_bytes','content_length_bytes','received_bytes'].includes(k)&&Number.isSafeInteger(v)&&v>=0||
       k==='retry_after_seconds'&&Number.isFinite(v)&&v>=0&&v<=2**31-1)
       .map(([k,v])=>row(({declared_bytes:'Declared bytes',content_length_bytes:'Advertised HTTP bytes',received_bytes:'Observed bytes',retry_after_seconds:'Required retry wait (seconds)'})[k],String(v))).join('');
+    const representation=data.representation||{},encodings={identity:'identity (uncompressed)',gzip:'gzip',br:'br',deflate:'deflate',zstd:'zstd',unsupported:'Unsupported encoding'};
+    const knownEncoding=typeof representation.content_encoding==='string'&&Object.hasOwn(encodings,representation.content_encoding),hasPresence=typeof representation.content_encoding_present==='boolean';
+    const encodingRows=knownEncoding||hasPresence?
+      row('Content encoding',knownEncoding?encodings[representation.content_encoding]:'Unknown — encoding not recorded')+
+      (hasPresence?row('Content-Encoding header',representation.content_encoding_present?'Present':'Absent'):''):'';
     const identifiers=Object.entries(data.support||{}).filter(([k,v])=>/^(request_id|broker_request_id|model_request_id|x-request-id|x-litellm-call-id|x-moyai-model-request-id)$/.test(k)&&typeof v==='string'&&/^[A-Za-z0-9._:-]{1,128}$/.test(v))
       .map(([k,v])=>row(esc(k.replaceAll('_',' ')),v)).join('');
-    const detail=`<p>${inline?'Recorded for this operation; the final response keeps its own outcome.':'Recorded when the agent stopped. Action fields describe this record, not all work in the turn.'} Observations do not establish a root cause. Private request and response contents are omitted.</p><dl>${rows}${sizes}</dl>${support||identifiers?`<details class="failure-support"${key?` data-work-key="${esc(key)}:support"`:''}><summary>Support details</summary><dl>${support}${identifiers}</dl></details>`:''}`;
+    const detail=`<p>${inline?'Recorded for this operation; the final response keeps its own outcome.':'Recorded when the agent stopped. Action fields describe this record, not all work in the turn.'} Observations do not establish a root cause. Private request and response contents are omitted.</p><dl>${rows}${sizes}${encodingRows}</dl>${support||identifiers?`<details class="failure-support"${key?` data-work-key="${esc(key)}:support"`:''}><summary>Support details</summary><dl>${support}${identifiers}</dl></details>`:''}`;
     return inline?`<div class="failure-details">${detail}</div>`:`<details class="failure-details"${key?` data-work-key="${esc(key)}"`:''}><summary>Failure details</summary>${detail}</details>`;
   }
   function duration(start,end=Date.now()){
@@ -184,7 +191,7 @@
         }else if(data.phase!=='processing'){
           turn.rows.push({id:String(event.id),eventId:String(event.id),kind:event.kind,message:event.message,start:event.created_at,
             failure_explanation:event.failure_explanation,
-            phase:event.kind==='error'?'error':'recorded'});
+            phase:event.kind==='error'||event.kind==='tool'&&data.phase==='error'?'error':'recorded'});
         }
       }
       turn.rows=turn.rows.map(row=>({...row,state:row.phase==='started'?(turn.live&&run.activity_disconnected?'disconnected':turn.live&&!waiting.has(turn.status)?'running':turn.live?'paused':'unconfirmed'):row.phase==='error'?'error':row.phase==='completed'?'completed':row.phase==='backgrounded'?'backgrounded':'recorded'}));

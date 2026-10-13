@@ -260,8 +260,11 @@ class DeepAgentsRuntime:
         if isinstance(exc, ApplicationError):
             return ApplicationError(exc.message, *exc.details, {'recovery': recovery},
                                     type=exc.type, non_retryable=exc.non_retryable)
-        exc.moyai_recovery = recovery
-        return exc
+        # Temporal does not serialize arbitrary attributes on ordinary errors.
+        # Preserve its original safe type and default retryability in supported
+        # details, without copying the exception message or provider request.
+        error_type = safe_error({'exception_type': type(exc).__name__}).get('exception_type', 'Exception')
+        return ApplicationError('Tool catalog read failed.', {'recovery': recovery}, type=error_type)
 
     async def catalog_recovery(self, scope, decision, attempts):
         try:

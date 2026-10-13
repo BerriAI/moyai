@@ -176,7 +176,8 @@ def safe_recovery(value):
     method, decision = value.get('method'), value.get('decision')
     if (method not in ('catalog_read', 'startup', 'model_transport', 'context_transport', 'attachment_read')
             or decision not in ('retrying', 'recovered', 'exhausted', 'deadline', 'not_retryable',
-                                'unconfirmed_action', 'unknown', 'retry_after_unavailable', 'retry_after_budget')):
+                                'unconfirmed_action', 'unknown', 'retry_after_unavailable', 'retry_after_budget',
+                                'credential_replay_blocked')):
         return None
     result = {'method': method, 'decision': decision}
     for key in ('attempts', 'limit', 'scheduled_retries'):

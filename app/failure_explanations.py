@@ -101,7 +101,14 @@ SLACK_CAUSES = {
     'tls': 'The attachment TLS connection failed.',
     'storage': 'Storing the attachment failed.',
     'inspection_timeout': 'Attachment inspection timed out.',
+    'credential_upstream': 'Slack credential acquisition received an upstream HTTP error; its underlying cause is unknown.',
+    'credential_transport': 'Slack credential acquisition failed to connect before dispatch.',
+    'credential_unconfirmed': 'The result of Slack credential acquisition could not be confirmed.',
+    'credential_unavailable': 'Slack bot credentials could not be obtained; the underlying cause is unknown.',
 }
+SLACK_CREDENTIAL_CODES = ('credential_upstream', 'credential_transport',
+                          'credential_unconfirmed', 'credential_unavailable')
+SLACK_ENCODINGS = {'identity', 'gzip', 'br', 'deflate', 'zstd', 'unsupported'}
 
 
 def explain(data):
@@ -180,7 +187,8 @@ def explain(data):
             and recovery['decision'] in {'exhausted', 'deadline'}):
         decision = 'bounded_recovery_stopped'
         next_action = 'The recorded recovery limit was reached. Check service readiness and saved receipts before requesting more work.'
-    measurements = {}
+    measurements, representation = {}, {}
+    component = None
     if data.get('phase') == 'slack_attachment_read':
         category = 'attachment'
         slack_code, slack_stage = data.get('code'), data.get('stage')
@@ -195,6 +203,24 @@ def explain(data):
         if type(attempts) is int and 0 <= attempts <= 10000:
             recovery = {'method': 'attachment_read', 'decision': 'deadline' if slack_code == 'read_budget' else 'unknown',
                         'attempts': attempts}
+        if slack_code in SLACK_CREDENTIAL_CODES:
+            component = 'Slack credential acquisition'
+            if slack_stage == 'access':
+                stage = 'Obtaining Slack credentials'
+            if slack_code == 'credential_upstream' and facts.get('http_status'):
+                observed += f' HTTP {facts["http_status"]} was recorded.'
+            if outcome == 'completed':
+                decision = 'do_not_repeat'
+                next_action = 'Keep the confirmed receipt and inspect the later credential failure. Do not repeat a confirmed credential operation.'
+            else:
+                decision = 'credential_replay_blocked'
+                next_action = ('Inspect saved Slack connection state before retrying credential acquisition. '
+                               'It may refresh a token; attachment recovery must not automatically replay that request.')
+                if slack_code == 'credential_unconfirmed':
+                    outcome = 'unknown'
+                if slack_code == 'credential_transport' and dispatched is None and outcome == 'unknown':
+                    dispatched, outcome = False, 'failed'
+                recovery = {**(recovery or {'method': 'attachment_read'}), 'decision': 'credential_replay_blocked'}
         # Exact application-owned stop explanations from the optional producer;
         # arbitrary provider/error prose never enters the rendered explanation.
         blockers = {
@@ -203,7 +229,7 @@ def explain(data):
             'The remaining read budget is too short for another attempt.': 'deadline',
         }
         blocker = data.get('remaining_blocker')
-        if isinstance(blocker, str) and blocker in blockers:
+        if isinstance(blocker, str) and blocker in blockers and slack_code not in SLACK_CREDENTIAL_CODES:
             recovery = {**(recovery or {'method': 'attachment_read'}), 'decision': blockers[blocker]}
         for field in ('declared_bytes', 'content_length_bytes', 'received_bytes'):
             number = data.get(field)
@@ -212,6 +238,11 @@ def explain(data):
         delay = data.get('retry_after_seconds')
         if type(delay) in (int, float) and 0 <= delay <= 2**31 - 1:
             measurements['retry_after_seconds'] = delay
+        encoding = data.get('content_encoding')
+        if isinstance(encoding, str) and encoding in SLACK_ENCODINGS:
+            representation['content_encoding'] = encoding
+        if type(data.get('content_encoding_present')) is bool:
+            representation['content_encoding_present'] = data['content_encoding_present']
     if data.get('stage') == 'capture_sync' and data.get('status') == 'unconfirmed':
         category, stage = 'capture-persistence', 'Copying the completed capture to the app'
         observed = 'The capture completed, but its copy to the app could not be confirmed. Underlying copy failure cause unknown.'
@@ -232,11 +263,12 @@ def explain(data):
     for key, value in facts.get('request_ids', {}).items():
         if '/' not in value and public_text(value) == value:
             support[key] = value
-    return {'version': 1, 'category': category, 'component': CATEGORIES[category],
+    return {'version': 1, 'category': category, 'component': component or CATEGORIES[category],
             'observed_cause': observed, 'stage': stage or 'Unknown — stage not recorded.',
             'action': {'dispatched': dispatched, 'outcome': outcome},
             'retryability': decision, 'recovery': recovery,
-            'next_action': next_action, 'support': support, 'measurements': measurements}
+            'next_action': next_action, 'support': support, 'measurements': measurements,
+            **({'representation': representation} if representation else {})}
 
 
 def project_event(event):

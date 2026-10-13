@@ -159,6 +159,53 @@ def test_capture_copy_warning_preserves_completed_capture_without_requesting_rec
     assert 'PRIVATE' not in json.dumps(value)
 
 
+@pytest.mark.parametrize('code', ['credential_upstream', 'credential_transport',
+                                 'credential_unconfirmed', 'credential_unavailable'])
+def test_slack_credential_failures_do_not_infer_denial_or_authorize_refresh_replay(code):
+    data = {'phase': 'slack_attachment_read', 'stage': 'access', 'code': code, 'attempts': 1,
+            'message': 'PRIVATE provider says authentication failed', 'remaining_blocker': 'PRIVATE',
+            'next_action': 'PRIVATE replay this POST', 'recovery_tried': 'PRIVATE'}
+    if code == 'credential_upstream':
+        data['http_status'] = 503
+    value = explain(data)
+    assert value['component'] == 'Slack credential acquisition'
+    assert value['stage'] == 'Obtaining Slack credentials'
+    assert value['retryability'] == 'credential_replay_blocked'
+    assert value['recovery'] == {'method': 'attachment_read', 'attempts': 1, 'decision': 'credential_replay_blocked'}
+    assert 'not automatically replay' in value['next_action']
+    assert 'authentication failed' not in value['observed_cause']
+    assert 'Restore the required Slack access' not in value['next_action']
+    assert value['measurements'] == {} and 'representation' not in value
+    assert 'PRIVATE' not in json.dumps(value)
+    assert value['action'] == ({'dispatched': False, 'outcome': 'failed'} if code == 'credential_transport'
+                               else {'dispatched': None, 'outcome': 'unknown'})
+    confirmed = explain({**data, 'action': {'dispatched': True, 'outcome': 'completed'}})
+    assert confirmed['action'] == {'dispatched': True, 'outcome': 'completed'}
+    assert confirmed['retryability'] == 'do_not_repeat'
+
+
+@pytest.mark.parametrize('encoding', ['identity', 'gzip', 'br', 'deflate', 'zstd', 'unsupported'])
+@pytest.mark.parametrize('present', [True, False, None])
+def test_slack_encoding_is_allowlisted_and_presence_is_not_invented(encoding, present):
+    data = {'phase': 'slack_attachment_read', 'code': 'encoded_response', 'stage': 'headers',
+            'content_encoding': encoding}
+    if present is not None:
+        data['content_encoding_present'] = present
+    value = explain(data)
+    assert value['representation'] == {'content_encoding': encoding,
+        **({'content_encoding_present': present} if present is not None else {})}
+    assert 'received_bytes' not in value['measurements']
+
+
+@pytest.mark.parametrize('encoding,present', [('gzip PRIVATE', 'false'), (['identity'], 0), ({'PRIVATE': 1}, 1)])
+def test_slack_encoding_rejects_raw_headers_and_malformed_presence(encoding, present):
+    value = explain({'phase': 'slack_attachment_read', 'code': 'encoded_response',
+                     'content_encoding': encoding, 'content_encoding_present': present})
+    assert 'representation' not in value
+    assert 'PRIVATE' not in json.dumps(value)
+    assert 'representation' not in explain({'phase': 'slack_attachment_read', 'stage': 'access'})
+
+
 def test_empty_completed_result_records_once_without_changing_lifecycle_or_guessing_stale_turn(active):
     manager, store, scope = active
     result = {'message_id': scope.message_id, 'completed': True, 'message': ''}

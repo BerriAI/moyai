@@ -43,6 +43,11 @@ bounded view, not a complete execution trace.
   `attempts` is a **read-attempt index, not an HTTP-request count**. Missing
   observed bytes are never replaced with zero. Producer prose and raw history
   are not copied into the explanation.
+  Credential-acquisition failures are separate from authentication denial:
+  acquisition may refresh a token, so automatic refresh-request replay stays
+  blocked even for an upstream transport failure. The recorded encoding and
+  header-presence flag are independent, allowlisted facts; absent fields never
+  become an invented identity encoding or a zero-byte download.
 - Existing `stage=capture_sync,status=unconfirmed` means a capture completed
   but copying it into app storage was not confirmed. Copy recovery must not
   repeat the capture. New records retain the operation's original turn.

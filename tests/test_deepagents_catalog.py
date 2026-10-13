@@ -185,9 +185,68 @@ async def test_catalog_has_a_total_read_deadline(catalog_runtime, monkeypatch):
 
     monkeypatch.setattr('app.deepagents_runtime.asyncio.timeout', deadline)
     runtime.broker_transport = httpx.MockTransport(respond)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(ApplicationError) as caught:
         await asyncio.wait_for(runtime.catalog(scope), 2)
+    assert caught.value.type == 'TimeoutError' and not caught.value.non_retryable
     assert deadlines == [45] and len(requests) == 1 and delays == []
+
+
+@pytest.mark.parametrize('failure,error_type,attempts,decision,non_retryable', [
+    ('network', 'ConnectError', 3, 'exhausted', False),
+    ('read_timeout', 'ReadTimeout', 3, 'exhausted', False),
+    ('deadline', 'TimeoutError', 1, 'deadline', False),
+    ('http', 'BrokerRejected', 3, 'exhausted', False),
+    ('denied', 'BrokerRejected', 1, 'not_retryable', True),
+])
+async def test_catalog_recovery_survives_temporal_failure_conversion(
+        catalog_runtime, monkeypatch, failure, error_type, attempts, decision, non_retryable):
+    from temporalio.api.failure.v1 import Failure
+    from temporalio.client import WorkflowFailureError
+    from temporalio.converter import DataConverter
+    from app.deepagents_diagnostics import workflow_failure as terminal
+    from app.failure_explanations import explain
+    from test_deepagents_failures import workflow_failure as wrap
+
+    runtime, store, scope, delays = catalog_runtime
+    requests = []
+    secret = 'sk-private-catalog-sentinel https://private.example?token=secret'
+
+    async def respond(request):
+        requests.append(request)
+        if failure == 'network':
+            raise httpx.ConnectError(secret, request=request)
+        if failure == 'read_timeout':
+            raise httpx.ReadTimeout(secret, request=request)
+        if failure == 'deadline':
+            await asyncio.Event().wait()
+        return httpx.Response(403 if failure == 'denied' else 503, text=secret)
+
+    if failure == 'deadline':
+        monkeypatch.setattr('app.deepagents_runtime.asyncio.timeout', lambda seconds: asyncio.timeout(.1))
+    runtime.broker_transport = httpx.MockTransport(respond)
+    with pytest.raises(ApplicationError) as caught:
+        await runtime.catalog(scope)
+    assert len(requests) == attempts
+    assert all(request.method == 'GET' for request in requests)
+    assert caught.value.type == error_type
+    assert caught.value.non_retryable is non_retryable
+    encoded = Failure()
+    await DataConverter.default.encode_failure(wrap(caught.value).cause, encoded)
+    decoded = WorkflowFailureError(cause=await DataConverter.default.decode_failure(encoded))
+    assert decoded.cause.cause.cause is None
+    facts = terminal(decoded)
+    recovery = {'method': 'catalog_read', 'decision': decision, 'attempts': attempts, 'limit': 3}
+    assert facts['exception_type'] == error_type
+    assert facts['non_retryable'] is non_retryable
+    assert facts['recovery'] == explain(facts)['recovery'] == recovery
+    assert explain(facts)['retryability'] == ('not_retryable' if non_retryable else 'bounded_recovery_stopped')
+    assert facts['action'] == {'dispatched': False, 'outcome': 'rejected'}
+    if failure in {'http', 'denied'}:
+        assert caught.value.details[0] == (403 if failure == 'denied' else 503)
+        assert facts['http_status'] == caught.value.details[0]
+    assert secret not in str(encoded) + json.dumps(facts)
+    assert secret.encode() not in encoded.SerializeToString()
+    assert not [event for event in store.events(scope.run_id) if event['data'].get('phase') == 'recovery_decision']
 
 
 @pytest.mark.parametrize('failure', ['catalog_recovers', 'catalog_exhausted', 'write_response_lost'])
