@@ -27,6 +27,12 @@ class LostExecution(Exception):
     pass
 
 
+class SupervisorCommandError(RuntimeError):
+    def __init__(self, returncode):
+        super().__init__('Sandbox supervisor command failed')
+        self.returncode = returncode
+
+
 def swarm_wake_seconds(mission):
     """Keep Temporal timers finite for swarms that run until explicitly stopped."""
     from .swarms import remaining_seconds
@@ -736,8 +742,8 @@ class DurableRunner(RunManager):
                                          RUNTIME_ROOT, 'durable_process.py', *args,
                                          timeout=30, env=self.settings.broker_environment(token) if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
-        if await process.wait.aio() != 0:
-            raise RuntimeError('Sandbox supervisor command failed')
+        if (code := await process.wait.aio()) != 0:
+            raise SupervisorCommandError(code)
         return output
 
     def guard_agent_completion(self, run_id, result):

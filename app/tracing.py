@@ -335,7 +335,9 @@ class AgentTracing:
                    'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if omit else data.get('input')),
                    'output.value': self.content('[private tool payload omitted]' if omit else data.get('output')),
                    'moyai.status': str(data.get('status', 'completed')),
-                   **({'error.type': self.content(error_type)} if failed else {})}, failed=failed)
+                   **({'error.type': self.content(error_type)} if failed else {}),
+                   **(self.error_attributes(data['diagnostic']) if failed and safe_error(data.get('diagnostic')) else {})},
+                  failed=failed)
 
     @best_effort
     def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = '', error=None):

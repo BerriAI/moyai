@@ -25,6 +25,7 @@ from sandbox import computer
 from agent.tools import credential_tools
 from agent.repository_guidance import TOOL as GUIDANCE_TOOL, resolve as repository_guidance
 from sandbox.broker_transport import send_payload
+from sandbox.broker_failure import exception_diagnostic
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
@@ -168,7 +169,13 @@ def call_tool(params, tools, *, relay=None):
                 pass
         return {"content": [{"type": "text", "text": message}], "isError": True}
     except Exception as exc:
-        return {"content": [{"type": "text", "text": f"Tool failed ({type(exc).__name__}). The action was not confirmed; do not retry writes automatically."}], "isError": True, "error_type": type(exc).__name__}
+        diagnostic = {}
+        try:
+            diagnostic = exception_diagnostic(exc, stage='tool_dispatch')
+        except Exception:
+            pass
+        return {"content": [{"type": "text", "text": f"Tool failed ({type(exc).__name__}). The action was not confirmed; do not retry writes automatically."}],
+                "isError": True, "error_type": type(exc).__name__, "diagnostic": diagnostic}
 
 
 def serve():

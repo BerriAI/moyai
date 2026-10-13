@@ -494,9 +494,10 @@ async def test_tool_invocation_exports_real_bridge_outcome(traced_tool_runtime, 
     assert span.status.code == (2 if failed else 1)
     if failed:
         assert attrs['error.type'] == 'ValueError'
-        assert span.status.message == 'Operation error'
+        assert attrs['moyai.error.failure_stage'] == 'tool_dispatch'
+        assert span.status.message == 'Operation failed (ValueError; tool_dispatch).'
         assert {attr.key: attr.value.string_value for attr in span.events[0].attributes} == {
-            'exception.type': 'ValueError', 'exception.message': 'Operation error'}
+            'exception.type': 'ValueError', 'exception.message': 'Operation failed (ValueError; tool_dispatch).'}
     else:
         assert 'error.type' not in attrs and not span.events
     assert all(secret not in received[0] for secret in (

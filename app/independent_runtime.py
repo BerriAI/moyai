@@ -11,6 +11,7 @@ import time
 import modal
 from fastapi import HTTPException
 
+from sandbox.broker_failure import safe_error
 from .computer_operations import ComputerOperations
 from .db import database
 from .environments import EnvironmentPending
@@ -175,15 +176,27 @@ class IndependentRuntime:
         await sandbox.filesystem.write_text.aio(json.dumps(spec), spec_path)
         await r.command(sandbox, 'start', directory, spec_path, token=r.token(run_id, state['message_id']))
         report = json.loads(await r.command(sandbox, 'read', directory, '0'))
+        diagnostic = safe_error(report.get('diagnostic'))
+        if diagnostic and report['state'] in {'done', 'uncertain'}:
+            # Bind to the host-owned operation identity rather than trusting a
+            # sandbox-supplied correlation. Save before terminating the guest.
+            diagnostic = safe_error({**diagnostic, 'request_id': (spec.get('broker_tool_scope') or {}).get('request_id')})
+            try:
+                await database(r.store.event, run_id, 'error', 'Computer operation failed.',
+                    {'phase': 'supervisor_failure', **diagnostic}, turn_id=state['message_id'])
+            except Exception:
+                pass  # A telemetry outage cannot change a confirmed receipt.
+        details = {'diagnostic': diagnostic, 'error_type': diagnostic.get('exception_type')} if diagnostic else {}
         if report['state'] == 'uncertain':
-            return {'status': 'unknown', 'result': receipt('The computer supervisor lost this operation. Inspect its effects before retrying.')}
+            return {'status': 'unknown', 'result': {
+                **receipt('The computer supervisor lost this operation. Inspect its effects before retrying.'), **details}}
         if report['state'] != 'done':
             return None
         result = report.get('final', {}).get('tool_result')
         if result is not None:
             return {'status': 'completed', 'result': result}
-        return {'status': 'unknown', 'result': receipt(
-            'The computer operation ended without a verified result. Inspect its effects before retrying.')}
+        return {'status': 'unknown', 'result': {**receipt(
+            'The computer operation ended without a verified result. Inspect its effects before retrying.'), **details}}
 
     async def computer_step(self, run_id, state):
         from .durable_runner import LostExecution

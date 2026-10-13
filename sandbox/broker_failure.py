@@ -1,6 +1,7 @@
 """Small, body-free diagnostics shared by the broker and sandbox relay."""
 import http.client
 import json
+from pathlib import Path
 import re
 import urllib.error
 
@@ -42,15 +43,86 @@ CLAUDE_RESULTS = {'success', 'error_during_execution', 'error_max_turns',
                   'error_max_budget_usd', 'error_max_structured_output_retries'}
 CLAUDE_TERMINAL_REASONS = {'completed', 'max_turns', 'max_budget_usd',
                           'aborted_streaming', 'aborted_tools', 'error'}
+FAILURE_STAGES = {
+    'tool_catalog', 'tool_activity', 'tool_dispatch', 'computer_poll', 'computer_step',
+    'tool_receipt', 'tool_journal', 'supervisor_launch', 'supervisor_events', 'supervisor_wait',
+    'remote_setup', 'remote_prepare', 'remote_finish', 'remote_activate', 'remote_attachments',
+    'remote_dispatch', 'remote_result', 'remote_cleanup',
+}
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+STACK_LOCATION = re.compile(r'(?:app|agent|sandbox)/(?:[a-zA-Z0-9_]+/)*[a-zA-Z0-9_]+\.py:[1-9][0-9]{0,5}:[A-Za-z_][A-Za-z0-9_]{0,79}')
+
+
+def exception_diagnostic(exc, *, stage, request_id=None):
+    """Capture structure, never messages, source lines, arguments or locals.
+
+    Only our installed code contributes stack locations. Third-party frames,
+    absolute paths and exception/provider prose never cross this boundary.
+    """
+    try:
+        return _exception_diagnostic(exc, stage=stage, request_id=request_id)
+    except Exception:
+        # Even hostile exception properties or unavailable filesystems cannot
+        # replace the original failure with a telemetry error.
+        return safe_error({'exception_type': type(exc).__name__, 'failure_stage': stage, 'request_id': request_id})
+
+
+def _exception_diagnostic(exc, *, stage, request_id):
+    result = {'failure_stage': stage, 'request_id': request_id}
+    chain, locations, seen = [], [], set()
+    while isinstance(exc, BaseException) and id(exc) not in seen and len(chain) < 6:
+        seen.add(id(exc))
+        name = type(exc).__name__
+        # Keep this shared sandbox module independent of the Temporal SDK.
+        # Only the known SDK envelope has semantic types/status details;
+        # never infer either from arbitrary exception text or details.
+        if name == 'ApplicationError' and type(exc).__module__ == 'temporalio.exceptions':
+            name = safe_error({'exception_type': exc.type}).get('exception_type', name)
+            if name == 'BrokerRejected' and exc.details:
+                for key, value in safe_error({'http_status': exc.details[0]}).items():
+                    result.setdefault(key, value)
+        chain.append(name)
+        if 'exception_type' not in result:
+            result['exception_type'] = name
+        if type(getattr(exc, 'errno', None)) is int:
+            result.setdefault('errno', exc.errno)
+        if type(getattr(exc, 'status_code', None)) is int:
+            result.setdefault('http_status', exc.status_code)
+        if type(getattr(exc, 'returncode', None)) is int:
+            result.setdefault('exit_code', exc.returncode)
+        tb = exc.__traceback__
+        frames = []
+        while tb:
+            code = tb.tb_frame.f_code
+            try:
+                relative = Path(code.co_filename).resolve().relative_to(SOURCE_ROOT).as_posix()
+            except (ValueError, OSError):
+                relative = ''
+            location = f'{relative}:{tb.tb_lineno}:{code.co_name}'
+            if STACK_LOCATION.fullmatch(location):
+                frames.append(location)
+            tb = tb.tb_next
+        locations.extend(frames[-8:])
+        # __context__ remains valuable even for "raise ... from None"; copy
+        # only structure, never resurrect its suppressed private message.
+        exc = exc.__cause__ or exc.__context__
+    result.update(exception_chain=chain, stack_locations=locations[-12:])
+    if len(chain) > 1:
+        result['cause_type'] = chain[1]
+    return safe_error(result)
 
 
 def safe_error(data):
     """One additive, body-free projection for traces, events and diagnostics."""
+    if not isinstance(data, dict):
+        return {}
     result = {}
     for key, values in {'error_code': ERROR_CODES, 'stage': ERROR_STAGES, 'sdk_error': CLAUDE_ERRORS,
                         'compaction_reason': COMPACTION_REASONS,
                         'route': BROKER_ROUTES, 'code': CODEX_ERRORS, 'native_status': CLAUDE_RESULTS,
-                        'terminal_reason': CLAUDE_TERMINAL_REASONS}.items():
+                        'terminal_reason': CLAUDE_TERMINAL_REASONS,
+                        'failure_stage': FAILURE_STAGES,
+                        'outcome_type': {'UncertainToolOutcome'}}.items():
         if isinstance(data.get(key), str) and data[key] in values:
             result[key] = data[key]
     for key in ('response_status', 'http_status', 'upstream_status'):
@@ -64,6 +136,16 @@ def safe_error(data):
         value = data.get(key)
         if isinstance(value, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,63}', value):
             result[key] = value
+    for key, lower, upper in (('errno', -4095, 4095), ('exit_code', -255, 255)):
+        if type(data.get(key)) is int and lower <= data[key] <= upper:
+            result[key] = data[key]
+    for key, pattern, limit in (
+            ('exception_chain', re.compile(r'[A-Za-z][A-Za-z0-9_]{0,63}'), 6),
+            ('stack_locations', STACK_LOCATION, 12)):
+        if isinstance(data.get(key), list):
+            values = [value for value in data[key][:limit] if isinstance(value, str) and pattern.fullmatch(value)]
+            if values:
+                result[key] = values
     if isinstance(data.get('request_ids'), dict):
         result['request_ids'] = request_ids(data['request_ids'])
     return result
@@ -97,6 +179,14 @@ def provider_error(value):
 
 def error_summary(data, *, technical=True):
     data = safe_error(data)
+    if data.get('failure_stage'):
+        # Every component has already passed the body-free projection.
+        facts = [data.get('exception_type', 'OperationError'), data['failure_stage']]
+        if data.get('errno') is not None:
+            facts.append('errno ' + str(data['errno']))
+        if data.get('exit_code') is not None:
+            facts.append('exit ' + str(data['exit_code']))
+        return 'Operation failed (' + '; '.join(facts) + ').'
     code = data.get('error_code', 'unknown')
     reason = {
         'cyber_policy': 'The model provider rejected this request under its cybersecurity policy',
