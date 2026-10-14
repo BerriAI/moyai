@@ -77,6 +77,31 @@ The videos join a live running segment with a short live completed-state segment
 - Automatic computer restoration, complete legacy Slack behavior, SSO, automations, sustained goals/swarms, skill learning, billing reconciliation, and legacy-data migration remain product work.
 - The native schema bootstrap is not a production migration system.
 
+## Bugbot follow-up: October 14, 2026
+
+All five findings on `1eeb2570afb009fe5f8d91aeae6a5e464c838d16` were reproduced and fixed.
+Nine added regression cases fail on that revision and pass with the changes.
+The native suite passes 41 tests, with the opt-in PostgreSQL test qualified separately.
+
+The actual native API and worker were deployed from the original and changed
+sources with separate local Temporal services, real GPT-6 Astra inference and
+real Modal computers. Killing the worker during `moyai_save_computer_v1` changed
+the original answer's turn to `failed`; the corrected application kept it
+`completed`, displayed a snapshot warning, and released the active turn.
+A real native question in a shared conversation exposed `pending` to another
+member on the original version; only the requester received it after the fix.
+
+Signed synthetic Slack envelopes entered the running `/hooks/slack` endpoint:
+the original admitted two turns for one message, and the corrected app admitted
+one. The actual dispatcher staged 100 of 125 seeded completed replies before,
+and all 125 afterward. Outbound Slack HTTPS was blocked through a dead loopback
+proxy in these isolated API processes; no real Slack messages were sent, and
+these checks do not qualify delivery to Slack itself.
+
+Real browser captures show the original pin control remaining "Pin" after
+clicks and the corrected control changing between "Pin" and "Unpin", with its
+saved preference reflected by the session API.
+
 ## Reproduce the native app
 
 From the repository root:

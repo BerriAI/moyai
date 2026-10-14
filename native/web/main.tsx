@@ -238,7 +238,7 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
       <div><h1 ref={heading} tabIndex={-1}>{session.title}</h1><span className={`status ${session.status}`}>{session.status === "waiting" ? "Waiting for your response" : session.status}</span><span className="muted privacy">{session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"}</span></div>
       <div className="header-actions">
         {session.owner_id === me.user.id && <Button variant="ghost" size="sm" onClick={() => { setTitle(session.title); setRenaming(true) }}>Rename</Button>}
-        <Button variant="ghost" size="icon" aria-label="Pin conversation" onClick={() => editSession({ pinned: true })}><Pin /></Button>
+        <Button variant="ghost" size="icon" aria-label={session.pinned ? "Unpin conversation" : "Pin conversation"} aria-pressed={Boolean(session.pinned)} onClick={() => editSession({ pinned: !session.pinned })}><Pin /></Button>
         {session.owner_id === me.user.id && <Button variant="ghost" size="icon" aria-label={session.archived ? "Restore conversation" : "Archive conversation"} onClick={() => editSession({ archived: !session.archived })}><Archive /></Button>}
       </div>
     </header>

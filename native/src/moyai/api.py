@@ -226,6 +226,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             result: dict[str, Any] = {
                 "session": session_view(row), "turns": [turn_view(turn) for turn in turns],
             }
+            preference = await db.get(SessionPreference, (user.id, session_id))
+            result["session"]["pinned"] = bool(preference and preference.pinned)
+            active_turn = next((turn for turn in turns if turn.id == row.active_turn), None)
             unsettled = list((await db.scalars(select(Effect).where(
                 Effect.session_id == session_id, Effect.state == "pending"
             ))).all())
@@ -238,7 +241,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             snapshot = await runtime.stores.steps.latest_snapshot(run_id=turns[0].id)
             if snapshot is not None:
                 result["activity"] = saved_activity(snapshot.messages, turns[0].id)
-        if row.status == "waiting" and row.conversation:
+        if (
+            row.status == "waiting" and row.conversation
+            and active_turn is not None and active_turn.actor_id == user.id
+        ):
             conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(row.conversation))
             result["pending"] = TypeAdapter(Any).dump_python(conversation.deferred_tool_requests, mode="json")
         return result

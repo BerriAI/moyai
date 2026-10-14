@@ -122,8 +122,11 @@ async def admit_one(runtime: Runtime, inbox: SlackInbox) -> None:
             if thread is None:
                 raise
     try:
+        # app_mention and message envelopes can describe the same Slack message.
+        # Channel + message timestamp identifies that message independently of event_id.
+        message_key = hashlib.sha256(json.dumps([team, channel, event["ts"]]).encode()).hexdigest()
         await runtime.database.submit(actor, thread.session_id, NewMessage(
-            prompt=event["text"], request_key=f"slack:{inbox.id}", mode="asap",
+            prompt=event["text"], request_key=f"slack-message:{message_key}", mode="asap",
         ))
     except HTTPException as error:
         if error.status_code not in (401, 403, 404):
@@ -144,8 +147,13 @@ async def stage_deliveries(runtime: Runtime) -> None:
     async with runtime.database.sessions() as db:
         pairs = (await db.execute(select(Turn, SlackThread).join(
             SlackThread, SlackThread.session_id == Turn.session_id
-        ).where(Turn.status.in_(["completed", "waiting", "saving", "failed"])).order_by(
-            Turn.created_at.desc()
+        ).where(
+            Turn.status.in_(["completed", "waiting", "saving", "failed"]),
+            ~select(Delivery.id).where(
+                Delivery.identity == ("slack-answer:" + Turn.id)
+            ).exists(),
+        ).order_by(
+            Turn.created_at, Turn.id
         ).limit(100))).all()
     for turn, thread in pairs:
         identity = f"slack-answer:{turn.id}"
@@ -158,7 +166,7 @@ async def stage_deliveries(runtime: Runtime) -> None:
         elif turn.status == "failed":
             text = turn.error or "This task stopped before it completed."
         if not text:
-            continue
+            text = "This task completed without a text answer."
         link = (
             f"{runtime.settings.public_url.rstrip('/')}/#{turn.session_id}"
             if runtime.settings.public_url else ""

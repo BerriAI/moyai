@@ -155,11 +155,18 @@ class TurnWorkflow(PydanticAIWorkflow):
                 )
                 return {"turn_id": turn_id, "status": "stopped"}
             if accepted and not waiting:
-                await workflow.execute_activity(
-                    "moyai_save_computer_v1", args=[turn_id, reference],
-                    start_to_close_timeout=timedelta(minutes=3),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+                try:
+                    await workflow.execute_activity(
+                        "moyai_save_computer_v1", args=[turn_id, reference],
+                        start_to_close_timeout=timedelta(minutes=3),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                except ActivityError:
+                    # Worker loss/timeouts bypass the activity's own error handler.
+                    # The answer is already committed; only snapshot settlement failed.
+                    await workflow.execute_activity(
+                        "moyai_settle_answer_v1", turn_id, **CONTROL,
+                    )
             return {"turn_id": turn_id, "status": "waiting" if waiting else "completed"}
         except RunCancelled as error:
             self.finished = True

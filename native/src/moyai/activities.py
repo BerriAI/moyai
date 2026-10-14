@@ -15,6 +15,11 @@ from .runtime import current
 
 logger = logging.getLogger(__name__)
 
+SNAPSHOT_WARNING = (
+    "The answer was saved, but the computer snapshot could not be confirmed. "
+    "The previous saved workspace remains authoritative."
+)
+
 
 @activity.defn(name="moyai_prepare_turn_v1")
 async def prepare_turn(turn_id: str) -> PreparedTurn:
@@ -59,6 +64,12 @@ async def save_computer(turn_id: str, reference: dict | None) -> None:
     await runtime.database.settle(turn_id, snapshot=image.object_id)
 
 
+@activity.defn(name="moyai_settle_answer_v1")
+async def settle_answer(turn_id: str) -> None:
+    """Settle an accepted answer after snapshot activity failure or timeout."""
+    await current().database.settle(turn_id, warning=SNAPSHOT_WARNING)
+
+
 @activity.defn(name="moyai_fail_turn_v1")
 async def fail_turn(turn_id: str, message: str) -> None:
     await current().database.fail(turn_id, message)
@@ -80,7 +91,7 @@ async def steering_receipt(turn_id: str, enqueue_id: str | None) -> None:
 
 
 ACTIVITIES = [
-    prepare_turn, save_answer, save_computer, fail_turn, stopped_turn,
+    prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
     prepare_steering, steering_receipt,
 ]
 

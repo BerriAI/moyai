@@ -18,7 +18,7 @@ from moyai.api import create_app
 from moyai.contracts import Grant, NewMessage, NewSession
 from moyai.database import Database
 from moyai.effects import EffectReceipts
-from moyai.models import Connection, Effect, Turn, User, new_id
+from moyai.models import Connection, Effect, Message, Session, Turn, User, new_id
 from moyai.security import Security
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter
@@ -57,6 +57,51 @@ async def test_answer_commit_can_be_retried_after_lost_acknowledgment(runtime, a
     assert await runtime.database.save_result(prepared.scope, **arguments)
     with pytest.raises(ValueError, match="immutable"):
         await runtime.database.save_result(prepared.scope, **{**arguments, "output": "A different answer"})
+
+
+@pytest.mark.parametrize("cleanup", ["fail", "reconcile", "stop"])
+async def test_snapshot_cleanup_preserves_published_answer_and_releases_queue(runtime, active, actor, cleanup):
+    session, turn, prepared = active
+    await runtime.database.save_result(
+        prepared.scope,
+        conversation=ConversationTypeAdapter.dump_json(Conversation(
+            conversation_id=prepared.scope.conversation_id
+        )).decode(),
+        output="The committed answer.", workspace=None, usage={"requests": 1},
+    )
+    assert turn.id in {item.id for item in await runtime.database.unsettled_turns()}
+    if cleanup == "stop":
+        await runtime.database.stop(actor, session.id)
+        await runtime.database.stopped(turn.id)
+    else:
+        await runtime.database.fail(turn.id, "Snapshot worker disappeared.", only_unsettled=cleanup == "reconcile")
+    # A repeated failure/cleanup receipt must not downgrade the accepted answer.
+    await runtime.database.fail(turn.id, "A later cleanup retry.")
+    async with runtime.database.sessions() as db:
+        saved = await db.get(Turn, turn.id)
+        current = await db.get(Session, session.id)
+        assert saved.status == "completed" and saved.error is None
+        assert runtime.security.unseal(saved.result).decode() == "The committed answer."
+        assert current.active_turn is None and current.status == "idle" and current.save_warning
+        assert await db.scalar(select(func.count()).select_from(Message).where(
+            Message.identity == f"answer:{turn.id}"
+        )) == 1
+    following = await runtime.database.submit(
+        actor, session.id, NewMessage(prompt="Continue.", request_key="after-snapshot-failure"),
+    )
+    assert (await runtime.database.claim_next()).id == following.id
+
+
+async def test_pin_preference_round_trips_through_session_snapshot(runtime, actor):
+    session = await runtime.database.create_session(actor, NewSession())
+    async with sign_in(runtime) as client:
+        for pinned in (False, True, False):
+            response = await client.patch(f"/api/sessions/{session.id}", json={"pinned": pinned})
+            assert response.status_code == 200
+            view = (await client.get(f"/api/sessions/{session.id}")).json()
+            assert view["session"]["pinned"] is pinned
+            listing = (await client.get("/api/sessions")).json()
+            assert next(row for row in listing if row["id"] == session.id)["pinned"] is pinned
 
 
 async def test_native_search_and_memory_scopes_change_with_account_grants(runtime, active):

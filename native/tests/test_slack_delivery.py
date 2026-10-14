@@ -11,11 +11,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 
 from moyai.api import create_app
 from moyai.models import Delivery, Session, SlackInbox, SlackThread, Turn, User, new_id
-from moyai.slack import admit_one, deliver_one, reconcile_one
+from moyai.slack import admit_one, deliver_one, reconcile_one, stage_deliveries
 
 
 async def test_signed_ingress_deduplicates_and_admits_linked_actor(runtime, actor):
@@ -58,6 +58,62 @@ async def test_signed_ingress_deduplicates_and_admits_linked_actor(runtime, acto
     await runtime.database.claim_next()
     prepared = await runtime.database.prepare(turns[0].id)
     assert prepared.scope.memory_namespace.startswith(f"slack/{session.id}/")
+
+
+@pytest.mark.parametrize("order", [("app_mention", "message"), ("message", "app_mention")])
+async def test_same_slack_message_in_two_event_envelopes_admits_one_turn(runtime, actor, order):
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(User, actor.id)).slack_user_id = "UTEST"
+
+    async def admit(event_type, timestamp, thread_ts=None):
+        inbox = SlackInbox(id=new_id(), payload=runtime.security.seal({
+            "team_id": "TTEST", "event_id": new_id(),
+            "event": {
+                "type": event_type, "channel": "CTEST", "user": "UTEST",
+                "ts": timestamp, "text": "Same user message.",
+                **({"thread_ts": thread_ts} if thread_ts else {}),
+            },
+        }))
+        async with runtime.database.sessions.begin() as db:
+            db.add(inbox)
+        await admit_one(runtime, inbox)
+
+    for kind in order:
+        await admit(kind, "123.456")
+    # Thread replies can also arrive in either order. Different timestamps are
+    # distinct messages even when the actor and text are identical.
+    for timestamp in ("123.457", "123.458"):
+        for kind in order:
+            await admit(kind, timestamp, "123.456")
+    async with runtime.database.sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 3
+        assert await db.scalar(select(func.count()).select_from(SlackThread)) == 1
+
+
+async def test_delivery_staging_drains_backlog_beyond_hundred_newer_completions(runtime, active):
+    session, original, _ = active
+    async with runtime.database.sessions.begin() as db:
+        db.add(SlackThread(
+            id=new_id(), team_id="TTEST", channel_id="CTEST", thread_ts="123.456", session_id=session.id,
+        ))
+        (await db.get(Turn, original.id)).status = "completed"
+        for index in range(205):
+            turn = Turn(
+                id=new_id(), session_id=session.id, actor_id=original.actor_id,
+                request_key=f"backlog-{index}", request_fingerprint=str(index),
+                prompt=runtime.security.seal("Test input."), model=original.model,
+                workflow_id=f"backlog-{index}", status="completed",
+                result=runtime.security.seal("Answer." if index % 2 else ""),
+            )
+            db.add(turn)
+    for _ in range(4):
+        await stage_deliveries(runtime)
+    async with runtime.database.sessions() as db:
+        deliveries = list((await db.scalars(select(Delivery))).all())
+        assert len(deliveries) == 206
+        assert len({row.turn_id for row in deliveries}) == 206
+        assert original.id in {row.turn_id for row in deliveries}
+        assert all(runtime.security.unseal(row.content) for row in deliveries)
 
 
 async def make_delivery(runtime, active):

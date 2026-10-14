@@ -264,7 +264,7 @@ class Database:
     async def unsettled_turns(self) -> list[Turn]:
         async with self.sessions() as db:
             return list((await db.scalars(select(Turn).where(
-                Turn.status.in_(["starting", "running"])
+                Turn.status.in_(["starting", "running", "saving"])
             ).order_by(Turn.created_at).limit(100))).all())
 
     async def prepare(self, turn_id: str) -> PreparedTurn:
@@ -432,12 +432,20 @@ class Database:
             session = await db.get(Session, turn.session_id)
             if session is None or session.active_turn != turn.id or turn.status != "saving":
                 return
+            self._settle_answer(turn, session, snapshot=snapshot, warning=warning)
+
+    @staticmethod
+    def _settle_answer(
+        turn: Turn, session: Session | None, *, snapshot: str | None = None, warning: str | None = None,
+    ) -> None:
+        """Later cleanup cannot downgrade a published answer to failure or Stop."""
+        turn.status = "completed"
+        if session is not None and session.active_turn == turn.id:
             if snapshot:
                 session.snapshot = snapshot
             session.save_warning = warning
             session.status = "idle"
             session.active_turn = None
-            turn.status = "completed"
 
     async def fail(self, turn_id: str, message: str, *, only_unsettled: bool = False) -> None:
         async with self.sessions.begin() as db:
@@ -446,9 +454,15 @@ class Database:
                 return
             if turn.status in ("completed", "stopped"):
                 return
-            if only_unsettled and turn.status not in ("starting", "running"):
+            if only_unsettled and turn.status not in ("starting", "running", "saving"):
                 return
             session = await db.get(Session, turn.session_id)
+            if turn.status == "saving" and turn.result_accepted:
+                self._settle_answer(
+                    turn, session,
+                    warning="The answer was saved, but computer snapshot settlement was interrupted.",
+                )
+                return
             turn.status = "failed"
             turn.error = message
             turn.finished_at = now()
@@ -484,6 +498,12 @@ class Database:
                 return
             session = await db.get(Session, turn.session_id)
             if session is None or session.active_turn != turn.id:
+                return
+            if turn.status == "saving" and turn.result_accepted:
+                self._settle_answer(
+                    turn, session,
+                    warning="The answer was saved before Stop interrupted computer snapshot settlement.",
+                )
                 return
             if conversation:
                 session.conversation = self.security.seal(conversation)
