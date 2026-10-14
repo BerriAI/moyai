@@ -2,6 +2,8 @@
   "name": "moyai-ui",
   "private": true,
   "scripts": {
+    "build:native": "vite build --config native/web/vite.config.ts",
+    "typecheck:native": "tsc --project native/web/tsconfig.json",
     "build": "vite build",
     "dev": "vite build --watch",
     "preview": "node scripts/settings_ui_preview.cjs",
@@ -17,6 +19,8 @@
     "radix-ui": "^1.4.3",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.3.1",
     "three": "^0.180.0"
   },

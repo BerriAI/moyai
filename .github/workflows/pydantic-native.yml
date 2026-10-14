@@ -1,0 +1,59 @@
+name: Native Pydantic runtime
+
+on:
+  pull_request:
+    paths: ['native/**', 'frontend/**', 'package*.json', '.github/workflows/pydantic-native.yml']
+  push:
+    branches: [main]
+    paths: ['native/**', 'frontend/**', 'package*.json', '.github/workflows/pydantic-native.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: native-test-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES: postgresql://postgres:native-test-only@127.0.0.1:5432/postgres
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.13'
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests
+      - run: uv run pyright
+      - run: uv run pytest -q --tb=short
+      - run: uv build
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck:native
+      - run: npm run build:native
+      - run: git diff --exit-code -- native/src/moyai/static

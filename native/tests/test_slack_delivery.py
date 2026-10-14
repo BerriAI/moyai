@@ -1,0 +1,193 @@
+"""Slack protocol tests with a transport double; these are not live Slack proof."""
+
+import asyncio
+import hashlib
+import hmac
+import itertools
+import json
+import time
+from datetime import UTC, datetime, timedelta
+
+import httpx
+import pytest
+from pydantic import SecretStr
+from sqlalchemy import event, select
+
+from moyai.api import create_app
+from moyai.models import Delivery, Session, SlackInbox, SlackThread, Turn, User, new_id
+from moyai.slack import admit_one, deliver_one, reconcile_one
+
+
+async def test_signed_ingress_deduplicates_and_admits_linked_actor(runtime, actor):
+    runtime.settings.slack_signing_secret = SecretStr("local-signature-secret")
+    runtime.settings.slack_team_id = "TTEST"
+    async with runtime.database.sessions.begin() as db:
+        saved = await db.get(User, actor.id)
+        saved.slack_user_id = "UTEST"
+    body = json.dumps({
+        "type": "event_callback", "event_id": "EONE", "team_id": "TTEST",
+        "event": {"type": "app_mention", "channel": "CTEST", "user": "UTEST",
+                  "ts": "123.456", "text": "Explain this test."},
+    }).encode()
+    stamp = str(int(time.time()))
+    signature = "v0=" + hmac.new(
+        b"local-signature-secret", b"v0:" + stamp.encode() + b":" + body, hashlib.sha256
+    ).hexdigest()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
+        base_url="http://test",
+    ) as client:
+        invalid = await client.post("/hooks/slack", content=body)
+        assert invalid.status_code == 401
+        for _ in range(2):
+            response = await client.post("/hooks/slack", content=body, headers={
+                "x-slack-signature": signature, "x-slack-request-timestamp": stamp,
+            })
+            assert response.status_code == 200
+    async with runtime.database.sessions() as db:
+        rows = list((await db.scalars(select(SlackInbox))).all())
+        assert len(rows) == 1
+    await admit_one(runtime, rows[0])
+    await admit_one(runtime, rows[0])
+    async with runtime.database.sessions() as db:
+        turns = list((await db.scalars(select(Turn))).all())
+        assert len(turns) == 1 and turns[0].actor_id == actor.id
+        assert await db.scalar(select(SlackThread.id))
+        session = await db.get(Session, turns[0].session_id)
+        assert session.surface == "slack" and session.visibility == "private"
+    await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turns[0].id)
+    assert prepared.scope.memory_namespace.startswith(f"slack/{session.id}/")
+
+
+async def make_delivery(runtime, active):
+    session, turn, _ = active
+    async with runtime.database.sessions.begin() as db:
+        delivery = Delivery(
+            id=new_id(), identity="one-delivery", session_id=session.id, turn_id=turn.id,
+            destination=json.dumps({"channel": "CTEST", "thread_ts": "123.456"}),
+            content=runtime.security.seal("Verified result."),
+        )
+        db.add(delivery)
+    return delivery
+
+
+async def test_delivery_ownership_survives_network_await(runtime, active):
+    delivery = await make_delivery(runtime, active)
+    entered, finish = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.path)
+        entered.set()
+        await finish.wait()
+        return httpx.Response(200, json={"ok": True, "ts": "123.999"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
+        first = asyncio.create_task(deliver_one(runtime, client, delivery))
+        await entered.wait()
+        await deliver_one(runtime, client, delivery)
+        finish.set()
+        await first
+    assert calls == ["/chat.postMessage"]
+    async with runtime.database.sessions() as db:
+        saved = await db.get(Delivery, delivery.id)
+        assert saved.status == "sent" and "123.999" in runtime.security.unseal(saved.receipt).decode()
+
+
+async def test_lost_send_ack_is_reconciled_without_reposting(runtime, active):
+    delivery = await make_delivery(runtime, active)
+    calls = []
+
+    async def handler(request):
+        calls.append(request.method)
+        if request.method == "POST":
+            raise httpx.ReadTimeout("Acknowledgment lost after dispatch.", request=request)
+        return httpx.Response(200, json={
+            "ok": True, "messages": [{
+                "ts": "123.999", "metadata": {"event_payload": {"id": delivery.id}},
+            }],
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
+        await deliver_one(runtime, client, delivery)
+        await deliver_one(runtime, client, delivery)
+        async with runtime.database.sessions.begin() as db:
+            saved = await db.get(Delivery, delivery.id)
+            assert saved.status == "sending"
+            saved.claimed_at = (datetime.now(UTC) - timedelta(seconds=40)).isoformat()
+        await reconcile_one(runtime, client, delivery)
+    assert calls == ["POST", "GET"]
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).status == "sent"
+
+
+async def test_cancel_after_receipt_commit_never_reclassifies_or_reposts(runtime, active):
+    delivery = await make_delivery(runtime, active)
+    posted = False
+    cancelled = False
+    calls = 0
+
+    async def handler(request):
+        nonlocal posted, calls
+        calls += 1
+        posted = True
+        return httpx.Response(200, json={"ok": True, "ts": "123.999"})
+
+    session_type = runtime.database.sessions.class_.sync_session_class
+
+    def after_commit(_session):
+        nonlocal cancelled
+        if posted and not cancelled:
+            cancelled = True
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+
+    event.listen(session_type, "after_commit", after_commit)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://slack.test/"
+        ) as client:
+            task = asyncio.create_task(deliver_one(runtime, client, delivery))
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await deliver_one(runtime, client, delivery)
+    finally:
+        event.remove(session_type, "after_commit", after_commit)
+    assert cancelled and calls == 1
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).status == "sent"
+
+
+async def test_sqlite_writer_wait_does_not_block_slack_event_loop(runtime, active):
+    delivery = await make_delivery(runtime, active)
+    ticks = []
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"ok": True, "ts": "123.999"})
+
+    async def heartbeat():
+        while True:
+            ticks.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.02)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://slack.test/"
+    ) as client, runtime.database.engine.connect() as owner:
+        await owner.exec_driver_sql("BEGIN IMMEDIATE")
+        pulse = asyncio.create_task(heartbeat())
+        task = asyncio.create_task(deliver_one(runtime, client, delivery))
+        try:
+            await asyncio.sleep(0.65)
+            assert not task.done() and calls == []
+        finally:
+            await owner.rollback()
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
+        await asyncio.wait_for(task, 5)
+    assert len(ticks) >= 10
+    assert max(b - a for a, b in itertools.pairwise(ticks)) < 0.3
+    assert calls == ["/chat.postMessage"]
