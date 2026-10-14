@@ -140,8 +140,8 @@ def normalize(t, payload, event_header=''):
         if event == 'issues' and issue.get('pull_request'):
             return None
         if event in {'issue_comment','pull_request_review','pull_request_review_comment'}:
-            expected_action = 'submitted' if event == 'pull_request_review' else 'created'
-            if action != (t.action or expected_action):
+            expected_action = t.action or t.event.partition('.')[2] or ('submitted' if event == 'pull_request_review' else 'created')
+            if action != expected_action:
                 return None
         if event == 'check_run':
             if action != 'completed':

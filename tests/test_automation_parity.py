@@ -276,3 +276,11 @@ def test_ci_check_filters_use_native_check_run_fields():
     assert normalize(trigger,payload,'check_run')
     assert normalize(trigger,example(trigger),'check_run')
     assert normalize(trigger,payload|{'check_run':payload['check_run']|{'conclusion':'success'}},'check_run') is None
+
+
+@pytest.mark.parametrize('event',['issue_comment.edited','pull_request_review.dismissed','pull_request_review_comment.edited'])
+def test_legacy_dotted_github_triggers_match_their_own_action(event):
+    trigger,header=event_trigger('github',event),event.partition('.')[0]
+    payload=example(trigger)
+    assert normalize(trigger,payload,header)
+    assert normalize(trigger,payload|{'action':'deleted'},header) is None
