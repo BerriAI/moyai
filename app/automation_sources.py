@@ -24,6 +24,12 @@ EVENT_CHOICES = {
                   ('incident.resolved','Resolved'), ('incident.updated','Updated')],
     'webhook': [],
 }
+# These events restrict deliveries to a default action when none is configured.
+GITHUB_DEFAULT_ACTIONS = {
+    'issue_comment': 'created',
+    'pull_request_review': 'submitted',
+    'pull_request_review_comment': 'created',
+}
 IDENTIFIER = r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$'
 UUID = r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
 
@@ -111,6 +117,12 @@ class EventTrigger(BaseModel):
         return self
 
 
+def _github_action(trigger: EventTrigger, *, fallback: str = '') -> str:
+    """Resolve explicit and legacy actions before applying event defaults."""
+    kind, _, legacy_action = trigger.event.partition('.')
+    return trigger.action or legacy_action or GITHUB_DEFAULT_ACTIONS.get(kind, fallback)
+
+
 def normalize(t, payload, event_header=''):
     p = obj(payload)
     event, action, title, body, url, item, branch, status, conclusion = '', '', '', '', '', '', '', '', ''
@@ -139,10 +151,8 @@ def normalize(t, payload, event_header=''):
         detail = obj(p.get('comment') or p.get('review') or p.get('check_run'))
         if event == 'issues' and issue.get('pull_request'):
             return None
-        if event in {'issue_comment','pull_request_review','pull_request_review_comment'}:
-            expected_action = 'submitted' if event == 'pull_request_review' else 'created'
-            if action != (t.action or expected_action):
-                return None
+        if event in GITHUB_DEFAULT_ACTIONS and action != _github_action(t):
+            return None
         if event == 'check_run':
             if action != 'completed':
                 return None
@@ -289,9 +299,8 @@ def example(t):
                 'conversation':[{'role':'assistant','content':'The previous attempt is ready to check.'}],
                 'context_truncated':False}
     if t.provider == 'github':
-        kind, _, action = t.event.partition('.')
-        action = t.action or action or {'issues':'opened', 'issue_comment':'created', 'pull_request_review':'submitted',
-            'pull_request_review_comment':'created', 'check_run':'completed'}.get(kind,'opened')
+        kind = t.event.partition('.')[0]
+        action = _github_action(t, fallback='completed' if kind == 'check_run' else 'opened')
         content = t.text_starts_with or t.text_contains or 'Example context'
         issue = {'number':123,'title':'Example issue','body':content,'labels':[{'name':t.label}]}
         payload = {'action':action,'repository':{'id':t.repository_id,'full_name':t.repository},
