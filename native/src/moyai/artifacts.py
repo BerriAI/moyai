@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 from pathlib import PurePosixPath
+from typing import Literal
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import Capability
@@ -14,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .contracts import RunScope
 from .database import Database
+from .links import LinkInput, save_link
 from .models import Artifact, new_id
 from .storage import ObjectStore
 
@@ -66,4 +68,22 @@ def artifact_capability(database: Database, objects: ObjectStore) -> Capability[
             "sha256": content_hash, "download_url": f"/api/files/{artifact.id}",
         }
 
-    return Capability(id="moyai_artifacts", tools=[save_artifact])
+    async def attach_link(
+        ctx: RunContext[RunScope], url: str,
+        kind: Literal["pull_request", "output", "source"], title: str = "",
+    ) -> dict[str, str]:
+        """Attach a PR, published output/preview, or source to this session's Workspace panel.
+
+        Use this for a PR you created or are working on, and for actual delivered output URLs.
+        It records a link only; it does not fetch, create, merge, or publish anything externally.
+        """
+        await database.authorize_scope(ctx.deps)
+        actor = await database.user(ctx.deps.actor_id)
+        try:
+            body = LinkInput(kind=kind, url=url, title=title)
+        except ValueError as error:
+            raise ToolFailed("Use a valid HTTP(S) link without credentials; PR links must be GitHub pull request URLs.") from error
+        row = await save_link(database, actor, ctx.deps.session_id, body)
+        return {"id": row.id, "url": row.url, "title": row.title}
+
+    return Capability(id="moyai_artifacts", tools=[save_artifact, attach_link])

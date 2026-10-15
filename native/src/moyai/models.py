@@ -206,6 +206,28 @@ class Artifact(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
+class SessionLink(Base):
+    __tablename__ = "moyai_session_links"
+    __table_args__ = (UniqueConstraint("session_id", "kind", "url"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), index=True)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"))
+    kind: Mapped[str] = mapped_column(String(20))
+    url: Mapped[str] = mapped_column(String(2048))
+    title: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class SubagentLabel(Base):
+    """Stable presentation names; native Harness records remain the run authority."""
+    __tablename__ = "moyai_subagent_labels"
+    __table_args__ = (UniqueConstraint("session_id", "name"),)
+    run_id: Mapped[str] = mapped_column(String(250), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    avatar: Mapped[int] = mapped_column(Integer)
+
+
 class SlackThread(Base):
     __tablename__ = "moyai_slack_threads"
     __table_args__ = (UniqueConstraint("team_id", "channel_id", "thread_ts"),)

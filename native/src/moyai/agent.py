@@ -46,6 +46,7 @@ from .contracts import GuidanceChanged, RunScope
 from .database import Database
 from .effects import EffectReceipts
 from .settings import Settings
+from .settings_runtime import settings_capability
 from .storage import ObjectStore
 from .stores import NativeStores
 
@@ -288,6 +289,7 @@ def make_agent(
                 enable_subtasks=True,
             ),
             Skills(skills_directory),
+            settings_capability(database),
             Memory(store=stores.memory, namespace=lambda ctx: ctx.deps.memory_namespace, injection_errors="raise"),
             StepPersistence(store=stores.steps, capture_frontier=True),
             DurableConversationSearch(SnapshotHistorySource(stores.steps), scope="conversation"),

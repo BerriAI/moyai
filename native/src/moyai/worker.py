@@ -13,6 +13,7 @@ from temporalio.worker import Worker
 from .activities import ACTIVITIES
 from .execution import ExecutionAuthority
 from .runtime import Runtime, configure
+from .settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
 from .workflow import TurnWorkflow
 
 logger = logging.getLogger(__name__)
@@ -25,9 +26,10 @@ def make_worker(runtime: Runtime) -> Worker:
     TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent]
     return Worker(
         runtime.client,
+        identity=settings_worker_identity(),
         task_queue=runtime.settings.temporal_queue,
-        workflows=[TurnWorkflow],
-        activities=ACTIVITIES,
+        workflows=[TurnWorkflow, *SETTINGS_WORKFLOWS],
+        activities=[*ACTIVITIES, *SETTINGS_ACTIVITIES],
         interceptors=[ExecutionAuthority(runtime.database)],
         max_concurrent_activities=32,
         max_concurrent_workflow_tasks=16,

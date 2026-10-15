@@ -32,6 +32,7 @@ from .contracts import (
 )
 from .models import (
     Base,
+    ComputerOperation,
     Connection,
     LoginAttempt,
     Message,
@@ -154,13 +155,15 @@ class Database:
             db.add(session)
         return session
 
-    async def list_sessions(self, actor: User, *, archived: bool = False) -> list[Session]:
+    async def list_sessions(self, actor: User, *, archived: bool = False, deleted: bool = False) -> list[Session]:
         async with self.sessions() as db:
             query = select(Session).where(
-                Session.deleted.is_(False),
-                Session.archived.is_(archived),
+                Session.deleted.is_(deleted),
+                Session.owner_id == actor.id if deleted else
                 or_(Session.owner_id == actor.id, Session.visibility == "shared"),
             ).order_by(Session.updated_at.desc()).limit(100)
+            if not deleted:
+                query = query.where(Session.archived.is_(archived))
             return list((await db.scalars(query)).all())
 
     async def session(self, actor: User, session_id: str) -> Session:
@@ -206,7 +209,21 @@ class Database:
 
     async def _submit(self, actor: User, session_id: str, body: NewMessage, fingerprint: str) -> Turn:
         async with self.sessions.begin() as db:
+            # Account changes and admission must serialize across API/worker
+            # processes. An authorization check before this transaction can
+            # become stale while a scheduled or interactive request waits.
+            authorized = await db.scalar(update(User).where(
+                User.id == actor.id, User.enabled.is_(True), User.auth_version == actor.auth_version,
+            ).values(auth_version=User.auth_version).returning(User.id))
+            if authorized is None:
+                raise HTTPException(401, "Your access changed. Sign in again.")
             session = await self.allowed_session(db, session_id, actor)
+            locked = await db.scalar(update(Session).where(
+                Session.id == session_id, Session.deleted.is_(False),
+            ).values(revision=Session.revision + 1).returning(Session.id))
+            if locked is None:
+                raise HTTPException(404, "Conversation not found.")
+            await db.refresh(session)
             existing = await db.scalar(select(Turn).where(
                 Turn.session_id == session_id, Turn.actor_id == actor.id,
                 Turn.request_key == body.request_key,
@@ -366,6 +383,14 @@ class Database:
             if actor is None or not actor.enabled:
                 raise PermissionError("The requester no longer has access.")
             session = await self.allowed_session(db, turn.session_id, actor)
+            locked = await db.scalar(update(Session).where(
+                Session.id == turn.session_id, Session.active_turn == turn.id,
+                Session.deleted.is_(False), Session.status.in_(["queued", "running"]),
+            ).values(revision=Session.revision + 1).returning(Session.id))
+            if locked is None:
+                raise PermissionError("This turn is no longer authorized to execute.")
+            await db.refresh(turn)
+            await db.refresh(session)
             if session.active_turn != turn.id or turn.status not in ("starting", "running"):
                 raise PermissionError("This turn is no longer authorized to execute.")
             grants = await self.resolve_grants(
@@ -589,6 +614,46 @@ class Database:
             ).values(status="stopped", finished_at=now()))
             # Keep ownership until execution/cleanup acknowledges Stop; don't admit competing work.
             return workflow_id
+
+    async def delete_session(self, actor: User, session_id: str) -> None:
+        """Hide a session and fence work atomically; the existing Stop dispatcher cancels execution."""
+        async with self.sessions.begin() as db:
+            locked = await db.scalar(update(Session).where(
+                Session.id == session_id, Session.owner_id == actor.id,
+            ).values(revision=Session.revision + 1).returning(Session.id))
+            if locked is None:
+                raise HTTPException(404, "Conversation not found.")
+            session = await db.get(Session, session_id)
+            assert session is not None
+            if session.deleted:
+                return
+            session.deleted = True
+            session.updated_at = now()
+            # An answer already being saved retains its confirmed outcome.
+            if session.status != "saving":
+                session.status = "stopped"
+            await db.execute(update(Turn).where(
+                Turn.session_id == session_id,
+                Turn.status.in_(["queued", "starting", "running", "waiting", "steering", "signal_sent", "accepted"]),
+            ).values(status="stopped", finished_at=now()))
+
+    async def restore_session(self, actor: User, session_id: str) -> None:
+        async with self.sessions.begin() as db:
+            locked = await db.scalar(update(Session).where(
+                Session.id == session_id, Session.owner_id == actor.id,
+            ).values(revision=Session.revision + 1).returning(Session.id))
+            if locked is None:
+                raise HTTPException(404, "Conversation not found.")
+            session = await db.get(Session, session_id)
+            assert session is not None
+            if not session.deleted:
+                return
+            pending = await db.get(ComputerOperation, session_id)
+            if session.active_turn or (pending and pending.expires_at > time.time()):
+                raise HTTPException(409, "Wait for the task and any desktop action to finish stopping, then restore.")
+            session.deleted = False
+            session.archived = False
+            session.updated_at = now()
 
     async def stopped(self, turn_id: str, conversation: str | None = None) -> None:
         async with self.sessions.begin() as db:

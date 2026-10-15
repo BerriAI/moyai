@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, Archive, Check, FileDown, FolderOpen, Link2, LogOut, Menu, MessageSquare, PanelRightClose, PanelRightOpen, Pin, Plus, Search, Square, X } from "lucide-react"
+import { ArrowUp, Check, FileDown, FolderOpen, Link2, ListTree, LogOut, Menu, MessageSquare, Plus, Search, Settings, Square, SquarePen, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -12,18 +12,25 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import "@/theme.css"
 import "./style.css"
 import logo from "../../app/static/moyai-logo.png"
-import { api, setCsrf } from "./api"
+import { api, ApiError, setCsrf } from "./api"
 import { AttachButton, ImagePreviews, UploadedImage, useImages } from "./attachments"
 import { ComputerPanel } from "./computer"
-import { SessionSidebar, SessionFolder, SidebarSession } from "./sidebar"
+import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
+import { SessionActionsProvider, SessionMenu, useSessionActions } from "./session-actions"
+import { WorkspaceOverview } from "./workspace"
+import { PullRequestPanel } from "./pull-request"
 
 const Home = React.lazy(() => import("./home").then(module => ({ default: module.Home })))
+const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
+
+type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
+type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request"; url?: string }
 
 type Me = { user: { id: string; name: string; role: string }; csrf: string; models: string[]; default_model: string }
 type Session = SidebarSession & { id: string; title: string; owner_id: string; visibility: string; surface: string; model: string; status: string; active_turn: string | null; archived: boolean; pinned?: boolean; save_warning?: string; workspace?: { id: string; provider: string } }
 type Turn = { id: string; actor_id: string; status: string; connections: string[]; error?: string; usage: { requests?: number; input_tokens?: number; output_tokens?: number } }
 type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; attachments?: UploadedImage[] }
-type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean }
+type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type File = { id: string; name: string; size: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
@@ -48,36 +55,44 @@ function App() {
   const refreshVersion = useRef(0)
   const [sessions, setSessions] = useState<Session[]>([])
   const [selected, setSelected] = useState(location.hash.slice(1))
-  const [computerRequest, setComputerRequest] = useState<{ sessionId: string; sequence: number } | null>(null)
+  const [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceRequest | null>(null)
+  const [prStates, setPrStates] = useState<Record<string, PRSummary[]>>({})
+  const [prRefresh, setPrRefresh] = useState(0)
   const [connections, setConnections] = useState<Connection[]>([])
   const [showConnections, setShowConnections] = useState(false)
-  const [archived, setArchived] = useState(false)
+  const [listView, setListView] = useState<SessionListView>("active")
+  const listViewRef = useRef(listView)
+  listViewRef.current = listView
   const [search, setSearch] = useState("")
   const [mobileNav, setMobileNav] = useState(false)
+  const [searchFocus, setSearchFocus] = useState(0)
   const searchInput = useRef<HTMLInputElement>(null)
+  const lastConversation = useRef("")
+  const settingsOpen = selected === "settings" || selected.startsWith("settings/")
   const refresh = useCallback(async () => {
     const version = ++refreshVersion.current
     const [rows, accounts, groups] = await Promise.all([
-      api<Session[]>(`/sessions?archived=${archived}`), api<Connection[]>("/connections"), api<SessionFolder[]>("/session-folders"),
+      api<Session[]>(`/sessions?archived=${listView === "archived"}&deleted=${listView === "deleted"}`), api<Connection[]>("/connections"), api<SessionFolder[]>("/session-folders"),
     ])
-    if (version !== refreshVersion.current) return
+    if (version !== refreshVersion.current || listViewRef.current !== listView) return
     setSessions(rows); setConnections(accounts); setFolders(groups)
-  }, [archived])
+  }, [listView])
 
   useEffect(() => {
     api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
-    const signedOut = () => { ++refreshVersion.current; setCsrf(""); setMe(null); setSessions([]); setFolders([]); setConnections([]); setComputerRequest(null) }
+    const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}) }
     const clearSearch = () => setSearch("")
     window.addEventListener("moyai:clear-search", clearSearch)
     const navigate = () => {
       const id = location.hash.slice(1)
+      if (id && id !== "settings" && !id.startsWith("settings/")) lastConversation.current = id
       setSelected(id); setMobileNav(false)
-      setComputerRequest(request => request?.sessionId === id ? request : null)
+      setWorkspaceRequest(request => request?.sessionId === id ? request : null)
     }
     const shortcut = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return
       if (!(event.metaKey || event.ctrlKey)) return
-      if (event.key.toLowerCase() === "k") { event.preventDefault(); setMobileNav(true); searchInput.current?.focus() }
+      if (event.key.toLowerCase() === "k") { event.preventDefault(); setMobileNav(true); setSearchFocus(value => value + 1) }
       if (event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); location.hash = "" }
     }
     window.addEventListener("moyai:signed-out", signedOut)
@@ -85,6 +100,7 @@ function App() {
     window.addEventListener("keydown", shortcut)
     return () => { window.removeEventListener("moyai:clear-search", clearSearch); window.removeEventListener("moyai:signed-out", signedOut); window.removeEventListener("hashchange", navigate); window.removeEventListener("keydown", shortcut) }
   }, [])
+  useEffect(() => { if (searchFocus) searchInput.current?.focus() }, [searchFocus])
   useEffect(() => {
     if (!me) return
     let live = true
@@ -97,30 +113,56 @@ function App() {
     return () => { live = false; ++refreshVersion.current; clearTimeout(timer) }
   }, [me, refresh])
 
+  const prSessionIds = [...new Set([...sessions.filter(row => !row.deleted).map(row => row.id), ...(selected && !settingsOpen ? [selected] : [])])].sort().join(",")
+  const connectionVersion = JSON.stringify(connections.map(item => [item.id, item.enabled, item.shared, item.revision]))
+  useEffect(() => {
+    setPrStates({})
+    if (!me || !prSessionIds) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const ids = prSessionIds.split(",")
+        const batches = await Promise.all(Array.from({ length: Math.ceil(ids.length / 100) }, (_, index) =>
+          api<Record<string, PRSummary[]>>("/pull-requests/statuses", "POST", { session_ids: ids.slice(index * 100, (index + 1) * 100) }, controller.signal),
+        ))
+        const states = Object.assign({}, ...batches) as Record<string, PRSummary[]>
+        if (!controller.signal.aborted) setPrStates(states)
+      } catch {
+        if (!controller.signal.aborted) setPrStates({})
+      }
+      if (!controller.signal.aborted) timer = setTimeout(poll, 20000)
+    }
+    void poll()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [me?.user.id, prSessionIds, connectionVersion, prRefresh])
+
   if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
   if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError("") }} />
-  return <div className="app">
-    <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
+  const newSession = () => { location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
+  return <SessionActionsProvider key={me.user.id} userId={me.user.id} folders={folders} refresh={refresh} onNewSession={newSession} onDeleted={id => { if (selected === id) newSession() }} onOpenComputer={sessionId => {
+    setWorkspaceRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1, tab: "computer" }))
+    location.hash = sessionId; setMobileNav(false)
+  }}><div className={`app ${settingsOpen ? "settings-open" : ""}`}>
+    {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
       <a href="#" className="brand"><img src={logo} alt="" /><span>Moyai<small>LiteLLM</small></span></a>
-      <Button variant="secondary" className="new-chat" onClick={() => { location.hash = "" }}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
+      <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <div className="rail-search"><Search size={16} /><Input ref={searchInput} aria-label="Find conversations" placeholder="Search sessions…" value={search} onChange={e => setSearch(e.target.value)} /><span className="key-hint">⌘K</span></div>
       <Button variant="ghost" className="rail-button" onClick={() => setShowConnections(true)}><Link2 />Connections</Button>
-      <SessionSidebar key={me.user.id} sessions={sessions} folders={folders} selected={selected} userId={me.user.id} search={search} archived={archived} refresh={refresh} onArchiveView={() => { ++refreshVersion.current; setArchived(!archived) }} onOpenComputer={sessionId => {
-        setComputerRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1 }))
-        location.hash = sessionId
-        setMobileNav(false)
-      }} />
-      <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => { await api("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")) }}><LogOut /></Button></div>
-    </aside>
+      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: prStates[row.id] ?? [] }))} folders={folders} selected={selected} userId={me.user.id} search={search} view={listView} onViewChange={value => { ++refreshVersion.current; setSessions([]); setListView(value) }} onOpenPullRequest={(sessionId, url) => { setWorkspaceRequest(previous => ({ sessionId, url, tab: "pull-request", sequence: (previous?.sequence ?? 0) + 1 })); location.hash = sessionId; setMobileNav(false) }} />
+      <div className="account"><span>{me.user.name}</span><Button variant={settingsOpen ? "secondary" : "ghost"} size="icon" aria-label="Settings" onClick={() => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = "settings/overview" }}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => { await api("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")) }}><LogOut /></Button></div>
+    </aside>}
     <main className="main">
-      <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>
+      {!settingsOpen && <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>}
       {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
-      {selected
-        ? <Conversation key={`${me.user.id}:${selected}`} id={selected} me={me} connections={connections} refreshList={refresh} openComputerRequest={computerRequest?.sessionId === selected ? computerRequest.sequence : 0} />
+      {settingsOpen
+        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} /></React.Suspense>
+        : selected
+        ? <Conversation key={`${me.user.id}:${selected}`} id={selected} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refresh} workspaceRequest={workspaceRequest?.sessionId === selected ? workspaceRequest : null} pullRequests={prStates[selected] ?? []} onPRUpdated={() => setPrRefresh(value => value + 1)} />
         : <React.Suspense fallback={<div className="center muted">Opening workspace…</div>}><Home models={me.models} defaultModel={me.default_model} onCreated={refresh} /></React.Suspense>}
     </main>
     <Connections open={showConnections} onOpenChange={setShowConnections} me={me} connections={connections} refresh={refresh} />
-  </div>
+  </div></SessionActionsProvider>
 }
 
 function Login({ onLogin }: { onLogin: (me: Me) => void }) {
@@ -142,7 +184,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </form></main>
 }
 
-function Conversation({ id, me, connections, refreshList, openComputerRequest }: { id: string; me: Me; connections: Connection[]; refreshList: () => Promise<void>; openComputerRequest: number }) {
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void }) {
   const [view, setView] = useState<View | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [files, setFiles] = useState<File[]>([])
@@ -155,14 +197,14 @@ function Conversation({ id, me, connections, refreshList, openComputerRequest }:
   const pictures = useImages(setError)
   const [busy, setBusy] = useState(false)
   const [activity, setActivity] = useState<Activity[]>([])
-  const [panel, setPanel] = useState("computer")
+  const [panel, setPanel] = useState("overview")
+  const sessionActions = useSessionActions()
+  const [selectedPR, setSelectedPR] = useState<string | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
   const [computerExpanded, setComputerExpanded] = useState(false)
   const [editing, setEditing] = useState<Message | null>(null)
   const [editText, setEditText] = useState("")
   const composerInput = useRef<HTMLTextAreaElement>(null)
-  const [renaming, setRenaming] = useState(false)
-  const [title, setTitle] = useState("")
   const heading = useRef<HTMLHeadingElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
@@ -195,15 +237,20 @@ function Conversation({ id, me, connections, refreshList, openComputerRequest }:
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
-      try { await load(controller.signal) } catch (e) { if (!controller.signal.aborted) setError(String(e)) }
+      try { await load(controller.signal) } catch (e) {
+        if (!controller.signal.aborted) {
+          if (e instanceof ApiError && [403, 404].includes(e.status)) { setView(null); setMessages([]); setFiles([]); setPlan([]); setActivity([]) }
+          setError(String(e))
+        }
+      }
       if (!controller.signal.aborted) timer = setTimeout(poll, 1500)
     }
     void poll()
     return () => { controller.abort(); clearTimeout(timer) }
   }, [load])
   useEffect(() => {
-    if (openComputerRequest) { setPanel("computer"); setPanelOpen(true) }
-  }, [openComputerRequest])
+    if (workspaceRequest) { setPanel(workspaceRequest.tab); setSelectedPR(workspaceRequest.url ?? null); setComputerExpanded(false); setPanelOpen(true) }
+  }, [workspaceRequest])
   useEffect(() => { heading.current?.focus() }, [Boolean(view)])
   useEffect(() => { document.title = `${view?.session.title ?? "Conversation"} · Moyai` }, [view?.session.title])
   useEffect(() => {
@@ -247,22 +294,17 @@ function Conversation({ id, me, connections, refreshList, openComputerRequest }:
       setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
-  async function editSession(body: object) {
-    try { await api(`/sessions/${id}`, "PATCH", body); await load(); await refreshList() }
-    catch (e) { setError(String(e)) }
-  }
   if (!view) return <div className="center" role="status">{error || "Opening conversation…"}</div>
   const session = view.session
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn => turn.id === message.turn_id && turn.status === "queued"))
   return <div className="conversation">
     <header className="topbar">
-      <div><h1 ref={heading} tabIndex={-1}>{session.title}</h1><span className={`status ${session.status}`}>{session.status === "waiting" ? "Waiting for your response" : session.status}</span><span className="muted privacy">{session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"}</span></div>
-      <div className="header-actions">
-        {session.owner_id === me.user.id && <Button variant="ghost" size="sm" onClick={() => { setTitle(session.title); setRenaming(true) }}>Rename</Button>}
-        <Button variant="ghost" size="icon" aria-label={session.pinned ? "Unpin conversation" : "Pin conversation"} aria-pressed={Boolean(session.pinned)} onClick={() => editSession({ pinned: !session.pinned })}><Pin /></Button>
-        {session.owner_id === me.user.id && <Button variant="ghost" size="icon" aria-label={session.archived ? "Restore conversation" : "Archive conversation"} onClick={() => editSession({ archived: !session.archived })}><Archive /></Button>}
+      <div><h1 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h1><span className={`status ${session.status}`}>{session.status === "waiting" ? "Waiting for your response" : session.status}</span><span className="muted privacy">{session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"}</span></div>
+      <div className="header-controls">
+        <Button type="button" variant="ghost" size="icon-sm" aria-label="New session" title="New session" onClick={sessionActions.newSession}><SquarePen size={17} /></Button>
+        <SessionMenu session={session} header />
+        <Button className="workspace-toggle" type="button" variant={panelOpen ? "secondary" : "ghost"} size="icon-sm" aria-label={panelOpen ? "Hide workspace panel" : "Show workspace panel"} title="Workspace" aria-expanded={panelOpen} onClick={() => { if (!panelOpen) { setPanel("overview"); setComputerExpanded(false) } setPanelOpen(!panelOpen) }}><ListTree size={18} /></Button>
       </div>
-      <Button className="workspace-toggle" variant="ghost" size="sm" aria-label={panelOpen ? "Hide workspace panel" : "Show workspace panel"} aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? <PanelRightClose /> : <PanelRightOpen />}<span>Workspace</span></Button>
     </header>
     <div className={`workspace ${panelOpen ? "with-panel" : "panel-closed"} ${panelOpen && computerExpanded && panel === "computer" ? "computer-expanded" : ""}`}>
       <section className="chat">
@@ -275,8 +317,10 @@ function Conversation({ id, me, connections, refreshList, openComputerRequest }:
                 {message.role === "user" && turn?.status === "queued" && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
-              <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : message.content}</div>
-              <ImagePreviews images={message.attachments ?? []} />
+              <div className={message.role === "user" ? "user-bubble" : undefined}>
+                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : message.content}</div>}
+                <ImagePreviews images={message.attachments ?? []} />
+              </div>
 
             </article>
           })}
@@ -313,8 +357,10 @@ function Conversation({ id, me, connections, refreshList, openComputerRequest }:
         </form>
       </section>
       {panelOpen && <aside className="details-panel" aria-label="Conversation details">
-        <div className="panel-tabs">{["computer", "activity", "plan", "files"].map(tab => <Button key={tab} variant={panel === tab ? "secondary" : "ghost"} size="sm" aria-pressed={panel === tab} onClick={() => setPanel(tab)}>{tab === "files" ? `Files${files.length ? ` (${files.length})` : ""}` : tab === "plan" ? "Plan" : tab === "computer" ? "Computer" : "Activity"}</Button>)}</div>
+        <div className="panel-tabs">{["overview", "computer", "activity", "plan", "files"].map(tab => <Button key={tab} variant={panel === tab ? "secondary" : "ghost"} size="sm" aria-pressed={panel === tab} onClick={() => setPanel(tab)}>{tab === "files" ? `Files${files.length ? ` (${files.length})` : ""}` : tab === "plan" ? "Plan" : tab === "computer" ? "Computer" : tab === "overview" ? "Workspace" : "Activity"}</Button>)}</div>
         <div className="panel-body">
+          {panel === "overview" && <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated} onPullRequest={url => { setSelectedPR(url); setPanel("pull-request") }} onComputer={() => setPanel("computer")} onPlan={() => setPanel("plan")} />}
+          {panel === "pull-request" && selectedPR && <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={selectedPR} onBack={() => setPanel("overview")} onUpdated={onPRUpdated} />}
           {panel === "computer" && <ComputerPanel id={id} shared={session.visibility === "shared"} hasWorkspace={Boolean(session.workspace)} expanded={computerExpanded} onExpand={() => setComputerExpanded(!computerExpanded)} />}
           {panel === "activity" && <>{!activity.length && <div className="panel-empty"><MessageSquare /><p>{session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{activity.map((item, index) => <ActivityRow key={index} item={item} />)}{session.workspace && <div className="computer-info"><span className="muted">Conversation computer</span><p>Attached</p><code>{session.workspace.id}</code></div>}</>}
           {panel === "plan" && <>{!plan.length && <div className="panel-empty"><Check /><p>Moyai’s task plan will appear here.</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>}
@@ -322,7 +368,7 @@ function Conversation({ id, me, connections, refreshList, openComputerRequest }:
         </div>
       </aside>}
     </div>
-    <Dialog open={renaming} onOpenChange={setRenaming}><DialogContent><DialogHeader><DialogTitle>Rename conversation</DialogTitle><DialogDescription>Choose a title you can find later.</DialogDescription></DialogHeader><Input aria-label="Conversation title" value={title} onChange={e => setTitle(e.target.value)} /><Button disabled={!title.trim()} onClick={async () => { await editSession({ title }); setRenaming(false) }}>Save title</Button></DialogContent></Dialog>
+
   </div>
 }
 

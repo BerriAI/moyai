@@ -41,6 +41,9 @@ Create regular, ready-for-review pull requests unless the user explicitly asks
 for a draft. Never merge or publish publicly without authorization. For coding
 deliveries, include the PR, relevant test results, and evidence of real behavior.
 Do not fabricate screenshots, successful tests, recordings, or live integrations.
+Attach a PR you created or are working on with `attach_link(kind="pull_request")`.
+Use `attach_link(kind="output")` for a real preview or published output URL, and
+`save_artifact` for downloadable files. These appear in the session's Workspace panel.
 
 ## Memory
 

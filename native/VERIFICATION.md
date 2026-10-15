@@ -260,3 +260,67 @@ the banner's left edge moved from 323.20 px to the conversation/composer edge at
 450 px. All eight open/closed-panel checks at 1920/1440/768/320 px now have
 identical banner and composer edges. Native asset build passed. Verification
 used the existing failed session without resubmitting its task.
+
+## Workspace, PR viewer and Settings: October 15, 2026
+
+The actual local native application at
+`8277e8d79489ee882968e635f4cc024b7d6f129c` supplied the before comparison.
+The updated source and generated assets supplied the after deployment on
+`http://127.0.0.1:8796`, using the same private local application data and
+Temporal persistence. The final commit identity is also recorded with the
+handoff's evidence files.
+
+The before app displayed header Rename/Pin/Archive controls and a computer-first
+detail panel. It had no workspace overview, in-app PR viewer or Settings routes.
+The same existing session after deployment displayed its original saved file,
+mentioned PR and native child run, now named Cicero. Its requester opened the
+child's recorded answer without exposing private tool content.
+
+A new real-model task used GPT-6 Astra through the approved development gateway,
+the native Temporal worker and a real Modal computer. It loaded a saved personal
+skill, delegated to the native child displayed as Hamilton, saved
+`native-settings-proof.txt` containing `NATIVE SETTINGS READY`, and attached
+PR #465 through `attach_link`. A real Temporal Schedule then admitted a second
+native turn, which read the same file and returned that exact text. The schedule
+was explicitly triggered through Temporal for this check and paused afterward;
+the test did not wait an hour for its interval.
+
+Actual running-service checks also verified:
+
+- Every requested Settings endpoint returns native data.
+- Native memory create/read/versioned delete and CSV export work.
+- Usage-by-user totals cover the entire filtered range, with missing costs
+  remaining unpriced.
+- Secret create/list responses exclude the submitted synthetic value.
+- Members receive 403 on Users, Performance and Usage; disabling a local test
+  member invalidates its existing login.
+- Session delete hides history/download access; restore returns saved history
+  without restarting stopped work.
+- The PR viewer fetches real public GitHub metadata and diffs. No environment
+  or CLI GitHub token was passed to the application.
+
+All nine Settings pages were checked at 1440, 768 and 320 pixels without
+horizontal document overflow or page errors. The phone skill editor remained
+within the viewport, Settings navigation opened, and Command+K focused the
+sidebar search after opening it. Header/session menus, native subagent details,
+PR diffs, usage tabs and the compact user-message layout were inspected in the
+actual browser.
+
+The complete native suite passed **181 tests** with disposable PostgreSQL
+enabled. One subsequently added malformed-PR-mention regression also passed.
+Ruff, Pyright, native TypeScript/build, wheel/sdist packaging and all three
+desktop-input Node checks passed. Supplementary component/transport tests cover
+responsive layout, API permissions, public GitHub cache limits, stale response
+handling, concurrent deletion, account revocation, Temporal replay and schedule
+reconciliation; they do not replace the actual-app proof above.
+
+The handoff includes actual before/after browser captures, a 32-second after
+recording, readable workspace/Settings/usage screenshots and local run steps.
+Gaps between capture segments were shortened; no UI or model output was
+reconstructed. Both MP4 files were decoded successfully.
+
+Remaining scope is explicit: interval automations do not yet implement every
+legacy event source; secret storage does not automatically grant values to
+runtime tools; provider billing/infrastructure costs remain uninstrumented.
+Live authenticated private-GitHub and outbound Slack qualification were not
+performed, and no real Slack messages were sent.

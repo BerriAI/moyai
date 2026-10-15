@@ -1,0 +1,164 @@
+/* Extend only the scrolling list through the sidebar's 16px inline padding.
+   Classic gutters stay outside the rows; the row padding also clears overlay thumbs. */
+.sidebar .session-list {
+  margin-inline: -14px;
+  padding: 0 6px 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable both-edges;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ui-control-border) transparent;
+}
+
+.sidebar .session-list::-webkit-scrollbar { width: 8px; }
+.sidebar .session-list::-webkit-scrollbar-thumb {
+  background: var(--ui-control-border);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 8px;
+}
+
+.sidebar .session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 4px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 4px;
+  margin-block: 2px;
+}
+
+.sidebar .session-row > a {
+  grid-column: 1;
+  grid-row: 1;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 6px;
+  min-height: 30px;
+}
+
+.sidebar .session-row .session-indicator {
+  margin: 8px 0 0;
+  width: 5px;
+  height: 5px;
+}
+
+.sidebar .session-row .session-title { min-width: 0; }
+
+.sidebar .session-row-actions {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  width: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Keep the controls in the tab order; focusing one reveals its whole group. */
+.sidebar .session-row:is(:hover, :focus-within, .selected, :has([data-state="open"])) .session-row-actions {
+  width: auto;
+  overflow: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sidebar .session-row-actions > button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  flex: none;
+}
+
+.sidebar .session-row .session-row-actions .session-menu-trigger { opacity: 1; }
+.sidebar .session-row-actions > button[aria-pressed="true"] { color: var(--ui-primary); }
+.sidebar .session-row:focus-within { background: var(--ui-secondary); color: var(--ui-foreground); }
+.sidebar .session-row button:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: -2px;
+}
+
+.sidebar .session-row-meta {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+  padding: 0 6px 2px 19px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ui-muted);
+}
+
+.sidebar .session-meta-status:empty { display: none; }
+.sidebar .session-slack-logo { display: block; flex: none; width: 14px; height: 14px; }
+.sidebar .session-pr-indicator,
+.sidebar .session-pr-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar .session-pr-indicator {
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  min-height: 24px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-weight: 400;
+  white-space: normal;
+  text-align: start;
+  border-radius: 4px;
+}
+
+.sidebar .session-pr-indicator svg { width: 13px; height: 13px; }
+.sidebar .session-pr-count { font-variant-numeric: tabular-nums; }
+.sidebar .session-pr-ready { color: var(--ui-success); }
+.sidebar .session-pr-merged { color: var(--ui-primary); }
+.sidebar .session-pr-closed { color: var(--ui-danger); }
+.sidebar .session-pr-draft { color: var(--ui-muted); }
+
+/* Popovers are portaled outside the sidebar, so use a dedicated class. */
+.native-session-menu.sidebar-pr-menu > p { padding: 6px 8px; color: var(--ui-muted); font-size: 12px; }
+.native-session-menu.sidebar-pr-menu > button {
+  width: 100%;
+  height: auto;
+  min-height: 40px;
+  justify-content: flex-start;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  white-space: normal;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+.native-session-menu.sidebar-pr-menu > button > svg { margin-top: 3px; }
+.native-session-menu.sidebar-pr-menu > button > span { min-width: 0; }
+.native-session-menu.sidebar-pr-menu button:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
+
+@media (hover: none), (pointer: coarse), (max-width: 600px) {
+  .sidebar .session-row > a { grid-column: 1 / -1; min-height: 44px; align-items: center; }
+  .sidebar .session-row .session-indicator { margin-top: 0; }
+  .sidebar .session-row-actions {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    justify-self: end;
+    width: auto;
+    overflow: visible;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .sidebar .session-row-actions > button { width: 44px; height: 44px; min-height: 44px; }
+  .sidebar button.session-pr-indicator { min-height: 44px; }
+  .sidebar .session-group-toggle,
+  .sidebar .session-group-heading > button,
+  .sidebar .rail-caption button { min-height: 44px; }
+  .native-session-menu.sidebar-pr-menu > button { min-height: 44px; }
+}

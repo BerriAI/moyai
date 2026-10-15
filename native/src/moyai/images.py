@@ -100,6 +100,18 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                 await runtime.database.allowed_session(db, row.session_id, user)
             elif row.owner_id != user.id:
                 raise HTTPException(404, "Image not found.")
-        return Response(await runtime.objects.get(row.digest), media_type=row.media_type)
+        raw = await runtime.objects.get(row.digest)
+        current = await runtime.database.user(user.id)
+        if current.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        async with runtime.database.sessions() as db:
+            current_image = await db.get(Upload, upload_id)
+            if current_image is None:
+                raise HTTPException(404, "Image not found.")
+            if current_image.session_id:
+                await runtime.database.allowed_session(db, current_image.session_id, user)
+            elif current_image.owner_id != user.id:
+                raise HTTPException(404, "Image not found.")
+        return Response(raw, media_type=row.media_type)
 
     return router

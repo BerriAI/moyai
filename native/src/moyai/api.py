@@ -39,14 +39,17 @@ from .models import (
     now,
 )
 from .presentation import public_event, redact, saved_activity
+from .pull_requests import routes as pull_request_routes
 from .runtime import Runtime
 from .security import check_password
 from .settings import Settings
+from .settings_api import routes as settings_routes
 from .sidebar import folders_for, lock_sidebar
 from .sidebar import routes as sidebar_routes
 from .slack import dispatcher as slack_dispatcher
 from .slack import routes as slack_routes
 from .worker import dispatcher, reconcile_workflows
+from .workspace import routes as workspace_routes
 
 COOKIE = "moyai_session"
 STATIC = Path(__file__).parent / "static"
@@ -80,7 +83,7 @@ def session_view(session: Session) -> dict[str, Any]:
         "id": session.id, "title": session.title, "owner_id": session.owner_id,
         "visibility": session.visibility, "surface": session.surface,
         "model": session.model, "status": session.status,
-        "active_turn": session.active_turn, "archived": session.archived,
+        "active_turn": session.active_turn, "archived": session.archived, "deleted": session.deleted,
         "workspace": json.loads(session.workspace) if session.workspace else None,
         "save_warning": session.save_warning, "updated_at": session.updated_at,
     }
@@ -151,6 +154,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     app.include_router(image_routes(runtime, actor))
     app.include_router(computer_routes(runtime, actor))
     app.include_router(sidebar_routes(runtime, actor))
+    app.include_router(workspace_routes(runtime, actor))
+    app.include_router(pull_request_routes(runtime, actor))
+    app.include_router(settings_routes(runtime, actor))
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -214,8 +220,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         }
 
     @app.get("/api/sessions")
-    async def sessions(archived: bool = False, user: User = Depends(actor)):
-        rows = await runtime.database.list_sessions(user, archived=archived)
+    async def sessions(archived: bool = False, deleted: bool = False, user: User = Depends(actor)):
+        rows = await runtime.database.list_sessions(user, archived=archived, deleted=deleted)
         async with runtime.database.sessions() as db:
             ids = [row.id for row in rows]
             preferences = {
@@ -261,6 +267,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             }
             preference = await db.get(SessionPreference, (user.id, session_id))
             result["session"]["pinned"] = bool(preference and preference.pinned)
+            result["session"]["folder"] = preference.folder if preference else ""
+            read = await db.get(SessionRead, (user.id, session_id))
+            result["session"]["unread"] = bool(read and read.unread)
             active_turn = next((turn for turn in turns if turn.id == row.active_turn), None)
             unsettled = list((await db.scalars(select(Effect).where(
                 Effect.session_id == session_id, Effect.state == "pending"
@@ -315,6 +324,16 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 if not body.unread:
                     read.message_id = await db.scalar(select(func.max(Message.id)).where(Message.session_id == session_id)) or 0
         return {"updated": True}
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str, user: User = Depends(actor)):
+        await runtime.database.delete_session(user, session_id)
+        return {"deleted": True}
+
+    @app.post("/api/sessions/{session_id}/restore")
+    async def restore_session(session_id: str, user: User = Depends(actor)):
+        await runtime.database.restore_session(user, session_id)
+        return {"restored": True}
 
     @app.get("/api/sessions/{session_id}/messages")
     async def messages(session_id: str, after: int = 0, user: User = Depends(actor)):
@@ -493,8 +512,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 raise HTTPException(404, "Connection not found.")
             if body.kind != row.kind:
                 raise HTTPException(422, "Create a new connection to change its service.")
-            if body.shared and user.role != "admin":
-                raise HTTPException(403, "Only administrators can publish a shared connection.")
+            if (row.shared or body.shared) and user.role != "admin":
+                raise HTTPException(403, "Only administrators can change a shared connection.")
             row.name, row.enabled = body.name, body.enabled
             row.shared, row.read_only = body.shared, body.read_only
             if body.credential.get_secret_value():
@@ -569,11 +588,15 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if row is None:
                 raise HTTPException(404, "File not found.")
             await runtime.database.allowed_session(db, row.session_id, user)
-            content = await runtime.objects.get(row.digest)
-            return Response(
-                content, media_type="application/octet-stream",
-                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(Path(row.name).name)}"},
-            )
+        content = await runtime.objects.get(row.digest)
+        current = await runtime.database.user(user.id)
+        if current.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        await runtime.database.session(user, row.session_id)
+        return Response(
+            content, media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(Path(row.name).name)}"},
+        )
 
     if STATIC.is_dir():
         app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")

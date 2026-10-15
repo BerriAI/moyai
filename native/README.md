@@ -127,12 +127,59 @@ The sidebar separates **Participated** (another person's shared session you have
 sent a message to) from **Recent**. Pins, folders, collapsed groups and unread
 state are personal. Folder creation, rename and removal preserve session sharing.
 The session menu offers rename, folder placement, copy link, open computer,
-read/unread, pin and archive/restore; rename and archive remain owner-only.
+read/unread, pin, archive and delete; owner-only actions are enforced by the API.
+The header and sidebar use the same menu. Deleted conversations can be restored
+from the Deleted list once any active work has stopped. Restore preserves saved
+answers and downloads and does not restart cancelled work.
+
+**Workspace** opens an overview of pull requests, outputs, subagents and sources.
+Subagents come from native Harness run lineage, with persistent display names;
+only their requester can inspect their answers and recorded steps. Saving a
+file with `save_artifact` adds an output, and `attach_link` adds a PR, external
+output or source. PR links in the public transcript also appear as mentioned PRs.
+
+PR badges in the sidebar and overview use the same GitHub state. The in-app PR
+view shows changes, description, discussion, commits and checks. Public PRs need
+no connection; private PRs use eligible native GitHub connections. Shared
+conversations never use a viewer's personal connection. Anonymous reads are
+cached for five minutes, with explicit Refresh available. Large or omitted
+GitHub patches are labelled; this is a read-only viewer.
 
 Queued messages appear above the composer. **Edit** loads their text into that
 same composer and keeps attachments; Save/Cancel restore the unsent draft.
 **Steer now** promotes the existing message through the native Temporal signal
 and Pydantic `AgentRun.enqueue` path. A message already admitted cannot be edited.
+
+## Settings and administration
+
+The account's Settings button opens a dedicated rail with Overview, Skills,
+Automations, Memory, Connections and Secrets. Administrators also see Users,
+Performance and Spend & usage. These pages use native application records,
+not the legacy application's database or APIs.
+
+- **Skills:** bundled instructions stay available; personal and shared saved
+  skills load through Pydantic's deferred capability mechanism. Personal skills
+  are limited to their owner's private web conversations.
+- **Memory:** inspect and edit the Harness memory store in your authorized
+  namespaces. Version checks reject conflicting edits. Other users' personal
+  memory is not available to administrators.
+- **Automations:** interval schedules use Temporal Schedules and admit ordinary
+  native turns with deduplicated occurrence receipts. Pause/delete fences new
+  admissions; work already admitted follows the normal Stop controls. Creation
+  requires a registered Settings worker. Schedules are private and belong to
+  their requester.
+- **Connections:** manage the same account records selected in the composer.
+- **Secrets:** encrypted personal/shared storage with metadata-only reads and
+  rotation. Values are never returned to the browser or automatically injected
+  into tools or computers. Explicit scoped runtime secret grants remain future
+  product work.
+- **Users:** manage local accounts, roles and enabled state. Changes invalidate
+  prior authentication; the final enabled administrator cannot be disabled or
+  demoted.
+- **Analytics:** filter and export recorded usage and turn timing. Latency is
+  accepted-to-finished wall time, including tools and waits. Native turn records
+  do not yet carry authoritative billed cost; missing costs are shown as
+  unpriced, never as zero. Provider billing reconciliation remains separate.
 
 ## Separate API and workers
 
@@ -301,9 +348,9 @@ qualification gaps. No fixture run substitutes for that proof.
 
 ## Product scope still outside this foundation
 
-The exact legacy swarm/goal rules, automation editor and event sources, skill
-learning and personal library editing, quote-based memory review, SSO, billing
-reconciliation dashboards, desktop recording, automatic computer restore,
+The exact legacy swarm/goal rules, calendar/event-triggered automation editors,
+skill learning, quote-based memory review, SSO, provider billing reconciliation,
+runtime secret grants, desktop recording, automatic computer restore,
 and legacy-data migration remain explicit product work.
 
 Use native Pydantic/Harness capabilities and Temporal primitives for those
