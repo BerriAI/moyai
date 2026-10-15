@@ -638,20 +638,73 @@ def test_delta_restores_changed_file_types_and_new_hardlinks(tmp_path):
 
 
 def test_image_package_contains_no_server_secrets_and_uses_real_sdk_shape(tmp_path):
+    import hashlib
     import zipfile
     from botocore.validate import validate_parameters
     from scripts.lambda_image import image_request, package
+    source = Path(__file__).resolve().parents[1]
+    expected = {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for directory in ('sandbox', 'agent')
+        for path in (source / directory).rglob('*')
+        if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc'
+    }
+    expected['Dockerfile'] = ((source / 'Dockerfile.sandbox').read_text()
+                              + '\nFROM lambda-workspace AS aws-image\n').encode()
     target = tmp_path / 'image.zip'
-    package(target)
+    digest = package(target)
+    assert digest == hashlib.sha256(target.read_bytes()).hexdigest()
     with zipfile.ZipFile(target) as archive:
-        assert archive.read('Dockerfile').decode().endswith('FROM lambda-workspace AS aws-image\n')
-        assert 'sandbox/lambda_guest.py' in archive.namelist()
-        assert all(name == 'Dockerfile' or name.startswith('sandbox/') for name in archive.namelist())
-        assert not any(name.endswith('.pyc') or '.env' in name for name in archive.namelist())
+        assert set(archive.namelist()) == set(expected)
+        assert {'sandbox/lambda_guest.py', 'sandbox/agent.py', 'agent/agent.py',
+                'agent/tools/mcp_bridge.py', 'agent/prompts/system.md'} <= set(archive.namelist())
+        assert not any(name.endswith('.pyc') or '__pycache__' in Path(name).parts or '.env' in name
+                       for name in archive.namelist())
+        for name, content in expected.items():
+            assert archive.read(name) == content, name
     client = boto3.client('lambda-microvms', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test')
     request = image_request(region='us-east-1', name='moyai', bucket='artifacts', key='image.zip',
                             role='arn:aws:iam::123456789012:role/build')
     validate_parameters(request, client.meta.service_model.operation_model('CreateMicrovmImage').input_shape)
+
+
+def test_image_package_recurses_runtime_sources_and_excludes_unrelated_files(tmp_path, monkeypatch):
+    import zipfile
+    from scripts import lambda_image
+    source = tmp_path / 'source'
+    dockerfile = b'FROM scratch AS lambda-workspace\nCOPY sandbox /sandbox\nCOPY agent /agent\n'
+    expected = {
+        'sandbox/lambda_guest.py': b'# guest\n',
+        'sandbox/assets/nested/config.json': b'{"format": 1}\n',
+        'agent/__init__.py': b'# agent package\n',
+        'agent/harnesses/nested/fixture.py': b'# nested runtime module\n',
+        'agent/prompts/system.md': b'Runtime instructions\n',
+        'agent/assets/probe.bin': b'\x00\xff\x01',
+    }
+    excluded = {
+        '.env': b'AWS_SECRET_ACCESS_KEY=synthetic-test-secret\n',
+        'app/config.py': b'# controller configuration\n',
+        'sandbox/__pycache__/guest.cpython-313.pyc': b'cached guest',
+        'sandbox/nested/stale.pyc': b'stale guest bytecode',
+        'agent/__pycache__/unexpected.txt': b'cache directory contents',
+        'agent/nested/stale.pyc': b'stale agent bytecode',
+    }
+    for name, content in {'Dockerfile.sandbox': dockerfile, **expected, **excluded}.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    monkeypatch.setattr(lambda_image, 'ROOT', source)
+    target = tmp_path / 'image.zip'
+    with zipfile.ZipFile(target, 'w') as archive:
+        archive.writestr('stale-file', 'previous package')
+
+    lambda_image.package(target)
+
+    with zipfile.ZipFile(target) as archive:
+        assert set(archive.namelist()) == {'Dockerfile', *expected}
+        assert archive.read('Dockerfile') == dockerfile + b'\nFROM lambda-workspace AS aws-image\n'
+        for name, content in expected.items():
+            assert archive.read(name) == content, name
 
 
 @pytest.mark.parametrize('method', ['GET', 'POST'])

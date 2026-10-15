@@ -18,9 +18,10 @@ def package(destination):
         # AWS builds the last stage. Ordinary Docker/Substrate builds keep their
         # existing default; this package selects only the Lambda entry point.
         archive.writestr('Dockerfile', (ROOT / 'Dockerfile.sandbox').read_text() + '\nFROM lambda-workspace AS aws-image\n')
-        for path in sorted((ROOT / 'sandbox').rglob('*')):
-            if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
-                archive.write(path, path.relative_to(ROOT))
+        for directory in ('sandbox', 'agent'):
+            for path in sorted((ROOT / directory).rglob('*')):
+                if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
+                    archive.write(path, path.relative_to(ROOT))
     return hashlib.sha256(destination.read_bytes()).hexdigest()
 
 
