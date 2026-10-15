@@ -15,11 +15,12 @@ import logo from "../../app/static/moyai-logo.png"
 import { api, setCsrf } from "./api"
 import { AttachButton, ImagePreviews, UploadedImage, useImages } from "./attachments"
 import { ComputerPanel } from "./computer"
+import { SessionSidebar, SessionFolder, SidebarSession } from "./sidebar"
 
 const Home = React.lazy(() => import("./home").then(module => ({ default: module.Home })))
 
 type Me = { user: { id: string; name: string; role: string }; csrf: string; models: string[]; default_model: string }
-type Session = { id: string; title: string; owner_id: string; visibility: string; surface: string; model: string; status: string; active_turn: string | null; archived: boolean; pinned?: boolean; save_warning?: string; workspace?: { id: string; provider: string } }
+type Session = SidebarSession & { id: string; title: string; owner_id: string; visibility: string; surface: string; model: string; status: string; active_turn: string | null; archived: boolean; pinned?: boolean; save_warning?: string; workspace?: { id: string; provider: string } }
 type Turn = { id: string; actor_id: string; status: string; connections: string[]; error?: string; usage: { requests?: number; input_tokens?: number; output_tokens?: number } }
 type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; attachments?: UploadedImage[] }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean }
@@ -43,6 +44,8 @@ function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState("")
+  const [folders, setFolders] = useState<SessionFolder[]>([])
+  const refreshVersion = useRef(0)
   const [sessions, setSessions] = useState<Session[]>([])
   const [selected, setSelected] = useState(location.hash.slice(1))
   const [connections, setConnections] = useState<Connection[]>([])
@@ -52,15 +55,19 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false)
   const searchInput = useRef<HTMLInputElement>(null)
   const refresh = useCallback(async () => {
-    const [rows, accounts] = await Promise.all([
-      api<Session[]>(`/sessions?archived=${archived}`), api<Connection[]>("/connections"),
+    const version = ++refreshVersion.current
+    const [rows, accounts, groups] = await Promise.all([
+      api<Session[]>(`/sessions?archived=${archived}`), api<Connection[]>("/connections"), api<SessionFolder[]>("/session-folders"),
     ])
-    setSessions(rows); setConnections(accounts)
+    if (version !== refreshVersion.current) return
+    setSessions(rows); setConnections(accounts); setFolders(groups)
   }, [archived])
 
   useEffect(() => {
     api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
-    const signedOut = () => { setCsrf(""); setMe(null); setSessions([]); setConnections([]) }
+    const signedOut = () => { ++refreshVersion.current; setCsrf(""); setMe(null); setSessions([]); setFolders([]); setConnections([]) }
+    const clearSearch = () => setSearch("")
+    window.addEventListener("moyai:clear-search", clearSearch)
     const navigate = () => { setSelected(location.hash.slice(1)); setMobileNav(false) }
     const shortcut = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return
@@ -71,7 +78,7 @@ function App() {
     window.addEventListener("moyai:signed-out", signedOut)
     window.addEventListener("hashchange", navigate)
     window.addEventListener("keydown", shortcut)
-    return () => { window.removeEventListener("moyai:signed-out", signedOut); window.removeEventListener("hashchange", navigate); window.removeEventListener("keydown", shortcut) }
+    return () => { window.removeEventListener("moyai:clear-search", clearSearch); window.removeEventListener("moyai:signed-out", signedOut); window.removeEventListener("hashchange", navigate); window.removeEventListener("keydown", shortcut) }
   }, [])
   useEffect(() => {
     if (!me) return
@@ -82,27 +89,18 @@ function App() {
       if (live) timer = setTimeout(poll, 4000)
     }
     void poll()
-    return () => { live = false; clearTimeout(timer) }
+    return () => { live = false; ++refreshVersion.current; clearTimeout(timer) }
   }, [me, refresh])
 
   if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
   if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError("") }} />
-  const filtered = sessions.filter(row => row.title.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
   return <div className="app">
     <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
       <a href="#" className="brand"><img src={logo} alt="" /><span>Moyai<small>LiteLLM</small></span></a>
       <Button variant="secondary" className="new-chat" onClick={() => { location.hash = "" }}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <div className="rail-search"><Search size={16} /><Input ref={searchInput} aria-label="Find conversations" placeholder="Search sessions…" value={search} onChange={e => setSearch(e.target.value)} /><span className="key-hint">⌘K</span></div>
       <Button variant="ghost" className="rail-button" onClick={() => setShowConnections(true)}><Link2 />Connections</Button>
-      <div className="rail-caption"><span>{archived ? "Archived sessions" : "All sessions"} <small>{filtered.length}</small></span><Button size="icon-sm" variant="ghost" aria-label={archived ? "Show active conversations" : "Show archived conversations"} onClick={() => setArchived(!archived)}><Archive /></Button></div>
-      <nav aria-label="Conversations" className="session-list">
-        {filtered.map(row => <a key={row.id} href={`#${row.id}`} className={`session-row ${selected === row.id ? "selected" : ""}`} aria-current={selected === row.id ? "page" : undefined}>
-          {row.pinned ? <Pin size={15} /> : <MessageSquare size={15} />}
-          <span>{row.title}</span>{["running", "queued", "saving"].includes(row.status) && <span className="running-dot" aria-label={row.status} />}
-        </a>)}
-        {!filtered.length && <p className="muted empty-rail">{search ? "No conversations match." : "Your conversations will appear here."}</p>}
-      </nav>
+      <SessionSidebar key={me.user.id} sessions={sessions} folders={folders} selected={selected} userId={me.user.id} search={search} archived={archived} refresh={refresh} onArchiveView={() => { ++refreshVersion.current; setArchived(!archived) }} />
       <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => { await api("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")) }}><LogOut /></Button></div>
     </aside>
     <main className="main">
@@ -153,12 +151,14 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
   const [computerExpanded, setComputerExpanded] = useState(false)
   const [editing, setEditing] = useState<Message | null>(null)
   const [editText, setEditText] = useState("")
+  const composerInput = useRef<HTMLTextAreaElement>(null)
   const [renaming, setRenaming] = useState(false)
   const [title, setTitle] = useState("")
   const heading = useRef<HTMLHeadingElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
   const loaded = useRef(false)
+  const readThrough = useRef<number | null>(null)
   const load = useCallback(async (signal?: AbortSignal) => {
     const [next, history, outputs, tasks] = await Promise.all([
       api<View>(`/sessions/${id}`, "GET", undefined, signal),
@@ -168,6 +168,12 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
     ])
     if (signal?.aborted) return
     setView(next); setMessages(history); setFiles(outputs); setPlan(tasks)
+    const latestMessage = history.at(-1)?.id ?? 0
+    if (readThrough.current !== latestMessage) {
+      await api(`/sessions/${id}/read`, "POST", { message_id: latestMessage }, signal)
+      if (signal?.aborted) return
+      readThrough.current = latestMessage
+    }
     if (next.activity) setActivity(next.activity)
     if (!loaded.current) {
       setModel(next.session.model)
@@ -186,6 +192,13 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
     void poll()
     return () => { controller.abort(); clearTimeout(timer) }
   }, [load])
+  useEffect(() => {
+    const openComputer = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === id) { setPanel("computer"); setPanelOpen(true) }
+    }
+    window.addEventListener("moyai:open-computer", openComputer)
+    return () => window.removeEventListener("moyai:open-computer", openComputer)
+  }, [id])
   useEffect(() => { heading.current?.focus() }, [Boolean(view)])
   useEffect(() => { document.title = `${view?.session.title ?? "Conversation"} · Moyai` }, [view?.session.title])
   useEffect(() => {
@@ -212,6 +225,13 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
   }, [activeId, id, load])
 
   async function send() {
+    if (editing) {
+      if (busy || !editText.trim()) return
+      setBusy(true); setError("")
+      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt: editText }); setEditing(null); await load() }
+      catch (error) { setError(String(error)) } finally { setBusy(false) }
+      return
+    }
     if ((!draft.trim() && !pictures.images.length) || busy || pictures.uploading) return
     setBusy(true); setError("")
     const body = { prompt: draft, model, mode, connections: selectedAccounts, attachments: pictures.images.map(image => image.id) }
@@ -228,6 +248,7 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
   }
   if (!view) return <div className="center" role="status">{error || "Opening conversation…"}</div>
   const session = view.session
+  const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn => turn.id === message.turn_id && turn.status === "queued"))
   return <div className="conversation">
     <header className="topbar">
       <div><h1 ref={heading} tabIndex={-1}>{session.title}</h1><span className={`status ${session.status}`}>{session.status === "waiting" ? "Waiting for your response" : session.status}</span><span className="muted privacy">{session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"}</span></div>
@@ -242,7 +263,7 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
       <section className="chat">
         <div className="transcript" ref={transcript}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
-          {messages.map(message => {
+          {messages.filter(message => !queued.some(item => item.id === message.id)).map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             return <article key={message.id} className={`message ${message.role}`}>
               <div className="message-author">{message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
@@ -251,10 +272,7 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
               </div>
               <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : message.content}</div>
               <ImagePreviews images={message.attachments ?? []} />
-              {message.author_id === me.user.id && turn?.status === "queued" && <div className="inline-actions">
-                <Button size="sm" variant="ghost" onClick={() => { setEditing(message); setEditText(message.content) }}>Edit queued message</Button>
-                <Button size="sm" variant="ghost" onClick={async () => { try { await api(`/turns/${turn.id}`, "DELETE"); await load() } catch (e) { setError(String(e)) } }}>Cancel</Button>
-              </div>}
+
             </article>
           })}
           {session.status === "running" && <p className="working" role="status"><span className="running-dot" />Moyai is working. You can send a correction or stop the task.</p>}
@@ -266,15 +284,22 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
+          {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
+            <span><small>{session.active_turn ? "Queued after the current task" : "Starting shortly…"}</small><span>{message.content || "Image message"}</span></span>
+            <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={async () => { try { await api(`/turns/${message.turn_id}/steer`, "POST"); await load() } catch (error) { setError(String(error)) } }}>{session.active_turn ? "Steer now" : "Send now"}</Button>
+            <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={async () => { try { await api(`/turns/${message.turn_id}`, "DELETE"); if (editing?.id === message.id) setEditing(null); await load() } catch (error) { setError(String(error)) } }}><X size={14} /></Button>
+          </div>)}</div>}
+          {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
-            <ImagePreviews images={pictures.images} remove={pictures.remove} />
-            <Textarea aria-label="Message Moyai" placeholder="Describe the work…" value={draft} onChange={e => setDraft(e.target.value)} onPaste={pictures.paste} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <ImagePreviews images={editing ? editing.attachments ?? [] : pictures.images} remove={editing ? undefined : pictures.remove} />
+            <Textarea ref={composerInput} aria-label="Message Moyai" placeholder="Describe the work…" value={editing ? editText : draft} onChange={e => editing ? setEditText(e.target.value) : setDraft(e.target.value)} onPaste={editing ? undefined : pictures.paste} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
             <div className="composer-actions">
-              <AttachButton add={pictures.add} disabled={pictures.uploading || busy} />
+              <AttachButton add={pictures.add} disabled={Boolean(editing) || pictures.uploading || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
                 {session.active_turn && <><Choice value={mode} onChange={setMode} label="Delivery timing" options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /><Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button></>}
-                <Button type="submit" size="icon" aria-label="Send message" disabled={(!draft.trim() && !pictures.images.length) || busy || pictures.uploading || session.status === "waiting"}><ArrowUp /></Button>
+                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.images.length) || busy || pictures.uploading || (!editing && session.status === "waiting")}>{editing ? "Save message" : <ArrowUp />}</Button>
               </div>
             </div>
           </div>
@@ -285,16 +310,13 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
       {panelOpen && <aside className="details-panel" aria-label="Conversation details">
         <div className="panel-tabs">{["computer", "activity", "plan", "files"].map(tab => <Button key={tab} variant={panel === tab ? "secondary" : "ghost"} size="sm" aria-pressed={panel === tab} onClick={() => setPanel(tab)}>{tab === "files" ? `Files${files.length ? ` (${files.length})` : ""}` : tab === "plan" ? "Plan" : tab === "computer" ? "Computer" : "Activity"}</Button>)}</div>
         <div className="panel-body">
-          {panel === "computer" && (session.visibility === "private"
-            ? <ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} expanded={computerExpanded} onExpand={() => setComputerExpanded(!computerExpanded)} />
-            : <div className="panel-empty"><FolderOpen /><p>Use a private session to view and control a computer. Shared sessions keep agent activity, plans and saved files available here.</p></div>)}
+          {panel === "computer" && <ComputerPanel id={id} shared={session.visibility === "shared"} hasWorkspace={Boolean(session.workspace)} expanded={computerExpanded} onExpand={() => setComputerExpanded(!computerExpanded)} />}
           {panel === "activity" && <>{!activity.length && <div className="panel-empty"><MessageSquare /><p>{session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{activity.map((item, index) => <ActivityRow key={index} item={item} />)}{session.workspace && <div className="computer-info"><span className="muted">Conversation computer</span><p>Attached</p><code>{session.workspace.id}</code></div>}</>}
           {panel === "plan" && <>{!plan.length && <div className="panel-empty"><Check /><p>Moyai’s task plan will appear here.</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>}
           {panel === "files" && <>{!files.length && <div className="panel-empty"><FolderOpen /><p>Finished files appear here when Moyai saves them for you.</p></div>}{files.map(file => <a className="file-row" key={file.id} href={`/api/files/${file.id}`} download><FileDown size={18} /><span>{file.name}<small>{(file.size / 1024).toFixed(1)} KB</small></span></a>)}</>}
         </div>
       </aside>}
     </div>
-    <Dialog open={Boolean(editing)} onOpenChange={open => { if (!open) setEditing(null) }}><DialogContent><DialogHeader><DialogTitle>Edit queued message</DialogTitle><DialogDescription>Only messages that have not started can be changed.</DialogDescription></DialogHeader><Textarea aria-label="Queued message" value={editText} onChange={e => setEditText(e.target.value)} /><Button onClick={async () => { try { await api(`/turns/${editing!.turn_id}`, "PATCH", { prompt: editText }); setEditing(null); await load() } catch (e) { setError(String(e)); setEditing(null) } }}>Save message</Button></DialogContent></Dialog>
     <Dialog open={renaming} onOpenChange={setRenaming}><DialogContent><DialogHeader><DialogTitle>Rename conversation</DialogTitle><DialogDescription>Choose a title you can find later.</DialogDescription></DialogHeader><Input aria-label="Conversation title" value={title} onChange={e => setTitle(e.target.value)} /><Button disabled={!title.trim()} onClick={async () => { await editSession({ title }); setRenaming(false) }}>Save title</Button></DialogContent></Dialog>
   </div>
 }

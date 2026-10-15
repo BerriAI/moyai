@@ -61,7 +61,7 @@ export function Home({ models, defaultModel, onCreated }: { models: string[]; de
       <div className="home-mode">Chat</div>
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         <label className="check-label home-privacy"><Checkbox checked={privateSession} onCheckedChange={value => setPrivateSession(Boolean(value))} />Private session · Only you</label>
-        <p className="home-privacy-hint">{privateSession ? "Your conversation, images and computer stay private." : "Messages, attached images and saved files are visible to workspace members."}</p>
+        <p className="home-privacy-hint">{privateSession ? "Your conversation, images and computer stay private." : "Workspace members can see messages, images, files and the computer, including browser sign-ins, and take turns controlling it."}</p>
         {error && <p className="error" role="alert">{error}</p>}
         <div className="composer home-composer">
           <ImagePreviews images={pictures.images} remove={pictures.remove} />

@@ -74,6 +74,22 @@ class SessionPreference(Base):
     folder: Mapped[str] = mapped_column(String(200), default="")
 
 
+class SessionFolder(Base):
+    __tablename__ = "moyai_session_folders"
+    __table_args__ = (UniqueConstraint("user_id", "name"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+
+
+class SessionRead(Base):
+    __tablename__ = "moyai_session_reads"
+    user_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), primary_key=True)
+    message_id: Mapped[int] = mapped_column(Integer, default=0)
+    unread: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Turn(Base):
     __tablename__ = "moyai_turns"
     __table_args__ = (

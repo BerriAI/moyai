@@ -87,9 +87,9 @@ async def test_native_postgres_stores_in_temporal(tmp_path, monkeypatch):
         following = await runtime.database.submit(actor, session.id, NewMessage(
             prompt="Continue after handoff.", request_key="postgres-human-control",
         ))
-        assert await runtime.database.claim_next() is None
-        await lease(runtime, session.id, actor, "release")
         assert (await runtime.database.claim_next()).id == following.id
+        await lease(runtime, session.id, actor, "release")
+        assert await runtime.database.claim_next() is None
     finally:
         await runtime.close()
         await admin.execute(f"DROP DATABASE {name} WITH (FORCE)")

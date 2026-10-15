@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react"
-import { Camera, Globe, Maximize2, Monitor, MousePointer2 } from "lucide-react"
+import { Camera, Globe, Maximize2, Monitor, MousePointer2, Terminal } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api } from "./api"
 import { DesktopInputQueue } from "./desktop-input"
 
-type DesktopState = { available: boolean; has_workspace: boolean; controlled: boolean; busy: boolean; frame?: string; width?: number; height?: number }
+type DesktopState = { available: boolean; has_workspace: boolean; controlled: boolean; busy: boolean; controller?: string | null; frame?: string; width?: number; height?: number }
 
-export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: string; hasWorkspace: boolean; expanded: boolean; onExpand: () => void }) {
+export function ComputerPanel({ id, shared, hasWorkspace, expanded, onExpand }: { id: string; shared: boolean; hasWorkspace: boolean; expanded: boolean; onExpand: () => void }) {
   const [view, setView] = useState<DesktopState>({ available: false, has_workspace: hasWorkspace, controlled: false, busy: false })
   const [error, setError] = useState("")
   const [working, setWorking] = useState(false)
@@ -52,7 +52,7 @@ export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: st
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
       try { if (!working) await refresh(controller.signal) }
-      catch (error) { if (!controller.signal.aborted) setError(String(error)) }
+      catch (error) { if (!controller.signal.aborted) { setError(String(error)); setView(previous => ({ ...previous, frame: undefined, available: false, controlled: false, controller: null })) } }
       if (!controller.signal.aborted) timer = setTimeout(poll, 1200)
     }
     void poll()
@@ -97,10 +97,11 @@ export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: st
   }
 
   return <div className={`computer-panel ${expanded ? "expanded" : ""}`}>
-    <div className="computer-toolbar"><span><strong>Computer</strong><small>{working ? "Preparing desktop…" : view.controlled ? "You have control" : view.available ? "Live workspace" : hasWorkspace ? "Ready to open" : "Starts with your first task"}</small></span>
-      <div><Button variant="outline" size="sm" disabled={working || (!view.available && !view.controlled) || view.busy} onClick={() => void command(view.controlled && !halted ? "release" : "claim")}><MousePointer2 size={14} />{halted ? "Resume control" : view.controlled ? "Release control" : "Take control"}</Button>
+    <div className="computer-toolbar"><span><strong>Computer</strong><small>{working ? "Preparing desktop…" : view.controlled ? "You have control" : view.controller ? `${view.controller} has control` : view.available ? "Live workspace" : hasWorkspace ? "Ready to open" : "Starts with your first task"}</small></span>
+      <div><Button variant="outline" size="sm" disabled={working || (!view.available && !view.controlled) || Boolean(view.controller && !view.controlled)} onClick={() => void command(view.controlled && !halted ? "release" : "claim")}><MousePointer2 size={14} />{halted ? "Resume control" : view.controlled ? "Release control" : "Take control"}</Button>
         <Button variant="ghost" size="icon-sm" aria-label={expanded ? "Restore panel size" : "Expand computer"} onClick={onExpand}><Maximize2 size={16} /></Button></div>
     </div>
+    {shared && <p className="computer-hint">Shared computer · Workspace members can see files and browser sign-ins. One person controls it at a time.</p>}
     {error && <p className="error" role="alert">{error}</p>}
     <div className={`desktop-stage ${controlling.current ? "controlled" : ""}`} ref={stage} tabIndex={view.controlled ? 0 : -1} role="application" aria-label="Sandbox desktop. Take control to click and type."
       onFocus={event => { if (event.target === stage.current && controlling.current) keyboard.current?.focus({ preventScroll: true }) }}
@@ -123,15 +124,15 @@ export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: st
       }}>
       <textarea ref={keyboard} className="desktop-keyboard" aria-label="Desktop keyboard" tabIndex={-1} readOnly={!view.controlled} autoComplete="off" autoCapitalize="off" spellCheck={false} />
       {view.available && view.frame ? <img ref={image} src={`data:image/jpeg;base64,${view.frame}`} alt="Live Modal desktop" draggable={false} />
-        : <div className="desktop-empty"><Monitor size={40} /><h3>Your computer in the cloud</h3><p>{working ? "Preparing your desktop. Your existing files stay in this workspace." : hasWorkspace ? "Open the desktop in the same computer Moyai uses for your work." : "Send Moyai a task. Its computer will appear here, ready for you to open and control."}</p>
-          {hasWorkspace && <Button disabled={working || view.busy} onClick={() => void command("start")}>{working ? "Preparing desktop…" : "Open computer"}</Button>}</div>}
+        : <div className="desktop-empty"><Monitor size={40} /><h3>Your computer in the cloud</h3><p>{working ? "Preparing your desktop. Your existing files stay in this workspace." : hasWorkspace ? "Open Chromium and a desktop in the same computer Moyai uses for your work." : "Send Moyai a task. Its computer will appear here, ready for you to open and control."}</p>
+          {hasWorkspace && <Button disabled={working || Boolean(view.controller && !view.controlled)} onClick={() => void command("start")}>{working ? "Preparing desktop…" : "Open computer"}</Button>}</div>}
     </div>
-    {view.busy && <p className="computer-hint">Moyai is working. Stop the task before taking control.</p>}
-    {view.controlled && <p className="computer-hint">Click the desktop to type. Ctrl+Shift+Escape releases control. New agent tasks wait while you have control.</p>}
+    {view.busy && <p className="computer-hint">Moyai is working. Chat and coding continue while you use this desktop.</p>}
+    {view.controlled && <p className="computer-hint">Click the desktop to type. Ctrl+Shift+Escape releases control. Chat and coding continue while you have control.</p>}
     <form className="browser-address" onSubmit={event => { event.preventDefault(); void command("open", { url }) }}>
       <Globe size={16} /><Input aria-label="Computer browser address" placeholder="https://example.com" value={url} onChange={event => setUrl(event.target.value)} disabled={!view.controlled || working} />
       <Button type="submit" variant="outline" size="sm" disabled={!view.controlled || working}>Open browser</Button>
     </form>
-    <div className="computer-footer"><Button variant="outline" size="sm" disabled={!view.frame} onClick={() => { if (!view.frame) return; const link = document.createElement("a"); link.href = `data:image/jpeg;base64,${view.frame}`; link.download = "moyai-computer.jpg"; link.click() }}><Camera size={15} />Screenshot</Button><span>Watch Moyai work here. Take control to use the desktop.</span></div>
+    <div className="computer-footer"><Button variant="outline" size="sm" disabled={!view.controlled || working} onClick={() => void command("terminal")}><Terminal size={15} />Terminal</Button><Button variant="outline" size="sm" disabled={!view.frame} onClick={() => { if (!view.frame) return; const link = document.createElement("a"); link.href = `data:image/jpeg;base64,${view.frame}`; link.download = "moyai-computer.jpg"; link.click() }}><Camera size={15} />Screenshot</Button><span>Watch Moyai work here. Take control to use the desktop.</span></div>
   </div>
 }

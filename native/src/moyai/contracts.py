@@ -126,6 +126,15 @@ class SessionEdit(BaseModel):
     archived: bool | None = None
     pinned: bool | None = None
     folder: str | None = Field(default=None, max_length=200)
+    unread: bool | None = None
+
+    @model_validator(mode="after")
+    def trim_title(self) -> SessionEdit:
+        if self.title is not None:
+            self.title = self.title.strip()
+            if not self.title:
+                raise ValueError("Enter a session name.")
+        return self
 
 
 class ApprovalReply(BaseModel):

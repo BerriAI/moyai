@@ -29,9 +29,45 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .brand img { width: 36px; height: 36px; object-fit: contain; }
 .new-chat { min-height: 44px; justify-content: flex-start; border: 1px solid var(--ui-control-border); }
 .rail-caption { display: flex; align-items: center; justify-content: space-between; color: var(--ui-muted); padding-left: 10px; margin-bottom: -12px; font-size: 12px; }
-.session-list { overflow: auto; flex: 1; min-height: 0; }
-.session-row { display: flex; gap: 10px; align-items: center; min-height: 42px; border-radius: 6px; padding: 10px; color: var(--ui-muted); margin: 2px 0; }
-.session-row > span:first-of-type { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.session-list { overflow: auto; flex: 1; min-height: 0; scrollbar-gutter: stable; padding-right: 6px; }
+.session-row { display: flex; gap: 4px; align-items: center; min-height: 54px; border-radius: 8px; padding: 0 5px 0 0; color: var(--ui-muted); margin: 2px 0; }
+.session-row > a { display: flex; align-items: flex-start; gap: 10px; min-width: 0; flex: 1; padding: 9px 6px 9px 10px; border-radius: 8px; }
+.session-row > a > span:last-child { min-width: 0; flex: 1; }
+.session-title { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-row small { font-size: 11px; margin-top: 2px; }
+.session-row.unread .session-title { color: var(--ui-foreground); font-weight: 600; }
+.session-indicator { width: 5px; height: 5px; margin-top: 8px; background: var(--ui-control-border); border-radius: 50%; flex: none; }
+.session-row.unread .session-indicator { background: var(--ui-primary); }
+.session-indicator.working { background: var(--ui-success); }
+.session-indicator.waiting { background: var(--ui-warning); }
+.session-row .session-menu-trigger { opacity: 0; }
+.session-row:hover .session-menu-trigger, .session-row:focus-within .session-menu-trigger, .session-row.selected .session-menu-trigger { opacity: 1; }
+.session-row a:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
+.rail-caption > div, .session-group-heading { display: flex; align-items: center; min-width: 0; }
+.session-group { margin-bottom: 12px; }
+.session-group-toggle { flex: 1; min-width: 0; justify-content: flex-start; gap: 8px; padding: 6px; font-weight: 400; color: var(--ui-muted); }
+.session-group-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-group-toggle small { margin-left: auto; }
+.session-group-toggle .closed { transform: rotate(-90deg); }
+.folder-empty { font-size: 11px; padding: 4px 10px 8px 29px; color: var(--ui-muted); }
+.native-session-menu { width: 252px; max-width: calc(100vw - 24px); padding: 6px; max-height: var(--radix-popover-content-available-height); overflow-y: auto; z-index: 80; }
+.native-session-menu [role="menuitem"] { display: flex; width: 100%; justify-content: flex-start; gap: 10px; font-weight: 400; min-height: 38px; }
+.native-session-menu svg, .folder-choices svg { width: 16px; height: 16px; flex: none; }
+.native-session-menu hr { border-top: 1px solid var(--ui-border); margin: 6px; }
+.trailing { margin-left: auto; }
+.sidebar-editor { max-height: calc(100dvh - 32px); overflow-y: auto; }
+.folder-choices { display: grid; gap: 6px; }
+.folder-choices button { justify-content: flex-start; height: auto; min-height: 40px; white-space: normal; text-align: left; overflow-wrap: anywhere; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.sidebar-notice { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ui-primary); padding: 0 6px; }
+.queued-messages { max-height: 160px; overflow-y: auto; margin-bottom: 8px; }
+.queued-message { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); }
+.queued-message > span { flex: 1; min-width: 0; }
+.queued-message > span > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.queued-message small { font-size: 10px; }
+.editing-message { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--ui-primary); font-size: 12px; padding: 4px 8px; }
+@media (max-width: 600px) { .queued-message { flex-wrap: wrap; } .queued-message > span { flex-basis: 100%; } }
+@media (hover: none) { .session-row .session-menu-trigger { opacity: 1; } }
 .session-row svg { flex: none; }
 .session-row:hover, .session-row.selected { background: var(--ui-secondary); color: var(--ui-foreground); }
 .session-row:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
@@ -80,9 +116,9 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .composer:focus-within { outline: 1px solid var(--ui-primary); }
 .composer textarea { border: 0; box-shadow: none; outline: 0; resize: vertical; min-height: 92px; max-height: 240px; padding: 16px; background: transparent; width: 100%; }
 .composer textarea:focus-visible { box-shadow: none; }
-.composer-actions { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px 12px; gap: 8px; }
+.composer-actions { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; padding: 8px 12px 12px; gap: 8px; }
 .composer-actions > [data-slot="select-trigger"] { max-width: 210px; font-size: 12px; height: 34px; }
-.send-actions { display: flex; align-items: center; gap: 8px; }
+.send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; max-width: 100%; }
 .send-actions [data-slot="select-trigger"] { font-size: 12px; width: 112px; }
 .composer-hint { text-align: center; color: var(--ui-muted); font-size: 11px; margin-top: 8px; }
 .account-selection { margin-top: 12px; font-size: 12px; color: var(--ui-muted); }

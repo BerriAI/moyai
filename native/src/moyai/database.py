@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 from pydantic_ai import Conversation, ConversationTypeAdapter
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import and_, delete, event, or_, select, text, update
+from sqlalchemy import insert as sql_insert
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -31,11 +32,12 @@ from .contracts import (
 )
 from .models import (
     Base,
-    ComputerLease,
     Connection,
     LoginAttempt,
     Message,
     Session,
+    SessionFolder,
+    SessionPreference,
     Turn,
     TurnImage,
     Upload,
@@ -75,6 +77,17 @@ class Database:
             else:
                 await conn.exec_driver_sql("BEGIN IMMEDIATE")
             await conn.run_sync(Base.metadata.create_all)
+            # Adopt folder names saved by the original native API. This is
+            # additive and runs under the schema lock on both supported DBs.
+            existing = select(SessionFolder.id).where(
+                SessionFolder.user_id == SessionPreference.user_id,
+                SessionFolder.name == SessionPreference.folder,
+            ).exists()
+            legacy = (await conn.execute(select(
+                SessionPreference.user_id, SessionPreference.folder,
+            ).where(SessionPreference.folder != "", ~existing).distinct())).all()
+            for user_id, name in legacy:
+                await conn.execute(sql_insert(SessionFolder).values(id=new_id(), user_id=user_id, name=name))
         password = self.settings.workspace_password.get_secret_value()
         if password:
             async with self.sessions.begin() as db:
@@ -285,9 +298,6 @@ class Database:
             ).where(
                 Turn.status == "queued", Session.active_turn.is_(None),
                 Session.deleted.is_(False),
-                ~select(ComputerLease.session_id).where(
-                    ComputerLease.session_id == Session.id, ComputerLease.expires_at > time.time(),
-                ).exists(),
             ).order_by(Turn.created_at, Turn.id).limit(20))).all()
             for turn in candidates:
                 claimed = await db.scalar(update(Session).where(
@@ -295,10 +305,10 @@ class Database:
                     Session.deleted.is_(False),
                 ).values(revision=Session.revision + 1).returning(Session.id))
                 if claimed is not None:
-                    # Read after acquiring the shared session row. A claim that
-                    # waited for human control must see its freshly committed lease.
-                    control = await db.get(ComputerLease, turn.session_id)
-                    if control and control.expires_at > time.time():
+                    admitted = await db.scalar(update(Turn).where(
+                        Turn.id == turn.id, Turn.status == "queued",
+                    ).values(status="starting").returning(Turn.id))
+                    if admitted is None:
                         continue
                     await db.execute(update(Session).where(Session.id == turn.session_id).values(
                         active_turn=turn.id, status="queued", updated_at=now(),
@@ -306,6 +316,34 @@ class Database:
                     turn.status = "starting"
                     return turn
         return None
+
+    async def steer_queued(self, actor: User, turn_id: str) -> Turn:
+        """Promote saved input into the SDK's existing durable enqueue path."""
+        async with self.sessions.begin() as db:
+            turn = await db.get(Turn, turn_id)
+            if turn is None or turn.actor_id != actor.id:
+                raise HTTPException(404, "Message not found.")
+            await db.execute(update(Session).where(
+                Session.id == turn.session_id,
+            ).values(revision=Session.revision + 1))
+            session = await self.allowed_session(db, turn.session_id, actor)
+            await db.refresh(turn)
+            if turn.status in {"steering", "signal_sent", "accepted"}:
+                return turn
+            if turn.status != "queued":
+                raise HTTPException(409, "This message has already started.")
+            active = await db.get(Turn, session.active_turn) if session.active_turn else None
+            if active:
+                if (
+                    active.status != "running" or active.actor_id != actor.id
+                    or active.model != turn.model
+                    or set(json.loads(active.connections)) != set(json.loads(turn.connections))
+                ):
+                    raise HTTPException(409, "This message needs its own run. It will start after the active task.")
+                turn.parent_turn = active.id
+                turn.status = "steering"
+            turn.mode = "asap"
+            return turn
 
     async def starting_turns(self) -> list[Turn]:
         async with self.sessions() as db:

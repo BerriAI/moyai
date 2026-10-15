@@ -37,7 +37,7 @@ class DesktopCommandFailed(HTTPException):
 
 
 class ComputerCommand(BaseModel):
-    action: Literal["start", "claim", "release", "heartbeat", "open", "click", "type", "key", "scroll"]
+    action: Literal["start", "claim", "release", "heartbeat", "open", "terminal", "click", "type", "key", "scroll"]
     x: int = Field(default=0, ge=0, lt=1280)
     y: int = Field(default=0, ge=0, lt=800)
     button: Literal[1, 2, 3] = 1
@@ -66,13 +66,11 @@ async def authorize(runtime: Runtime, session_id: str, user: User) -> Session:
         raise HTTPException(401, "Your session expired.")
     async with runtime.database.sessions() as db:
         session = await runtime.database.allowed_session(db, session_id, user)
-        # A browser profile may hold the person's logins. Shared agent
-        # workspaces are reused by other requesters, so they cannot host this UI.
-        if session.visibility != "private":
-            raise HTTPException(403, "Use a private conversation to view and control the computer.")
         active = await db.get(Turn, session.active_turn) if session.active_turn else None
         requester = active.actor_id if active else session.last_actor_id
-        if session.owner_id != user.id or (requester is not None and requester != user.id):
+        if session.visibility == "private" and (
+            session.owner_id != user.id or (requester is not None and requester != user.id)
+        ):
             raise HTTPException(403, "The computer is private to its requester.")
         context = active or await db.scalar(select(Turn).where(
             Turn.session_id == session_id
@@ -92,12 +90,13 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str) -> s
     if not session.workspace:
         raise HTTPException(409, "Send Moyai a task to start this conversation's computer.")
     async with runtime.database.sessions.begin() as db:
-        # Agent admission fences this same row before checking the lease.
+        # This lease arbitrates desktop viewers only. Chat and native coding
+        # work continue independently of a person's mouse/keyboard control.
         locked = await db.scalar(update(Session).where(
-            Session.id == session_id, Session.active_turn.is_(None), Session.deleted.is_(False),
+            Session.id == session_id, Session.deleted.is_(False),
         ).values(revision=Session.revision + 1).returning(Session.id))
         if locked is None:
-            raise HTTPException(409, "Stop the active task and wait for it to finish before taking control.")
+            raise HTTPException(404, "Conversation not found.")
         current = await db.get(ComputerLease, session_id)
         stamp = int(time.time())
         lifetime = 660 if action == "start" else LEASE_SECONDS
@@ -171,10 +170,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         async with runtime.database.sessions() as db:
             current = await db.get(ComputerLease, session_id)
             controlled = bool(current and current.actor_id == user.id and current.expires_at > time.time())
+            controller = await db.get(User, current.actor_id) if current and current.expires_at > time.time() else None
         value = await request(runtime, session, {"action": "frame"}) if session.workspace else {"available": False}
         await authorize(runtime, session_id, user)
         return {**value, "has_workspace": bool(session.workspace),
-                "controlled": controlled, "busy": bool(session.active_turn)}
+                "controlled": controlled, "busy": bool(session.active_turn),
+                "controller": controller.display_name if controller else None}
 
     @router.post("/api/sessions/{session_id}/computer")
     async def control(session_id: str, body: ComputerCommand, user: User = Depends(actor)):

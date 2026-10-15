@@ -18,18 +18,32 @@ from pydantic import BaseModel, Field, SecretStr, TypeAdapter, field_validator
 from pydantic_ai import ConversationTypeAdapter, DeferredToolResults
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse, ask_user_result
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from temporalio.service import RPCError
 
 from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .images import routes as image_routes
-from .models import Artifact, Connection, Effect, Message, Session, SessionPreference, Turn, User, new_id, now
+from .models import (
+    Artifact,
+    Connection,
+    Effect,
+    Message,
+    Session,
+    SessionPreference,
+    SessionRead,
+    Turn,
+    User,
+    new_id,
+    now,
+)
 from .presentation import public_event, redact, saved_activity
 from .runtime import Runtime
 from .security import check_password
 from .settings import Settings
+from .sidebar import folders_for, lock_sidebar
+from .sidebar import routes as sidebar_routes
 from .slack import dispatcher as slack_dispatcher
 from .slack import routes as slack_routes
 from .worker import dispatcher, reconcile_workflows
@@ -136,6 +150,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     app.include_router(image_routes(runtime, actor))
     app.include_router(computer_routes(runtime, actor))
+    app.include_router(sidebar_routes(runtime, actor))
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -202,15 +217,28 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def sessions(archived: bool = False, user: User = Depends(actor)):
         rows = await runtime.database.list_sessions(user, archived=archived)
         async with runtime.database.sessions() as db:
+            ids = [row.id for row in rows]
             preferences = {
                 item.session_id: item for item in await db.scalars(
-                    select(SessionPreference).where(SessionPreference.user_id == user.id)
+                    select(SessionPreference).where(SessionPreference.user_id == user.id, SessionPreference.session_id.in_(ids))
                 )
             }
+            participated = set(await db.scalars(select(Turn.session_id).where(
+                Turn.actor_id == user.id, Turn.session_id.in_(ids),
+            ).distinct()))
+            latest = dict((await db.execute(select(Message.session_id, func.max(Message.id)).where(
+                Message.session_id.in_(ids),
+            ).group_by(Message.session_id))).all())
+            reads = {item.session_id: item for item in await db.scalars(select(SessionRead).where(
+                SessionRead.user_id == user.id, SessionRead.session_id.in_(ids),
+            ))}
         return [{
             **session_view(row),
             "pinned": preferences[row.id].pinned if row.id in preferences else False,
             "folder": preferences[row.id].folder if row.id in preferences else "",
+            "participated": row.owner_id != user.id and row.id in participated,
+            "unread": bool(reads[row.id].unread or latest.get(row.id, 0) > reads[row.id].message_id)
+            if row.id in reads else False,
         } for row in rows]
 
     @app.post("/api/sessions")
@@ -257,6 +285,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.patch("/api/sessions/{session_id}")
     async def edit_session(session_id: str, body: SessionEdit, user: User = Depends(actor)):
         async with runtime.database.sessions.begin() as db:
+            await lock_sidebar(db, user.id)
             row = await runtime.database.allowed_session(db, session_id, user)
             if body.title is not None or body.archived is not None:
                 if row.owner_id != user.id:
@@ -265,6 +294,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                     row.title = body.title
                 if body.archived is not None:
                     row.archived = body.archived
+                row.updated_at = now()
             if body.pinned is not None or body.folder is not None:
                 pref = await db.get(SessionPreference, (user.id, session_id))
                 if pref is None:
@@ -273,8 +303,17 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 if body.pinned is not None:
                     pref.pinned = body.pinned
                 if body.folder is not None:
+                    if body.folder and not any(item.name == body.folder for item in await folders_for(db, user.id)):
+                        raise HTTPException(404, "Folder not found.")
                     pref.folder = body.folder
-            row.updated_at = now()
+            if body.unread is not None:
+                read = await db.get(SessionRead, (user.id, session_id))
+                if read is None:
+                    read = SessionRead(user_id=user.id, session_id=session_id, message_id=0)
+                    db.add(read)
+                read.unread = body.unread
+                if not body.unread:
+                    read.message_id = await db.scalar(select(func.max(Message.id)).where(Message.session_id == session_id)) or 0
         return {"updated": True}
 
     @app.get("/api/sessions/{session_id}/messages")
@@ -301,6 +340,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 Message.turn_id == turn.id, Message.role == "user"
             ).values(content=runtime.security.seal(body.prompt)))
         return {"updated": True}
+
+    @app.post("/api/turns/{turn_id}/steer", status_code=202)
+    async def steer_queued(turn_id: str, user: User = Depends(actor)):
+        return turn_view(await runtime.database.steer_queued(user, turn_id))
 
     @app.delete("/api/turns/{turn_id}")
     async def cancel_queued(turn_id: str, user: User = Depends(actor)):

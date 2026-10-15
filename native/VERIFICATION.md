@@ -52,7 +52,7 @@ A separate actual-app task ran a command that incremented a marker and then wait
 
 ## Automated checks
 
-The native suite contains 33 tests. The native tests use the real Pydantic libraries and local Temporal server, with explicitly controlled model responses. PostgreSQL qualification uses a disposable local database. Slack protocol tests use a transport double and make no real Slack posts.
+At the initial core handoff, the native suite contained 33 tests. The native tests use the real Pydantic libraries and local Temporal server, with explicitly controlled model responses. PostgreSQL qualification uses a disposable local database. Slack protocol tests use a transport double and make no real Slack posts.
 
 Coverage includes native file tools, skills, plans, memory, delegation, replay, deferred questions, steering, Stop, private access, grant revisions, workspace account scope, immutable outputs, encrypted/offloaded payloads, concurrent bootstrap, request idempotency, unknown effects, and Slack delivery ownership.
 
@@ -184,3 +184,52 @@ uv run moyai dev --port 8796
 ```
 
 Open `http://127.0.0.1:8796`, sign in, and use the workflow above. The development command uses real configured resources. Keep test data and credentials separate from production, and terminate test computers when finished.
+
+## Sidebar, shared desktop, and independent chat: October 15, 2026
+
+Baseline: actual local native app at `43f16104120c043938d8bbb846bdbdf0fe019fc8`.
+The updated UI/API/worker used the same authenticated local deployment, real
+GPT-6 Astra through the approved dev gateway, real Modal, and local Temporal.
+This section supersedes the earlier private-only and chat-pausing computer policy.
+
+- Baseline shared computer GET returned 403. Updated shared access returned 200;
+  another user's private computer returned 404. A second controller received 409,
+  then successfully acquired control after release. Automated coverage also checks disabled users.
+- Baseline chat stayed queued without an active task while human control was held.
+  Updated chat produced **READY** while **You have control** remained visible.
+- Baseline queued editing used a dialog. Updated editing used the normal composer,
+  saved the changed text, and restored **Keep this unsent draft.** without submitting
+  it. A queued correction was promoted with **Steer now** and the real model replied
+  **STEERING_WORKS** through the existing Temporal signal/native enqueue path.
+- A fresh shared computer opened Chromium and a taskbar. Typing/pasting an address
+  into its actual browser navigated to example.org. A separate Terminal launcher
+  remains available. No public VNC/debugging port was opened.
+- Real UI checks covered folder creation, assignment and rename, both three-dot
+  menus, copying the exact session URL, and the Participated group for a message
+  sent to another user's shared conversation. Personal preference writes do not
+  reorder everyone else's Recent list. Existing folder strings are adopted on startup.
+- The known empty pinned test conversation was archived through the authenticated
+  API after verifying it had no messages. Real user conversations were retained.
+
+The original shared proof computer expired during verification; its reference
+was retained and the final shared-desktop check used a fresh native session.
+An older manually provisioned demo computer lacked the bundled skill directory;
+that test prerequisite was restored before the successful live chat/steering check.
+No model or desktop implementation was substituted.
+
+Local checks: **58 native tests passed**, plus **1 PostgreSQL qualification test**
+on a disposable local PostgreSQL 18 server; **3 desktop-input tests passed**.
+Native TypeScript, Vite build, Python typecheck, Ruff and diff whitespace checks passed.
+The actual sidebar menus were checked at 1440, 768 and 320 pixels, including keyboard
+activation and a phone-sized move dialog. Source and generated native assets are committed together.
+
+The handoff includes actual rendered screenshots and `before.mp4` / `demo.mp4`.
+The short demo selects the successful composer/steering sequence from the live
+capture and holds its final frame for readability. Local recordings are not
+committed to the repository. No production service or Slack messages were modified.
+
+To reproduce: run the native application using the README setup; create a session,
+open its Computer panel and take control, then send a message. It should run without
+releasing the computer. While another task runs, queue a follow-up, edit it in the
+composer, save, then select Steer now. Create a shared session with a second local
+account to check participation and shared viewing; simultaneous control must return 409.

@@ -89,31 +89,46 @@ each upload to its owner's chosen conversation. The worker supplies native
 Pydantic `BinaryContent`, including when steering a run.
 
 After a task creates its Modal workspace, choose **Computer → Open computer**.
-This opens a real X desktop in the same sandbox, with a terminal and Chromium.
+This opens a real X desktop in the same sandbox, with Chromium open and a taskbar.
+The **Terminal** button opens a separate terminal window.
 Use **Take control** to click, type, paste text and scroll; **Open browser** opens
 an HTTP(S) address, and **Screenshot** downloads the current view. Expand the
 panel for more space. **Release control** or Ctrl+Shift+Escape returns control.
 
-Desktop access requires a private conversation and rechecks the workspace's
-account grants. Shared sessions retain agent execution, activity, plans and
-saved files, but do not expose a personal browser profile to other requesters.
-A persistent database lease keeps new
-agent tasks queued while a person has control. Taking control requires the
-active task to finish or acknowledge Stop. Abandoned leases expire. Input is
+Desktop access follows session visibility and rechecks the workspace's current
+account grants. A private session is owner-only; workspace members can view and
+take turns controlling a shared session's computer, including its browser sign-ins.
+A persistent database lease allows one human controller at a time.
+Chat, native coding work, and steering continue while a person controls the
+desktop. An idle conversation starts new work normally. Abandoned leases expire. Input is
 serialized in the UI and guest; uncertain input is not automatically repeated.
 An in-flight action also prevents another tab from releasing control, and
 expired input is rejected in the guest before dispatch.
 The desktop uses the native workspace API and private Modal exec, without
 exposing VNC or a browser debugging port.
 
-Files and browser sign-ins placed in this private computer are accessible to
-code running there after handoff. Restrictions on the app's connected-service
+Files and browser sign-ins placed in this computer are accessible to
+code running there. The human input lease is not a security boundary against
+native shell execution. Agent instructions direct automated web work to a separate
+headless browser instead of using the person's visible mouse/keyboard.
+Restrictions on the app's connected-service
 tools do not restrict an account signed into manually inside Chromium.
 
 Existing computers install the desktop prerequisites on first opening; new
 images include them. This adds basic viewing/control, not every legacy computer
 feature. Desktop recording, automatic workspace restoration, and restored
 browser-login workflows remain outside this implementation.
+
+The sidebar separates **Participated** (another person's shared session you have
+sent a message to) from **Recent**. Pins, folders, collapsed groups and unread
+state are personal. Folder creation, rename and removal preserve session sharing.
+The session menu offers rename, folder placement, copy link, open computer,
+read/unread, pin and archive/restore; rename and archive remain owner-only.
+
+Queued messages appear above the composer. **Edit** loads their text into that
+same composer and keeps attachments; Save/Cancel restore the unsent draft.
+**Steer now** promotes the existing message through the native Temporal signal
+and Pydantic `AgentRun.enqueue` path. A message already admitted cannot be edited.
 
 ## Separate API and workers
 

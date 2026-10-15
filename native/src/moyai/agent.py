@@ -240,7 +240,7 @@ def make_agent(
         image = (
             modal.Image.debian_slim(python_version="3.13")
             .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm",
-                         "xvfb", "openbox", "xterm", "xdotool", "chromium",
+                         "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2",
                          "x11-xserver-utils", "fonts-dejavu-core")
             .pip_install("uv", "pytest", "pillow==12.3.0")
             .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)

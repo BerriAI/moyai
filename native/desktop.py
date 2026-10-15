@@ -54,10 +54,30 @@ def remaining(deadline, limit):
     return duration
 
 
+def browser(url="chrome://newtab/"):
+    return launch("chromium", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run",
+                  "--user-data-dir=/workspace/.moyai-browser", "--start-maximized",
+                  "--window-position=0,0", f"--window-size={WIDTH},{HEIGHT - 32}", url)
+
+
+def terminal():
+    return launch("xterm", "-geometry", "110x30+60+60", "-bg", "#0b1627", "-fg", "#e7effa",
+                  "-fa", "DejaVu Sans Mono", "-fs", "12", "-title", "Moyai workspace",
+                  "-e", "bash", "-lc", "cd /workspace && exec bash")
+
+
+def ensure_process(name, *command):
+    pid_file = STATE / f"{name}.pid"
+    try:
+        os.kill(int(pid_file.read_text()), 0)
+    except (OSError, ValueError):
+        pid_file.write_text(str(launch(*command).pid))
+
+
 def start(deadline):
     packages = {
         "Xvfb": "xvfb", "openbox": "openbox", "xterm": "xterm", "xdotool": "xdotool",
-        "chromium": "chromium", "xsetroot": "x11-xserver-utils",
+        "chromium": "chromium", "xsetroot": "x11-xserver-utils", "tint2": "tint2",
     }
     missing = [package for command, package in packages.items() if not shutil.which(command)]
     if missing:
@@ -84,15 +104,39 @@ def start(deadline):
             time.sleep(.1)
         else:
             raise RuntimeError("The desktop display did not start.")
-    pid_file = STATE / "openbox.pid"
-    try:
-        os.kill(int(pid_file.read_text()), 0)
-    except (OSError, ValueError):
-        pid_file.write_text(str(launch("openbox", "--sm-disable").pid))
-        subprocess.run(["xsetroot", "-solid", "#0b1627"], env=ENV, check=True, timeout=remaining(deadline, 10))
-        launch("xterm", "-geometry", "110x30+60+60", "-bg", "#0b1627", "-fg", "#e7effa",
-               "-fa", "DejaVu Sans Mono", "-fs", "12", "-title", "Moyai workspace",
-               "-e", "bash", "-lc", "cd /workspace && exec bash")
+    ensure_process("openbox", "openbox", "--sm-disable")
+    subprocess.run(["xsetroot", "-solid", "#0b1627"], env=ENV, check=True, timeout=remaining(deadline, 10))
+    # A window switcher keeps Chromium and terminals accessible as ordinary
+    # desktop windows. Nothing is exposed outside the authenticated broker.
+    panel = STATE / "tint2rc"
+    panel.write_text(
+        "panel_items = LTSC\npanel_position = bottom center horizontal\n"
+        "panel_size = 100% 32\npanel_background_id = 0\n"
+        "taskbar_mode = single_desktop\nlauncher_icon_size = 22\n"
+        "launcher_item_app = /usr/share/applications/chromium.desktop\n"
+        "launcher_item_app = /usr/share/applications/debian-xterm.desktop\n"
+        "time1_format = %H:%M\n"
+    )
+    ensure_process("panel", "tint2", "-c", str(panel))
+    # Reopening a running desktop preserves the existing browser tabs/profile.
+    def windows():
+        result = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "chromium"],
+                                env=ENV, check=False, capture_output=True, text=True, timeout=remaining(deadline, 5))
+        return result.stdout.split()
+
+    existing = windows()
+    if not existing:
+        browser()
+        for _ in range(100):
+            remaining(deadline, 1)
+            existing = windows()
+            if existing:
+                break
+            time.sleep(.1)
+        else:
+            raise RuntimeError("The browser did not open.")
+    subprocess.run(["xdotool", "windowactivate", "--sync", existing[-1]],
+                   env=ENV, check=True, timeout=remaining(deadline, 5))
 
 
 def screenshot():
@@ -117,10 +161,9 @@ def command(body):
         if not display_alive():
             return {"available": False, "width": WIDTH, "height": HEIGHT}
         if action == "open":
-            launch("chromium", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run",
-                   "--user-data-dir=/workspace/.moyai-browser", "--start-maximized",
-                   "--window-position=0,0", f"--window-size={WIDTH},{HEIGHT}",
-                   body.get("url") or "about:blank")
+            browser(body.get("url") or "chrome://newtab/")
+        elif action == "terminal":
+            terminal()
         elif action == "click":
             # Older distro xdotool builds can wait forever on --sync when the
             # pointer is already at the requested position. X queues move/click

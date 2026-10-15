@@ -111,16 +111,15 @@ async def finished_computer(runtime, actor, *, visibility="private"):
     return session
 
 
-async def test_control_lease_holds_agent_queue_until_release(runtime, actor):
+async def test_human_control_does_not_block_chat_or_coding(runtime, actor):
     session = await finished_computer(runtime, actor)
     await lease(runtime, session.id, actor, "claim")
-    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Next", request_key="queued-under-human"))
-    assert await runtime.database.claim_next() is None
-    await lease(runtime, session.id, actor, "release")
+    turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Next", request_key="under-human"))
     assert (await runtime.database.claim_next()).id == turn.id
-    async with sign_in(runtime) as client:
-        response = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "claim"})
-        assert response.status_code == 409
+    # People can keep controlling the desktop during active agent work.
+    await lease(runtime, session.id, actor, "heartbeat")
+    async with runtime.database.sessions() as db:
+        assert (await db.get(ComputerLease, session.id)).actor_id == actor.id
 
 
 async def test_expired_control_lease_does_not_hold_queue_forever(runtime, actor):
@@ -132,7 +131,7 @@ async def test_expired_control_lease_does_not_hold_queue_forever(runtime, actor)
     assert (await runtime.database.claim_next()).id == turn.id
 
 
-async def test_release_from_another_tab_cannot_admit_agent_during_desktop_input(runtime, actor, monkeypatch):
+async def test_desktop_input_keeps_its_fence_without_blocking_chat(runtime, actor, monkeypatch):
     session = await finished_computer(runtime, actor)
     await lease(runtime, session.id, actor, "claim")
     entered, finish = asyncio.Event(), asyncio.Event()
@@ -154,12 +153,12 @@ async def test_release_from_another_tab_cannot_admit_agent_during_desktop_input(
             queued = await runtime.database.submit(actor, session.id, NewMessage(
                 prompt="Wait for input.", request_key="input-in-flight",
             ))
-            assert await runtime.database.claim_next() is None
+            assert (await runtime.database.claim_next()).id == queued.id
         finally:
             finish.set()
         assert (await command).status_code == 200
         assert (await second.post(f"/api/sessions/{session.id}/computer", json={"action": "release"})).status_code == 200
-        assert (await runtime.database.claim_next()).id == queued.id
+        assert await runtime.database.claim_next() is None
 
 
 async def test_control_is_not_acquired_for_an_unstarted_computer(runtime, actor):
@@ -213,21 +212,32 @@ async def test_ambiguous_desktop_timeout_keeps_operation_ownership(runtime, acto
         assert await db.get(ComputerLease, session.id) is not None
 
 
-async def test_shared_computer_still_belongs_to_its_requester(runtime, actor):
+async def test_shared_computer_allows_members_but_one_human_controller(runtime, actor, monkeypatch):
     session = await finished_computer(runtime, actor, visibility="shared")
+    private = await finished_computer(runtime, actor)
     async with runtime.database.sessions.begin() as db:
         other = User(id=new_id(), username="viewer", display_name="Viewer", password="unused")
         db.add(other)
-    token, _ = runtime.security.issue_session(other.id, other.auth_version)
+    async def frame(*_args):
+        return {"available": True}
+    monkeypatch.setattr("moyai.computer.request", frame)
+    token, csrf = runtime.security.issue_session(other.id, other.auth_version)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
-        base_url="http://testserver", cookies={COOKIE: token},
-    ) as client:
-        assert (await client.get(f"/api/sessions/{session.id}")).status_code == 200
-        assert (await client.get(f"/api/sessions/{session.id}/computer")).status_code == 403
-    async with sign_in(runtime) as owner:
-        assert (await owner.get(f"/api/sessions/{session.id}/computer")).status_code == 403
-        assert (await owner.post(f"/api/sessions/{session.id}/computer", json={"action": "claim"})).status_code == 403
+        base_url="http://testserver", cookies={COOKIE: token}, headers={"X-Moyai-CSRF": csrf},
+    ) as client, sign_in(runtime) as owner:
+        path = f"/api/sessions/{session.id}/computer"
+        assert (await client.get(path)).status_code == 200
+        assert (await owner.post(path, json={"action": "claim"})).status_code == 200
+        state = (await client.get(path)).json()
+        assert state["controller"] == actor.display_name and not state["controlled"]
+        assert (await client.post(path, json={"action": "claim"})).status_code == 409
+        assert (await owner.post(path, json={"action": "release"})).status_code == 200
+        assert (await client.post(path, json={"action": "claim"})).status_code == 200
+        assert (await client.get(f"/api/sessions/{private.id}/computer")).status_code == 404
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(User, other.id)).enabled = False
+        assert (await client.get(path)).status_code == 401
 
 
 async def test_computer_access_rechecks_revoked_connection_grants(runtime, actor):
