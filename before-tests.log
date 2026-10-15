@@ -1,0 +1,33 @@
+$ uv run --frozen --python 3.13 pytest -q --tb=short tests/test_lambda_microvms.py -k image_package
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+____ test_image_package_contains_no_server_secrets_and_uses_real_sdk_shape _____
+tests/test_lambda_microvms.py:658: in test_image_package_contains_no_server_secrets_and_uses_real_sdk_shape
+    assert set(archive.namelist()) == set(expected)
+E   AssertionError: assert {'Dockerfile'...acts.py', ...} == {'Dockerfile'...very.py', ...}
+E     
+E     Extra items in the right set:
+E     'agent/swarm/contracts.py'
+E     'agent/memory_history.py'
+E     'agent/prompts/delegation.md'
+E     'agent/skills/artifacts/SKILL.md'
+E     'agent/github_paths.py'...
+E     
+E     ...Full output truncated (66 lines hidden), use '-vv' to show
+___ test_image_package_recurses_runtime_sources_and_excludes_unrelated_files ___
+tests/test_lambda_microvms.py:704: in test_image_package_recurses_runtime_sources_and_excludes_unrelated_files
+    assert set(archive.namelist()) == {'Dockerfile', *expected}
+E   AssertionError: assert {'Dockerfile'...bda_guest.py'} == {'Dockerfile'...ig.json', ...}
+E     
+E     Extra items in the right set:
+E     'agent/__init__.py'
+E     'agent/assets/probe.bin'
+E     'agent/prompts/system.md'
+E     'agent/harnesses/nested/fixture.py'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/test_lambda_microvms.py::test_image_package_contains_no_server_secrets_and_uses_real_sdk_shape
+FAILED tests/test_lambda_microvms.py::test_image_package_recurses_runtime_sources_and_excludes_unrelated_files
+2 failed, 60 deselected in 9.58s
+
+Exit code: 1

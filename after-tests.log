@@ -1,0 +1,5 @@
+$ uv run --frozen --python 3.13 pytest -q --tb=short tests/test_lambda_microvms.py -k image_package
+..                                                                       [100%]
+2 passed, 60 deselected in 2.41s
+
+Exit code: 0

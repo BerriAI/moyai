@@ -1,0 +1,9 @@
+$ uv run --frozen --python 3.13 pytest -q --tb=short tests/test_lambda_microvms.py tests/test_sandbox_providers.py tests/test_runner.py tests/test_durable.py tests/test_idle_window.py tests/test_continuation.py tests/test_environments.py
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 82%]
+............................................................             [100%]
+348 passed in 80.51s (0:01:20)
+
+Exit code: 0
