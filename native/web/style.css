@@ -152,7 +152,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .pending > p, .pending > details, .pending > label { margin-block: 12px; }
 .question-options { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .question-options button { white-space: normal; height: auto; min-height: 36px; }
-.error, .notice { padding: 12px 16px; border-radius: 6px; background: var(--ui-danger-bg); color: var(--ui-danger); overflow-wrap: anywhere; margin: 12px 0; }
+.error, .notice { padding: 12px 16px; border-radius: 6px; background: var(--ui-danger-bg); color: var(--ui-danger); overflow-wrap: anywhere; margin-block: 12px; }
 .notice { color: var(--ui-warning); background: var(--ui-warning-bg); }
 .global-error { position: absolute; z-index: 20; top: 6px; left: 20px; right: 20px; display: flex; justify-content: space-between; }
 .login { width: min(360px, calc(100vw - 48px)); display: flex; flex-direction: column; gap: 20px; }

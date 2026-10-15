@@ -251,3 +251,12 @@ including reserved scrollbar space. Actual DOM measurements at 1920, 1440, 768 a
 all eight cases had zero width difference and no horizontal document overflow.
 Native TypeScript and Vite build passed. Before/after screenshots and an actual-app
 recording accompany the local handoff. The empty fresh-session test was archived.
+
+Error-banner follow-up: the actual failed session at baseline
+`7ad6f4179e30097bc3b646ca378c7eb311826bd0` exposed a later `margin: 12px 0`
+rule resetting the chat column's automatic inline margins. Replacing it with
+`margin-block: 12px` preserves centering for errors and warnings. At 1440 px,
+the banner's left edge moved from 323.20 px to the conversation/composer edge at
+450 px. All eight open/closed-panel checks at 1920/1440/768/320 px now have
+identical banner and composer edges. Native asset build passed. Verification
+used the existing failed session without resubmitting its task.
