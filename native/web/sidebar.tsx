@@ -38,9 +38,10 @@ function age(value?: string) {
   return minutes < 1 ? "Just now" : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.floor(minutes / 60)} hr ago` : `${Math.floor(minutes / 1440)} days ago`
 }
 
-export function SessionSidebar({ sessions, folders, selected, userId, search, archived, refresh, onArchiveView }: {
+export function SessionSidebar({ sessions, folders, selected, userId, search, archived, refresh, onArchiveView, onOpenComputer }: {
   sessions: SidebarSession[]; folders: SessionFolder[]; selected: string; userId: string; search: string
   archived: boolean; refresh: () => Promise<void>; onArchiveView: () => void
+  onOpenComputer: (sessionId: string) => void
 }) {
   const [editor, setEditor] = useState<Editor | null>(null)
   const [name, setName] = useState("")
@@ -78,7 +79,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, search, ar
         <hr />
         <Item disabled={row.owner_id !== userId} onClick={() => { close(); openEditor({ action: "rename", session: row }) }}><Pencil />Rename</Item>
         <Item onClick={() => { close(); void navigator.clipboard.writeText(`${location.origin}/#${row.id}`).then(() => setNotice("Session link copied."), () => setError("Could not copy the link. Open the session and copy its address.")) }}><Copy />Copy session link</Item>
-        <Item onClick={() => { close(); location.hash = row.id; window.dispatchEvent(new CustomEvent("moyai:open-computer", { detail: row.id })) }}><Monitor />Open computer</Item>
+        <Item onClick={() => { close(); onOpenComputer(row.id) }}><Monitor />Open computer</Item>
         <Item onClick={() => { close(); void edit(row, { unread: !row.unread }, row.unread ? "Marked read." : "Marked unread.") }}><Mail />{row.unread ? "Mark read" : "Mark unread"}</Item>
         <Item onClick={() => { close(); void edit(row, { pinned: !row.pinned }, row.pinned ? "Session unpinned." : "Session pinned.") }}><Pin />{row.pinned ? "Unpin" : "Pin"}</Item>
         <hr />

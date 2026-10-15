@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, Archive, Check, FileDown, FolderOpen, Link2, LogOut, Menu, MessageSquare, PanelRightClose, Pin, Plus, Search, Square, X } from "lucide-react"
+import { ArrowUp, Archive, Check, FileDown, FolderOpen, Link2, LogOut, Menu, MessageSquare, PanelRightClose, PanelRightOpen, Pin, Plus, Search, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -48,6 +48,7 @@ function App() {
   const refreshVersion = useRef(0)
   const [sessions, setSessions] = useState<Session[]>([])
   const [selected, setSelected] = useState(location.hash.slice(1))
+  const [computerRequest, setComputerRequest] = useState<{ sessionId: string; sequence: number } | null>(null)
   const [connections, setConnections] = useState<Connection[]>([])
   const [showConnections, setShowConnections] = useState(false)
   const [archived, setArchived] = useState(false)
@@ -65,10 +66,14 @@ function App() {
 
   useEffect(() => {
     api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
-    const signedOut = () => { ++refreshVersion.current; setCsrf(""); setMe(null); setSessions([]); setFolders([]); setConnections([]) }
+    const signedOut = () => { ++refreshVersion.current; setCsrf(""); setMe(null); setSessions([]); setFolders([]); setConnections([]); setComputerRequest(null) }
     const clearSearch = () => setSearch("")
     window.addEventListener("moyai:clear-search", clearSearch)
-    const navigate = () => { setSelected(location.hash.slice(1)); setMobileNav(false) }
+    const navigate = () => {
+      const id = location.hash.slice(1)
+      setSelected(id); setMobileNav(false)
+      setComputerRequest(request => request?.sessionId === id ? request : null)
+    }
     const shortcut = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return
       if (!(event.metaKey || event.ctrlKey)) return
@@ -100,14 +105,18 @@ function App() {
       <Button variant="secondary" className="new-chat" onClick={() => { location.hash = "" }}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <div className="rail-search"><Search size={16} /><Input ref={searchInput} aria-label="Find conversations" placeholder="Search sessions…" value={search} onChange={e => setSearch(e.target.value)} /><span className="key-hint">⌘K</span></div>
       <Button variant="ghost" className="rail-button" onClick={() => setShowConnections(true)}><Link2 />Connections</Button>
-      <SessionSidebar key={me.user.id} sessions={sessions} folders={folders} selected={selected} userId={me.user.id} search={search} archived={archived} refresh={refresh} onArchiveView={() => { ++refreshVersion.current; setArchived(!archived) }} />
+      <SessionSidebar key={me.user.id} sessions={sessions} folders={folders} selected={selected} userId={me.user.id} search={search} archived={archived} refresh={refresh} onArchiveView={() => { ++refreshVersion.current; setArchived(!archived) }} onOpenComputer={sessionId => {
+        setComputerRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1 }))
+        location.hash = sessionId
+        setMobileNav(false)
+      }} />
       <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => { await api("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")) }}><LogOut /></Button></div>
     </aside>
     <main className="main">
       <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>
       {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
       {selected
-        ? <Conversation key={`${me.user.id}:${selected}`} id={selected} me={me} connections={connections} refreshList={refresh} />
+        ? <Conversation key={`${me.user.id}:${selected}`} id={selected} me={me} connections={connections} refreshList={refresh} openComputerRequest={computerRequest?.sessionId === selected ? computerRequest.sequence : 0} />
         : <React.Suspense fallback={<div className="center muted">Opening workspace…</div>}><Home models={me.models} defaultModel={me.default_model} onCreated={refresh} /></React.Suspense>}
     </main>
     <Connections open={showConnections} onOpenChange={setShowConnections} me={me} connections={connections} refresh={refresh} />
@@ -133,7 +142,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </form></main>
 }
 
-function Conversation({ id, me, connections, refreshList }: { id: string; me: Me; connections: Connection[]; refreshList: () => Promise<void> }) {
+function Conversation({ id, me, connections, refreshList, openComputerRequest }: { id: string; me: Me; connections: Connection[]; refreshList: () => Promise<void>; openComputerRequest: number }) {
   const [view, setView] = useState<View | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [files, setFiles] = useState<File[]>([])
@@ -147,7 +156,7 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
   const [busy, setBusy] = useState(false)
   const [activity, setActivity] = useState<Activity[]>([])
   const [panel, setPanel] = useState("computer")
-  const [panelOpen, setPanelOpen] = useState(true)
+  const [panelOpen, setPanelOpen] = useState(false)
   const [computerExpanded, setComputerExpanded] = useState(false)
   const [editing, setEditing] = useState<Message | null>(null)
   const [editText, setEditText] = useState("")
@@ -193,12 +202,8 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
     return () => { controller.abort(); clearTimeout(timer) }
   }, [load])
   useEffect(() => {
-    const openComputer = (event: Event) => {
-      if ((event as CustomEvent<string>).detail === id) { setPanel("computer"); setPanelOpen(true) }
-    }
-    window.addEventListener("moyai:open-computer", openComputer)
-    return () => window.removeEventListener("moyai:open-computer", openComputer)
-  }, [id])
+    if (openComputerRequest) { setPanel("computer"); setPanelOpen(true) }
+  }, [openComputerRequest])
   useEffect(() => { heading.current?.focus() }, [Boolean(view)])
   useEffect(() => { document.title = `${view?.session.title ?? "Conversation"} · Moyai` }, [view?.session.title])
   useEffect(() => {
@@ -256,10 +261,10 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
         {session.owner_id === me.user.id && <Button variant="ghost" size="sm" onClick={() => { setTitle(session.title); setRenaming(true) }}>Rename</Button>}
         <Button variant="ghost" size="icon" aria-label={session.pinned ? "Unpin conversation" : "Pin conversation"} aria-pressed={Boolean(session.pinned)} onClick={() => editSession({ pinned: !session.pinned })}><Pin /></Button>
         {session.owner_id === me.user.id && <Button variant="ghost" size="icon" aria-label={session.archived ? "Restore conversation" : "Archive conversation"} onClick={() => editSession({ archived: !session.archived })}><Archive /></Button>}
-        <Button variant="ghost" size="icon" aria-label={panelOpen ? "Hide workspace panel" : "Show workspace panel"} onClick={() => setPanelOpen(!panelOpen)}><PanelRightClose /></Button>
       </div>
+      <Button className="workspace-toggle" variant="ghost" size="sm" aria-label={panelOpen ? "Hide workspace panel" : "Show workspace panel"} aria-expanded={panelOpen} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? <PanelRightClose /> : <PanelRightOpen />}<span>Workspace</span></Button>
     </header>
-    <div className={`workspace ${panelOpen ? "with-panel" : "panel-closed"} ${computerExpanded && panel === "computer" ? "computer-expanded" : ""}`}>
+    <div className={`workspace ${panelOpen ? "with-panel" : "panel-closed"} ${panelOpen && computerExpanded && panel === "computer" ? "computer-expanded" : ""}`}>
       <section className="chat">
         <div className="transcript" ref={transcript}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}

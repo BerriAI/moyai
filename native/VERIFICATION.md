@@ -233,3 +233,21 @@ open its Computer panel and take control, then send a message. It should run wit
 releasing the computer. While another task runs, queue a follow-up, edit it in the
 composer, save, then select Steer now. Create a shared session with a second local
 account to check participation and shared viewing; simultaneous control must return 409.
+
+## Chat-only entry and composer alignment: October 15, 2026
+
+Compared the actual locally running UI at `00665e97f1c00e1f92367ea90fca745a98477526`
+with this update. Session entry previously mounted the computer panel automatically.
+Sessions now start with chat only; the Workspace header button and session-menu
+Open computer action explicitly reveal it. Checked fresh session creation, reload,
+ordinary navigation, opening another session's computer, repeated same-session menu
+requests, and closing an expanded computer back to chat. The header toggle is available
+on phones. No backend or model behavior changed in this follow-up.
+
+The composer previously measured 1112 px wide against an 820 px conversation column
+at a 1440 px viewport. Both now use the same 820 px maximum width and responsive gutters,
+including reserved scrollbar space. Actual DOM measurements at 1920, 1440, 768 and
+320 px show identical left/right edges and widths, with the panel open and closed;
+all eight cases had zero width difference and no horizontal document overflow.
+Native TypeScript and Vite build passed. Before/after screenshots and an actual-app
+recording accompany the local handoff. The empty fresh-session test was archived.

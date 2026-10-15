@@ -89,7 +89,11 @@ each upload to its owner's chosen conversation. The worker supplies native
 Pydantic `BinaryContent`, including when steering a run.
 
 After a task creates its Modal workspace, choose **Computer → Open computer**.
-This opens a real X desktop in the same sandbox, with Chromium open and a taskbar.
+Sessions open with chat only. Use **Workspace** in the header or **Open computer**
+in a session's menu to reveal the side panel. Background coding and sandbox creation
+do not open it automatically.
+
+Opening the computer starts a real X desktop in the same sandbox, with Chromium open and a taskbar.
 The **Terminal** button opens a separate terminal window.
 Use **Take control** to click, type, paste text and scroll; **Open browser** opens
 an HTTP(S) address, and **Screenshot** downloads the current view. Expand the
