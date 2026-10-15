@@ -29,6 +29,13 @@ REMOTE_GUEST = f"/opt/moyai/desktop-{hashlib.sha256(GUEST_CONTENT).hexdigest()}.
 LEASE_SECONDS = 180
 
 
+class DesktopCommandFailed(HTTPException):
+    """The guest exited and returned an error; no foreground command remains."""
+
+    def __init__(self):
+        super().__init__(422, "The desktop command failed. Inspect the screen before another action.")
+
+
 class ComputerCommand(BaseModel):
     action: Literal["start", "claim", "release", "heartbeat", "open", "click", "type", "key", "scroll"]
     x: int = Field(default=0, ge=0, lt=1280)
@@ -143,10 +150,13 @@ async def request(runtime: Runtime, session: Session, body: dict) -> dict:
             timeout=600 if body["action"] == "start" else 30,
         )
         if result.exit_code:
-            raise HTTPException(503, "The desktop action could not be confirmed. Check the screen before retrying.")
-        value = json.loads(result.stdout)
-        if value.get("error"):
-            raise HTTPException(503, "The desktop is unavailable. Check the screen before retrying.")
+            raise DesktopCommandFailed()
+        try:
+            value = json.loads(result.stdout)
+        except ValueError as error:
+            raise DesktopCommandFailed() from error
+        if not isinstance(value, dict) or value.get("error"):
+            raise DesktopCommandFailed()
         return value
     except WorkspaceUnavailableError as error:
         raise HTTPException(410, "This computer has expired. Your saved files are still available.") from error
@@ -183,12 +193,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         except HTTPException as error:
             # A missing helper or expired computer cannot execute further input;
             # its workspace ref is never replaced. Ambiguous failures keep the fence.
-            if error.status_code in {409, 410}:
+            if isinstance(error, DesktopCommandFailed) or error.status_code in {409, 410}:
                 async with runtime.database.sessions.begin() as db:
-                    await db.execute(delete(ComputerOperation).where(
+                    cleared = await db.scalar(delete(ComputerOperation).where(
                         ComputerOperation.session_id == session_id, ComputerOperation.identity == operation,
-                    ))
-                    if body.action == "start":
+                    ).returning(ComputerOperation.identity))
+                    if cleared is not None and body.action == "start":
                         await db.execute(delete(ComputerLease).where(
                             ComputerLease.session_id == session_id, ComputerLease.actor_id == user.id,
                         ))

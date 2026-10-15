@@ -3,6 +3,7 @@ import { Camera, Globe, Maximize2, Monitor, MousePointer2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api } from "./api"
+import { DesktopInputQueue } from "./desktop-input"
 
 type DesktopState = { available: boolean; has_workspace: boolean; controlled: boolean; busy: boolean; frame?: string; width?: number; height?: number }
 
@@ -15,15 +16,37 @@ export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: st
   const stage = useRef<HTMLDivElement>(null)
   const keyboard = useRef<HTMLTextAreaElement>(null)
   const image = useRef<HTMLImageElement>(null)
-  const queue = useRef(Promise.resolve())
+  const queue = useRef<DesktopInputQueue | null>(null)
   const stopped = useRef(false)
   const controlling = useRef(false)
-  controlling.current = view.controlled && !halted && !working
+  const ownsControl = useRef(false)
+  ownsControl.current = view.controlled && !halted
+  controlling.current = ownsControl.current && !working
+  if (!queue.current) queue.current = new DesktopInputQueue(
+    body => api(`/sessions/${id}/computer`, "POST", body),
+    () => ownsControl.current && !stopped.current,
+    error => {
+      stopped.current = true; setHalted(true)
+      setError(`${String(error)} Check the screen, then resume control. Input was not retried.`)
+    },
+  )
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const next = await api<DesktopState>(`/sessions/${id}/computer`, "GET", undefined, signal)
     if (!signal?.aborted) setView(previous => ({ ...previous, ...next, frame: next.frame ?? previous.frame }))
   }, [id])
   useEffect(() => { stopped.current = false; return () => { stopped.current = true } }, [])
+  useEffect(() => {
+    const element = stage.current
+    if (!element) return
+    const wheel = (event: WheelEvent) => {
+      if (!controlling.current || stopped.current) return
+      event.preventDefault()
+      const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? element.clientHeight : 1)
+      queue.current?.wheel(pixels)
+    }
+    element.addEventListener("wheel", wheel, { passive: false })
+    return () => element.removeEventListener("wheel", wheel)
+  }, [])
   useEffect(() => {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
@@ -49,7 +72,7 @@ export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: st
     setWorking(true); setError("")
     if (action === "release") stopped.current = true
     try {
-      await queue.current
+      await queue.current?.drain()
       const next = await api<Partial<DesktopState>>(`/sessions/${id}/computer`, "POST", { action, ...values })
       setView(previous => ({ ...previous, ...next }))
       if (action === "claim" || action === "start") { stopped.current = false; setHalted(false); keyboard.current?.focus({ preventScroll: true }) }
@@ -57,16 +80,8 @@ export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: st
     } catch (error) { setError(String(error)) } finally { setWorking(false) }
   }
 
-  function input(action: string, values: object) {
-    if (!controlling.current || stopped.current) return
-    queue.current = queue.current.then(async () => {
-      if (!controlling.current || stopped.current) return
-      try { await api(`/sessions/${id}/computer`, "POST", { action, ...values }) }
-      catch (error) {
-        stopped.current = true; setHalted(true)
-        setError(`${String(error)} Check the screen, then resume control. Input was not retried.`)
-      }
-    })
+  function input(action: string, values: Record<string, string | number | boolean>) {
+    if (controlling.current) queue.current?.enqueue(action, values)
   }
 
   function key(event: React.KeyboardEvent) {
@@ -105,8 +120,7 @@ export function ComputerPanel({ id, hasWorkspace, expanded, onExpand }: { id: st
         if (x >= 0 && y >= 0 && x < (view.width ?? 1280) && y < (view.height ?? 800)) {
           keyboard.current?.focus({ preventScroll: true }); input("click", { x, y })
         }
-      }}
-      onWheel={event => { if (controlling.current) input("scroll", { direction: event.deltaY < 0 ? "up" : "down", steps: 3 }) }}>
+      }}>
       <textarea ref={keyboard} className="desktop-keyboard" aria-label="Desktop keyboard" tabIndex={-1} readOnly={!view.controlled} autoComplete="off" autoCapitalize="off" spellCheck={false} />
       {view.available && view.frame ? <img ref={image} src={`data:image/jpeg;base64,${view.frame}`} alt="Live Modal desktop" draggable={false} />
         : <div className="desktop-empty"><Monitor size={40} /><h3>Your computer in the cloud</h3><p>{working ? "Preparing your desktop. Your existing files stay in this workspace." : hasWorkspace ? "Open the desktop in the same computer Moyai uses for your work." : "Send Moyai a task. Its computer will appear here, ready for you to open and control."}</p>

@@ -142,6 +142,30 @@ Its SHA-256 is
 The guarded desktop then ran `cat` on that same file, and the release-control
 keyboard shortcut was exercised through the browser.
 
+## Desktop review follow-up: October 15, 2026
+
+Two additional Bugbot findings on `04eb20d` were reproduced and fixed.
+The actual baseline API was served from that revision's extracted source, and
+the corrected API from this checkout, both using the real application's data
+and a real native Modal workspace. No model response or desktop implementation
+was substituted for these endpoint checks.
+
+A reversible filesystem fault made the guest helper exit with an error:
+before, start returned 503 and both release and retry returned 409, with the
+operation and lease retained. After, start/retry return a confirmed 422 failure,
+release returns 200, and neither record is retained. Ambiguous timeouts still
+retain ownership. The guest directory was restored after each run.
+
+Matched browser scroll gestures moved the surrounding baseline panel 227 pixels
+but left the corrected panel at 0. The access logs recorded 7 versus 3 computer
+POSTs in the observed windows (including any heartbeat). Real before/after
+recordings were captured. The queue regression holds a transport call open,
+feeds 200 wheel updates, and verifies only two bounded scroll commands; other
+tests verify that pointer/key input and release supersede stale movement.
+
+The updated native suite passes **55 tests**, including PostgreSQL. Three
+desktop-input tests pass and run in the native web CI job.
+
 ## Reproduce the native app
 
 From the repository root:

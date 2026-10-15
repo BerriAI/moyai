@@ -2,10 +2,10 @@ name: Native Pydantic runtime
 
 on:
   pull_request:
-    paths: ['native/**', 'frontend/**', 'package*.json', '.github/workflows/pydantic-native.yml']
+    paths: ['native/**', 'frontend/**', 'package*.json', 'tests/test_native_desktop_input.cjs', '.github/workflows/pydantic-native.yml']
   push:
     branches: [main]
-    paths: ['native/**', 'frontend/**', 'package*.json', '.github/workflows/pydantic-native.yml']
+    paths: ['native/**', 'frontend/**', 'package*.json', 'tests/test_native_desktop_input.cjs', '.github/workflows/pydantic-native.yml']
 
 permissions:
   contents: read
@@ -55,5 +55,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck:native
+      - run: node --test tests/test_native_desktop_input.cjs
       - run: npm run build:native
       - run: git diff --exit-code -- native/src/moyai/static

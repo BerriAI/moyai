@@ -2,6 +2,7 @@
 import asyncio
 import io
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -13,7 +14,7 @@ from test_application_boundaries import sign_in
 from moyai.api import COOKIE, create_app
 from moyai.computer import lease
 from moyai.contracts import NewMessage, NewSession
-from moyai.models import ComputerLease, Connection, User, new_id
+from moyai.models import ComputerLease, ComputerOperation, Connection, User, new_id
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
@@ -168,6 +169,48 @@ async def test_control_is_not_acquired_for_an_unstarted_computer(runtime, actor)
         assert response.status_code == 409
     async with runtime.database.sessions() as db:
         assert await db.get(ComputerLease, session.id) is None
+
+
+@pytest.mark.parametrize("failure", ["exit", "reported"])
+async def test_confirmed_guest_failure_allows_immediate_retry_release_and_agent_work(runtime, actor, monkeypatch, failure):
+    session = await finished_computer(runtime, actor)
+
+    class FailedWorkspace:
+        async def write_bytes(self, *_args):
+            pass
+
+        async def run(self, *_args, **_kwargs):
+            return SimpleNamespace(exit_code=1 if failure == "exit" else 0, stdout='{"error":"failed"}')
+
+    monkeypatch.setattr("moyai.computer.Workspace", lambda _backend: FailedWorkspace())
+    async with sign_in(runtime) as client:
+        for _ in range(2):
+            failed = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "start"})
+            assert failed.status_code == 422
+            async with runtime.database.sessions() as db:
+                assert await db.get(ComputerOperation, session.id) is None
+                assert await db.get(ComputerLease, session.id) is None
+        assert (await client.post(f"/api/sessions/{session.id}/computer", json={"action": "release"})).status_code == 200
+    queued = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Continue without the desktop.", request_key="after-confirmed-guest-failure",
+    ))
+    assert (await runtime.database.claim_next()).id == queued.id
+
+
+async def test_ambiguous_desktop_timeout_keeps_operation_ownership(runtime, actor, monkeypatch):
+    session = await finished_computer(runtime, actor)
+
+    async def timeout(*_args):
+        raise TimeoutError("Response was lost.")
+
+    monkeypatch.setattr("moyai.computer.request", timeout)
+    async with sign_in(runtime) as client:
+        failed = await client.post(f"/api/sessions/{session.id}/computer", json={"action": "start"})
+        assert failed.status_code == 503
+        assert (await client.post(f"/api/sessions/{session.id}/computer", json={"action": "release"})).status_code == 409
+    async with runtime.database.sessions() as db:
+        assert await db.get(ComputerOperation, session.id) is not None
+        assert await db.get(ComputerLease, session.id) is not None
 
 
 async def test_shared_computer_still_belongs_to_its_requester(runtime, actor):
