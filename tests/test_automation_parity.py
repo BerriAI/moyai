@@ -278,9 +278,84 @@ def test_ci_check_filters_use_native_check_run_fields():
     assert normalize(trigger,payload|{'check_run':payload['check_run']|{'conclusion':'success'}},'check_run') is None
 
 
-@pytest.mark.parametrize('event',['issue_comment.edited','pull_request_review.dismissed','pull_request_review_comment.edited'])
-def test_legacy_dotted_github_triggers_match_their_own_action(event):
-    trigger,header=event_trigger('github',event),event.partition('.')[0]
-    payload=example(trigger)
-    assert normalize(trigger,payload,header)
-    assert normalize(trigger,payload|{'action':'deleted'},header) is None
+@pytest.mark.parametrize('event,default_action,other_action,item_key,detail_key', [
+    ('issue_comment', 'created', 'edited', 'issue', 'comment'),
+    ('pull_request_review', 'submitted', 'dismissed', 'pull_request', 'review'),
+    ('pull_request_review_comment', 'created', 'edited', 'pull_request', 'comment'),
+])
+def test_github_comment_and_review_action_filters(event, default_action, other_action, item_key, detail_key):
+    payload = {
+        'repository': {'id': 101, 'full_name': 'BerriAI/litellm'},
+        item_key: {'number': 123, 'title': 'Investigate'},
+        detail_key: {'id': 321, 'body': 'Please investigate'},
+    }
+    cases = [
+        (event, '', {default_action}, default_action),
+        (event, other_action, {other_action}, other_action),
+        (f'{event}.{other_action}', '', {other_action}, other_action),
+        (f'{event}.{other_action}', other_action, {other_action}, other_action),
+        # Explicit and legacy action filters must both match.
+        (f'{event}.{other_action}', default_action, set(), default_action),
+    ]
+    for selected_event, selected_action, expected_actions, expected_sample_action in cases:
+        trigger = event_trigger('github', selected_event, action=selected_action)
+        sample = example(trigger)
+        assert sample['action'] == expected_sample_action
+        assert (normalize(trigger, sample, event) is not None) == bool(expected_actions)
+        for action in (default_action, other_action, 'deleted', ''):
+            result = normalize(trigger, payload | {'action': action}, event)
+            assert (result is not None) == (action in expected_actions), (selected_event, selected_action, action)
+            if result is not None:
+                assert result['event'] == selected_event
+                assert result['action'] == action
+
+
+@pytest.mark.parametrize('event,item_key', [('issues', 'issue'), ('pull_request', 'pull_request')])
+@pytest.mark.parametrize('selected_action', ['', 'closed'])
+def test_github_issue_and_pull_request_actions_are_unrestricted_by_default(event, item_key, selected_action):
+    trigger = event_trigger('github', event, action=selected_action)
+    payload = {
+        'repository': {'id': 101, 'full_name': 'BerriAI/litellm'},
+        item_key: {'number': 123, 'title': 'Investigate'},
+    }
+    for action in ('opened', 'edited', 'closed', 'labeled'):
+        result = normalize(trigger, payload | {'action': action}, event)
+        assert (result is not None) == (not selected_action or action == selected_action), action
+
+
+@pytest.mark.parametrize('event,selected_action,expected_action', [
+    ('check_run', '', 'completed'),
+    ('check_run', 'completed', 'completed'),
+    ('check_run', 'rerequested', None),
+    ('check_run.completed', '', 'completed'),
+    ('check_run.rerequested', '', None),
+    ('check_run.completed', 'completed', 'completed'),
+    ('check_run.completed', 'rerequested', None),
+    ('check_run.rerequested', 'completed', None),
+])
+def test_github_check_runs_only_match_completed_actions(event, selected_action, expected_action):
+    trigger = event_trigger('github', event, action=selected_action)
+    payload = {
+        'repository': {'id': 101, 'full_name': 'BerriAI/litellm'},
+        'check_run': {'id': 42, 'name': 'CI', 'status': 'completed', 'conclusion': 'success'},
+    }
+    for action in ('completed', 'created', 'rerequested'):
+        result = normalize(trigger, payload | {'action': action}, 'check_run')
+        assert (result is not None) == (action == expected_action), action
+
+
+@pytest.mark.parametrize('event,header,action,item_key,detail_key', [
+    ('issue_comment', 'issues', 'created', 'issue', 'comment'),
+    ('pull_request_review', 'pull_request_review_comment', 'submitted', 'pull_request', 'review'),
+    ('pull_request_review_comment', 'pull_request_review', 'created', 'pull_request', 'comment'),
+])
+def test_github_action_match_requires_the_correct_event_header(event, header, action, item_key, detail_key):
+    trigger = event_trigger('github', event)
+    payload = {
+        'action': action,
+        'repository': {'id': 101, 'full_name': 'BerriAI/litellm'},
+        item_key: {'number': 123, 'title': 'Investigate'},
+        detail_key: {'id': 321, 'body': 'Please investigate'},
+    }
+    assert normalize(trigger, payload, event)
+    assert normalize(trigger, payload, header) is None
