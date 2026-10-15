@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class GuidanceChanged(PermissionError):
@@ -63,12 +63,21 @@ class RunScope:
 
 
 @dataclass
+class InputImage:
+    digest: str
+    media_type: str
+    name: str
+    data: str = ""  # Hydrated by the activity; encrypted/offloaded in Temporal.
+
+
+@dataclass
 class PreparedTurn:
     scope: RunScope
     prompt: str
     conversation: str | None = None
     workspace: dict[str, Any] | None = None
     deferred_results: dict[str, Any] | None = None
+    images: list[InputImage] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +85,7 @@ class SteeringInput:
     turn_id: str
     prompt: str
     mode: Literal["asap", "when_idle"] = "asap"
+    images: list[InputImage] = field(default_factory=list)
 
 
 @dataclass
@@ -95,18 +105,20 @@ class NewSession(BaseModel):
 
 
 class NewMessage(BaseModel):
-    prompt: str = Field(min_length=1, max_length=500_000)
+    prompt: str = Field(default="", max_length=500_000)
     request_key: str = Field(min_length=1, max_length=200)
     model: str | None = None
     mode: Literal["asap", "when_idle"] = "when_idle"
     connections: list[str] = Field(default_factory=list, max_length=30)
+    attachments: list[str] = Field(default_factory=list, max_length=8)
 
-    @field_validator("prompt")
-    @classmethod
-    def nonblank_prompt(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Enter a message.")
-        return value
+    @model_validator(mode="after")
+    def nonblank_prompt(self) -> NewMessage:
+        if not self.prompt.strip() and not self.attachments:
+            raise ValueError("Enter a message or attach an image.")
+        if len(set(self.attachments)) != len(self.attachments):
+            raise ValueError("An image can only be attached once per message.")
+        return self
 
 
 class SessionEdit(BaseModel):

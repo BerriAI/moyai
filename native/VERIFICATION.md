@@ -81,7 +81,7 @@ The videos join a live running segment with a short live completed-state segment
 
 All five findings on `1eeb2570afb009fe5f8d91aeae6a5e464c838d16` were reproduced and fixed.
 Nine added regression cases fail on that revision and pass with the changes.
-The native suite passes 41 tests, with the opt-in PostgreSQL test qualified separately.
+At fix commit `056fef0`, 41 native tests passed, with PostgreSQL qualified separately.
 
 The actual native API and worker were deployed from the original and changed
 sources with separate local Temporal services, real GPT-6 Astra inference and
@@ -101,6 +101,46 @@ these checks do not qualify delivery to Slack itself.
 Real browser captures show the original pin control remaining "Pin" after
 clicks and the corrected control changing between "Pin" and "Unpin", with its
 saved preference reflected by the session API.
+
+## Native UI, clipboard images and computer control
+
+The before deployment uses the actual native application from
+`056fef0320611a753a442a6812c8af1642ebb6f2`; its imported source path was verified.
+The after deployment uses this checkout's built UI, API and native Temporal
+worker, real GPT-6 Astra through the development gateway, and real Modal.
+
+- Pasting a synthetic PNG into the original composer created no preview and
+  left image-only Send disabled. After adding the same text question, the real
+  model reported that no image was attached.
+- Command+V in the new home and conversation composers produced a removable
+  preview. Sending the image with the same question produced the observed
+  answer **"Violet, 7319."**, matching the image.
+- The Computer panel opened a real desktop in that conversation's existing
+  Modal sandbox. Keyboard paste and Enter in its terminal wrote
+  `/workspace/manual-proof.txt` and displayed **"Native computer control works."**.
+- An agent request remained `queued`, with no active turn, while human control
+  was held. After release, the same native workspace was available to the agent.
+  The first read encountered a gateway HTTP 503; a subsequent read-only request
+  succeeded and returned the file's exact contents.
+- Browser checks measured 1440-, 768- and 320-pixel widths without horizontal
+  document overflow. Mobile navigation and clipboard-preview removal were
+  exercised. Real captures show the app and sandbox; there is no reconstructed
+  UI or scripted model response in this proof.
+
+Automated coverage additionally checks encrypted image admission and native
+Temporal input, invalid/corrupt image rejection, private upload access, forbidden
+cross-conversation reuse, control lease admission/expiry, requester-only computer
+access, revoked connection grants, and releasing control from another tab while
+input is in flight.
+
+The final native suite passed **52 tests**, including disposable PostgreSQL
+qualification. Ruff, Pyright, native TypeScript/build, and wheel/sdist packaging
+also passed. A fresh live demo read the image, wrote and ran
+`/workspace/native-demo.txt`, and saved a download containing `VIOLET\n7319\n`.
+Its SHA-256 is
+`d6aee3ae50ae7b717a61ab6c073e75e5812b84464feeb50075478ab40957258a`.
+The guarded desktop then ran `cat` on that same file, and the release-control
+keyboard shortcut was exercised through the browser.
 
 ## Reproduce the native app
 

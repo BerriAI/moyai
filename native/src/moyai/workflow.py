@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.workspaces import WorkspaceRef, WorkspaceUnavailableError
 
     from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
+    from .images import prompt_content
     from .runtime import current
 
 
@@ -75,7 +76,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             try:
                 enqueue_id = self.agent_run.enqueue(
                     ModelRequest(
-                        parts=[UserPromptPart(content=value.prompt)],
+                        parts=[UserPromptPart(content=prompt_content(value.prompt, value.images) or "")],
                         metadata={
                             "moyai_input_id": value.turn_id, "moyai_parent_turn_id": self.turn_id,
                         },
@@ -111,7 +112,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                 if prepared.deferred_results else None
             )
             async with self.events, runtime.agent.iter(
-                prepared.prompt or None,
+                prompt_content(prepared.prompt, prepared.images),
                 conversation=conversation,
                 run_id=turn_id,
                 model=runtime.models[prepared.scope.model],

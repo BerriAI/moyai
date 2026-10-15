@@ -21,8 +21,10 @@ from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse, ask_us
 from sqlalchemy import select, update
 from temporalio.service import RPCError
 
+from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
+from .images import routes as image_routes
 from .models import Artifact, Connection, Effect, Message, Session, SessionPreference, Turn, User, new_id, now
 from .presentation import public_event, redact, saved_activity
 from .runtime import Runtime
@@ -131,6 +133,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if not hmac.compare_digest(csrf, identity["csrf"]):
                 raise HTTPException(403, "Refresh the page before making changes.")
         return user
+
+    app.include_router(image_routes(runtime, actor))
+    app.include_router(computer_routes(runtime, actor))
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -529,6 +534,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     if STATIC.is_dir():
         app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
+
+    @app.get("/static/models/moyai.glb")
+    async def sculpture():
+        return FileResponse(STATIC / "moyai.glb", media_type="model/gltf-binary")
 
     @app.get("/{path:path}")
     async def frontend(path: str):

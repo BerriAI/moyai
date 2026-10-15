@@ -129,6 +129,39 @@ class Event(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
+class Upload(Base):
+    __tablename__ = "moyai_uploads"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("moyai_sessions.id"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    media_type: Mapped[str] = mapped_column(String(100))
+    digest: Mapped[str] = mapped_column(String(64))
+    size: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class TurnImage(Base):
+    __tablename__ = "moyai_turn_images"
+    turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_turns.id"), primary_key=True)
+    upload_id: Mapped[str] = mapped_column(ForeignKey("moyai_uploads.id"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer)
+
+
+class ComputerLease(Base):
+    __tablename__ = "moyai_computer_leases"
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"))
+    expires_at: Mapped[int] = mapped_column(Integer)
+
+
+class ComputerOperation(Base):
+    __tablename__ = "moyai_computer_operations"
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), primary_key=True)
+    identity: Mapped[str] = mapped_column(String(36))
+    expires_at: Mapped[int] = mapped_column(Integer)
+
+
 class Connection(Base):
     __tablename__ = "moyai_connections"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

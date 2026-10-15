@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from temporalio.testing import WorkflowEnvironment
 
 from moyai.api import create_app
+from moyai.computer import lease
 from moyai.contracts import NewMessage, NewSession
-from moyai.models import Artifact, Delivery, User, new_id
+from moyai.models import Artifact, Delivery, Session, User, new_id
 from moyai.runtime import Runtime
 from moyai.settings import Settings
 from moyai.slack import deliver_one
@@ -77,6 +78,18 @@ async def test_native_postgres_stores_in_temporal(tmp_path, monkeypatch):
             saved = await db.scalar(select(Artifact).where(Artifact.turn_id == turn.id))
             assert saved.name == "proof.txt"
         await qualify_pool_wait(runtime, session.id, turn.id, monkeypatch)
+        # Qualify the admission policy in PostgreSQL without making a provider
+        # call: the real Modal desktop is exercised by the separate live proof.
+        async with runtime.database.sessions.begin() as db:
+            saved_session = await db.get(Session, session.id)
+            saved_session.workspace = json.dumps({"provider": "modal", "id": "policy-only"})
+        await lease(runtime, session.id, actor, "claim")
+        following = await runtime.database.submit(actor, session.id, NewMessage(
+            prompt="Continue after handoff.", request_key="postgres-human-control",
+        ))
+        assert await runtime.database.claim_next() is None
+        await lease(runtime, session.id, actor, "release")
+        assert (await runtime.database.claim_next()).id == following.id
     finally:
         await runtime.close()
         await admin.execute(f"DROP DATABASE {name} WITH (FORCE)")

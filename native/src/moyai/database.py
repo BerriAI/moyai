@@ -19,8 +19,30 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from .contracts import Grant, GuidanceChanged, NewMessage, NewSession, PreparedTurn, RunScope, SteeringInput
-from .models import Base, Connection, LoginAttempt, Message, Session, Turn, User, new_id, now
+from .contracts import (
+    Grant,
+    GuidanceChanged,
+    InputImage,
+    NewMessage,
+    NewSession,
+    PreparedTurn,
+    RunScope,
+    SteeringInput,
+)
+from .models import (
+    Base,
+    ComputerLease,
+    Connection,
+    LoginAttempt,
+    Message,
+    Session,
+    Turn,
+    TurnImage,
+    Upload,
+    User,
+    new_id,
+    now,
+)
 from .security import Security, password_hash
 from .settings import Settings
 
@@ -135,13 +157,22 @@ class Database:
     async def messages(self, actor: User, session_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         async with self.sessions() as db:
             await self.allowed_session(db, session_id, actor)
-            rows = await db.scalars(select(Message).where(
+            rows = list((await db.scalars(select(Message).where(
                 Message.session_id == session_id, Message.id > after
-            ).order_by(Message.id).limit(200))
+            ).order_by(Message.id).limit(200))).all())
+            pictures: dict[str, list[dict]] = {}
+            if rows:
+                for link, upload in (await db.execute(select(TurnImage, Upload).join(
+                    Upload, Upload.id == TurnImage.upload_id
+                ).where(TurnImage.turn_id.in_([row.turn_id for row in rows])).order_by(TurnImage.position))).all():
+                    pictures.setdefault(link.turn_id, []).append({
+                        "id": upload.id, "name": upload.name, "media_type": upload.media_type, "size": upload.size,
+                    })
             return [{
                 "id": row.id, "turn_id": row.turn_id, "role": row.role,
                 "author_id": row.author_id, "content": self.security.unseal(row.content).decode(),
                 "created_at": row.created_at,
+                "attachments": pictures.get(row.turn_id, []) if row.role == "user" else [],
             } for row in rows]
 
     async def submit(self, actor: User, session_id: str, body: NewMessage) -> Turn:
@@ -209,6 +240,16 @@ class Database:
                     turn.status = "steering"
             db.add(turn)
             await db.flush()
+            for position, image_id in enumerate(body.attachments):
+                # Reserve the upload's destination atomically before publishing
+                # it into a conversation, including concurrent first attachment.
+                image = await db.scalar(update(Upload).where(
+                    Upload.id == image_id, Upload.owner_id == actor.id,
+                    or_(Upload.session_id.is_(None), Upload.session_id == session_id),
+                ).values(session_id=session_id).returning(Upload.id))
+                if image is None:
+                    raise HTTPException(404, "An image is unavailable in this conversation.")
+                db.add(TurnImage(turn_id=turn.id, upload_id=image_id, position=position))
             db.add(Message(
                 session_id=session_id, turn_id=turn_id, author_id=actor.id,
                 role="user", content=self.security.seal(body.prompt),
@@ -216,7 +257,7 @@ class Database:
             ))
             session.updated_at = now()
             if session.title == "New conversation":
-                session.title = body.prompt.strip().splitlines()[0][:100]
+                session.title = body.prompt.strip().splitlines()[0][:100] if body.prompt.strip() else "Image conversation"
             session.model = model
         return turn
 
@@ -244,13 +285,24 @@ class Database:
             ).where(
                 Turn.status == "queued", Session.active_turn.is_(None),
                 Session.deleted.is_(False),
+                ~select(ComputerLease.session_id).where(
+                    ComputerLease.session_id == Session.id, ComputerLease.expires_at > time.time(),
+                ).exists(),
             ).order_by(Turn.created_at, Turn.id).limit(20))).all()
             for turn in candidates:
                 claimed = await db.scalar(update(Session).where(
                     Session.id == turn.session_id, Session.active_turn.is_(None),
                     Session.deleted.is_(False),
-                ).values(active_turn=turn.id, status="queued", updated_at=now()).returning(Session.id))
+                ).values(revision=Session.revision + 1).returning(Session.id))
                 if claimed is not None:
+                    # Read after acquiring the shared session row. A claim that
+                    # waited for human control must see its freshly committed lease.
+                    control = await db.get(ComputerLease, turn.session_id)
+                    if control and control.expires_at > time.time():
+                        continue
+                    await db.execute(update(Session).where(Session.id == turn.session_id).values(
+                        active_turn=turn.id, status="queued", updated_at=now(),
+                    ))
                     turn.status = "starting"
                     return turn
         return None
@@ -318,7 +370,7 @@ class Database:
                     else:
                         history.append(ModelRequest(parts=[UserPromptPart(
                             content=f"Earlier public message by {message.author_id}:\n{content}"
-                        )]))
+                        )], metadata={"moyai_public_turn": message.turn_id}))
                 conversation = ConversationTypeAdapter.dump_json(
                     Conversation(messages=history, conversation_id=scope.conversation_id)
                 ).decode()
@@ -423,6 +475,15 @@ class Database:
                         content=self.security.seal(output), identity=f"answer:{turn.id}",
                     ))
             return True
+
+    async def input_images(self, turn_id: str, *, session_id: str | None = None) -> list[InputImage]:
+        async with self.sessions() as db:
+            query = select(Upload).join(TurnImage, TurnImage.upload_id == Upload.id).where(
+                TurnImage.turn_id == turn_id
+            ).order_by(TurnImage.position)
+            if session_id is not None:
+                query = query.where(Upload.session_id == session_id)
+            return [InputImage(row.digest, row.media_type, row.name) for row in (await db.scalars(query)).all()]
 
     async def settle(self, turn_id: str, *, snapshot: str | None = None, warning: str | None = None) -> None:
         async with self.sessions.begin() as db:

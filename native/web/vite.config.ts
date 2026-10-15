@@ -4,6 +4,7 @@ import { resolve } from "node:path"
 
 export default defineConfig({
   root: __dirname,
+  publicDir: resolve(__dirname, "../../app/static/models"),
   plugins: [tailwindcss()],
   resolve: { alias: { "@": resolve(__dirname, "../../frontend") } },
   build: {

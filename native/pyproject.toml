@@ -17,6 +17,7 @@ dependencies = [
     "cryptography>=44",
     "itsdangerous>=2.2,<3",
     "boto3>=1.43,<2",
+    "pillow>=12.3,<13",
 ]
 
 [dependency-groups]
@@ -41,6 +42,7 @@ packages = ["src/moyai"]
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "moyai/resources/skills"
 "instructions.md" = "moyai/resources/instructions.md"
+"desktop.py" = "moyai/resources/desktop.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, Archive, Check, FileDown, FolderOpen, Link2, LogOut, Menu, MessageSquare, Pin, Plus, Square, X } from "lucide-react"
+import { ArrowUp, Archive, Check, FileDown, FolderOpen, Link2, LogOut, Menu, MessageSquare, PanelRightClose, Pin, Plus, Search, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -12,11 +12,16 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import "@/theme.css"
 import "./style.css"
 import logo from "../../app/static/moyai-logo.png"
+import { api, setCsrf } from "./api"
+import { AttachButton, ImagePreviews, UploadedImage, useImages } from "./attachments"
+import { ComputerPanel } from "./computer"
+
+const Home = React.lazy(() => import("./home").then(module => ({ default: module.Home })))
 
 type Me = { user: { id: string; name: string; role: string }; csrf: string; models: string[]; default_model: string }
 type Session = { id: string; title: string; owner_id: string; visibility: string; surface: string; model: string; status: string; active_turn: string | null; archived: boolean; pinned?: boolean; save_warning?: string; workspace?: { id: string; provider: string } }
 type Turn = { id: string; actor_id: string; status: string; connections: string[]; error?: string; usage: { requests?: number; input_tokens?: number; output_tokens?: number } }
-type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string }
+type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; attachments?: UploadedImage[] }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean }
 type File = { id: string; name: string; size: number }
 type Plan = { id: string; content: string; status: string }
@@ -26,20 +31,6 @@ type Effect = { id: string; turn_id: string; tool_name: string; arguments: unkno
 type View = { session: Session; turns: Turn[]; pending?: Pending; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = { type: string; name?: string; text?: string; content?: string; arguments?: unknown; data?: unknown }
 type Question = { header: string; question: string; multi_select?: boolean; options: { label: string; description?: string }[] }
-let csrf = ""
-
-async function api<T>(path: string, method = "GET", body?: unknown, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    method, signal, headers: { "Content-Type": "application/json", "X-Moyai-CSRF": csrf },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  const value = await response.json()
-  if (!response.ok) {
-    if (response.status === 401) window.dispatchEvent(new Event("moyai:signed-out"))
-    throw new Error(typeof value.detail === "string" ? value.detail : "The request could not be completed.")
-  }
-  return value
-}
 
 function Choice({ value, onChange, options, label }: { value: string; onChange: (value: string) => void; options: { value: string; label: string }[]; label: string }) {
   return <Select value={value} onValueChange={onChange}>
@@ -59,6 +50,7 @@ function App() {
   const [archived, setArchived] = useState(false)
   const [search, setSearch] = useState("")
   const [mobileNav, setMobileNav] = useState(false)
+  const searchInput = useRef<HTMLInputElement>(null)
   const refresh = useCallback(async () => {
     const [rows, accounts] = await Promise.all([
       api<Session[]>(`/sessions?archived=${archived}`), api<Connection[]>("/connections"),
@@ -67,12 +59,19 @@ function App() {
   }, [archived])
 
   useEffect(() => {
-    api<Me>("/me").then(value => { csrf = value.csrf; setMe(value) }).catch(() => {}).finally(() => setReady(true))
-    const signedOut = () => { csrf = ""; setMe(null); setSessions([]); setConnections([]) }
+    api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
+    const signedOut = () => { setCsrf(""); setMe(null); setSessions([]); setConnections([]) }
     const navigate = () => { setSelected(location.hash.slice(1)); setMobileNav(false) }
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (event.key.toLowerCase() === "k") { event.preventDefault(); setMobileNav(true); searchInput.current?.focus() }
+      if (event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); location.hash = "" }
+    }
     window.addEventListener("moyai:signed-out", signedOut)
     window.addEventListener("hashchange", navigate)
-    return () => { window.removeEventListener("moyai:signed-out", signedOut); window.removeEventListener("hashchange", navigate) }
+    window.addEventListener("keydown", shortcut)
+    return () => { window.removeEventListener("moyai:signed-out", signedOut); window.removeEventListener("hashchange", navigate); window.removeEventListener("keydown", shortcut) }
   }, [])
   useEffect(() => {
     if (!me) return
@@ -86,23 +85,17 @@ function App() {
     return () => { live = false; clearTimeout(timer) }
   }, [me, refresh])
 
-  async function create() {
-    try {
-      const session = await api<Session>("/sessions", "POST", {})
-      location.hash = session.id; await refresh()
-    } catch (e) { setError(String(e)) }
-  }
-
   if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
-  if (!me) return <Login onLogin={value => { csrf = value.csrf; setMe(value); setError("") }} />
+  if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError("") }} />
   const filtered = sessions.filter(row => row.title.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
   return <div className="app">
     <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-      <a href="#" className="brand"><img src={logo} alt="" /><span>Moyai</span></a>
-      <Button className="new-chat" onClick={create}><Plus />New conversation</Button>
-      <Input aria-label="Find conversations" placeholder="Find a conversation…" value={search} onChange={e => setSearch(e.target.value)} />
-      <div className="rail-caption"><span>{archived ? "Archived" : "Conversations"}</span><Button size="icon-sm" variant="ghost" aria-label={archived ? "Show active conversations" : "Show archived conversations"} onClick={() => setArchived(!archived)}><Archive /></Button></div>
+      <a href="#" className="brand"><img src={logo} alt="" /><span>Moyai<small>LiteLLM</small></span></a>
+      <Button variant="secondary" className="new-chat" onClick={() => { location.hash = "" }}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
+      <div className="rail-search"><Search size={16} /><Input ref={searchInput} aria-label="Find conversations" placeholder="Search sessions…" value={search} onChange={e => setSearch(e.target.value)} /><span className="key-hint">⌘K</span></div>
+      <Button variant="ghost" className="rail-button" onClick={() => setShowConnections(true)}><Link2 />Connections</Button>
+      <div className="rail-caption"><span>{archived ? "Archived sessions" : "All sessions"} <small>{filtered.length}</small></span><Button size="icon-sm" variant="ghost" aria-label={archived ? "Show active conversations" : "Show archived conversations"} onClick={() => setArchived(!archived)}><Archive /></Button></div>
       <nav aria-label="Conversations" className="session-list">
         {filtered.map(row => <a key={row.id} href={`#${row.id}`} className={`session-row ${selected === row.id ? "selected" : ""}`} aria-current={selected === row.id ? "page" : undefined}>
           {row.pinned ? <Pin size={15} /> : <MessageSquare size={15} />}
@@ -110,7 +103,6 @@ function App() {
         </a>)}
         {!filtered.length && <p className="muted empty-rail">{search ? "No conversations match." : "Your conversations will appear here."}</p>}
       </nav>
-      <Button variant="ghost" className="rail-button" onClick={() => setShowConnections(true)}><Link2 />Connections</Button>
       <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => { await api("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")) }}><LogOut /></Button></div>
     </aside>
     <main className="main">
@@ -118,7 +110,7 @@ function App() {
       {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
       {selected
         ? <Conversation key={`${me.user.id}:${selected}`} id={selected} me={me} connections={connections} refreshList={refresh} />
-        : <div className="welcome"><div className="orbit"><img src={logo} alt="" /></div><h1>What are we working on?</h1><p>A place to think, build, and follow through.</p><Button onClick={create}><Plus />Start a conversation</Button></div>}
+        : <React.Suspense fallback={<div className="center muted">Opening workspace…</div>}><Home models={me.models} defaultModel={me.default_model} onCreated={refresh} /></React.Suspense>}
     </main>
     <Connections open={showConnections} onOpenChange={setShowConnections} me={me} connections={connections} refresh={refresh} />
   </div>
@@ -132,7 +124,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
     const form = new FormData(e.currentTarget)
     try {
       const result = await api<{ csrf: string }>("/login", "POST", Object.fromEntries(form))
-      csrf = result.csrf; onLogin(await api<Me>("/me"))
+      setCsrf(result.csrf); onLogin(await api<Me>("/me"))
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }}>
     <img src={logo} alt="" /><h1>Welcome to Moyai</h1><p className="muted">Sign in to your workspace.</p>
@@ -153,9 +145,12 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([])
   const [mode, setMode] = useState("when_idle")
   const [error, setError] = useState("")
+  const pictures = useImages(setError)
   const [busy, setBusy] = useState(false)
   const [activity, setActivity] = useState<Activity[]>([])
-  const [panel, setPanel] = useState("activity")
+  const [panel, setPanel] = useState("computer")
+  const [panelOpen, setPanelOpen] = useState(true)
+  const [computerExpanded, setComputerExpanded] = useState(false)
   const [editing, setEditing] = useState<Message | null>(null)
   const [editText, setEditText] = useState("")
   const [renaming, setRenaming] = useState(false)
@@ -217,14 +212,14 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
   }, [activeId, id, load])
 
   async function send() {
-    if (!draft.trim() || busy) return
+    if ((!draft.trim() && !pictures.images.length) || busy || pictures.uploading) return
     setBusy(true); setError("")
-    const body = { prompt: draft, model, mode, connections: selectedAccounts }
+    const body = { prompt: draft, model, mode, connections: selectedAccounts, attachments: pictures.images.map(image => image.id) }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
     try {
       await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: lastRequest.current.key })
-      setDraft(""); lastRequest.current = null; await load(); await refreshList()
+      setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
   async function editSession(body: object) {
@@ -240,9 +235,10 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
         {session.owner_id === me.user.id && <Button variant="ghost" size="sm" onClick={() => { setTitle(session.title); setRenaming(true) }}>Rename</Button>}
         <Button variant="ghost" size="icon" aria-label={session.pinned ? "Unpin conversation" : "Pin conversation"} aria-pressed={Boolean(session.pinned)} onClick={() => editSession({ pinned: !session.pinned })}><Pin /></Button>
         {session.owner_id === me.user.id && <Button variant="ghost" size="icon" aria-label={session.archived ? "Restore conversation" : "Archive conversation"} onClick={() => editSession({ archived: !session.archived })}><Archive /></Button>}
+        <Button variant="ghost" size="icon" aria-label={panelOpen ? "Hide workspace panel" : "Show workspace panel"} onClick={() => setPanelOpen(!panelOpen)}><PanelRightClose /></Button>
       </div>
     </header>
-    <div className="workspace">
+    <div className={`workspace ${panelOpen ? "with-panel" : "panel-closed"} ${computerExpanded && panel === "computer" ? "computer-expanded" : ""}`}>
       <section className="chat">
         <div className="transcript" ref={transcript}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
@@ -254,6 +250,7 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : message.content}</div>
+              <ImagePreviews images={message.attachments ?? []} />
               {message.author_id === me.user.id && turn?.status === "queued" && <div className="inline-actions">
                 <Button size="sm" variant="ghost" onClick={() => { setEditing(message); setEditText(message.content) }}>Edit queued message</Button>
                 <Button size="sm" variant="ghost" onClick={async () => { try { await api(`/turns/${turn.id}`, "DELETE"); await load() } catch (e) { setError(String(e)) } }}>Cancel</Button>
@@ -270,27 +267,32 @@ function Conversation({ id, me, connections, refreshList }: { id: string; me: Me
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
           <div className="composer">
-            <Textarea aria-label="Message Moyai" placeholder="Describe the work…" value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <ImagePreviews images={pictures.images} remove={pictures.remove} />
+            <Textarea aria-label="Message Moyai" placeholder="Describe the work…" value={draft} onChange={e => setDraft(e.target.value)} onPaste={pictures.paste} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
             <div className="composer-actions">
+              <AttachButton add={pictures.add} disabled={pictures.uploading || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
                 {session.active_turn && <><Choice value={mode} onChange={setMode} label="Delivery timing" options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /><Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button></>}
-                <Button type="submit" size="icon" aria-label="Send message" disabled={!draft.trim() || busy || session.status === "waiting"}><ArrowUp /></Button>
+                <Button type="submit" size="icon" aria-label="Send message" disabled={(!draft.trim() && !pictures.images.length) || busy || pictures.uploading || session.status === "waiting"}><ArrowUp /></Button>
               </div>
             </div>
           </div>
           {session.surface !== "slack" && connections.some(item => item.enabled) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary><div className="connection-options">{connections.filter(item => item.enabled && (session.visibility === "private" || item.shared)).map(item => <label key={item.id}><Checkbox checked={selectedAccounts.includes(item.id)} onCheckedChange={checked => setSelectedAccounts(values => checked ? [...values, item.id] : values.filter(value => value !== item.id))} />{item.name}<span className="muted">{item.read_only ? "Read only" : "Can make changes"}</span></label>)}</div></details>}
-          <p className="composer-hint">Enter to send · Shift+Enter for a new line</p>
+          <p className="composer-hint">{pictures.uploading ? "Uploading images…" : "Paste images · Enter to send · Shift+Enter for a new line"}</p>
         </form>
       </section>
-      <aside className="details-panel" aria-label="Conversation details">
-        <div className="panel-tabs">{["activity", "plan", "files"].map(tab => <Button key={tab} variant={panel === tab ? "secondary" : "ghost"} size="sm" aria-pressed={panel === tab} onClick={() => setPanel(tab)}>{tab === "files" ? `Files${files.length ? ` (${files.length})` : ""}` : tab === "plan" ? "Plan" : "Activity"}</Button>)}</div>
+      {panelOpen && <aside className="details-panel" aria-label="Conversation details">
+        <div className="panel-tabs">{["computer", "activity", "plan", "files"].map(tab => <Button key={tab} variant={panel === tab ? "secondary" : "ghost"} size="sm" aria-pressed={panel === tab} onClick={() => setPanel(tab)}>{tab === "files" ? `Files${files.length ? ` (${files.length})` : ""}` : tab === "plan" ? "Plan" : tab === "computer" ? "Computer" : "Activity"}</Button>)}</div>
         <div className="panel-body">
+          {panel === "computer" && (session.visibility === "private"
+            ? <ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} expanded={computerExpanded} onExpand={() => setComputerExpanded(!computerExpanded)} />
+            : <div className="panel-empty"><FolderOpen /><p>Use a private session to view and control a computer. Shared sessions keep agent activity, plans and saved files available here.</p></div>)}
           {panel === "activity" && <>{!activity.length && <div className="panel-empty"><MessageSquare /><p>{session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{activity.map((item, index) => <ActivityRow key={index} item={item} />)}{session.workspace && <div className="computer-info"><span className="muted">Conversation computer</span><p>Attached</p><code>{session.workspace.id}</code></div>}</>}
           {panel === "plan" && <>{!plan.length && <div className="panel-empty"><Check /><p>Moyai’s task plan will appear here.</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>}
           {panel === "files" && <>{!files.length && <div className="panel-empty"><FolderOpen /><p>Finished files appear here when Moyai saves them for you.</p></div>}{files.map(file => <a className="file-row" key={file.id} href={`/api/files/${file.id}`} download><FileDown size={18} /><span>{file.name}<small>{(file.size / 1024).toFixed(1)} KB</small></span></a>)}</>}
         </div>
-      </aside>
+      </aside>}
     </div>
     <Dialog open={Boolean(editing)} onOpenChange={open => { if (!open) setEditing(null) }}><DialogContent><DialogHeader><DialogTitle>Edit queued message</DialogTitle><DialogDescription>Only messages that have not started can be changed.</DialogDescription></DialogHeader><Textarea aria-label="Queued message" value={editText} onChange={e => setEditText(e.target.value)} /><Button onClick={async () => { try { await api(`/turns/${editing!.turn_id}`, "PATCH", { prompt: editText }); setEditing(null); await load() } catch (e) { setError(String(e)); setEditing(null) } }}>Save message</Button></DialogContent></Dialog>
     <Dialog open={renaming} onOpenChange={setRenaming}><DialogContent><DialogHeader><DialogTitle>Rename conversation</DialogTitle><DialogDescription>Choose a title you can find later.</DialogDescription></DialogHeader><Input aria-label="Conversation title" value={title} onChange={e => setTitle(e.target.value)} /><Button disabled={!title.trim()} onClick={async () => { await editSession({ title }); setRenaming(false) }}>Save title</Button></DialogContent></Dialog>

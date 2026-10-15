@@ -75,6 +75,46 @@ after the live computer expires.
 `moyai dev` is for local development. Its Temporal history and application data
 live in `DATA_DIR`. Keep that directory private and preserve its encryption key.
 
+## Images and the computer
+
+The native interface reuses Moyai's navigation style, home constellation and
+interactive sculpture. Start a task directly from the home composer, or continue
+an existing conversation beside the Computer, Activity, Plan and Files panel.
+
+Paste an image with Command/Ctrl+V or choose **Attach**. Both composers show
+removable previews and support image-only messages. PNG, JPEG, GIF and WebP
+uploads are limited to eight images per message, 8 MB and 20 megapixels per
+image. Uploads are validated and stored in encrypted objects; admission binds
+each upload to its owner's chosen conversation. The worker supplies native
+Pydantic `BinaryContent`, including when steering a run.
+
+After a task creates its Modal workspace, choose **Computer → Open computer**.
+This opens a real X desktop in the same sandbox, with a terminal and Chromium.
+Use **Take control** to click, type, paste text and scroll; **Open browser** opens
+an HTTP(S) address, and **Screenshot** downloads the current view. Expand the
+panel for more space. **Release control** or Ctrl+Shift+Escape returns control.
+
+Desktop access requires a private conversation and rechecks the workspace's
+account grants. Shared sessions retain agent execution, activity, plans and
+saved files, but do not expose a personal browser profile to other requesters.
+A persistent database lease keeps new
+agent tasks queued while a person has control. Taking control requires the
+active task to finish or acknowledge Stop. Abandoned leases expire. Input is
+serialized in the UI and guest; uncertain input is not automatically repeated.
+An in-flight action also prevents another tab from releasing control, and
+expired input is rejected in the guest before dispatch.
+The desktop uses the native workspace API and private Modal exec, without
+exposing VNC or a browser debugging port.
+
+Files and browser sign-ins placed in this private computer are accessible to
+code running there after handoff. Restrictions on the app's connected-service
+tools do not restrict an account signed into manually inside Chromium.
+
+Existing computers install the desktop prerequisites on first opening; new
+images include them. This adds basic viewing/control, not every legacy computer
+feature. Desktop recording, automatic workspace restoration, and restored
+browser-login workflows remain outside this implementation.
+
 ## Separate API and workers
 
 Configure a Temporal service, `TEMPORAL_TASK_QUEUE`, a dedicated PostgreSQL
@@ -244,7 +284,7 @@ qualification gaps. No fixture run substitutes for that proof.
 
 The exact legacy swarm/goal rules, automation editor and event sources, skill
 learning and personal library editing, quote-based memory review, SSO, billing
-reconciliation dashboards, browser takeover/recording, automatic computer restore,
+reconciliation dashboards, desktop recording, automatic computer restore,
 and legacy-data migration remain explicit product work.
 
 Use native Pydantic/Harness capabilities and Temporal primitives for those

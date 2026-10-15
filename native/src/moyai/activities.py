@@ -11,6 +11,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
+from .images import hydrate
 from .runtime import current
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,11 @@ SNAPSHOT_WARNING = (
 @activity.defn(name="moyai_prepare_turn_v1")
 async def prepare_turn(turn_id: str) -> PreparedTurn:
     try:
-        return await current().database.prepare(turn_id)
+        runtime = current()
+        prepared = await runtime.database.prepare(turn_id)
+        prepared.images = await runtime.database.input_images(turn_id, session_id=prepared.scope.session_id)
+        await hydrate(runtime, prepared)
+        return prepared
     except PermissionError as error:
         raise ApplicationError(str(error), type="PermissionDenied", non_retryable=True) from error
 
@@ -82,7 +87,11 @@ async def stopped_turn(turn_id: str, conversation: str | None) -> None:
 
 @activity.defn(name="moyai_prepare_steering_v1")
 async def prepare_steering(parent_id: str, turn_id: str) -> SteeringInput:
-    return await current().database.prepare_steering(parent_id, turn_id)
+    runtime = current()
+    prepared = await runtime.database.prepare_steering(parent_id, turn_id)
+    prepared.images = await runtime.database.input_images(turn_id)
+    await hydrate(runtime, prepared)
+    return prepared
 
 
 @activity.defn(name="moyai_steering_receipt_v1")

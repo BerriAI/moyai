@@ -239,9 +239,12 @@ def make_agent(
     if workspace is None:
         image = (
             modal.Image.debian_slim(python_version="3.13")
-            .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm")
-            .pip_install("uv", "pytest")
+            .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm",
+                         "xvfb", "openbox", "xterm", "xdotool", "chromium",
+                         "x11-xserver-utils", "fonts-dejavu-core")
+            .pip_install("uv", "pytest", "pillow==12.3.0")
             .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)
+            .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
         )
         workspace = ModalSandbox(
             image=image, app_name=settings.modal_app, working_dir="/workspace",

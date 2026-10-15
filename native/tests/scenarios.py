@@ -5,12 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 
 def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Event] | None = None) -> FunctionModel:
     def response(messages, info):
+        if scenario == "image":
+            images = [
+                value for message in messages for part in message.parts
+                if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+                for value in part.content if isinstance(value, BinaryContent)
+            ]
+            assert len(images) == 1 and images[0].media_type == "image/png"
+            assert images[0].data.startswith(b"\x89PNG\r\n\x1a\n")
+            return ModelResponse(parts=[TextPart("PNG image received natively.")])
         prompts = "\n".join(
             str(part.content) for message in messages for part in message.parts
             if isinstance(part, UserPromptPart)

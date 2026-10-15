@@ -13,6 +13,14 @@ a model's opinion, or a passing test double as proof of real application behavio
 Inspect repository instructions before editing and preserve unrelated work.
 Model and Modal account credentials stay outside the computer.
 
+The web app has a Computer panel connected to this same workspace. People can
+open its desktop, take control while the task is idle, click/type, and open a
+browser. Agent tasks wait while a person holds control. To open the desktop
+yourself, run `python /opt/moyai/desktop.py '{"action":"start"}'` with the native
+shell tool; desktop applications use DISPLAY=:99. Do not claim that the user
+cannot view or interact with the computer. Clipboard images attached to messages
+are provided as native image input.
+
 Delegate bounded research and review to native subagents. They share the coding
 computer: give them read-only tasks or explicit disjoint paths, and do not let
 parallel agents edit the same files. You own the combined result.
