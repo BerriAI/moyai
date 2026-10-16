@@ -63,17 +63,23 @@ async def test_concurrent_dispatch_claims_only_one_turn_per_session(runtime, act
     assert len([claim for claim in claims if claim is not None]) == 1
 
 
-async def test_private_session_rejects_another_admin(runtime, actor):
-    session = await runtime.database.create_session(actor, NewSession())
+@pytest.mark.parametrize("visibility", [None, "shared", "private"])
+async def test_session_visibility_controls_another_admin_access(runtime, actor, visibility):
+    body = NewSession() if visibility is None else NewSession(visibility=visibility)
+    session = await runtime.database.create_session(actor, body)
     async with runtime.database.sessions.begin() as db:
         other = User(
             id=new_id(), username="another", display_name="Other administrator",
             password=password_hash("another-password-123"), role="admin",
         )
         db.add(other)
-    with pytest.raises(HTTPException) as caught:
-        await runtime.database.session(other, session.id)
-    assert caught.value.status_code == 404
+    if visibility == "private":
+        with pytest.raises(HTTPException) as caught:
+            await runtime.database.session(other, session.id)
+        assert caught.value.status_code == 404
+    else:
+        assert session.visibility == "shared"
+        assert (await runtime.database.session(other, session.id)).id == session.id
 
 
 async def test_preparation_retries_keep_original_conversation(runtime, active):
@@ -107,7 +113,7 @@ async def test_revoked_connection_cannot_dispatch(runtime, actor):
             credential=runtime.security.seal("not-a-real-provider-token"),
         )
         db.add(connection)
-    session = await runtime.database.create_session(actor, NewSession())
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="Read the repository", request_key="grant", connections=[connection.id]
     ))

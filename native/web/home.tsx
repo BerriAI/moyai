@@ -30,7 +30,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 }) {
   const [draft, setDraft] = useState("")
   const [model, setModel] = useState(defaultModel)
-  const [privateSession, setPrivateSession] = useState(individual)
+  const [privateSession, setPrivateSession] = useState(false)
   const isPrivate = individual && privateSession
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")

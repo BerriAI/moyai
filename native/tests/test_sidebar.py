@@ -45,7 +45,7 @@ async def test_personal_folders_rename_memberships_and_remove_without_archiving(
 
 async def test_participation_read_state_and_preferences_do_not_reorder_other_peoples_sessions(runtime, actor):
     shared = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    private = await runtime.database.create_session(actor, NewSession())
+    private = await runtime.database.create_session(actor, NewSession(visibility="private"))
     async with sign_in(runtime) as owner, member_client(runtime) as (member, other):
         assert [row["id"] for row in (await member.get("/api/sessions")).json()] == [shared.id]
         assert not (await member.get("/api/sessions")).json()[0]["participated"]

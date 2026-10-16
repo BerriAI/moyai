@@ -47,7 +47,7 @@ async def saved_file(
     runtime, actor, raw=b"Preview content.", *, name="report.txt", media_type="text/plain",
     kind="artifact", session=None, size=None,
 ):
-    session = session or await runtime.database.create_session(actor, NewSession())
+    session = session or await runtime.database.create_session(actor, NewSession(visibility="private"))
     digest = await runtime.objects.put(raw)
     fields = {
         "id": new_id(), "session_id": session.id, "name": name, "media_type": media_type,
