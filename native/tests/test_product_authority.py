@@ -66,9 +66,11 @@ async def admitted_product(prepared_product_database):
     return product
 
 
-async def active_turn(product):
+async def active_turn(product, *, private=False):
     database = product.database
-    session = await database.create_session(product.actor, NewSession())
+    session = await database.create_session(
+        product.actor, NewSession(visibility="private") if private else NewSession(),
+    )
     turn = await database.submit(product.actor, session.id, NewMessage(prompt="Work", request_key=str(uuid4())))
     assert (await database.claim_next()).id == turn.id
     prepared = await database.prepare(turn.id)
@@ -294,9 +296,9 @@ async def test_private_session_denied_for_shared_principal(admitted_product):
     async with product.database.sessions.begin() as db:
         actor = await product.adapter.project_native_user(db, principal)
     with pytest.raises(HTTPException) as denied:
-        await product.database.create_session(actor, NewSession())
+        await product.database.create_session(actor, NewSession(visibility="private"))
     assert denied.value.status_code == 403
-    shared = await product.database.create_session(actor, NewSession(visibility="shared"))
+    shared = await product.database.create_session(actor, NewSession())
     assert shared.owner_id == principal.id and shared.visibility == "shared"
 
 

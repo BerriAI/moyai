@@ -81,6 +81,29 @@ async def test_source_library_files_and_ciphertext_are_preserved_without_convers
         assert await db.scalar(text("SELECT count(*) FROM skill_bundles")) == 1
 
 
+async def test_explicit_invocation_loads_original_files_and_preserves_scope(skill_product):
+    product = skill_product
+    loaded = await product.catalog.invocation(product.principal.grant, "owner-skill", shared=False)
+    assert loaded["reference"] == "personal:owner-skill"
+    assert loaded["instructions"] == "Original owner-skill"
+    assert loaded["supporting_files"]["references/runbook.md"] == product.supporting_content
+    for name in ("personal:owner-skill", "other-private", "org:owner-skill"):
+        with pytest.raises(HTTPException):
+            await product.catalog.invocation(product.principal.grant, name, shared=True)
+    async with product.writer.begin() as db:
+        await db.execute(text("UPDATE skills SET name='owner-skill' WHERE id=:id"), {"id": product.organization})
+    with pytest.raises(HTTPException) as ambiguous:
+        await product.catalog.invocation(product.principal.grant, "owner-skill", shared=False)
+    assert ambiguous.value.status_code == 422
+    assert (await product.catalog.invocation(
+        product.principal.grant, "org:owner-skill", shared=False,
+    ))["id"] == product.organization
+    async with product.writer.begin() as db:
+        await db.execute(text("UPDATE skills SET archived=1 WHERE id=:id"), {"id": product.personal})
+    with pytest.raises(HTTPException):
+        await product.catalog.invocation(product.principal.grant, "personal:owner-skill", shared=False)
+
+
 async def test_admin_has_no_private_skill_bypass_and_archived_history_is_explicit(skill_product):
     product = skill_product
     with pytest.raises(HTTPException) as hidden:

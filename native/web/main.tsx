@@ -6,6 +6,8 @@ import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, ListTree, LockKey
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import { SkillComposer } from "./skill-composer"
+import { SkillMessage } from "./skill-content"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "@/theme.css"
@@ -14,7 +16,8 @@ import "./product-shell.css"
 import logo from "./assets/moyai-logo.png"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
-import { ComputerPanel } from "./computer"
+import { Home } from "./home"
+import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { WorkspaceOverview, SubagentPanel } from "./workspace"
@@ -31,7 +34,7 @@ import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
 
-const Home = React.lazy(() => import("./home").then(module => ({ default: module.Home })))
+const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
 const ProductHistory = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistory })))
 const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
@@ -96,6 +99,8 @@ function App() {
   const [folders, setFolders] = useState<SessionFolder[]>([])
   const refreshVersion = useRef(0)
   const [sessions, setSessions] = useState<Session[]>([])
+  const sessionsNow = useRef(sessions)
+  sessionsNow.current = sessions
   const [sessionPageCount, setSessionPageCount] = useState(1)
   const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, notice: "" })
   const [selected, setSelected] = useState(currentRoute)
@@ -115,7 +120,7 @@ function App() {
   const [continued, setContinued] = useState<{ scope: string; original: string; id: string } | null>(null)
   const continuedNow = useRef(continued)
   continuedNow.current = continued
-  const [nativeRoute, setNativeRoute] = useState<{ key: string; ready?: boolean; error?: string } | null>(null)
+  const [nativeRoute, setNativeRoute] = useState<{ key: string; ready?: boolean; error?: string; view?: View } | null>(null)
   const lastConversation = useRef("")
   const settingsOpen = selected === "settings" || selected.startsWith("settings/")
   const historical = selected.startsWith("run=")
@@ -133,7 +138,8 @@ function App() {
     const controller = new AbortController(), key = routeKey
     // A native UUID can itself be an alias. Only the authenticated read adapter
     // may supply that mapping; ordinary session reads still enforce native ACLs.
-    void api<{ session: SessionReference }>(`/history/sessions/${encodeURIComponent(selected)}?source=native`, "GET", undefined, controller.signal).then(({ session }) => {
+    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false`, "GET", undefined, controller.signal).then(value => {
+      const session = value.reference
       if (controller.signal.aborted || currentRoute() !== selected) return
       if (session.id !== selected || session.source !== "native") throw new Error("The session reference changed. Reopen the conversation.")
       if (session.source_session_id) {
@@ -143,7 +149,7 @@ function App() {
         setContinued({ scope: routeScope, original, id: reference.id })
         history.replaceState(null, "", `#run=${original}`)
         setSelected(`run=${original}`)
-      } else setNativeRoute({ key, ready: true })
+      } else setNativeRoute({ key, ready: true, view: value })
     }).catch(reason => {
       if (!controller.signal.aborted && currentRoute() === selected) {
         setCurrentSession(null); setInitialConversation(null); setContinued(null)
@@ -161,15 +167,15 @@ function App() {
     void refresh().catch(reason => setError(String(reason)))
   }
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
     setInventoryState(previous => ({ ...previous, loading: true }))
     const inventory = async () => {
       const rows = new Map<string, Session>(), notices = new Set<string>()
       let cursor: string | null = null, hasMore = false
       for (let page = 0; page < sessionPageCount; page++) {
-        const next: SessionInventory = await api(`/history/sessions?source=all&scope=mine&limit=100&archived=${listView === "archived"}&deleted=${listView === "deleted"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)
-        if (version !== refreshVersion.current || listViewRef.current !== listView) return null
+        const next: SessionInventory = await api(`/history/sessions?source=all&scope=mine&limit=100&archived=${listView === "archived"}&deleted=${listView === "deleted"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, "GET", undefined, signal)
+        if (signal?.aborted || version !== refreshVersion.current || listViewRef.current !== listView) return null
         for (const row of next.sessions) {
           let unread = row.unread
           if (row.source === "legacy" && row.read_marker_key && row.completion_marker) {
@@ -185,12 +191,25 @@ function App() {
       return { rows: [...rows.values()], hasMore, notice: [...notices].join(" ") }
     }
     try {
-      const [result, accounts, groups] = await Promise.all([
-        inventory(), api<Connection[]>("/connections"), api<SessionFolder[]>("/session-folders"),
+      const current = () => !signal?.aborted && version === refreshVersion.current && listViewRef.current === listView
+      // Publish the list independently; a slow account catalog must not leave
+      // the rail empty after its authenticated inventory has arrived.
+      const results = await Promise.allSettled([
+        inventory().then(result => {
+          if (result && current()) {
+            setSessions(result.rows)
+            setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
+          }
+        }).catch(reason => {
+          if (current() && reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
+          throw reason
+        }),
+        api<Connection[]>("/connections", "GET", undefined, signal).then(accounts => { if (current()) setConnections(accounts) }),
+        api<SessionFolder[]>("/session-folders", "GET", undefined, signal).then(groups => { if (current()) setFolders(groups) }),
       ])
-      if (!result || version !== refreshVersion.current || listViewRef.current !== listView) return
-      setSessions(result.rows); setConnections(accounts); setFolders(groups)
-      setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
+      if (!current()) return
+      const failure = results.find(result => result.status === "rejected")
+      if (failure?.status === "rejected") throw failure.reason
     } catch (reason) {
       if (version !== refreshVersion.current) return
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
@@ -238,14 +257,8 @@ function App() {
   }, [])
   useEffect(() => {
     if (!me) return
-    let live = true
-    let timer: ReturnType<typeof setTimeout>
-    const poll = async () => {
-      try { await refresh() } catch (e) { if (live) setError(String(e)) }
-      if (live) timer = setTimeout(poll, 4000)
-    }
-    void poll()
-    return () => { live = false; ++refreshVersion.current; clearTimeout(timer) }
+    const stop = pollVisible(refresh, () => sessionsNow.current.some(row => activeSession(row.status)) ? 4000 : 15000, reason => setError(String(reason)))
+    return () => { stop(); ++refreshVersion.current }
   }, [me, refresh])
 
   const prSessionIds = [...new Set([...sessions.filter(row => !row.deleted && !sessionIsReadOnly(row)).map(row => row.id), ...(nativeSelected ? [nativeSelected] : [])])].sort().join(",")
@@ -253,23 +266,14 @@ function App() {
   useEffect(() => {
     setPrStates({})
     if (!me || !prSessionIds) return
-    const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout>
-    const poll = async () => {
-      try {
+    return pollVisible(async signal => {
         const ids = prSessionIds.split(",")
         const batches = await Promise.all(Array.from({ length: Math.ceil(ids.length / 100) }, (_, index) =>
-          api<Record<string, PRSummary[]>>("/pull-requests/statuses", "POST", { session_ids: ids.slice(index * 100, (index + 1) * 100) }, controller.signal),
+          api<Record<string, PRSummary[]>>("/pull-requests/statuses", "POST", { session_ids: ids.slice(index * 100, (index + 1) * 100) }, signal),
         ))
         const states = Object.assign({}, ...batches) as Record<string, PRSummary[]>
-        if (!controller.signal.aborted) setPrStates(states)
-      } catch {
-        if (!controller.signal.aborted) setPrStates({})
-      }
-      if (!controller.signal.aborted) timer = setTimeout(poll, 20000)
-    }
-    void poll()
-    return () => { controller.abort(); clearTimeout(timer) }
+        if (!signal.aborted) setPrStates(states)
+    }, () => 20000, () => setPrStates({}))
   }, [me?.user.id, prSessionIds, connectionVersion, prRefresh])
 
   if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
@@ -310,12 +314,13 @@ function App() {
         : nativeSelected
         ? <Conversation key={`${scopeKey}:${nativeSelected}`} id={nativeSelected} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refresh} workspaceRequest={workspaceRequest?.sessionId === nativeSelected ? workspaceRequest : null} pullRequests={prStates[nativeSelected] ?? []} onPRUpdated={() => setPrRefresh(value => value + 1)}
           originalSessionId={originalId || undefined} authorityKey={routeScope}
+          resolved={nativeRoute?.key === routeKey ? nativeRoute.view : undefined}
           initial={initialConversation?.scope === scopeKey && initialConversation.value.session.id === nativeSelected ? initialConversation.value : undefined}
           onSession={session => { setCurrentSession(session); setInitialConversation(previous => previous?.value.session.id === (session?.id ?? nativeSelected) ? null : previous) }} />
         : selected
         ? <div className="center" role={routeError ? "alert" : "status"}>{routeError || "Opening conversation…"}{routeError && <Button variant="outline" onClick={() => setRouteRevision(value => value + 1)}>Retry</Button>}</div>
-        : <React.Suspense fallback={<div className="center muted">Opening workspace…</div>}><Home models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
-          onStarted={value => { setInitialConversation({ scope: scopeKey, value }); setSelected(value.session.id); location.hash = value.session.id }} /></React.Suspense>}
+        : <Home models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
+          onStarted={value => { setInitialConversation({ scope: scopeKey, value }); setSelected(value.session.id); location.hash = value.session.id }} />}
     </main>
     <AppCommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} scopeKey={`${scopeKey}:${selected}`} role={me.user.role} productMode={me.product_mode}
       current={currentSession?.id === nativeSelected ? { ...currentSession, url: originalId ? `/#run=${originalId}` : currentSession.url } : sessions.find(row => !sessionIsReadOnly(row) && row.id === nativeSelected)}
@@ -385,10 +390,16 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </section></main>
 }
 
-function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; originalSessionId?: string; authorityKey?: string }) {
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
   const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : null)
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : [])
   const [plan, setPlan] = useState<Plan[]>([])
+  const [panelLoading, setPanelLoading] = useState(false)
+  const [panelError, setPanelError] = useState("")
+  const resolvedOnce = useRef(resolved)
+  const viewNow = useRef(view)
+  viewNow.current = view
+  const sensitiveVersion = useRef(0)
   const [draft, setDraft] = useState("")
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
@@ -415,7 +426,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [sendingNow, setSendingNow] = useState<Set<string>>(() => new Set())
   const fileDrop = useFileDrop(pictures.add, setError, busy || Boolean(editing) || !visible)
   const [editText, setEditText] = useState("")
-  const composerInput = useRef<HTMLTextAreaElement>(null)
+  const composerInput = useRef<HTMLDivElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
@@ -427,8 +438,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   visibleNow.current = visible
   function clearSensitive() {
     ++loadVersion.current
+    ++sensitiveVersion.current
+    resolvedOnce.current = undefined
     liveNow.current = emptyLiveTranscript()
-    setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([])
+    setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
     dispatchPanel({ type: "reset" })
@@ -440,13 +453,15 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const load = useCallback(async (signal?: AbortSignal) => {
     const version = ++loadVersion.current
     try {
-      const [next, history, tasks] = await Promise.all([
-        api<View>(`/sessions/${id}`, "GET", undefined, signal),
+      const cached = resolvedOnce.current
+      resolvedOnce.current = undefined
+      const [next, history] = await Promise.all([
+        cached ? Promise.resolve(cached) : api<View>(`/sessions/${id}?include_activity=false`, "GET", undefined, signal),
         api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal),
-        sideMode ? Promise.resolve([] as Plan[]) : api<Plan[]>(`/sessions/${id}/plan`, "GET", undefined, signal),
       ])
       if (signal?.aborted || version !== loadVersion.current) return
-      setView(next); setMessages(history); setPlan(tasks)
+      viewNow.current = next
+      setView(next); setMessages(history)
       setSendingNow(previous => {
         const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
         return pending.length === previous.size ? previous : new Set(pending)
@@ -475,19 +490,29 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [id, me.user.id, sideMode])
   useEffect(() => {
     if (sideMode && !visible) return
-    const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout>
-    const poll = async () => {
-      try { await load(controller.signal) } catch (e) {
-        if (!controller.signal.aborted) {
-          setError(String(e))
-        }
-      }
-      if (!controller.signal.aborted) timer = setTimeout(poll, 1500)
-    }
-    void poll()
-    return () => { controller.abort(); clearTimeout(timer) }
+    return pollVisible(load, () => {
+      const current = viewNow.current
+      return !current || activeSession(current.session.status) || current.turns.some(turn => activeSession(turn.status)) ? 1500 : 10000
+    }, reason => setError(String(reason)))
   }, [load, sideMode, visible])
+  const auxiliaryPanel = panelState.visible && visible
+    ? panelState.tabs.find(tab => tab.id === panelState.activeId)?.kind : undefined
+  useEffect(() => {
+    if (!view || (auxiliaryPanel !== "plan" && auxiliaryPanel !== "activity")) return
+    const version = sensitiveVersion.current
+    setPanelLoading(true); setPanelError("")
+    return pollVisible(async signal => {
+      const rows = await api<Plan[] | Activity[]>(`/sessions/${id}/${auxiliaryPanel}`, "GET", undefined, signal)
+      if (signal.aborted || version !== sensitiveVersion.current) return
+      if (auxiliaryPanel === "plan") setPlan(rows as Plan[])
+      else setActivity(rows as Activity[])
+      setPanelLoading(false); setPanelError("")
+    }, () => activeSession(viewNow.current?.session.status) ? 1500 : 10000, reason => {
+      if (version !== sensitiveVersion.current) return
+      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) { clearSensitiveNow.current(); setError(String(reason)) }
+      else { setPanelLoading(false); setPanelError(String(reason)) }
+    })
+  }, [id, auxiliaryPanel, Boolean(view)])
   const productAccounts = me.product_mode === "existing"
   const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
   const effectiveConnections = productAccounts ? accountCatalog.scope === accountScope ? accountCatalog.rows : [] : connections
@@ -572,17 +597,18 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 180) element.scrollTop = element.scrollHeight
   }, [liveText])
 
-  async function send() {
+  async function send(promptOverride?: string) {
+    const prompt = promptOverride ?? (editing ? editText : draft)
     if (editing) {
-      if (busy || !editText.trim()) return
+      if (busy || !prompt.trim()) return
       setBusy(true); setError("")
-      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt: editText }); setEditing(null); await load() }
+      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt }); setEditing(null); await load() }
       catch (error) { setError(String(error)) } finally { setBusy(false) }
       return
     }
-    if ((!draft.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
+    if ((!prompt.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
     setBusy(true); setError("")
-    const body = { prompt: draft, model, mode, connections: selectedAccounts, attachments: pictures.readyFiles.map(file => file.id) }
+    const body = { prompt, model, mode, connections: selectedAccounts, attachments: pictures.readyFiles.map(file => file.id) }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
     try {
@@ -642,7 +668,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
-                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : message.content}</div>}
+                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
@@ -665,7 +691,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
-            <span><small>Queued after the current task</small><span>{message.content || "File message"}</span></span>
+            <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
             <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={async () => { try { await api(`/turns/${message.turn_id}`, "DELETE"); if (editing?.id === message.id) setEditing(null); await load() } catch (error) { setError(String(error)) } }}><X size={14} /></Button>
@@ -673,7 +699,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
             <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
-            <Textarea ref={composerInput} aria-label="Message Moyai" placeholder="Describe the work…" value={editing ? editText : draft} onChange={e => editing ? setEditText(e.target.value) : setDraft(e.target.value)} onPaste={editing || busy ? undefined : pictures.paste} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={editing ? undefined : pictures.paste} />
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
@@ -726,9 +752,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
           onOpenFile={openOutput} onName={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
         if (tab.kind === "files") return <FilesPanel sessionId={id} onOpen={openOutput} active={activeTab} />
-        if (tab.kind === "computer") return <ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} />
-        if (tab.kind === "activity") return <>{!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}</>
-        if (tab.kind === "plan") return <>{!plan.length && <div className="panel-empty"><Check /><p>Moyai’s task plan will appear here.</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>
+        if (tab.kind === "computer") return <React.Suspense fallback={<div className="panel-empty" role="status">Opening computer…</div>}><ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} /></React.Suspense>
+        if (tab.kind === "activity") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{panelLoading ? "Loading activity…" : session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}</>
+        if (tab.kind === "plan") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!plan.length && <div className="panel-empty"><Check /><p>{panelLoading ? "Loading plan…" : "Moyai’s task plan will appear here."}</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>
         if (tab.kind === "side-chat") return tab.sessionId
           ? <Conversation key={`${me.user.id}:${tab.sessionId}`} id={tab.sessionId} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refreshList} workspaceRequest={null} pullRequests={[]} onPRUpdated={onPRUpdated} sideMode visible={activeTab} onOpenFile={openOutput} onTitle={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
           : <SideChatPicker parentId={id} defaultModel={me.default_model} individual={me.user.individual !== false} onCreated={refreshList} onSelect={selected => dispatchPanel({ type: "replace", id: tab.id, tab: { id: `side-chat:${selected.id}`, kind: "side-chat", sessionId: selected.id, title: selected.title } })} />
@@ -761,7 +787,7 @@ function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelec
     <Button className="side-chat-new" disabled={busy} onClick={async () => {
       setBusy(true); setError("")
       try {
-        const next = await api<Session>("/sessions", "POST", { visibility: individual ? "private" : "shared", model: defaultModel })
+        const next = await api<Session>("/sessions", "POST", { visibility: "shared", model: defaultModel })
         if (alive.current) onSelect(next)
         // The session already exists; a sidebar refresh failure must not turn
         // a confirmed creation into an invitation to create it again.

@@ -108,6 +108,8 @@ class Runtime:
                 self.product_drain = ProductDrainService.from_runtime(self)
                 self.database.product_drain = self.product_drain
         self.client: Client | None = None
+        from .skill_invocations import SkillInvocations
+        self.skill_invocations = SkillInvocations(self)
         self.agent: Agent[RunScope, str | DeferredToolRequests]
         self.durability: TemporalDurability[RunScope]
         self.models: dict[str, Model] = {}

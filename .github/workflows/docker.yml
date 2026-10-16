@@ -3,6 +3,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -20,3 +21,80 @@ jobs:
         with:
           name: docker-startup-evidence
           path: /tmp/docker-evidence
+  publish-quickstart:
+    needs: docker
+    if: github.repository == 'BerriAI/moyai' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: moyai-quickstart-publication
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the verified revision for AMD64 and ARM64
+        uses: docker/build-push-action@v6
+        id: image
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/berriai/moyai:quickstart-sha-${{ github.sha }}
+          build-args: MOYAI_BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=moyai-quickstart
+          cache-to: type=gha,mode=max,scope=moyai-quickstart
+          provenance: mode=max
+          sbom: true
+      - name: Advance the quickstart tag only for the current main revision
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          current_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current_main" = "$GITHUB_SHA" ]; then
+            docker buildx imagetools create \
+              --tag ghcr.io/berriai/moyai:quickstart \
+              "ghcr.io/berriai/moyai@$IMAGE_DIGEST"
+          else
+            echo "Main advanced during the build; retaining only the revision-specific tag."
+          fi
+      - name: Verify the published image can be pulled without GitHub credentials
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          try:
+              url = "https://ghcr.io/token?service=ghcr.io&scope=repository:berriai/moyai:pull"
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  token = json.load(response)["token"]
+              request = urllib.request.Request(
+                  "https://ghcr.io/v2/berriai/moyai/manifests/" + os.environ["IMAGE_DIGEST"],
+                  headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.oci.image.index.v1+json"},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  index = json.load(response)
+              platforms = {
+                  (entry["platform"]["os"], entry["platform"]["architecture"])
+                  for entry in index["manifests"]
+              }
+              assert {("linux", "amd64"), ("linux", "arm64")} <= platforms
+          except (OSError, ValueError, KeyError, AssertionError):
+              raise SystemExit(
+                  "::error::The image was published but anonymous multi-platform pull could not be verified. "
+                  "Check GHCR availability and set the BerriAI/moyai container package visibility to public. "
+                  "See deploy/docker/README.md#publish-the-quickstart-image."
+              )
+          print("Verified anonymous access to the published AMD64 and ARM64 image.")
+          PY

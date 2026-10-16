@@ -116,16 +116,16 @@ class SlackAuthority(Protocol):
 
 
 class _RoleConnection:
-    """Adapt the existing pure UserRoles.role_in query to this async SQL session."""
+    """Adapt the shared role/revision query to this async SQL session."""
 
     def __init__(self, session: Any, table: str):
         self.session, self.table = session, table
 
     def execute(self, statement: str, parameters: tuple[str, ...]):
-        if statement != "SELECT role FROM user_roles WHERE email=?" or len(parameters) != 1:
+        if statement != "SELECT role,revision FROM user_roles WHERE email=?" or len(parameters) != 1:
             raise RuntimeError("The product role query changed; review its identity adapter.")
         return self.session.execute(
-            text(f"SELECT role FROM {self.table} WHERE email=:email"), {"email": parameters[0]},
+            text(f"SELECT role,revision FROM {self.table} WHERE email=:email"), {"email": parameters[0]},
         ).mappings()
 
 
@@ -164,6 +164,7 @@ class ProductIdentityAdapter:
         self.settings = legacy_settings
         self.source_engine = source_engine
         self.native_engine = native_engine or source_engine
+        self._controls_engine: AsyncEngine | None = None
         self.allow_shared_identities = allow_shared_identities
         self.slack_authority: SlackAuthority | None = None
         # No role service is attached here: Security handles signed-session and
@@ -188,14 +189,18 @@ class ProductIdentityAdapter:
     async def _native_controls(self, user_id: str, db: AsyncSession | None = None) -> tuple[bool, int]:
         async def read(session: AsyncSession) -> tuple[bool, int]:
             connection = await session.connection()
-            schema = User.__table__.schema
-            if connection.dialect.name == "postgresql" and schema is None:
-                schema = await connection.scalar(text("SELECT current_schema()"))
-            exists = await connection.run_sync(
-                lambda conn: inspect(conn).has_table(User.__tablename__, schema=schema)
-            )
-            if not exists:
-                return True, 1
+            if self._controls_engine is not connection.engine:
+                schema = User.__table__.schema
+                if connection.dialect.name == "postgresql" and schema is None:
+                    schema = await connection.scalar(text("SELECT current_schema()"))
+                exists = await connection.run_sync(
+                    lambda conn: inspect(conn).has_table(User.__tablename__, schema=schema)
+                )
+                if not exists:
+                    return True, 1
+                # Cache only positive schema discovery, never account authority.
+                # A later missing table fails the SELECT below closed.
+                self._controls_engine = connection.engine
             row = (await session.execute(select(User.enabled, User.auth_version).where(User.id == user_id))).first()
             return (bool(row.enabled), row.auth_version) if row else (True, 1)
 
@@ -239,12 +244,11 @@ class ProductIdentityAdapter:
                 method = "google"
             else:
                 raise HTTPException(401, "This product sign-in method is no longer enabled.")
-            role = await db.run_sync(
-                lambda session: self.roles.role_in(_RoleConnection(session, self._table("user_roles")), email)
+            role, revision = await db.run_sync(
+                lambda session: self.roles.role_and_revision_in(
+                    _RoleConnection(session, self._table("user_roles")), email,
+                )
             )
-            revision = (await db.execute(
-                text(f"SELECT revision FROM {self._table('user_roles')} WHERE email=:email"), {"email": email},
-            )).scalar_one_or_none() or 0
         elif kind == "shared" and self.allow_shared_identities:
             parts = user_id.split(":")
             if len(parts) != 3 or parts[0] != "shared":

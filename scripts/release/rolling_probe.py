@@ -154,7 +154,7 @@ def schema_capability(connection, schema, revision):
     return {'schema_support': support}
 
 
-def probe(options):
+def probe(options, *, snapshot_fn=None, health_fn=None):
     with validation_stage('environment'):
         require(not options['staged'] and not options['drain'])
         for name, value in {'RENDER_GIT_COMMIT': options['sha'], 'MOYAI_BUILD_SHA': options['sha'],
@@ -183,7 +183,7 @@ def probe(options):
     with validation_stage('snapshot'):
         try:
             with connection:
-                state = snapshot(connection, settings.moyai_database_schema)
+                state = (snapshot_fn or snapshot)(connection, settings.moyai_database_schema)
                 state.update(schema_capability(connection, settings.moyai_database_schema, state['schema']))
         except psycopg.Error:
             # Never retry after observing even partial state: a later sample must
@@ -204,7 +204,7 @@ def probe(options):
     with validation_stage('health_identity'):
         try:
             with response:
-                health = health_identity(response, options, state)
+                health = (health_fn or health_identity)(response, options, state)
         except (TimeoutError, ConnectionError, http.client.HTTPException):
             raise ProbeFailure('health_unavailable') from None
     return {'ok': True, **state, **health}

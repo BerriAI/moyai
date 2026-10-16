@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -295,3 +296,41 @@ def test_staged_snapshot_cannot_qualify_dirty_or_incoherent_database(database, c
     elif change == 'stale_contract': writer.execute("UPDATE runtime_api_policy SET cluster_fingerprint='wrong'")
     else: writer.execute('DELETE FROM runtime_coordinator_policy')
     with psycopg.connect(url) as reader, pytest.raises(ValueError): probe.snapshot(reader, schema)
+
+
+@pytest.mark.parametrize('installed_layout', ['scheduler', 'definitions'])
+def test_automation_snapshot_uses_installed_schedule_version(database, monkeypatch, installed_layout):
+    from app import automation_definitions
+    url, schema, owners = database
+    version = 7
+    if installed_layout == 'definitions':
+        monkeypatch.setattr(automation_definitions, 'SCHEDULE_VERSION', version)
+        legacy_version = 99  # A valid current definition must not use the fallback.
+    else:
+        monkeypatch.delattr(automation_definitions, 'SCHEDULE_VERSION')
+        legacy_version = version
+    monkeypatch.setitem(sys.modules, 'app.automations', SimpleNamespace(SCHEDULE_VERSION=legacy_version))
+    writer = owners[0]
+    writer.execute('''CREATE TABLE automations(
+        paused integer, revision integer, synced_revision integer,
+        synced_schedule_version integer, sync_error text)''')
+    writer.execute('''INSERT INTO automations VALUES
+        (1,2,2,%s,''), (1,2,2,%s,''), (0,2,2,%s,''), (1,2,2,%s,'unconfirmed')''',
+        (version, version - 1, version, version))
+    with psycopg.connect(url) as reader:
+        result = probe.snapshot(reader, schema)
+        assert result['legacy_automations'] == 3
+        assert result['legacy_events'] == result['legacy_schedule_count'] == 0
+        with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+            reader.execute('DELETE FROM automations')
+
+
+@pytest.mark.parametrize('version', [None, True, 0, -1, '1'])
+def test_invalid_installed_schedule_version_cannot_fall_back(database, monkeypatch, version):
+    from app import automation_definitions
+    url, schema, owners = database
+    monkeypatch.setattr(automation_definitions, 'SCHEDULE_VERSION', version)
+    monkeypatch.setitem(sys.modules, 'app.automations', SimpleNamespace(SCHEDULE_VERSION=1))
+    owners[0].execute('CREATE TABLE automations(id integer)')
+    with psycopg.connect(url) as reader, pytest.raises(ValueError, match='Runtime check failed'):
+        probe.snapshot(reader, schema)
