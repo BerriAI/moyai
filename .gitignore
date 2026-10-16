@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+moyai.env
 .data/
 __pycache__/
 .pytest_cache/

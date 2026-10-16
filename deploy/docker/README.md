@@ -365,3 +365,37 @@ The release workflow publishes AMD64/ARM64 images and attaches a digest-pinned
 installation bundle when a GitHub release is published. That workflow does not
 deploy Moyai or migrate a customer's data. Helm/EKS and AWS provisioning remain
 follow-up work.
+
+## Publish the quickstart image
+
+The root README's `docker run` quickstart uses the same application image with
+the `moyai dev` command. It keeps SQLite, encrypted objects and a Temporal
+development server in the local data volume. This local trial is separate from
+the production installation bundle above.
+
+The **Docker startup** workflow first runs its real-container startup,
+authentication and persistence checks. A successful run on `main` then publishes
+`ghcr.io/berriai/moyai:quickstart-sha-<full-git-sha>` for AMD64 and ARM64. It advances
+the `quickstart` tag only if that revision is still the current main commit.
+Pull requests never publish images. Maintainers can also run this workflow
+manually on `main`.
+
+The workflow uses GitHub's scoped `GITHUB_TOKEN` with `packages: write`; customers
+should not need a GitHub token to pull the image. For the first publication:
+
+1. Merge the workflow and let the Docker startup check and image build finish.
+2. In the BerriAI `moyai` container package settings, set package visibility to
+   **public** and ensure this repository has Actions access to the package.
+   New GHCR packages may initially be private.
+3. Rerun the publication job if its anonymous-access check failed while the
+   package was private.
+
+Publication is not ready for the public quickstart until the final check confirms
+anonymous access to both CPU architectures. Until then, use the README's local
+build fallback. A registry push alone does not establish that customers can pull
+the image.
+
+The `quickstart` tag follows main and is intended for local trials. For production,
+use a published release's digest-pinned bundle and its maintenance procedure.
+Publishing the quickstart image does not create a GitHub release or deploy an
+application.

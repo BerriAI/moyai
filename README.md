@@ -13,164 +13,131 @@ credentials and accounting through the shared product services.
 
 *Current frontend with synthetic accounts and session data.*
 
-## Deploy with Docker
+## Quickstart
 
-Set your service endpoints and credentials, then run `sh moyai.sh up`. The package
-contains one Moyai image with the backend, UI and worker code, plus Compose files
-that start the application services. The host needs Docker Compose 2.30 or newer;
-Python and Node run inside the build/application containers.
+Try Moyai on your laptop with Docker, or deploy it on a server so it stays
+available when your laptop is off. The local quickstart manages SQLite, encrypted
+file storage and a local Temporal development server automatically. You only
+need a model gateway, an enabled Responses-capable model, and Modal credentials.
+Agents execute in Modal computers; Docker hosts the Moyai application.
 
-Bring a PostgreSQL database, private S3-compatible storage, a model gateway,
-Modal credentials, and a reachable HTTPS origin. Use fresh, dedicated application
-schemas for a new installation. Existing deployments should follow the
-[migration and operations guide](docs/production-deploy.md).
+### Option 1: Try locally with Docker
 
-### 1. Get the deployment package
+**Prerequisites:** Docker Desktop on macOS/Windows, or Docker Engine with Docker
+Compose on Linux. The commands below use a macOS/Linux shell or WSL.
 
-For a GitHub release that includes `moyai-docker.tar.gz`, download that asset and
-extract it:
+Create `moyai.env` in your working directory and replace the placeholders:
 
-```sh
-tar -xzf moyai-docker.tar.gz
-cd moyai-docker
+```dotenv
+WORKSPACE_PASSWORD=replace-with-a-long-private-password
+LITELLM_API_BASE=https://your-gateway.example.com/v1
+LITELLM_API_KEY=YOUR_MODEL_KEY
+AGENT_MODEL=YOUR_RESPONSES_MODEL
+MODAL_TOKEN_ID=YOUR_MODAL_TOKEN_ID
+MODAL_TOKEN_SECRET=YOUR_MODAL_TOKEN_SECRET
 ```
 
-The bundle selects the release image by immutable digest. If a release bundle is
-not yet available, build from a checkout instead, starting at the repository root:
+Start the image with persistent local data:
 
 ```sh
-docker build --build-arg MOYAI_BUILD_SHA="$(git rev-parse HEAD)" -t moyai-local .
-export MOYAI_IMAGE=moyai-local
-cd deploy/docker
+docker run -d --name moyai --init --restart unless-stopped \
+  --stop-timeout 90 \
+  --env-file ./moyai.env \
+  -p 127.0.0.1:8787:8787 \
+  -v moyai-data:/data \
+  ghcr.io/berriai/moyai:quickstart \
+  moyai dev --host 0.0.0.0 --port 8787
 ```
 
-### 2. Set the environment variables
+The `quickstart` image is built from main for AMD64 and ARM64 after the Docker
+startup checks pass. If it is not yet publicly available, use the checkout
+fallback below. See [image publication](deploy/docker/README.md#publish-the-quickstart-image)
+for release status and maintainer setup.
 
-Replace these placeholders with your service settings, or supply them through
-your secret manager:
+Open <http://127.0.0.1:8787> and sign in as `admin` with `WORKSPACE_PASSWORD`.
+The first start may download Temporal and build the Modal computer image.
+Model and computer usage are billed by those providers.
+
+Try: “Create `/workspace/hello.py` that prints Hello from Moyai, run it, and save
+it for download.” The chat should show the observed output and a downloadable
+file. Follow up in the same conversation to change it.
+
+Use `docker logs -f moyai` to inspect startup and `docker stop moyai` /
+`docker start moyai` to stop and start it. Keep the `moyai-data` volume to retain
+history, files and encryption keys. This is a local trial; use Option 2 for a
+team deployment with managed storage and durable Temporal.
+
+**Checkout fallback:** if you cannot pull the prebuilt image, build it locally
+with Git and Docker, keeping `moyai.env` in your current directory:
 
 ```sh
-export MOYAI_INSTALLATION_ID='moyai'
-export MOYAI_PUBLIC_URL='https://moyai.example.com'
-export MOYAI_DATABASE_URL='postgresql://USER:PASSWORD@HOST:5432/DATABASE'
-export OBJECT_STORAGE_BUCKET='your-private-bucket'
-export OBJECT_STORAGE_REGION='us-east-1'
-export OBJECT_STORAGE_ACCESS_KEY_ID='YOUR_STORAGE_ACCESS_KEY'
-export OBJECT_STORAGE_SECRET_ACCESS_KEY='YOUR_STORAGE_SECRET_KEY'
-export LITELLM_API_BASE='https://your-gateway.example.com/v1'
-export LITELLM_API_KEY='YOUR_MODEL_KEY'
-export AGENT_MODEL='YOUR_RESPONSES_MODEL'
-export MODAL_TOKEN_ID='YOUR_MODAL_TOKEN_ID'
-export MODAL_TOKEN_SECRET='YOUR_MODAL_TOKEN_SECRET'
+git clone https://github.com/BerriAI/moyai.git
+docker build --build-arg MOYAI_BUILD_SHA="$(git -C moyai rev-parse HEAD)" \
+  -t moyai-local ./moyai
 ```
 
-For S3-compatible storage, also set `OBJECT_STORAGE_ENDPOINT` to its endpoint.
-For AWS workload credentials, omit the two storage-key exports. Use addresses
-reachable from the containers; `localhost` inside a container refers to itself.
+Then replace `ghcr.io/berriai/moyai:quickstart` with `moyai-local` in the run command
+above. From an existing checkout, you can alternatively copy `.env.example` to
+`.env`, fill in the same credentials, and run `docker compose up --build`.
 
-Choose **one Temporal option** before the first startup:
+### Option 2: Deploy for your team
 
-| Option | Configuration |
-| --- | --- |
-| Temporal Cloud or an existing server | Set the address and existing namespace, with the server's TLS/authentication settings. |
-| Include Temporal in this deployment | Set `MOYAI_TEMPORAL_MODE=bundled`; the package starts Temporal and its persistent database and generates the internal database password. |
+Use the [Docker installation guide](deploy/docker/README.md) for a persistent
+server deployment. Bring PostgreSQL, private S3-compatible storage, a reachable
+HTTPS origin, and the model/Modal settings above. The guide includes a complete
+environment example and instructions to obtain a release bundle or build one
+from a checkout.
 
-For Temporal Cloud using an API key:
-
-```sh
-export MOYAI_TEMPORAL_MODE='external'
-export TEMPORAL_ADDRESS='YOUR_TEMPORAL_HOST:7233'
-export TEMPORAL_NAMESPACE='YOUR_TEMPORAL_NAMESPACE'
-export TEMPORAL_TLS='true'
-export TEMPORAL_API_KEY='YOUR_TEMPORAL_API_KEY'
-```
-
-Or, for bundled Temporal, omit those external connection settings and use:
-
-```sh
-export MOYAI_TEMPORAL_MODE='bundled'
-```
-
-Standalone is the default. To run the API, coordinator, broker and worker as four
-containers using the same image, also export `MOYAI_INSTALL_TOPOLOGY=split`.
-Choose the topology before creating the installation; changing this variable
-does not migrate existing data.
-
-Point your HTTPS ingress at the Docker host's proxy, which binds to
-`127.0.0.1:8787` by default. Preserve the Host header and support streaming and
-WebSockets. For ingress on another host, configure `MOYAI_BIND_ADDRESS` as
-described in the [full installation guide](deploy/docker/README.md).
-
-### 3. Start Moyai
-
-From the deployment directory, with the variables exported:
+From the deployment directory, with the required settings exported:
 
 ```sh
 sh moyai.sh up
 ```
 
-The helper creates private configuration, checks dependencies, prepares schemas,
-retains generated signing/encryption keys, starts the selected services, and
-waits for activation. No separate wizard or setup command is required.
+Choose the topology and Temporal option before the first startup:
 
-Open `MOYAI_PUBLIC_URL` and sign in with `WORKSPACE_PASSWORD` if you supplied it.
-Otherwise, retrieve the generated password in your private terminal:
+| Setting | Behavior |
+| --- | --- |
+| `MOYAI_INSTALL_TOPOLOGY=standalone` | One application container with an embedded worker and dispatcher; this is the default. |
+| `MOYAI_INSTALL_TOPOLOGY=split` | API, coordinator, broker and worker as four containers using the same image. |
+| `MOYAI_TEMPORAL_MODE=external` | Connect to Temporal Cloud or your existing server using its address, namespace and TLS/API-key settings. |
+| `MOYAI_TEMPORAL_MODE=bundled` | Start the included persistent Temporal server and database; setup generates the internal database password. |
+
+The helper configures the installation, checks dependencies, prepares schemas,
+retains generated keys, starts the selected services and waits for activation.
+Use `sh moyai.sh password` to retrieve a generated sign-in password and
+`sh moyai.sh status` to check readiness. A real file task separately verifies
+model and computer access.
+
+Keep the deployment configuration and persistent volumes, and keep credentials
+exported for later starts. Existing installations must use the documented
+[migration and upgrade procedures](deploy/docker/README.md#maintenance-upgrades).
+The local quickstart's data is not automatically migrated into this topology.
+
+### Option 3: Develop from source
+
+**Prerequisites:** Python 3.13, Node.js 22 or newer, and
+[uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```sh
-sh moyai.sh password
-```
-
-Use `admin` if the sign-in form asks for a username. Ask Moyai to create a file and
-save it for download to verify the model and Modal computer; service readiness
-alone does not run a task. `sh moyai.sh status` checks startup readiness.
-
-Keep credentials exported for later starts and retain the deployment directory
-and persistent volumes. Repeated `up` uses the saved configuration. For optional
-interactive configuration, diagnostics, backups and upgrades, see the
-[Docker installation guide](deploy/docker/README.md).
-
-## Run locally
-
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.13,
-and Node.js 22 or newer. From the repository root:
-
-```sh
+git clone https://github.com/BerriAI/moyai.git
+cd moyai
 uv sync --frozen
 cp .env.example .env
 chmod 600 .env
 ```
 
-Installation also builds the frontend from source. Edit `.env` with your workspace password, LiteLLM gateway URL/key, enabled model
-alias, and Modal token pair. The model alias must support the gateway's Responses
-API. An authenticated local Modal CLI profile also works for source development.
-Leave `ENCRYPTION_KEY` empty on a new local installation to generate and persist
-one in `DATA_DIR`; preserve that directory and its key on subsequent starts.
+Edit `.env` with your workspace password, model gateway/model and Modal token
+pair, then start:
 
 ```sh
 uv run --frozen moyai dev --port 8787
 ```
 
-Open <http://127.0.0.1:8787> and sign in as `admin` with `WORKSPACE_PASSWORD`.
-The command starts a local Temporal server, worker and API, using real configured
-inference and Modal. It may download Temporal and build the first computer image.
-Model and computer usage are billed by those providers.
-
-Try: “Create `/workspace/hello.py` that prints Hello from Moyai, run it, and save
-it for download.” Success means the chat reports the observed output and a saved
-file opens in the Files panel. Follow up in the same conversation to change it.
-If inference fails, verify the model alias through your gateway's Responses API;
-if computer creation fails, check Modal authentication and the worker log.
-
-For a Docker-based local trial, use the same `.env` and run:
-
-```sh
-docker compose up --build
-```
-
-This starts the same development service at port 8787 and keeps application data
-and Temporal history in the `workspace-data` volume. Keep that volume to preserve
-history. Local development is a single-host setup; it is not the production
-release procedure.
+Open <http://127.0.0.1:8787> and sign in as `admin`. This runs the same local
+application, worker and Temporal development server. Installation builds the UI
+from source. An authenticated local Modal CLI profile also works for source
+development. Preserve `.data` and its generated encryption key across restarts.
 
 ## Use and operate
 

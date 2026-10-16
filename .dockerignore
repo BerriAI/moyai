@@ -10,6 +10,7 @@ tests
 **/.data
 **/.env
 **/.env.*
+**/moyai.env
 **/__pycache__
 **/.pytest_cache
 **/test-results
