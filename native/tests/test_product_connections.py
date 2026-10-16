@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 import time
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -167,6 +168,82 @@ async def test_canonical_notion_helpers_run_as_native_toolset_and_recheck_after_
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("github", [False, True])
+@pytest.mark.parametrize("read", [False, True])
+async def test_connector_execution_keeps_checks_on_owner_loop_and_retains_write_evidence(
+    bridge, monkeypatch, github, read,
+):
+    owner = asyncio.get_running_loop()
+    allowed, checks, requests = True, [], []
+
+    async def authorize():
+        assert asyncio.get_running_loop() is owner
+        checks.append(allowed)
+        if not allowed:
+            raise PermissionError("Revoked during the provider request.")
+
+    async def request(*args, **kwargs):
+        nonlocal allowed
+        assert asyncio.get_running_loop() is not owner
+        requests.append(args)
+        allowed = False
+        return {"confirmed": True}
+
+    target = bridge.connectors.github if github else bridge.connectors
+    monkeypatch.setattr(target, "request", request)
+
+    async def operation(bound):
+        transport = bound.github if github else bound
+        return await transport.request("GET" if read else "POST", "/synthetic")
+
+    call = bridge.execution.call(operation, authorize=authorize, recheck=read)
+    if read:
+        with pytest.raises(PermissionError, match="Revoked"):
+            await call
+        assert checks == [True, False]
+    else:
+        assert await call == {"confirmed": True}
+        assert checks == [True]
+    # A received write remains evidence, but no later request may use its grant.
+    with pytest.raises(PermissionError):
+        await bridge.execution.call(operation, authorize=authorize, recheck=read)
+    assert len(requests) == 1
+    assert target.request is request
+
+
+async def test_connector_execution_drains_repeated_cancellation_before_returning(bridge, monkeypatch):
+    owner = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    completed, checks = [], []
+
+    async def authorize():
+        assert asyncio.get_running_loop() is owner
+        checks.append(True)
+
+    async def request(*_args, **_kwargs):
+        owner.call_soon_threadsafe(entered.set)
+        assert await asyncio.to_thread(release.wait, 5)
+        completed.append(True)
+        return {"complete": True}
+
+    monkeypatch.setattr(bridge.connectors, "request", request)
+    task = asyncio.create_task(bridge.execution.call(
+        lambda bound: bound.request("GET", "/synthetic"), authorize=authorize, recheck=True,
+    ))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel("first cancellation")
+        await asyncio.sleep(0)
+        task.cancel("second cancellation")
+        await asyncio.sleep(0)
+        assert not task.done() and not completed
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError, match="first cancellation"):
+            await asyncio.wait_for(task, 5)
+    assert completed == [True] and checks == [True, True]
+
+
 async def test_grant_resolution_offloads_canonical_database_wait(bridge, monkeypatch):
     save(bridge, "linear")
     original = bridge._grants
@@ -206,10 +283,7 @@ async def test_public_metadata_cache_singleflight_copy_and_failed_refresh_evicts
         await asyncio.sleep(.01)
         return {"id": state["id"], "full_name": "owner/public", "private": state["private"]}
 
-    async def source(operation):
-        return await operation(SimpleNamespace(github=SimpleNamespace(public_repository=public)))
-
-    monkeypatch.setattr(bridge, "source_call", source)
+    monkeypatch.setattr(bridge.connectors.github, "public_repository", public)
     values = await asyncio.gather(*(bridge.public_repository(repository_id=123) for _ in range(8)))
     assert calls == [("", 123)]
     values[0]["full_name"] = "caller-mutated"

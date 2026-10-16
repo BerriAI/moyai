@@ -1,5 +1,6 @@
 """Real local SQL publication receipts with a deterministic provider protocol fixture."""
 
+import asyncio
 import copy
 import os
 from dataclasses import replace
@@ -23,6 +24,7 @@ from moyai.contracts import Grant, NewMessage, NewSession
 from moyai.effects import EffectReceipts, effect_id
 from moyai.models import Effect
 from moyai.pr_publications import PRPublication
+from moyai.product_connector_execution import CanonicalConnectorExecution
 from moyai.product_github_publication import Publications, toolset
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
@@ -117,12 +119,15 @@ async def publication(admitted_product):
         async def request(self, *args, **kwargs): return await provider.request(*args, **kwargs)
         async def installation_token(self, **kwargs): return "synthetic-token"
         def saved_credentials(self): return {}
-    async def source_call(function): return await function(SimpleNamespace(github=SourceGit()))
     service = SimpleNamespace(
         database=product.database, product=SimpleNamespace(identity=product.adapter),
-        connectors=SimpleNamespace(github=SourceGit()), check=check, source_call=source_call,
+        connectors=SimpleNamespace(
+            github=SourceGit(), personal_slack=SimpleNamespace(),
+            locks={"github": asyncio.Lock()}, request=provider.request,
+        ), check=check,
         store=SimpleNamespace(rows=lambda *_args: []),
     )
+    service.execution = CanonicalConnectorExecution(service)
     ctx = RunContext(deps=prepared.scope, model=TestModel(), usage=RunUsage(),
                      run_id=turn.id, tool_call_id="create")
     return SimpleNamespace(product=product, service=service, scope=prepared.scope, ctx=ctx, grant=grant,

@@ -40,6 +40,23 @@ flowchart LR
 adapter, and `worker.py` registers it. `product_*` modules adapt canonical product
 services. `app/` contains those shared services and historical data formats.
 
+## Connector execution and answer settlement
+
+`product_connector_execution.py` owns canonical connection execution: worker
+threads, transport locks, request authorization and cancellation draining. Native
+authorization checks run on the calling event loop. Connection tools, GitHub
+publication/bootstrap and Slack file ingress use this module. Read results can
+require a fresh grant check after the request; confirmed writes retain their
+evidence even when authority changes during the request.
+
+`answer_settlement.py` owns result acceptance, checkpoint capture/publication and
+completion after failure or Stop. Its snapshot adapter keeps Modal calls outside
+database transactions and lets tests control capture through the same interface.
+Publication checks current authority and the exact checkpoint source under the
+existing locks. `Database` and Temporal activities forward settlement calls;
+`workspace_recovery.py` owns checkpoint formats, validation and cold restoration.
+Activity identities, ordering and historical snapshot formats remain compatible.
+
 ## Roles and data
 
 Production retains API, coordinator, broker and worker roles. They use the same

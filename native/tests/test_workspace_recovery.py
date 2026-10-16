@@ -13,18 +13,21 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import Conversation, ConversationTypeAdapter
+from pydantic_ai.workspaces import WorkspaceRef
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.exceptions import ApplicationError
 
 from moyai.activities import save_computer
+from moyai.answer_settlement import ModalSnapshots
 from moyai.contracts import NewMessage, NewSession
 from moyai.database import Database
-from moyai.models import ComputerDesktop, ComputerLease, Effect, Session, Turn, User
+from moyai.models import ComputerDesktop, ComputerLease, ComputerOperation, Effect, Session, Turn, User
 from moyai.security import Security
 from moyai.settings import Settings
-from moyai.workspace_recovery import checkpoint, prepare_workspace, save_checkpoint
+from moyai.workspace_recovery import checkpoint, prepare_workspace
 
 REFERENCE = {"provider": "modal", "id": "sb-original"}
 RESTORED = {"provider": "modal", "id": "sb-restored"}
@@ -40,18 +43,14 @@ async def saved(runtime, active, monkeypatch, *, waiting=True):
         prepared.scope, conversation=conversation, output="" if waiting else "Saved.",
         workspace=REFERENCE, usage={"requests": 1}, deferred=waiting, checkpoint_workspace=True,
     )
-    capture = AsyncMock(return_value=SimpleNamespace(object_id="im-checkpoint"))
-    sandbox = SimpleNamespace(
-        poll=SimpleNamespace(aio=AsyncMock(return_value=None)),
-        snapshot_filesystem=SimpleNamespace(aio=capture),
-    )
-    monkeypatch.setattr("moyai.workspace_recovery.modal.Sandbox.from_id.aio", AsyncMock(return_value=sandbox))
+    capture = AsyncMock(return_value="im-checkpoint")
+    monkeypatch.setattr(runtime.database.answers, "snapshots", SimpleNamespace(capture=capture))
     return session, turn, prepared, capture
 
 
 async def resumed(runtime, actor, active, monkeypatch, *, waiting=True):
     session, turn, _prepared, capture = await saved(runtime, active, monkeypatch, waiting=waiting)
-    assert await save_checkpoint(runtime, turn.id, REFERENCE)
+    await save_computer(turn.id, REFERENCE)
     if waiting:
         followup = await runtime.database.resume(
             actor, session.id, turn.id, "approved-once", {"approvals": {"original-call": True}},
@@ -69,7 +68,7 @@ async def test_pending_approval_is_not_exposed_until_checkpoint_settlement(runti
     with pytest.raises(HTTPException) as error:
         await runtime.database.resume(actor, session.id, turn.id, "too-early", {"approvals": {}})
     assert error.value.status_code == 409
-    assert await save_checkpoint(runtime, turn.id, REFERENCE)
+    await save_computer(turn.id, REFERENCE)
     async with runtime.database.sessions() as db:
         current = await db.get(Session, session.id)
         completed = await db.get(Turn, turn.id)
@@ -80,7 +79,9 @@ async def test_pending_approval_is_not_exposed_until_checkpoint_settlement(runti
         assert point.image_id == "im-checkpoint"
         assert point.workspace == REFERENCE and point.scope == prepared.scope.workspace_key
         assert point.result_fingerprint == completed.result_fingerprint
-    capture.assert_awaited_once_with(timeout=120)
+    capture.assert_awaited_once()
+    assert capture.await_args.args[0].id == REFERENCE["id"]
+    assert capture.await_args.kwargs == {"require_live": True}
 
 
 @pytest.mark.parametrize("waiting", [True, False])
@@ -189,9 +190,9 @@ async def test_failed_checkpoint_preserves_deferred_request(runtime, active, mon
 async def test_stop_during_deferred_checkpoint_does_not_rearm_approval(runtime, actor, active, monkeypatch):
     session, turn, _, capture = await saved(runtime, active, monkeypatch)
 
-    async def stop(**_):
+    async def stop(*_args, **_):
         await runtime.database.stop(actor, session.id)
-        return SimpleNamespace(object_id="im-too-late")
+        return "im-too-late"
 
     capture.side_effect = stop
     await save_computer(turn.id, REFERENCE)
@@ -200,6 +201,91 @@ async def test_stop_during_deferred_checkpoint_does_not_rearm_approval(runtime, 
         assert current.status == "stopped" and current.active_turn is None
         assert (await db.get(Turn, turn.id)).status == "stopped"
         assert checkpoint(current.snapshot).image_id is None
+
+
+async def test_cancelled_capture_releases_reservation_and_preserves_answer_for_fallback(runtime, active, monkeypatch):
+    session, turn, _, capture = await saved(runtime, active, monkeypatch)
+    entered = asyncio.Event()
+
+    async def interrupted(*_args, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    capture.side_effect = interrupted
+    saving = asyncio.create_task(save_computer(turn.id, REFERENCE))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+    finally:
+        saving.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await saving
+    async with runtime.database.sessions() as db:
+        current, answer = await db.get(Session, session.id), await db.get(Turn, turn.id)
+        assert current.status == answer.status == "saving"
+        assert answer.result_accepted and answer.conversation
+        assert checkpoint(current.snapshot).image_id is None
+        assert await db.get(ComputerOperation, session.id) is None
+    await runtime.database.settle(turn.id, warning="Interrupted capture")
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Session, session.id)).status == "waiting"
+        assert (await db.get(Turn, turn.id)).result_accepted
+
+
+async def test_historical_snapshot_keeps_raw_image_format(runtime, active, monkeypatch):
+    session, turn, prepared = active
+    monkeypatch.setattr("moyai.activities.current", lambda: runtime)
+    capture = AsyncMock(return_value="im-historical")
+    monkeypatch.setattr(runtime.database.answers, "snapshots", SimpleNamespace(capture=capture))
+    await runtime.database.save_result(
+        prepared.scope, conversation="{}", output="Original answer.", workspace=REFERENCE, usage={},
+    )
+    await save_computer(turn.id, REFERENCE)
+    capture.assert_awaited_once()
+    assert capture.await_args.kwargs == {"require_live": False}
+    async with runtime.database.sessions() as db:
+        current, answer = await db.get(Session, session.id), await db.get(Turn, turn.id)
+        assert current.snapshot == "im-historical" and checkpoint(current.snapshot) is None
+        assert current.status == "idle" and answer.status == "completed"
+        assert runtime.security.unseal(answer.result).decode() == "Original answer."
+
+
+async def test_invalid_workspace_is_not_reported_as_a_settled_capture_failure(runtime, active, monkeypatch):
+    session, turn, _prepared, capture = await saved(runtime, active, monkeypatch)
+    with pytest.raises(ValidationError):
+        await save_computer(turn.id, {"provider": "modal"})
+    capture.assert_not_awaited()
+    async with runtime.database.sessions() as db:
+        current, answer = await db.get(Session, session.id), await db.get(Turn, turn.id)
+        assert current.status == answer.status == "saving"
+        assert current.save_warning is None and answer.result_accepted
+
+
+@pytest.mark.parametrize("mode", ["bound", "historical", "terminated"])
+async def test_modal_snapshot_adapter_preserves_capture_modes_and_timeouts(monkeypatch, mode):
+    capture = AsyncMock(return_value=SimpleNamespace(object_id="im-captured"))
+    poll = AsyncMock(return_value=0 if mode == "terminated" else None)
+    sandbox = SimpleNamespace(poll=SimpleNamespace(aio=poll), snapshot_filesystem=SimpleNamespace(aio=capture))
+    from_id, historical = AsyncMock(return_value=sandbox), AsyncMock(return_value=sandbox)
+    monkeypatch.setattr("moyai.answer_settlement.modal.Sandbox.from_id.aio", from_id)
+    monkeypatch.setattr("moyai.answer_settlement.ModalSandbox", lambda: SimpleNamespace(
+        backend=lambda _ref: SimpleNamespace(get_sandbox=historical),
+    ))
+    reference = TypeAdapter(WorkspaceRef).validate_python(REFERENCE)
+    if mode == "terminated":
+        with pytest.raises(ApplicationError):
+            await ModalSnapshots().capture(reference, require_live=True)
+        capture.assert_not_awaited()
+    else:
+        assert await ModalSnapshots().capture(reference, require_live=mode == "bound") == "im-captured"
+        capture.assert_awaited_once_with(timeout=120)
+    if mode == "historical":
+        historical.assert_awaited_once()
+        from_id.assert_not_awaited()
+        poll.assert_not_awaited()
+    else:
+        from_id.assert_awaited_once_with(REFERENCE["id"])
+        poll.assert_awaited_once()
+        historical.assert_not_awaited()
 
 
 async def test_exact_restore_inherits_legacy_file_provenance(runtime, actor, active, monkeypatch):
