@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -20,6 +21,7 @@ from pydantic_ai import ConversationTypeAdapter, DeferredToolResults
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse, ask_user_result
 from sqlalchemy import func, select, update
+from sqlalchemy.orm import load_only
 from temporalio.service import RPCError
 
 from .computer import routes as computer_routes
@@ -277,7 +279,12 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             f"img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' {stream_origin}; font-src 'self'; "
             "frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
         )
-        response.headers["Cache-Control"] = "no-store"
+        # Only content-addressed build assets are public/cacheable. HTML,
+        # authenticated API data, unversioned files and errors remain no-store.
+        immutable = response.status_code in {200, 304} and re.fullmatch(
+            r"/assets/[^/]+-[A-Za-z0-9_-]{8,}\.(?:js|css|woff2?|png|svg|jpe?g|webp|ico)", request.url.path,
+        )
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-store"
         return response
 
     @app.get("/health")
@@ -385,19 +392,37 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return session_view(await runtime.database.create_session(user, body))
 
     @app.get("/api/sessions/{session_id}")
-    async def session(session_id: str, request: Request, user: User = Depends(actor)):
+    async def session(
+        session_id: str, request: Request, resolve: bool = False, include_activity: bool = True,
+        user: User = Depends(actor),
+    ):
+        reference = None
+        if resolve and runtime.product_identity is not None:
+            from .product_routes import ProductReadService, Reader
+            # actor has just verified the product principal. The read adapter
+            # still fences source/native ACLs and canonical continuation aliases.
+            reference = (await ProductReadService(runtime).detail(
+                Reader(user, request.state.product_principal), session_id, "native",
+            ))["session"]
         row = await runtime.database.session(user, session_id)
+        turn_columns = load_only(
+            Turn.id, Turn.session_id, Turn.actor_id, Turn.model, Turn.status, Turn.mode,
+            Turn.parent_turn, Turn.enqueue_id, Turn.connections, Turn.accepted_at, Turn.usage,
+            Turn.error, Turn.created_at, Turn.finished_at,
+        )
         async with runtime.database.sessions() as db:
             turns = list((await db.scalars(select(Turn).where(
                 Turn.session_id == session_id
-            ).order_by(Turn.created_at.desc()).limit(100))).all())
+            ).options(turn_columns).order_by(Turn.created_at.desc()).limit(100))).all())
             if row.active_turn and not any(turn.id == row.active_turn for turn in turns):
-                active_turn = await db.get(Turn, row.active_turn)
+                active_turn = await db.get(Turn, row.active_turn, options=[turn_columns])
                 if active_turn is not None:
                     turns.append(active_turn)
             result: dict[str, Any] = {
                 "session": session_view(row), "turns": [turn_view(turn) for turn in turns],
             }
+            if reference is not None:
+                result["reference"] = reference
             preference = await db.get(SessionPreference, (user.id, session_id))
             result["session"]["pinned"] = bool(preference and preference.pinned)
             result["session"]["folder"] = preference.folder if preference else ""
@@ -412,7 +437,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 "id": effect.id, "turn_id": effect.turn_id, "tool_name": effect.tool_name,
                 "arguments": json.loads(runtime.security.unseal(effect.arguments)),
             } for effect in unsettled if effect.actor_id == user.id]
-        if turns and turns[0].actor_id == user.id and turns[0].status != "running":
+        if include_activity and turns and turns[0].actor_id == user.id and turns[0].status != "running":
             snapshot = await runtime.stores.steps.latest_snapshot(run_id=turns[0].id)
             if snapshot is not None:
                 result["activity"] = saved_activity(snapshot.messages, turns[0].id)
@@ -431,6 +456,19 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                     {"request_id": item["request_id"]} for item in requests["requests"]
                 ]
         return result
+
+    @app.get("/api/sessions/{session_id}/activity")
+    async def session_activity(session_id: str, user: User = Depends(actor)):
+        await runtime.database.session(user, session_id)
+        async with runtime.database.sessions() as db:
+            turn = (await db.execute(select(Turn.id, Turn.actor_id, Turn.status).where(
+                Turn.session_id == session_id,
+            ).order_by(Turn.created_at.desc()).limit(1))).first()
+        if turn is not None and turn.actor_id == user.id and turn.status != "running":
+            snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id)
+            if snapshot is not None:
+                return saved_activity(snapshot.messages, turn.id)
+        return []
 
     @app.patch("/api/sessions/{session_id}")
     async def edit_session(session_id: str, body: SessionEdit, user: User = Depends(actor)):

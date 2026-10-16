@@ -66,9 +66,11 @@ async def admitted_product(prepared_product_database):
     return product
 
 
-async def active_turn(product):
+async def active_turn(product, *, private=False):
     database = product.database
-    session = await database.create_session(product.actor, NewSession())
+    session = await database.create_session(
+        product.actor, NewSession(visibility="private") if private else NewSession(),
+    )
     turn = await database.submit(product.actor, session.id, NewMessage(prompt="Work", request_key=str(uuid4())))
     assert (await database.claim_next()).id == turn.id
     prepared = await database.prepare(turn.id)

@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { mountSculpture } from "@/moyai-sculpture"
 import "./space-field.js"
 import logo from "./assets/moyai-logo.png"
 import { api, csrfToken } from "./api"
@@ -56,9 +55,14 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   useEffect(() => {
     mounted.current = true
     document.title = "New session · Moyai"
-    const cleanupSculpture = mountSculpture(sculpture.current)
+    let disposed = false
+    let cleanupSculpture = () => {}
+    // The composer is useful before the decorative WebGL module is downloaded.
+    void import("@/moyai-sculpture").then(({ mountSculpture }) => {
+      if (!disposed) cleanupSculpture = mountSculpture(sculpture.current)
+    }).catch(() => {}) // The static logo remains a complete fallback.
     const cleanupStars = stars.current ? window.MoyaiSpace?.mount(stars.current, { anchor: sculpture.current ?? undefined }) : undefined
-    return () => { mounted.current = false; cleanupSculpture(); cleanupStars?.() }
+    return () => { disposed = true; mounted.current = false; cleanupSculpture(); cleanupStars?.() }
   }, [])
   useEffect(() => {
     if (productMode !== "existing") return
