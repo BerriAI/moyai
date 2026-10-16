@@ -14,7 +14,7 @@ from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
 
 
-@pytest.mark.parametrize("runtime", ["tools"], indirect=True)
+@pytest.mark.parametrize("runtime", ["stream"], indirect=True)
 async def test_native_workflow_stream_scopes_root_text_and_model_rounds(runtime, active):
     _session, turn, _prepared = active
     converter = DataConverter(payload_codec=EncryptedPayloadCodec(runtime.security, runtime.objects))

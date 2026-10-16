@@ -349,7 +349,7 @@ async def test_native_reads_recheck_authority_after_store_await(
             await asyncio.gather(request, return_exceptions=True)
 
 
-@pytest.mark.parametrize("runtime", ["tools"], indirect=True)
+@pytest.mark.parametrize("runtime", ["workspace"], indirect=True)
 async def test_real_temporal_delegate_is_inspectable_through_workspace_api(runtime, active):
     """Real native execution with a deterministic model, not real-provider E2E proof."""
     session, turn, _ = active
