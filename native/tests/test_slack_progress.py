@@ -1,4 +1,4 @@
-"""Slack transport regression tests; these do not claim live Slack delivery."""
+"""Real delivery adapters with a Slack transport double; no external messages."""
 
 import asyncio
 import json
@@ -6,74 +6,135 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select
+from test_product_slack import bind
+from test_product_slack import bridge as canonical_bridge
+from test_product_slack import slack as canonical_slack
 
-from moyai.models import Delivery, Event, Turn, new_id
-from moyai.slack_progress import sync_progress
+from moyai.models import Delivery, Turn, User, new_id
+from moyai.slack import deliver_one, reconcile_one
+from moyai.slack_progress import anchor_identity, claim_delivery, stage_progress
+
+bridge = canonical_bridge
+slack = canonical_slack
 
 
-async def anchor(runtime, active):
+async def queued(runtime, active, *, product, kind, text):
     session, turn, _ = active
+    if kind == "anchor":
+        identity = anchor_identity(turn.id, product)
+    elif product:
+        identity = f"product-slack:{turn.id}:{'completed:0' if kind == 'final' else 'progress:' + kind}"
+    else:
+        identity = f"slack-answer:{turn.id}" if kind == "final" else f"slack-commentary:{turn.id}:{kind}"
+    destination = {"channel": "CTEST0001", "thread_ts": "1792100000.000"}
+    if kind not in {"anchor", "final"}:
+        destination["progress"] = True
     async with runtime.database.sessions.begin() as db:
-        row = Delivery(
-            id=new_id(), identity=f"product-slack:{turn.id}:running:0",
-            session_id=session.id, turn_id=turn.id,
-            destination=json.dumps({"channel": "CTEST", "thread_ts": "1.0"}),
-            content=runtime.security.seal({"text": "Moyai is working."}),
-            status="sent", receipt=runtime.security.seal({"ok": True, "ts": "1.1"}),
+        delivery = Delivery(
+            id=new_id(), identity=identity, session_id=session.id, turn_id=turn.id,
+            destination=json.dumps(destination),
+            content=runtime.security.seal({"text": text} if product else text),
         )
-        db.add(row)
-    return row
+        db.add(delivery)
+    return delivery
 
 
-async def allow(delivery):
-    return True
+def transport():
+    requests, messages = [], {}
+
+    async def handle(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"ok": True, "messages": list(messages.values())})
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        if request.url.path.endswith("chat.update"):
+            assert body["ts"] in messages
+            ts = body["ts"]
+        else:
+            ts = f"1792100000.{len(messages) + 1:03d}"
+        messages[ts] = {**body, "ts": ts}
+        return httpx.Response(200, json={"ok": True, "ts": ts})
+
+    return requests, messages, handle
 
 
-async def progress(runtime, turn):
-    return [{"id": "progress", "text": "I found the relevant handler.", "phase": "commentary"}]
+@pytest.mark.parametrize("product", [False, True])
+async def test_one_reply_is_edited_from_progress_to_final(runtime, active, slack, product):
+    await bind(slack, active)
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    update = await queued(runtime, active, product=product, kind="one", text="Checking the handler.")
+    final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
+    requests, messages, handle = transport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await deliver(client, initial)
+        await deliver(client, update)
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Turn, active[1].id)).status = "completed"
+        await deliver(client, final)
+    assert [path for path, _ in requests] == ["/chat.postMessage", "/chat.update", "/chat.update"]
+    assert len(messages) == 1 and next(iter(messages.values()))["text"] == "Final verdict."
+    assert requests[-1][1]["blocks"] == []
 
 
-async def test_concurrent_progress_updates_reuse_one_confirmed_timestamp(runtime, active, monkeypatch):
-    row = await anchor(runtime, active)
-    monkeypatch.setattr("moyai.slack_progress.turn_progress", progress)
+@pytest.mark.parametrize("product", [False, True])
+async def test_late_progress_cannot_overwrite_final(runtime, active, slack, product):
+    await bind(slack, active)
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    progress = await queued(runtime, active, product=product, kind="one", text="Checking.")
+    late = await queued(runtime, active, product=product, kind="late", text="Stale update.")
+    final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
+    requests, messages, handle = transport()
     entered, release = asyncio.Event(), asyncio.Event()
-    requests = []
 
-    async def handler(request):
-        requests.append((request.url.path, json.loads(request.content)))
-        entered.set()
-        await release.wait()
-        return httpx.Response(200, json={"ok": True, "ts": "1.1"})
+    async def delayed(request):
+        if request.method == "POST" and json.loads(request.content)["text"] == "Checking.":
+            entered.set()
+            await release.wait()
+        return await handle(request)
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
-        first = asyncio.create_task(sync_progress(runtime, client, product=True, allowed=allow))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(delayed), base_url="https://slack.test/") as client:
+        await deliver(client, initial)
+        first = asyncio.create_task(deliver(client, progress))
         await entered.wait()
-        await sync_progress(runtime, client, product=True, allowed=allow)
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Turn, active[1].id)).status = "completed"
+        await deliver(client, final)
+        assert len(requests) == 1
         release.set()
         await first
-    assert len(requests) == 1
-    assert requests[0][0] == "/chat.update" and requests[0][1]["ts"] == "1.1"
+        await deliver(client, final)
+        await deliver(client, late)
+    assert len(messages) == 1 and next(iter(messages.values()))["text"] == "Final verdict."
+    assert len(requests) == 3
     async with runtime.database.sessions() as db:
-        saved = await db.get(Delivery, row.id)
-        assert saved.status == "sent"
-        assert json.loads(runtime.security.unseal(saved.content))["text"] == "I found the relevant handler."
+        assert (await db.get(Delivery, late.id)).status == "suppressed"
 
 
+@pytest.mark.parametrize("product", [False, True])
 @pytest.mark.parametrize("cancel", [False, True])
-async def test_lost_update_ack_preserves_post_receipt_and_final_outbox(runtime, active, monkeypatch, cancel):
-    row = await anchor(runtime, active)
-    monkeypatch.setattr("moyai.slack_progress.turn_progress", progress)
+async def test_ambiguous_update_is_reconciled_before_final(runtime, active, slack, product, cancel):
+    await bind(slack, active)
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    progress = await queued(runtime, active, product=product, kind="one", text="Checking.")
+    final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
+    requests, messages, handle = transport()
     entered = asyncio.Event()
 
-    async def handler(request):
-        entered.set()
-        if cancel:
-            await asyncio.Event().wait()
-        raise httpx.ReadTimeout("lost acknowledgement")
+    async def lose_ack(request):
+        result = await handle(request)
+        if request.method == "POST" and json.loads(request.content)["text"] == "Checking.":
+            entered.set()
+            if cancel:
+                await asyncio.Event().wait()
+            raise httpx.ReadTimeout("lost update acknowledgement")
+        return result
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
-        task = asyncio.create_task(sync_progress(runtime, client, product=True, allowed=allow))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lose_ack), base_url="https://slack.test/") as client:
+        await deliver(client, initial)
+        task = asyncio.create_task(deliver(client, progress))
         await entered.wait()
         if cancel:
             task.cancel()
@@ -81,48 +142,75 @@ async def test_lost_update_ack_preserves_post_receipt_and_final_outbox(runtime, 
                 await task
         else:
             await task
-    async with runtime.database.sessions() as db:
-        saved = await db.get(Delivery, row.id)
-        assert saved.status == "sent"
-        assert json.loads(runtime.security.unseal(saved.receipt))["ts"] == "1.1"
-        assert json.loads(runtime.security.unseal(saved.content))["text"] == "Moyai is working."
-
-
-async def test_terminal_progress_settles_once_without_posting_another_answer(runtime, active):
-    row = await anchor(runtime, active)
-    async with runtime.database.sessions.begin() as db:
-        (await db.get(Turn, row.turn_id)).status = "completed"
-    calls = []
-
-    async def handler(request):
-        calls.append(request.url.path)
-        return httpx.Response(200, json={"ok": True})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
-        await sync_progress(runtime, client, product=True, allowed=allow)
         async with runtime.database.sessions.begin() as db:
-            (await db.get(Delivery, row.id)).claimed_at = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
-        await sync_progress(runtime, client, product=True, allowed=allow)
-    assert calls == ["/chat.update"]
-    async with runtime.database.sessions() as db:
-        assert await db.scalar(select(Event.id).where(Event.identity == f"slack-progress-finished:{row.id}"))
+            (await db.get(Turn, active[1].id)).status = "completed"
+            saved = await db.get(Delivery, progress.id)
+            assert saved.status == "sending"
+            saved.claimed_at = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
+        await deliver(client, final)
+        assert len(requests) == 2
+        await reconcile_one(runtime, client, saved)
+        await deliver(client, final)
+    assert len(messages) == 1 and next(iter(messages.values()))["text"] == "Final verdict."
+    assert len(requests) == 3
 
 
-async def test_authority_is_rechecked_after_token_refresh(runtime, active, monkeypatch):
-    await anchor(runtime, active)
-    monkeypatch.setattr("moyai.slack_progress.turn_progress", progress)
-    authorized = True
+@pytest.mark.parametrize("product", [False, True])
+async def test_fast_answer_skips_unsent_placeholder(runtime, active, slack, product):
+    await bind(slack, active)
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    final = await queued(runtime, active, product=product, kind="final", text="Yep, I'm here.")
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Turn, active[1].id)).status = "completed"
+    requests, messages, handle = transport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await deliver(client, initial)
+        await deliver(client, final)
+    assert len(requests) == len(messages) == 1
+    assert requests[0][1]["text"] == "Yep, I'm here."
 
-    async def allowed(delivery):
-        return authorized
 
-    async def headers():
-        nonlocal authorized
-        authorized = False
-        return {"Authorization": "Bearer synthetic-token"}
+@pytest.mark.parametrize("product", [False, True])
+async def test_revoked_sender_cannot_replace_the_reply(runtime, active, slack, product):
+    await bind(slack, active)
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
+    requests, _, handle = transport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await deliver(client, initial)
+        if product:
+            slack.authority["current"] = False
+        else:
+            async with runtime.database.sessions.begin() as db:
+                (await db.get(User, active[1].actor_id)).enabled = False
+        await deliver(client, final)
+    assert len(requests) == 1
 
-    async def handler(request):
-        pytest.fail("Revoked commentary must not reach Slack.")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
-        await sync_progress(runtime, client, product=True, allowed=allowed, headers=headers)
+async def test_progress_staging_coalesces_native_updates(runtime, active, slack, monkeypatch):
+    await bind(slack, active)
+    await queued(runtime, active, product=True, kind="anchor", text="Received.")
+    sequence = 0
+
+    async def read_progress(runtime, turn):
+        nonlocal sequence
+        sequence += 1
+        return [{"id": str(sequence), "text": f"Update {sequence}", "phase": "commentary"}]
+
+    monkeypatch.setattr("moyai.slack_progress.turn_progress", read_progress)
+    await stage_progress(runtime, product=True)
+    await stage_progress(runtime, product=True)
+    assert sequence == 1
+
+
+async def test_different_delivery_rows_share_one_turn_reservation(runtime, active, slack):
+    await bind(slack, active)
+    first = await queued(runtime, active, product=True, kind="one", text="First update.")
+    second = await queued(runtime, active, product=True, kind="two", text="Second update.")
+    claimed = await asyncio.gather(
+        claim_delivery(runtime, first, product=True),
+        claim_delivery(runtime, second, product=True),
+    )
+    assert sorted(claimed) == [False, True]

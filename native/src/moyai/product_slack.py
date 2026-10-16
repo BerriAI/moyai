@@ -606,6 +606,9 @@ class ProductSlack:
                 ).exists(),
             ).order_by(Turn.created_at).limit(100))).all()
         for turn, thread, binding in pairs:
+            # Admission and delivery can run concurrently. Reserve the same
+            # primary reply before any later state is queued.
+            await self.queue(turn, thread, "accepted", {"text": "Moyai received your message."})
             text_value = {
                 "queued": "Moyai is getting ready.", "running": "Moyai is working.",
                 "saving": "Moyai is saving the work.", "waiting": "Moyai needs your response.",
@@ -756,15 +759,15 @@ class ProductSlack:
                     Delivery.id == delivery.id, Delivery.status == "pending",
                 ).values(status="suppressed"))
             return
+        from .slack_progress import claim_delivery, reply_target
+        ready, reply_ts = await reply_target(self.runtime, delivery, product=True)
+        if not ready:
+            return
         # Refresh only the installation bot. Never use personal/shared user OAuth.
         token = await self.connectors.slack_bot_token()
         if not await self.delivery_allowed(delivery):
             return
-        async with self.runtime.database.sessions.begin() as db:
-            claimed = await db.scalar(update(Delivery).where(
-                Delivery.id == delivery.id, Delivery.status == "pending",
-            ).values(status="sending", claimed_at=now()).returning(Delivery.id))
-        if claimed is None:
+        if not await claim_delivery(self.runtime, delivery, product=True):
             return
         try:
             still_allowed = await self.delivery_allowed(delivery)
@@ -779,9 +782,11 @@ class ProductSlack:
         destination = json.loads(delivery.destination)
         content = json.loads(self.runtime.security.unseal(delivery.content))
         try:
-            response = await client.post("chat.postMessage", headers={"Authorization": "Bearer " + token}, json={
-                "channel": destination["channel"], "thread_ts": destination["thread_ts"], **content,
-                "unfurl_links": False, "unfurl_media": False,
+            response = await client.post("chat.update" if reply_ts else "chat.postMessage", headers={"Authorization": "Bearer " + token}, json={
+                "channel": destination["channel"], **content,
+                **({"ts": reply_ts, "blocks": content.get("blocks", [])} if reply_ts else {
+                    "thread_ts": destination["thread_ts"], "unfurl_links": False, "unfurl_media": False,
+                }),
                 "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
             })
             response.raise_for_status()
@@ -823,6 +828,8 @@ class ProductSlack:
 
     async def pump(self, client: httpx.AsyncClient | None = None):
         await self.stage()
+        from .slack_progress import stage_progress
+        await stage_progress(self.runtime, product=True)
         async with self.runtime.database.sessions() as db:
             deliveries = list(await db.scalars(select(Delivery).where(
                 Delivery.identity.startswith("product-slack:"), Delivery.status.in_(["pending", "sending"]),
@@ -837,10 +844,13 @@ class ProductSlack:
 
     async def _deliver_batch(self, client: httpx.AsyncClient, deliveries: list[Delivery]):
         from .slack import reconcile_one
+        from .slack_progress import skip_obsolete
 
         channels: set[str] = set()
         for delivery in deliveries:
             if delivery.status == "pending":
+                if await skip_obsolete(self.runtime, delivery, product=True):
+                    continue
                 channel = json.loads(delivery.destination)["channel"]
                 if channel in channels:
                     continue
@@ -852,14 +862,6 @@ class ProductSlack:
                 await reconcile_one(
                     self.runtime, client, delivery, headers={"Authorization": "Bearer " + token},
                 )
-        from .slack_progress import sync_progress
-
-        async def progress_headers():
-            return {"Authorization": "Bearer " + await self.connectors.slack_bot_token()}
-
-        await sync_progress(
-            self.runtime, client, product=True, allowed=self.delivery_allowed, headers=progress_headers,
-        )
         return channels
 
     async def source_notices(self, client: httpx.AsyncClient, channels: set[str]):

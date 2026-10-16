@@ -1,22 +1,16 @@
-"""Coalesce native commentary into a confirmed Slack working message.
-
-Final replies retain their existing durable outbox. Updating a known timestamp
-is idempotent, and cannot overwrite or duplicate that separate final reply.
-"""
+"""One Slack reply per turn, edited through the existing durable delivery lane."""
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import json
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-import httpx
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .models import Delivery, Event, Session, SlackThread, Turn, User, new_id, now
+from .models import Delivery, SlackThread, Turn, new_id, now
 from .progress import turn_progress
 
 if TYPE_CHECKING:
@@ -25,150 +19,148 @@ if TYPE_CHECKING:
 TERMINAL = {"completed", "failed", "stopped", "waiting"}
 
 
-async def stage_progress(runtime: Runtime) -> None:
-    """Standalone bot: reserve one working post, independently of its final answer."""
+def anchor_identity(turn_id: str, product: bool) -> str:
+    return f"product-slack:{turn_id}:accepted" if product else f"slack-progress:{turn_id}"
+
+
+async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
+    """Queue at most one commentary revision per 30 seconds; never send from here."""
+    from app.slack_format import slack_text
+
     async with runtime.database.sessions() as db:
         pairs = (await db.execute(select(Turn, SlackThread).join(
             SlackThread, SlackThread.session_id == Turn.session_id,
-        ).where(
-            Turn.status == "running",
-            ~select(Delivery.id).where(Delivery.identity == ("slack-progress:" + Turn.id)).exists(),
-        ).order_by(Turn.created_at).limit(20))).all()
+        ).where(Turn.status == "running").order_by(Turn.created_at).limit(100))).all()
+    cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
     for turn, thread in pairs:
+        primary = anchor_identity(turn.id, product)
+        prefix = f"product-slack:{turn.id}:progress:" if product else f"slack-commentary:{turn.id}:"
+        async with runtime.database.sessions() as db:
+            anchor = await db.scalar(select(Delivery).where(Delivery.identity == primary))
+            recent = await db.scalar(select(Delivery.id).where(
+                Delivery.identity.startswith(prefix),
+                or_(Delivery.created_at > cutoff, Delivery.status.in_(["pending", "sending"])),
+            ).limit(1))
+        if anchor is None:
+            if product:
+                continue
+            try:
+                async with runtime.database.sessions.begin() as db:
+                    db.add(Delivery(
+                        id=new_id(), identity=primary, session_id=turn.session_id, turn_id=turn.id,
+                        destination=json.dumps({"channel": thread.channel_id, "thread_ts": thread.thread_ts}),
+                        content=runtime.security.seal("Moyai is working."),
+                    ))
+            except IntegrityError:
+                pass
+        if recent:
+            continue
+        messages = await turn_progress(runtime, turn)
+        if not messages:
+            continue
+        latest = messages[-1]
+        identity = prefix + hashlib.sha256(latest["id"].encode()).hexdigest()[:32]
+        message = slack_text(latest["text"][:2400])
+        if runtime.settings.public_url:
+            message += f"\n<{runtime.settings.public_url.rstrip('/')}/#{turn.session_id}|Open Moyai>"
         try:
             async with runtime.database.sessions.begin() as db:
                 db.add(Delivery(
-                    id=new_id(), identity=f"slack-progress:{turn.id}",
-                    session_id=turn.session_id, turn_id=turn.id,
-                    destination=json.dumps({"channel": thread.channel_id, "thread_ts": thread.thread_ts}),
-                    content=runtime.security.seal("Moyai is working."),
+                    id=new_id(), identity=identity, session_id=turn.session_id, turn_id=turn.id,
+                    destination=json.dumps({
+                        "channel": thread.channel_id, "thread_ts": thread.thread_ts, "progress": True,
+                    }),
+                    content=runtime.security.seal({"text": message} if product else message),
                 ))
         except IntegrityError:
             pass
 
 
-async def standalone_allowed(runtime: Runtime, delivery: Delivery) -> bool:
-    async with runtime.database.sessions() as db:
-        turn = await db.get(Turn, delivery.turn_id)
-        actor = await db.get(User, turn.actor_id) if turn else None
-        session = await db.get(Session, delivery.session_id)
-        thread = await db.scalar(select(SlackThread).where(SlackThread.session_id == delivery.session_id))
-    destination = json.loads(delivery.destination)
-    return bool(
-        actor and actor.enabled and session and not session.deleted and thread
-        and destination.get("channel") == thread.channel_id
-        and destination.get("thread_ts") == thread.thread_ts
-        and thread.team_id == runtime.settings.slack_team_id
-    )
-
-
-async def sync_progress(
-    runtime: Runtime, client: httpx.AsyncClient, *,
-    product: bool = False,
-    allowed: Callable[[Delivery], Awaitable[bool]],
-    headers: Callable[[], Awaitable[dict[str, str]]] | None = None,
-) -> None:
-    """Only edit confirmed posts; concurrent pollers reserve each update with CAS."""
-    pattern = "product-slack:%:running:0" if product else "slack-progress:%"
-    cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
-    async with runtime.database.sessions() as db:
-        rows = list(await db.scalars(select(Delivery).where(
-            Delivery.status == "sent", Delivery.identity.like(pattern),
-            or_(Delivery.claimed_at.is_(None), Delivery.claimed_at < cutoff),
-            ~select(Event.id).where(
-                Event.identity == ("slack-progress-finished:" + Delivery.id),
-            ).exists(),
-        ).order_by(Delivery.claimed_at.asc().nullsfirst(), Delivery.created_at).limit(20)))
-    for delivery in rows:
-        await update_progress(runtime, client, delivery, product=product, allowed=allowed, headers=headers)
-
-
-async def update_progress(
-    runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery, *, product: bool,
-    allowed: Callable[[Delivery], Awaitable[bool]],
-    headers: Callable[[], Awaitable[dict[str, str]]] | None,
-) -> None:
-    stamp = now()
-    cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
-    async with runtime.database.sessions.begin() as db:
-        claimed = await db.scalar(update(Delivery).where(
-            Delivery.id == delivery.id, Delivery.status == "sent",
-            or_(Delivery.claimed_at.is_(None), Delivery.claimed_at < cutoff),
-        ).values(claimed_at=stamp).returning(Delivery.id))
-    if claimed is None:
-        return
-    if not delivery.receipt or not await allowed(delivery):
-        return
-    receipt = json.loads(runtime.security.unseal(delivery.receipt))
-    timestamp = receipt.get("ts")
-    if not isinstance(timestamp, str) or not timestamp:
-        return
+async def skip_obsolete(runtime: Runtime, delivery: Delivery, *, product: bool) -> bool:
+    """Discard only known-unsent placeholders, never an ambiguous external write."""
+    if delivery.status != "pending":
+        return False
     async with runtime.database.sessions() as db:
         turn = await db.get(Turn, delivery.turn_id)
     if turn is None:
-        return
-    terminal = turn.status in TERMINAL
-    message = {
-        "completed": "Work completed.", "failed": "Work stopped with an error. Open Moyai for details.",
-        "stopped": "Work stopped.", "waiting": "Waiting for your response.",
-    }.get(turn.status)
-    if message is None:
-        progress = await turn_progress(runtime, turn)
-        if not progress:
-            return
-        message = progress[-1]["text"][:2400]
-    from app.slack_format import slack_text
-    message = slack_text(message)
-    if runtime.settings.public_url:
-        message += f"\n<{runtime.settings.public_url.rstrip('/')}/#{turn.session_id}|Open Moyai>"
-    current = runtime.security.unseal(delivery.content).decode()
-    if product:
-        current = json.loads(current).get("text", "")
-    if current == message:
-        return
-    request_headers = await headers() if headers else None
-    if not await allowed(delivery):
-        return
-    # Longer than the bot's 20-second HTTP timeout, so another poller cannot
-    # replace a still-running update. Final sends use separate delivery rows.
-    if not await allowed(delivery):
-        return
-    try:
-        response = await client.post("chat.update", headers=request_headers, json={
-            "channel": json.loads(delivery.destination)["channel"], "ts": timestamp,
-            "text": message, "blocks": [],
-        })
-        response.raise_for_status()
-        result = response.json()
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            return
-    except (httpx.HTTPError, ValueError):
-        # A lost update acknowledgement can be retried at this known timestamp.
-        # It never changes the receipt or ownership of the original post.
-        return
-    # Confirmed updates and their terminal marker settle together. Cancellation
-    # is allowed to propagate only after this transaction has finished.
-    async def settle():
-        async with runtime.database.sessions.begin() as db:
-            changed = await db.scalar(update(Delivery).where(
-                Delivery.id == delivery.id, Delivery.status == "sent", Delivery.claimed_at == stamp,
-            ).values(content=runtime.security.seal({"text": message} if product else message)).returning(Delivery.id))
-            if changed and terminal:
-                db.add(Event(
-                    session_id=delivery.session_id, turn_id=delivery.turn_id,
-                    kind="slack_progress_finished", content=runtime.security.seal({}),
-                    identity=f"slack-progress-finished:{delivery.id}",
-                ))
+        return False
+    if not obsolete_notice(delivery, turn.status, product):
+        return False
+    async with runtime.database.sessions.begin() as db:
+        changed = await db.scalar(update(Delivery).where(
+            Delivery.id == delivery.id, Delivery.status == "pending",
+        ).values(status="suppressed").returning(Delivery.id))
+    return changed is not None
 
-    task = asyncio.create_task(settle())
-    cancelled = None
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError as error:
-            if task.cancelled():
-                raise
-            cancelled = error
-    if cancelled is not None:
-        raise cancelled
+
+def obsolete_notice(delivery: Delivery, status: str, product: bool) -> bool:
+    destination = json.loads(delivery.destination)
+    kind = delivery.identity.removeprefix(f"product-slack:{delivery.turn_id}:").split(":")[0] if product else ""
+    transient = kind in {"accepted", "queued", "running", "saving"} if product else (
+        delivery.identity == anchor_identity(delivery.turn_id, False)
+    )
+    return (
+        (transient or destination.get("progress") is True) and status in TERMINAL
+    ) or (kind in {"queued", "running", "saving"} and kind != status)
+
+
+async def claim_delivery(runtime: Runtime, delivery: Delivery, *, product: bool) -> bool:
+    """Serialize all revisions of one reply, including across delivery pollers."""
+    async with runtime.database.sessions.begin() as db:
+        # Acquire the turn's write lock on both PostgreSQL and SQLite without
+        # changing its status. A row lock alone is ignored by SQLite.
+        status = await db.scalar(update(Turn).where(Turn.id == delivery.turn_id).values(
+            status=Turn.status,
+        ).returning(Turn.status))
+        if status is None:
+            return False
+        if obsolete_notice(delivery, status, product):
+            await db.execute(update(Delivery).where(
+                Delivery.id == delivery.id, Delivery.status == "pending",
+            ).values(status="suppressed"))
+            return False
+        if await db.scalar(select(Delivery.id).where(
+            Delivery.turn_id == delivery.turn_id, Delivery.id != delivery.id, Delivery.status == "sending",
+        ).limit(1)):
+            return False
+        claimed = await db.scalar(update(Delivery).where(
+            Delivery.id == delivery.id, Delivery.status == "pending",
+        ).values(status="sending", claimed_at=now()).returning(Delivery.id))
+        return claimed is not None
+
+
+async def reply_target(runtime: Runtime, delivery: Delivery, *, product: bool) -> tuple[bool, str | None]:
+    """Wait for earlier ambiguous writes, then reuse the confirmed primary reply.
+
+    The first part of a long final answer replaces the primary reply; overflow
+    parts retain existing chunked delivery. Control notices remain independent.
+    """
+    destination = json.loads(delivery.destination)
+    if destination.get("control"):
+        return True, None
+    primary = anchor_identity(delivery.turn_id, product)
+    if delivery.identity == primary:
+        return True, None
+    if product and destination.get("progress") is not True:
+        suffix = delivery.identity.removeprefix(f"product-slack:{delivery.turn_id}:")
+        if not suffix.endswith(":0"):
+            return True, None
+    if not product and not (
+        delivery.identity == f"slack-answer:{delivery.turn_id}" or destination.get("progress") is True
+    ):
+        return True, None
+    async with runtime.database.sessions() as db:
+        unresolved = await db.scalar(select(Delivery.id).where(
+            Delivery.turn_id == delivery.turn_id, Delivery.id != delivery.id,
+            Delivery.status == "sending",
+        ).limit(1))
+        if unresolved:
+            return False, None
+        anchor = await db.scalar(select(Delivery).where(Delivery.identity == primary))
+        if anchor is None or anchor.status in {"suppressed", "rejected"}:
+            return (destination.get("progress") is not True), None
+        if anchor.status != "sent" or not anchor.receipt:
+            return False, None
+        receipt = json.loads(runtime.security.unseal(anchor.receipt))
+        timestamp = receipt.get("ts")
+        return (True, timestamp) if isinstance(timestamp, str) and timestamp else (False, None)

@@ -34,16 +34,23 @@ access to another requester's working transcript.
 
 The signed bot transport remains separate from personal Slack agent tools.
 Standalone mode reserves one working post; the existing-product adapter reuses
-its existing running notice. Once Slack confirms its timestamp, commentary
-updates that post with `chat.update`, at most once every 30 seconds per turn.
-Completion changes the working post to a short terminal status. The final
-answer and approval requests continue through the existing durable outbox.
+its accepted-message reply. Once Slack confirms its timestamp, commentary
+updates that reply with `chat.update`, at most once every 30 seconds per turn.
+The final answer replaces that same reply. A fast answer skips any unsent
+placeholder. Long answers retain existing overflow-chunk delivery after the
+first part replaces the primary reply.
 
-Progress never uses a personal Slack token, posts token-by-token updates, or
-reposts a message whose original send acknowledgement was lost. Updates check
-current destination authority and use a compare-and-set reservation. A lost
-update acknowledgement leaves the original post receipt intact; retrying an
-edit at its known timestamp cannot duplicate the final answer.
+Commentary and final answers use the existing durable outbox and metadata
+reconciliation. A turn-level database reservation serializes edits even across
+competing pollers. An ambiguous earlier write blocks later edits until its
+receipt is reconciled; it is never blindly reposted. Known-unsent progress is
+suppressed when the turn finishes, so it cannot overwrite a final answer.
+Approval requests reuse the primary reply while retaining their confirmed
+message timestamp and action checks. Control notices remain independent.
+
+No personal Slack token or extra model call is used to render these updates.
+The web and Slack adapters consume the same native commentary projection, with
+current requester/destination authorization checked by each delivery surface.
 
 ## Verification
 

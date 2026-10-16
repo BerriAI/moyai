@@ -187,6 +187,12 @@ async def stage_deliveries(runtime: Runtime) -> None:
 
 
 async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery) -> None:
+    from .slack_progress import claim_delivery, reply_target, skip_obsolete
+    if await skip_obsolete(runtime, delivery, product=False):
+        return
+    ready, reply_ts = await reply_target(runtime, delivery, product=False)
+    if not ready:
+        return
     async with runtime.database.sessions.begin() as db:
         turn = await db.get(Turn, delivery.turn_id)
         actor = await db.get(User, turn.actor_id) if turn else None
@@ -194,16 +200,16 @@ async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Del
         if actor is None or not actor.enabled or session is None or session.deleted:
             await db.execute(update(Delivery).where(Delivery.id == delivery.id).values(status="suppressed"))
             return
-        claimed = await db.scalar(update(Delivery).where(
-            Delivery.id == delivery.id, Delivery.status == "pending"
-        ).values(status="sending", claimed_at=now()).returning(Delivery.id))
-    if claimed is None:
+    if not await claim_delivery(runtime, delivery, product=False):
         return
     destination = json.loads(delivery.destination)
     try:
-        response = await client.post("chat.postMessage", json={
-            **destination, "text": runtime.security.unseal(delivery.content).decode(),
-            "unfurl_links": False, "unfurl_media": False,
+        response = await client.post("chat.update" if reply_ts else "chat.postMessage", json={
+            "channel": destination["channel"],
+            **({"ts": reply_ts, "blocks": []} if reply_ts else {
+                "thread_ts": destination["thread_ts"], "unfurl_links": False, "unfurl_media": False,
+            }),
+            "text": runtime.security.unseal(delivery.content).decode(),
             "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
         })
         response.raise_for_status()
@@ -267,7 +273,7 @@ async def pump(runtime: Runtime) -> None:
         ).order_by(SlackInbox.created_at).limit(10))).all())
     for item in inbox:
         await admit_one(runtime, item)
-    from .slack_progress import stage_progress, standalone_allowed, sync_progress
+    from .slack_progress import stage_progress
     await stage_progress(runtime)
     await stage_deliveries(runtime)
     async with runtime.database.sessions() as db:
@@ -286,9 +292,6 @@ async def pump(runtime: Runtime) -> None:
                     await reconcile_one(runtime, client, delivery)
             except httpx.HTTPError:
                 logger.warning("Slack read reconciliation is unavailable; the delivery remains claimed.")
-        await sync_progress(
-            runtime, client, allowed=lambda delivery: standalone_allowed(runtime, delivery),
-        )
 
 
 async def dispatcher(runtime: Runtime) -> None:
