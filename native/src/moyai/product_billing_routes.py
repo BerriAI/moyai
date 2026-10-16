@@ -308,6 +308,13 @@ class ProductBillingService:
         async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
             async with self._reader(self.source_engine, self.schema) as old:
                 async with self._reader(self.native_engine, self.native_schema) as new:
+                    from .billing_storage import active_storage
+
+                    storage = await active_storage(
+                        new.connection, source_schema=self.schema, native_schema=self.native_schema,
+                    )
+                    old.storage = new.storage = storage
+                    old.billing_connection = new.connection
                     policy = self.recovery_policy() if callable(self.recovery_policy) else self.recovery_policy
                     projection = await read_product_billing(
                         old, new, period, rules=self.rules, mappings=self.mappings, policy=policy,

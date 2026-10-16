@@ -23,12 +23,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import MAX_EMAX, MIN_EMIN, Decimal, localcontext
 from types import MappingProxyType
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from sqlalchemy import MetaData, Table, and_, false, inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .analytics import ReportRange, actual_cost, integer, utc
+
+if TYPE_CHECKING:
+    from .billing_storage import Storage
 
 Engine = Literal["legacy", "native"]
 CostState = Literal["final", "pending", "missing", "estimated"]
@@ -624,10 +627,15 @@ class BillingReader:
     Missing sources fail visibly; they never initialize an empty replacement DB.
     """
 
-    def __init__(self, connection: AsyncConnection, *, schema: str | None = None, max_records: int = MAX_RECORDS):
+    def __init__(
+        self, connection: AsyncConnection, *, schema: str | None = None, max_records: int = MAX_RECORDS,
+        storage: Storage | None = None, billing_connection: AsyncConnection | None = None,
+    ):
         if not 1 <= max_records <= MAX_RECORDS:
             raise BillingReadError("invalid_read_bound")
         self.connection, self.schema, self.max_records = connection, schema, max_records
+        self.storage = storage
+        self.billing_connection = billing_connection if billing_connection is not None else connection
 
     async def table(self, name: str, fields: Iterable[str], required: Iterable[str]) -> Table:
         def reflect(connection: Any) -> Table:
@@ -647,11 +655,13 @@ class BillingReader:
         self, engine: Engine, period: ReportRange, *, matching: Iterable[str] = (),
     ) -> list[dict[str, Any]]:
         fields = LEGACY_FIELDS if engine == "legacy" else NATIVE_FIELDS
-        table = await self.table(
-            "model_requests" if engine == "legacy" else "moyai_inference_usage", fields,
-            ("id", "model", "created_at", "status", "run_id", "user_id", "cost") if engine == "legacy"
-            else ("id", "model", "created_at", "status", "session_id", "actor_id", "cost_usd", "cost_status"),
-        )
+        table = None
+        if self.storage is None:
+            table = await self.table(
+                "model_requests" if engine == "legacy" else "moyai_inference_usage", fields,
+                ("id", "model", "created_at", "status", "run_id", "user_id", "cost") if engine == "legacy"
+                else ("id", "model", "created_at", "status", "session_id", "actor_id", "cost_usd", "cost_status"),
+            )
         admissions = None
         if engine == "native":
             admissions = await self.admission_table()
@@ -665,21 +675,30 @@ class BillingReader:
                 )).limit(self.max_records + 1))).scalars().all()
                 candidates.extend(keys)
             candidates = sorted(set(candidates))
-        statements = [select(table).where(
-            table.c.created_at >= period.start.isoformat(), table.c.created_at < period.end.isoformat(),
-        )]
         if len(candidates) > self.max_records * 4:
             raise BillingReadError("too_many_accounting_identities")
-        names = ("id", "gateway_id", "cost_receipt_id") if engine == "legacy" else ("id", "request_key", "provider_request_id")
-        for offset in range(0, len(candidates), LOOKUP_CHUNK):
-            values = candidates[offset:offset + LOOKUP_CHUNK]
-            statements.append(select(table).where(or_(*(table.c[name].in_(values) for name in names if name in table.c))))
-        result: dict[str, dict[str, Any]] = {}
-        for statement in statements:
-            for row in (await self.connection.execute(statement.limit(self.max_records + 1))).mappings():
-                result[row["id"]] = dict(row)
-                if len(result) > self.max_records:
-                    raise BillingReadError("too_many_accounting_records")
+        if self.storage is not None:
+            result = await self._consolidated_rows(engine, period, candidates, fields)
+        else:
+            assert table is not None
+            statements = [select(table).where(
+                table.c.created_at >= period.start.isoformat(), table.c.created_at < period.end.isoformat(),
+            )]
+            names = (
+                ("id", "gateway_id", "cost_receipt_id") if engine == "legacy"
+                else ("id", "request_key", "provider_request_id")
+            )
+            for offset in range(0, len(candidates), LOOKUP_CHUNK):
+                values = candidates[offset:offset + LOOKUP_CHUNK]
+                statements.append(select(table).where(or_(
+                    *(table.c[name].in_(values) for name in names if name in table.c)
+                )))
+            result: dict[str, dict[str, Any]] = {}
+            for statement in statements:
+                for row in (await self.connection.execute(statement.limit(self.max_records + 1))).mappings():
+                    result[row["id"]] = dict(row)
+                    if len(result) > self.max_records:
+                        raise BillingReadError("too_many_accounting_records")
         if admissions is not None:
             identifiers = list(result)
             for offset in range(0, len(identifiers), LOOKUP_CHUNK):
@@ -688,6 +707,37 @@ class BillingReader:
                 ))).mappings():
                     result[row["request_key"]]["_admission"] = dict(row)
         return list(result.values())
+
+    async def _consolidated_rows(
+        self, engine: Engine, period: ReportRange, candidates: list[str], fields: tuple[str, ...],
+    ) -> dict[str, dict[str, Any]]:
+        from sqlalchemy import text
+
+        assert self.storage is not None
+        parameters = {
+            "source": engine, "start": period.start.isoformat(), "end": period.end.isoformat(),
+            "limit": self.max_records + 1,
+        }
+        predicates = [("created_at>=:start AND created_at<:end", parameters)]
+        for offset in range(0, len(candidates), LOOKUP_CHUNK):
+            predicates.append((
+                "identities && CAST(:identities AS text[])",
+                {**parameters, "identities": candidates[offset:offset + LOOKUP_CHUNK]},
+            ))
+        result: dict[str, dict[str, Any]] = {}
+        for predicate, params in predicates:
+            records = (await self.billing_connection.execute(text(
+                f"SELECT source_id,record FROM {self.storage.ledger} "
+                f"WHERE source=:source AND ({predicate}) LIMIT :limit"
+            ), params)).mappings()
+            for row in records:
+                saved = row["record"]
+                if not isinstance(saved, dict) or saved.get("id") != row["source_id"]:
+                    raise BillingReadError("incompatible_consolidated_accounting_record")
+                result[row["source_id"]] = {key: value for key, value in saved.items() if key in fields}
+                if len(result) > self.max_records:
+                    raise BillingReadError("too_many_accounting_records")
+        return result
 
     async def admission_table(self) -> Table | None:
         name = "moyai_product_inference_requests"

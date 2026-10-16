@@ -47,7 +47,8 @@ MEMORY_REVIEW_SCHEMA_VERSION = "2026-10-15-product-memory-review-v11"
 DRAIN_SCHEMA_VERSION = "2026-10-15-product-drain-v12"
 GIT_OPERATION_SCHEMA_VERSION = "2026-10-15-product-git-operations-v13"
 EXECUTION_COMPATIBILITY_SCHEMA_VERSION = "2026-10-16-product-execution-v14"
-PRODUCT_SCHEMA_VERSION = EXECUTION_COMPATIBILITY_SCHEMA_VERSION
+BILLING_STORAGE_SCHEMA_VERSION = "2026-10-16-product-billing-storage-v15"
+PRODUCT_SCHEMA_VERSION = BILLING_STORAGE_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -111,6 +112,9 @@ MIGRATIONS = (
     (GIT_OPERATION_SCHEMA_VERSION, GIT_OPERATION_TABLES),
     # A durable release barrier: v13 candidates cannot resume the new workflow commands.
     (EXECUTION_COMPATIBILITY_SCHEMA_VERSION, frozenset()),
+    # Passive tables only. Explicit billing_storage commands install mirrors,
+    # backfill records and select the read source after exact validation.
+    (BILLING_STORAGE_SCHEMA_VERSION, frozenset({"moyai_billing_records", "moyai_billing_storage"})),
 )
 
 
@@ -147,6 +151,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "product_memory_review_models",
         "product_drain_models",
         "product_github_models",
+        "billing_storage_models",
     ):
         import_module(f"{__package__}.{module}")
     included = frozenset().union(*(item[1] for item in MIGRATIONS[:versions.index(version) + 1]))
