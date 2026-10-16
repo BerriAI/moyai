@@ -53,6 +53,8 @@ the incoming Host header. The default binding is `127.0.0.1:8787`. Set
 `MOYAI_BIND_ADDRESS` to the appropriate private interface when ingress runs on a
 different host. Keep the database, Temporal, and individual application services
 private. Configure the ingress for streaming and WebSockets.
+Compose restarts the proxy when it replaces an upstream application container,
+so Nginx resolves the new container addresses.
 
 ### Choose the topology
 

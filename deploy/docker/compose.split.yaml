@@ -71,6 +71,13 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+        restart: true
+      broker:
+        condition: service_healthy
+        restart: true
+      coordinator:
+        condition: service_healthy
+        restart: true
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
       interval: 5s

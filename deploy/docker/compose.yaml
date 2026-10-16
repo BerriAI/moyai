@@ -24,6 +24,7 @@ services:
     depends_on:
       app:
         condition: service_healthy
+        restart: true
     restart: unless-stopped
 volumes:
   moyai-state:
