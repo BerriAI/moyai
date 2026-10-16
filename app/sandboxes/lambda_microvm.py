@@ -7,6 +7,7 @@ import asyncio
 from contextlib import closing
 import hashlib
 import json
+import logging
 import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -23,6 +24,7 @@ from .substrate import Filesystem, Process, operation
 from . import ProvisioningTerminated
 
 _LOCKS = WeakValueDictionary()
+logger = logging.getLogger(__name__)
 
 MAX_LIFETIME = 28800
 MAX_ARCHIVE = 4 * 1024 ** 3  # A bounded single S3 PUT; oversized saves fail closed.
@@ -287,6 +289,7 @@ class Sandbox:
     async def job(self, path, body, *, timeout):
         # The guest journals before executing. An uncertain POST can be polled
         # by ID, but is never silently sent again by this client.
+        last_phase, last_report = None, 0
         async with asyncio.timeout(timeout):
             try:
                 await self._request(path, body)
@@ -300,6 +303,16 @@ class Sandbox:
                     # Keep observing the original job within its existing budget.
                     await asyncio.sleep(2)
                     continue
+                progress = result.get('progress', {})
+                phase = progress.get('phase') if isinstance(progress, dict) else None
+                if (path == '/checkpoint' and phase in {'inventory', 'signatures', 'archive', 'checksum', 'packed'}
+                        and (phase != last_phase or time.monotonic() - last_report >= 10)):
+                    values = {key: progress[key] for key in (
+                        'elapsed_seconds', 'processed', 'entries', 'files_hashed', 'bytes_hashed', 'cache_hits',
+                        'changed_entries', 'deleted_entries', 'archive_bytes',
+                    ) if isinstance(progress.get(key), (int, float))}
+                    logger.info('Lambda checkpoint progress: %s', json.dumps({'phase': phase, **values}))
+                    last_phase, last_report = phase, time.monotonic()
                 if result['state'] == 'failed':
                     raise RuntimeError('AWS guest operation failed: ' + result.get('error', 'unknown'))
                 if result['state'] == 'done':
@@ -348,25 +361,37 @@ class Sandbox:
             return await self.checkpoint(timeout)
 
     async def checkpoint(self, timeout):
+        started = time.perf_counter()
+        timings = {}
         identity = uuid4().hex
         key = self.provider.key('checkpoints/' + identity)
         try:
             async with asyncio.timeout(timeout):
                 meta = await self.job('/checkpoint', {'id': identity, 'timeout': timeout,
                     'max_bytes': MAX_ARCHIVE}, timeout=timeout)
+                timings['prepare_seconds'] = time.perf_counter() - started
+                phase_started = time.perf_counter()
                 url = await self.provider.url('put_object', key + '.tar.gz',
                     ChecksumSHA256=meta['checksum'], ServerSideEncryption='AES256')
                 await self.job('/upload', {'id': uuid4().hex, 'checkpoint': identity, 'url': url,
                     'checksum': meta['checksum']}, timeout=timeout)
+                timings['upload_seconds'] = time.perf_counter() - phase_started
+                phase_started = time.perf_counter()
                 obj = await self.provider.aws('s3', 'head_object', Bucket=self.provider.settings.lambda_checkpoint_bucket,
                     Key=key + '.tar.gz', ChecksumMode='ENABLED')
                 if obj['ContentLength'] != meta['size'] or obj.get('ChecksumSHA256') != meta['checksum']:
                     raise RuntimeError('S3 checkpoint verification failed')
+                timings['verification_seconds'] = time.perf_counter() - phase_started
+                phase_started = time.perf_counter()
                 manifest = {'version': 1, 'key': key + '.tar.gz', 'sha256': meta['sha256'], 'size': meta['size'],
                     'image': self.vm['imageArn'], 'image_version': self.vm['imageVersion']}
                 await self.provider.write(key + '.json', manifest, IfNoneMatch='*')
+                timings['publication_seconds'] = time.perf_counter() - phase_started
         finally:
             # The guest also has an expiry watchdog if this server disconnects.
             await asyncio.shield(self._request('/checkpoint/finish', {'id': identity}))
+        timings['total_seconds'] = time.perf_counter() - started
+        diagnostics = {**timings, 'guest': meta.get('diagnostics', {}), 'archive_bytes': meta['size']}
+        logger.info('Lambda filesystem checkpoint completed: %s', json.dumps(diagnostics))
         return SimpleNamespace(object_id=':'.join(('lambda', self.provider.settings.lambda_region,
-            self.provider.settings.lambda_checkpoint_bucket, key + '.json')))
+            self.provider.settings.lambda_checkpoint_bucket, key + '.json')), diagnostics=diagnostics)

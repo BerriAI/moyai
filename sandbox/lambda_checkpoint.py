@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tarfile
 import threading
+import time
 
 # Runtime machinery, kernel mounts, host-injected networking, and per-exec
 # credentials do not belong to another VM. Everything else is included, even
@@ -20,6 +21,40 @@ EXCLUDED = ('proc', 'sys', 'dev', 'run', 'var/lib/moyai-runtime', 'opt/moyai-lam
             'etc/hostname', 'etc/hosts', 'etc/resolv.conf', '.dockerenv')
 RUNTIME = Path('/var/lib/moyai-runtime')
 BASELINE = Path('/opt/moyai-lambda/base.json')
+
+
+def content_stamp(info):
+    # Size/mtime alone miss edits followed by utime(). ctime cannot be set by
+    # ordinary filesystem writes. Include inode identity to catch replacement,
+    # and keep nanosecond precision; never carry a runtime cache across VMs.
+    return [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+class ContentCache:
+    """Content hashes bound to one filesystem and a verified image baseline."""
+
+    def __init__(self):
+        self.context = None
+        self.entries = {}
+
+    def prepare(self, root, baseline_path, raw, previous):
+        context = (str(root.resolve()), str(baseline_path.resolve()), hashlib.sha256(raw).hexdigest())
+        if context == self.context:
+            return
+        self.entries = {}
+        self.context = context
+        hints = baseline_path.with_suffix('.stats.json')
+        if not hints.exists():
+            return  # Older images remain correct, with a full first scan.
+        seed = json.loads(hints.read_text())
+        if seed.get('baseline_sha256') != context[2]:
+            return
+        self.entries = {
+            name: (stamp, previous[name][4])
+            for name, stamp in seed.get('files', {}).items()
+            if name in previous and stat.S_ISREG(previous[name][0])
+        }
 
 
 def excluded(name):
@@ -55,7 +90,7 @@ def signature(path, hash_file=None):
     if stat.S_ISLNK(info.st_mode):
         content = os.readlink(path)
     elif stat.S_ISREG(info.st_mode):
-        content = (hash_file(path, info) if hash_file else digest(path)).hexdigest()
+        content = hash_file(path, info) if hash_file else digest(path).hexdigest()
     return [info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
             # Container/image layers normalize file timestamps to whole seconds.
             content, attributes(path), int(info.st_mtime) if not stat.S_ISDIR(info.st_mode) else 0]
@@ -63,7 +98,21 @@ def signature(path, hash_file=None):
 
 def baseline(root=Path('/'), target=BASELINE):
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({name: signature(root / name) for name in inventory(root)}))
+    signatures, stamps = {}, {}
+    for name in inventory(root):
+        path = root / name
+        before = path.lstat()
+        signatures[name] = signature(path)
+        after = path.lstat()
+        if content_stamp(before) != content_stamp(after):
+            raise RuntimeError('File changed while recording the image baseline')
+        if stat.S_ISREG(after.st_mode):
+            stamps[name] = content_stamp(after)
+    raw = json.dumps(signatures).encode()
+    target.write_bytes(raw)
+    target.with_suffix('.stats.json').write_text(json.dumps({
+        'baseline_sha256': hashlib.sha256(raw).hexdigest(), 'files': stamps,
+    }))
 
 
 def digest(path):
@@ -103,44 +152,88 @@ def digest(path):
     return value
 
 
-def pack(destination, *, root=Path('/'), baseline_path=BASELINE, max_bytes):
+def pack(destination, *, root=Path('/'), baseline_path=BASELINE, max_bytes,
+         content_cache=None, progress=None):
+    started = time.perf_counter()
+    timings = {}
+    counts = {'files_hashed': 0, 'bytes_hashed': 0, 'cache_hits': 0}
+    def report(phase, **values):
+        if progress:
+            progress({'phase': phase, 'elapsed_seconds': time.perf_counter() - started,
+                      **counts, **values})
+    report('inventory')
     names = inventory(root)
-    previous = json.loads(baseline_path.read_text())
+    timings['inventory_seconds'] = time.perf_counter() - started
+    phase_started = time.perf_counter()
+    raw = baseline_path.read_bytes()
+    previous = json.loads(raw)
+    cache = content_cache if content_cache is not None else ContentCache()
+    cache.prepare(root, baseline_path, raw, previous)
+    timings['baseline_load_seconds'] = time.perf_counter() - phase_started
+    phase_started = time.perf_counter()
+    report('signatures', processed=0, entries=len(names))
     replaced = {name for name in names if name in previous and
                 stat.S_IFMT(previous[name][0]) != stat.S_IFMT((root / name).lstat().st_mode)}
     deleted = sorted((set(previous) - set(names)) | replaced, key=lambda n: n.count('/'), reverse=True)
     # An independent delta against the immutable image, never another runtime
-    # checkpoint. Hash contents so restored dependencies cannot be overlooked
-    # merely because their size/mtime matches the image.
-    # AWS restores image blocks on demand. Serial reads of the full image can
-    # exhaust the checkpoint deadline even when very few files changed. Keep
-    # full content hashing, with bounded parallel reads and deterministic order.
+    # checkpoint. Reuse a hash only while its full change stamp still matches.
+    # Restores and same-size/mtime edits change ctime and therefore require reads.
     changed = []
+    signature_changes = {}
     hashes, hashes_lock = {}, threading.Lock()
+    next_entries = {}
     def hash_file(path, info):
-        if info.st_nlink == 1:
-            return digest(path)
-        # Installed packages can share data with package-manager caches. The
-        # guest is quiesced, so each inode needs one full read per checkpoint.
-        # Never reuse this cache across checkpoints or restored VMs.
-        key = (info.st_dev, info.st_ino)
+        name = path.relative_to(root).as_posix()
+        stamp = content_stamp(info)
+        cached = cache.entries.get(name)
         with hashes_lock:
+            if cached and cached[0] == stamp:
+                counts['cache_hits'] += 1
+                next_entries[name] = cached
+                return cached[1]
+            # Hardlinks still share one read when their cache entry is absent.
+            key = tuple(stamp)
             pending = hashes.get(key)
             owner = pending is None
             if owner:
                 pending = hashes[key] = Future()
         if owner:
             try:
-                pending.set_result(digest(path))
+                value = digest(path).hexdigest()
+                if content_stamp(path.lstat()) != stamp:
+                    raise RuntimeError('File changed while hashing checkpoint')
+                with hashes_lock:
+                    counts['files_hashed'] += 1
+                    counts['bytes_hashed'] += info.st_size
+                pending.set_result(value)
             except BaseException as exc:
                 pending.set_exception(exc)
                 raise
-        return pending.result()
+        value = pending.result()
+        with hashes_lock:
+            next_entries[name] = (stamp, value)
+        return value
     with ThreadPoolExecutor(max_workers=8) as pool:
         for offset in range(0, len(names), 1024):
             batch = names[offset:offset + 1024]
             signatures = pool.map(lambda name: signature(root / name, hash_file), batch)
-            changed.extend(name for name, value in zip(batch, signatures) if previous.get(name) != value)
+            for name, value in zip(batch, signatures):
+                old = previous.get(name)
+                if old == value:
+                    continue
+                changed.append(name)
+                fields = (['added'] if old is None else [
+                    field for field, before, after in zip(
+                        ('mode', 'uid', 'gid', 'nlink', 'content', 'xattrs', 'mtime_seconds'), old, value
+                    ) if before != after
+                ])
+                for field in fields:
+                    signature_changes[field] = signature_changes.get(field, 0) + 1
+            report('signatures', processed=min(offset + len(batch), len(names)),
+                   entries=len(names), changed_entries=len(changed))
+    timings['signature_seconds'] = time.perf_counter() - phase_started
+    phase_started = time.perf_counter()
+    report('archive', changed_entries=len(changed), deleted_entries=len(deleted))
     metadata = json.dumps({'version': 1, 'deleted': deleted}).encode()
     with tarfile.open(destination, 'w:gz', format=tarfile.PAX_FORMAT) as archive:
         info = tarfile.TarInfo('manifest.json')
@@ -159,11 +252,23 @@ def pack(destination, *, root=Path('/'), baseline_path=BASELINE, max_bytes):
                     archive.addfile(info, stream)
             else:
                 archive.addfile(info)
+    timings['archive_seconds'] = time.perf_counter() - phase_started
     size = destination.stat().st_size
     if not 0 < size <= max_bytes:
         raise RuntimeError('Checkpoint exceeds the 4 GiB compressed archive limit')
+    phase_started = time.perf_counter()
+    report('checksum', archive_bytes=size)
     value = digest(destination)
-    return {'size': size, 'sha256': value.hexdigest(), 'checksum': base64.b64encode(value.digest()).decode()}
+    timings['checksum_seconds'] = time.perf_counter() - phase_started
+    timings['pack_seconds'] = time.perf_counter() - started
+    # Commit only a complete scan. Failed scans cannot introduce unverified
+    # cache entries, and deleted paths cannot survive through inode reuse.
+    cache.entries = next_entries
+    report('packed', archive_bytes=size, changed_entries=len(changed), deleted_entries=len(deleted))
+    return {'size': size, 'sha256': value.hexdigest(), 'checksum': base64.b64encode(value.digest()).decode(),
+            'diagnostics': {**timings, **counts, 'entries': len(names),
+                            'changed_entries': len(changed), 'deleted_entries': len(deleted),
+                            'signature_changes': signature_changes}}
 
 
 def valid_name(name):

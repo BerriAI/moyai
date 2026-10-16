@@ -30,6 +30,18 @@ BUSY = None
 FROZEN = {}
 MAX_ARCHIVE = 4 * 1024 ** 3
 BOOTSTRAPPED = sys.argv[1:] == ['bootstrapped']
+CONTENT_CACHE = checkpoint.ContentCache()
+
+
+def prepare_image_baseline():
+    # Record only the first, image-build boot, after OCI layer materialization.
+    # AWS snapshots the resulting filesystem; /bootstrap re-execs with
+    # BOOTSTRAPPED=True and must never rebase over restored/session work.
+    if checkpoint.BASELINE.exists():
+        return
+    if BOOTSTRAPPED:
+        raise RuntimeError('The immutable image baseline is missing')
+    checkpoint.baseline()
 
 
 def thaw():
@@ -138,7 +150,12 @@ def perform(path, body):
             result = {'ready': True}
         elif path == '/checkpoint':
             freeze()
-            result = checkpoint.pack(directory / 'archive.tar.gz', max_bytes=min(body['max_bytes'], MAX_ARCHIVE))
+            def progress(value):
+                with LOCK:
+                    if JOBS[job_id]['state'] == 'running':
+                        JOBS[job_id]['progress'] = value
+            result = checkpoint.pack(directory / 'archive.tar.gz', max_bytes=min(body['max_bytes'], MAX_ARCHIVE),
+                                     content_cache=CONTENT_CACHE, progress=progress)
         elif path == '/upload':
             archive = ROOT / 'operations' / identity(body['checkpoint']) / 'archive.tar.gz'
             transfer(body['url'], path=archive, upload=True,
@@ -298,5 +315,6 @@ if __name__ == '__main__':
         # the complete command tree quiesceable without stopping AWS daemons.
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0):  # PR_SET_CHILD_SUBREAPER
             raise OSError(ctypes.get_errno(), 'Could not own detached guest processes')
+        prepare_image_baseline()
         ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
         ThreadingHTTPServer(('0.0.0.0', 80), Handler).serve_forever()
