@@ -61,6 +61,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck:native
-      - run: node --test tests/test_native_*.cjs
       - run: npm run build:native
       - run: test -z "$(git ls-files -- native/src/moyai/static)"

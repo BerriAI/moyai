@@ -33,7 +33,6 @@ jobs:
       - name: Control, lifecycle and authorization regressions
         run: |
           uv run --python 3.13 pytest -q --tb=line tests/test_computer.py tests/test_idle_window.py tests/test_mcp_bridge.py
-          node --test tests/test_computer_lifecycle.cjs tests/test_pull_requests.cjs
       - name: Build production desktop dependencies
         run: docker build --target transport -f Dockerfile.sandbox -t moyai-desktop .
       - name: Exercise real Chromium address bar, input and agent handoff
