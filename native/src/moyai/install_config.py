@@ -89,12 +89,12 @@ def prepare(
     if not values["MOYAI_PORT"].isdigit() or not 1 <= int(values["MOYAI_PORT"]) <= 65535:
         raise InstallationError("MOYAI_PORT must be a valid TCP port.")
     files = ["compose.split.yaml" if topology == "split" else "compose.yaml"]
+    generated_temporal_password = False
     if temporal == "bundled":
         files.append("compose.temporal.yaml")
         if not values["MOYAI_TEMPORAL_DATABASE_PASSWORD"]:
-            if secrets_from_env:
-                raise InstallationError("Export MOYAI_TEMPORAL_DATABASE_PASSWORD for bundled Temporal.")
             values["MOYAI_TEMPORAL_DATABASE_PASSWORD"] = secrets.token_hex(24)
+            generated_temporal_password = True
         if not re.fullmatch(r"[A-Za-z0-9_-]+", values["MOYAI_TEMPORAL_DATABASE_PASSWORD"]):
             raise InstallationError("Use letters, digits, underscores or hyphens for MOYAI_TEMPORAL_DATABASE_PASSWORD.")
         values.update(TEMPORAL_ADDRESS="", TEMPORAL_TLS="false", TEMPORAL_API_KEY="")
@@ -118,7 +118,10 @@ def prepare(
             service: {"environment": dict.fromkeys(forwarded)} for service in services
         }}
         files.append(ENVIRONMENT_FILE)
-        values = {field: value for field, value in values.items() if field not in SECRETS}
+        values = {
+            field: value for field, value in values.items()
+            if field not in SECRETS or field == "MOYAI_TEMPORAL_DATABASE_PASSWORD" and generated_temporal_password
+        }
     values["COMPOSE_FILE"] = ":".join(files)
     values["COMPOSE_PATH_SEPARATOR"] = ":"
     return values, overlay
@@ -190,7 +193,7 @@ def main() -> None:
             else choice("Application topology", ("standalone", "split"), "standalone")
         )
         temporal = args.temporal or (
-            os.environ.get("MOYAI_TEMPORAL_MODE", "bundled") if args.from_env
+            os.environ.get("MOYAI_TEMPORAL_MODE", "external") if args.from_env
             else choice("Temporal", ("bundled", "external"), "bundled")
         )
         if not args.from_env:

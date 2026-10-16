@@ -19,18 +19,39 @@ Run it on the machine hosting Docker.
 Download `moyai-docker.tar.gz` from a Moyai GitHub release and extract it. The
 bundle's `.env.example` already names the release image by immutable digest.
 Until a release includes that bundle, use the checkout build instructions below.
-From the extracted `moyai-docker` directory:
+Export the settings below, then run one command from the extracted
+`moyai-docker` directory:
 
 ```sh
-sh moyai.sh configure
 sh moyai.sh up
 ```
 
-The configuration command asks for the application topology, Temporal choice,
-endpoints, and credentials. It writes `.env` with mode 0600, chooses the Compose
-files, and generates a password for bundled Temporal when needed. It does not
-overwrite existing configuration or initialize the database. The application
-generates and retains its own missing signing/encryption keys during setup.
+On first startup, `up` reads the exported environment, validates it, chooses the
+Compose files, and starts setup and the application. No wizard or separate
+configuration command is required. PostgreSQL, storage, model and provider
+credentials stay in the invoking environment. Generated non-provider
+configuration is saved in a private `.env`; when bundling Temporal, its generated
+database password is also saved there. Keep provider credentials exported for
+future starts and upgrades.
+
+For Temporal Cloud or your own server, supply `TEMPORAL_ADDRESS`,
+`TEMPORAL_NAMESPACE`, `TEMPORAL_TLS` and any required `TEMPORAL_API_KEY`.
+External Temporal is the unattended default. To run the included Temporal
+server instead, set `MOYAI_TEMPORAL_MODE=bundled`; setup prepares its persistent
+database and namespace. No separately configured Temporal service or database
+password is required.
+
+Set `MOYAI_INSTALL_TOPOLOGY=split` for all four application roles, or leave it
+unset for standalone. The same command handles either choice.
+
+The application generates and retains its own missing signing/encryption keys
+during setup. Subsequent starts retain the saved configuration and data
+destinations. To change them, edit the configuration deliberately and follow
+the migration/upgrade instructions below.
+
+If you prefer prompts, run `sh moyai.sh configure` first. The optional wizard
+writes endpoints and supplied credentials to `.env` with mode 0600 and refuses
+to overwrite existing configuration.
 
 For manual configuration, copy `.env.example` to `.env`, protect it with
 `chmod 600 .env`, and fill in the settings below. Use the helper to start either
@@ -62,17 +83,36 @@ and quotes. Do not source `.env` as a shell script, commit it, or include it in
 support logs. Use letters, digits, underscores or hyphens for
 `MOYAI_TEMPORAL_DATABASE_PASSWORD`.
 
-### Configuration from an environment
+### Example: external services
 
-For automation, export the settings from the table and select the topology
-explicitly:
+Provide these through your secret manager or private shell environment:
 
 ```sh
-sh moyai.sh configure --from-env --topology split --temporal bundled
+export MOYAI_PUBLIC_URL=https://moyai.example.com
+export MOYAI_DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
+export OBJECT_STORAGE_BUCKET=your-private-bucket
+export OBJECT_STORAGE_REGION=us-east-1
+# Export storage credentials, or use your AWS workload credentials.
+export TEMPORAL_ADDRESS=your-namespace.tmprl.cloud:7233
+export TEMPORAL_NAMESPACE=your-namespace
+export TEMPORAL_TLS=true
+export TEMPORAL_API_KEY=YOUR_TEMPORAL_KEY
+export LITELLM_API_BASE=https://your-gateway.example.com/v1
+export LITELLM_API_KEY=YOUR_MODEL_KEY
+export AGENT_MODEL=YOUR_RESPONSES_MODEL
+export MODAL_TOKEN_ID=YOUR_MODAL_ID
+export MODAL_TOKEN_SECRET=YOUR_MODAL_SECRET
+export MOYAI_INSTALL_TOPOLOGY=split
 sh moyai.sh up
 ```
 
-To keep credentials out of `.env`, add `--secrets-from-env`:
+For bundled Temporal, omit the external Temporal connection settings and export
+`MOYAI_TEMPORAL_MODE=bundled` before the same `up` command. For S3-compatible
+storage, export `OBJECT_STORAGE_ENDPOINT` too.
+
+### Optional separate configuration
+
+To generate and inspect configuration before startup:
 
 ```sh
 sh moyai.sh configure --from-env --secrets-from-env --topology split --temporal bundled
@@ -81,11 +121,15 @@ sh moyai.sh up
 
 This writes a `compose.environment.json` override containing credential names
 without values. Keep the credentials exported whenever starting, recreating, or
-upgrading containers. In this mode, export `MOYAI_TEMPORAL_DATABASE_PASSWORD` too
-when using bundled Temporal; the helper does not save a generated password.
+upgrading containers. If you export `MOYAI_TEMPORAL_DATABASE_PASSWORD`, it also
+stays in the invoking environment; otherwise the generated internal database
+password is retained in private `.env`.
 Database URLs and initial signing/encryption/password values are also kept in
 the environment. Missing application keys are still generated once and retained
 in the private installation volume.
+
+Omit `--secrets-from-env` to store supplied credentials in private `.env` instead.
+Automatic first startup uses the environment-credential mode.
 
 You can append a custom Compose override to `COMPOSE_FILE` in `.env`, for example
 to mount a private certificate bundle. The helper uses this directory's
@@ -300,8 +344,7 @@ Then configure the checked-out bundle:
 
 ```sh
 cd deploy/docker
-MOYAI_IMAGE=moyai-local sh moyai.sh configure
-sh moyai.sh up
+MOYAI_IMAGE=moyai-local sh moyai.sh up
 ```
 
 Release

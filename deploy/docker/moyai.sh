@@ -68,7 +68,11 @@ if [ "$action" = configure ]; then
         --entrypoint "$python" "$image" -m moyai.install_config --directory /install --image "$image" "$@"
 fi
 
-[ -f .env ] || fail 'Configure this directory first: sh moyai.sh configure'
+if [ "$action" = up ] && [ ! -e .env ] && [ ! -L .env ]; then
+    printf '%s\n' 'Preparing a new installation from the exported environment.'
+    sh "$directory/moyai.sh" configure --from-env --secrets-from-env
+fi
+[ -f .env ] || fail 'Export the required settings and run: sh moyai.sh up'
 value() { awk -v name="$1" 'index($0,name "=")==1 {value=substr($0,length(name)+2)} END {sub(/\r$/,"",value); print value}' .env; }
 COMPOSE_FILE=$(value COMPOSE_FILE)
 COMPOSE_PROJECT_NAME=$(value COMPOSE_PROJECT_NAME)

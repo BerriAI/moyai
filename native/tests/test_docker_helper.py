@@ -41,6 +41,11 @@ elif args[0] == "inspect":
         print("true" if ticks < int(os.getenv("FAKE_PENDING_POLLS", "1")) else "false")
     else:
         print(os.getenv("FAKE_ACTIVATION_EXIT", "0"))
+elif args[0] == "run" and "moyai.install_config" in args:
+    if os.getenv("FAKE_CONFIG_EXIT"):
+        sys.exit(int(os.environ["FAKE_CONFIG_EXIT"]))
+    directory = Path(args[args.index("--volume") + 1].removesuffix(":/install"))
+    (directory / ".env").write_bytes(Path(os.environ["FAKE_CONFIG_SOURCE"]).read_bytes())
 '''
 
 
@@ -95,6 +100,27 @@ def test_up_waits_for_activation_and_uses_only_this_bundles_project(helper):
         assert call["image"].startswith("registry.example/moyai@sha256:")
         assert call["files"] == "compose.split.yaml:compose.temporal.yaml"
         assert call["envfiles"] == "/dev/null"
+    assert not any("moyai.install_config" in call["args"] for call in calls)
+
+
+@pytest.mark.parametrize("configuration_fails", [False, True])
+def test_one_command_configures_a_fresh_installation_before_starting_services(helper, configuration_fails):
+    directory, _, _ = helper
+    saved = directory.parent / "new-configuration"
+    (directory / ".env").rename(saved)
+    result, calls = run(
+        helper, FAKE_CONFIG_SOURCE=str(saved), FAKE_CONFIG_EXIT="1" if configuration_fails else "",
+    )
+    configuration_call = next(i for i, call in enumerate(calls) if "moyai.install_config" in call["args"])
+    assert "--from-env" in calls[configuration_call]["args"]
+    assert "--secrets-from-env" in calls[configuration_call]["args"]
+    if configuration_fails:
+        assert result.returncode != 0
+        assert not (directory / ".env").exists()
+        assert not any("up" in call["args"] for call in calls)
+    else:
+        assert result.returncode == 0, result.stderr
+        assert configuration_call < next(i for i, call in enumerate(calls) if "up" in call["args"])
 
 
 def test_preflight_failure_does_not_start_or_replace_services(helper):

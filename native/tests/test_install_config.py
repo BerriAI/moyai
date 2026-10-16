@@ -83,16 +83,33 @@ def test_configuration_rejects_newline_injection_without_printing_secret(install
     assert "LITELLM_API_KEY" in str(error.value) and "private-value" not in str(error.value)
 
 
-def test_bundled_password_is_generated_only_for_file_configuration(install_environment):
+@pytest.mark.parametrize("secrets_from_env", [False, True])
+def test_bundled_password_is_generated_and_retained_without_an_extra_input(
+    install_environment, tmp_path, secrets_from_env,
+):
     values, _ = install_config.prepare(
-        install_environment, image=IMAGE, topology="standalone", temporal="bundled", secrets_from_env=False,
+        install_environment, image=IMAGE, topology="standalone", temporal="bundled", secrets_from_env=secrets_from_env,
     )
     assert len(values["MOYAI_TEMPORAL_DATABASE_PASSWORD"]) == 48
-    assert values["TEMPORAL_API_KEY"] == "" and values["TEMPORAL_TLS"] == "false"
-    with pytest.raises(InstallationError, match="Export MOYAI_TEMPORAL_DATABASE_PASSWORD"):
-        install_config.prepare(
-            install_environment, image=IMAGE, topology="standalone", temporal="bundled", secrets_from_env=True,
-        )
+    assert values.get("TEMPORAL_API_KEY", "") == "" and values["TEMPORAL_TLS"] == "false"
+    install_config.write_configuration(tmp_path, values, None)
+    assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+    assert values["MOYAI_TEMPORAL_DATABASE_PASSWORD"] in (tmp_path / ".env").read_text()
+
+
+def test_unattended_configuration_defaults_to_the_supplied_external_temporal(
+    install_environment, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(install_config.os, "environ", install_environment)
+    monkeypatch.setattr(sys, "argv", [
+        "moyai.install_config", "--image", IMAGE, "--directory", str(tmp_path),
+        "--from-env", "--secrets-from-env",
+    ])
+    install_config.main()
+    content = (tmp_path / ".env").read_text()
+    assert "MOYAI_TEMPORAL_MODE=external\n" in content
+    assert f"TEMPORAL_ADDRESS={install_environment['TEMPORAL_ADDRESS']}\n" in content
+    assert "compose.temporal.yaml" not in content
 
 
 def test_configuration_never_follows_an_existing_env_symlink(tmp_path):
