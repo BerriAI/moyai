@@ -289,14 +289,16 @@ class Database:
         async with self.sessions() as db:
             query = select(Session).where(
                 Session.deleted.is_(deleted),
-                ~select(SwarmMember.session_id).where(
-                    SwarmMember.session_id == Session.id, SwarmMember.position > 0,
-                ).exists(),
                 Session.owner_id == actor.id if deleted else
                 or_(Session.owner_id == actor.id, Session.visibility == "shared"),
             ).order_by(Session.updated_at.desc()).limit(100)
             if not deleted:
-                query = query.where(Session.archived.is_(archived))
+                query = query.where(
+                    Session.archived.is_(archived),
+                    ~select(SwarmMember.session_id).where(
+                        SwarmMember.session_id == Session.id, SwarmMember.position > 0,
+                    ).exists(),
+                )
             return list((await db.scalars(query)).all())
 
     async def session(self, actor: User, session_id: str) -> Session:
@@ -366,7 +368,7 @@ class Database:
             ).values(auth_version=User.auth_version).returning(User.id))
             if authorized is None:
                 raise HTTPException(401, "Your access changed. Sign in again.")
-            mission = await self.swarms.admit(transaction, actor, session_id, body)
+            mission = await self.swarms.admit(transaction, actor, session_id, body, generated=swarm_generated)
             session = await self.allowed_session(transaction, session_id, actor)
             locked = await transaction.scalar(update(Session).where(
                 Session.id == session_id, Session.deleted.is_(False),

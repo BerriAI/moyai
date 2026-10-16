@@ -21,7 +21,7 @@ export type SwarmView = {
 }
 
 const windows = [
-  { value: "0", label: "Until stopped" }, { value: "300", label: "5 minutes" },
+  { value: "0", label: "No time limit" }, { value: "300", label: "5 minutes" },
   { value: "1800", label: "30 minutes" }, { value: "3600", label: "1 hour" },
   { value: "14400", label: "4 hours" }, { value: "86400", label: "1 day" },
 ]
@@ -129,7 +129,7 @@ export function SwarmPanel({ sessionId, visible = true, onChanged }: {
           <SelectTrigger aria-label="Change swarm work window"><SelectValue /></SelectTrigger>
           <SelectContent>{timeOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
         </Select>}
-        <span className="muted">{data.ends_at ? `Work window ends ${new Date(data.ends_at).toLocaleString()}` : "Keeps working until you pause or stop it."}</span>
+        <span className="muted">{data.ends_at ? `Work window ends ${new Date(data.ends_at).toLocaleString()}` : "Works until the goal is complete, or you pause or stop it."}</span>
       </div>
       <div className="swarm-roster" aria-label="Swarm members">{data.members.map(member => <a
         key={member.session_id} href={`#${member.session_id}`} aria-current={member.session_id === sessionId ? "page" : undefined}

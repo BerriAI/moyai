@@ -27,6 +27,8 @@ class SwarmMission(Base):
     board_seq: Mapped[int] = mapped_column(Integer, default=0)
     round: Mapped[int] = mapped_column(Integer, default=1)
     leader_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    completion_turn_id: Mapped[str | None] = mapped_column(ForeignKey("moyai_turns.id"), nullable=True)
+    completion_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     budget_seconds: Mapped[int] = mapped_column(Integer, default=0)
     ends_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     next_round_at: Mapped[str | None] = mapped_column(String(40), nullable=True)

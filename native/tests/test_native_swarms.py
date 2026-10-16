@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -11,10 +12,13 @@ from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 from sqlalchemy import func, select, update
+from test_file_preview import saved_file
 
 from moyai.api import COOKIE, create_app
 from moyai.contracts import NewMessage
-from moyai.models import Message, Session, Turn, User, new_id
+from moyai.file_preview import FilePreviewService
+from moyai.models import Effect, Message, Session, Turn, User, new_id
+from moyai.product_routes import ProductReadService, Reader
 from moyai.swarm_contracts import MissionRun, NewSwarm, SwarmControl
 from moyai.swarm_models import SwarmMember, SwarmMission, SwarmOperation, SwarmPost, SwarmTurn
 from moyai.swarm_runtime import tick
@@ -332,3 +336,132 @@ async def test_ordinary_chat_retains_native_delegation_without_swarm_tools(runti
     assert result.output == "Ordinary chat."
     assert "delegate_task" in offered
     assert not any(name.startswith("swarm_") for name in offered)
+
+
+async def test_large_board_text_preserves_cursor_and_full_text_readback(runtime, actor):
+    _, _, prepared, workers = await prepared_team(runtime, actor)
+    context = prepared[workers[0]["session_id"]][1]
+    text = '引用"\\\n' * 3000
+    for index in range(12):
+        await call(runtime, context, "publish", {"message": text}, f"large-{index}")
+    board = await call(runtime, context, "board", {"after": 0}, "read-board")
+    assert len(json.dumps(board)) < 48_000
+    assert board["you"]["session_id"] == workers[0]["session_id"]
+    assert board["has_more"] and board["next_after"] == board["posts"][-1]["sequence"]
+    finding = next(post for post in board["posts"] if post["kind"] == "finding")
+    assert finding["truncated"]
+    pieces, offset = [], 0
+    while True:
+        page = await call(runtime, context, "read", {"sequence": finding["sequence"], "offset": offset}, "read-text")
+        assert len(json.dumps(page)) < 48_000
+        pieces.append(page["text"])
+        if not page["has_more"]:
+            break
+        offset = page["next_offset"]
+    assert "".join(pieces) == text
+    next_page = await call(runtime, context, "board", {"after": board["next_after"]}, "read-next")
+    assert next_page["posts"][0]["sequence"] > board["next_after"]
+
+
+async def settle_team_workers(runtime, prepared, root_id):
+    for session_id, (turn, value) in prepared.items():
+        if session_id != root_id:
+            await runtime.database.save_result(
+                value.scope, conversation='{"messages":[]}', output="Observed 5050.", workspace=None, usage={},
+            )
+            await runtime.database.settle(turn.id)
+
+
+async def test_completion_waits_for_saved_synthesis_and_followup_reuses_team(runtime, actor):
+    root, initial, prepared, workers = await prepared_team(runtime, actor)
+    coordinator = prepared[root.id][1]
+    with pytest.raises(ToolFailed, match="still need attention"):
+        await call(runtime, coordinator, "finish", {"summary": "Too soon."}, "early")
+    with pytest.raises(ToolFailed, match="Only the coordinator"):
+        await call(runtime, prepared[workers[0]["session_id"]][1], "finish", {"summary": "Worker attempt."})
+    await settle_team_workers(runtime, prepared, root.id)
+    result = await call(runtime, coordinator, "finish", {"summary": "Both checks agree."}, "finish")
+    assert result["accepted"]
+    assert await call(runtime, coordinator, "finish", {"summary": "Both checks agree."}, "finish") == result
+    assert (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    assert (await runtime.database.swarms.view(actor, root.id))["status"] == "active"
+    await runtime.database.save_result(
+        coordinator.scope, conversation='{"messages":[]}', output="Verified 5050.", workspace=None, usage={},
+    )
+    await runtime.database.settle(initial.id)
+    assert not (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    done = await runtime.database.swarms.view(actor, root.id)
+    assert done["status"] == "completed"
+    assert any(post["kind"] == "completed" for post in done["posts"])
+    followup = await runtime.database.submit(actor, root.id, NewMessage(prompt="Verify a follow-up.", request_key="followup"))
+    reopened = await runtime.database.swarms.view(actor, root.id)
+    assert reopened["status"] == "active" and reopened["generation"] == 2
+    assert [m["session_id"] for m in reopened["members"]] == [m["session_id"] for m in done["members"]]
+    assert [turn.id for turn in await runtime.database.claim_batch(30)] == [followup.id]
+
+
+async def test_human_input_wins_over_pending_completion(runtime, actor):
+    root, initial, prepared, _ = await prepared_team(runtime, actor)
+    await settle_team_workers(runtime, prepared, root.id)
+    coordinator = prepared[root.id][1]
+    await call(runtime, coordinator, "finish", {"summary": "Original work done."}, "finish")
+    followup = await runtime.database.submit(actor, root.id, NewMessage(prompt="Include this correction.", request_key="correction"))
+    await runtime.database.save_result(
+        coordinator.scope, conversation='{"messages":[]}', output="Original result.", workspace=None, usage={},
+    )
+    await runtime.database.settle(initial.id)
+    assert (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    assert (await runtime.database.swarms.view(actor, root.id))["status"] == "active"
+    assert [turn.id for turn in await runtime.database.claim_batch(30)] == [followup.id]
+
+
+async def test_unknown_effect_prevents_claiming_mission_completion(runtime, actor):
+    root, initial, prepared, _ = await prepared_team(runtime, actor)
+    await settle_team_workers(runtime, prepared, root.id)
+    async with runtime.database.sessions.begin() as db:
+        db.add(Effect(
+            id="f" * 64, session_id=root.id, turn_id=initial.id, actor_id=actor.id,
+            tool_name="shell", arguments=runtime.security.seal({}), fingerprint="a" * 64,
+        ))
+    with pytest.raises(ToolFailed, match="unresolved actions"):
+        await call(runtime, prepared[root.id][1], "finish", {"summary": "Claim success."}, "finish")
+
+
+async def test_deleted_parent_hides_worker_search_and_deleted_members_remain_restorable(runtime, actor):
+    root, _ = await start(runtime, actor, visibility="shared")
+    view = await runtime.database.swarms.view(actor, root.id)
+    child_id = view["members"][1]["session_id"]
+    async with runtime.database.sessions.begin() as db:
+        viewer = User(id=new_id(), username="shared-viewer", display_name="Viewer", password="")
+        db.add(viewer)
+    reader = ProductReadService(runtime)
+    assert (await reader.native_search(Reader(viewer, None), "Investigate", limit=20, offset=0))["sessions"]
+    await runtime.database.delete_session(actor, root.id)
+    assert (await reader.native_search(Reader(viewer, None), "Investigate", limit=20, offset=0))["sessions"] == []
+    assert await reader.native_recheck(Reader(viewer, None), [child_id]) == set()
+    await runtime.database.restore_session(actor, root.id)
+    await runtime.database.delete_session(actor, child_id)
+    assert [row.id for row in await runtime.database.list_sessions(actor, deleted=True)] == [child_id]
+    deleted = await reader.native_list(Reader(actor, None), limit=20, offset=0, deleted=True)
+    assert [row["id"] for row in deleted["sessions"]] == [child_id]
+    await runtime.database.restore_session(actor, child_id)
+    assert (await runtime.database.session(actor, child_id)).id == child_id
+
+
+async def test_shared_output_links_preview_in_mission_without_leaking_other_sessions_or_uploads(runtime, actor):
+    root, _ = await start(runtime, actor)
+    view = await runtime.database.swarms.view(actor, root.id)
+    child = await runtime.database.session(actor, view["members"][1]["session_id"])
+    _, artifact, _ = await saved_file(runtime, actor, raw=b"5050\n", session=child)
+    _, upload, _ = await saved_file(runtime, actor, raw=b"Input only.", session=child, kind="upload")
+    previews = FilePreviewService(runtime)
+    _, raw, _ = await previews.load(actor, root.id, "artifact", artifact.id)
+    assert raw == b"5050\n"
+    with pytest.raises(HTTPException):
+        await previews.load(actor, root.id, "upload", upload.id)
+    other, _ = await start(runtime, actor, key="other-mission")
+    with pytest.raises(HTTPException):
+        await previews.load(actor, other.id, "artifact", artifact.id)
+    await runtime.database.delete_session(actor, child.id)
+    with pytest.raises(HTTPException):
+        await previews.load(actor, root.id, "artifact", artifact.id)

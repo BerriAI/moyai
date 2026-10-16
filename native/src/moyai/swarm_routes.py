@@ -18,7 +18,10 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         return {"session": {**session_view(session), "swarm_id": session.id}, "turn": turn_view(turn)}
 
     @router.get("/api/sessions/{session_id}/swarm")
-    async def board(session_id: str, after: int | None = Query(default=None, ge=0), user: User = Depends(actor)):
+    async def board(
+        session_id: str, after: int | None = Query(default=None, ge=0, le=2_147_483_647),
+        user: User = Depends(actor),
+    ):
         return await service.view(user, session_id, after=after)
 
     @router.post("/api/swarms/{mission_id}/control")

@@ -211,12 +211,24 @@ class SwarmService:
 
     async def admit(
         self, db: AsyncSession, actor: User, session_id: str, body: NewMessage,
+        *, generated: bool = False,
     ) -> SwarmMission | None:
         member = await self.member(db, session_id)
         if member is None:
             return None
         mission = await self.lock(db, member.mission_id, actor)
         await self.require_context(db, mission, actor)
+        if mission.status == "completed" and not generated:
+            # A new authenticated follow-up reopens the saved team without
+            # re-running every original assignment or changing its authority.
+            mission.generation += 1
+            mission.status = "active"
+            mission.reason = ""
+            mission.revision += 1
+            mission.completion_turn_id = None
+            mission.completion_summary = None
+            if expired(mission):
+                mission.ends_at = deadline(mission.budget_seconds)
         if mission.status != "active" or expired(mission):
             raise HTTPException(409, "Resume the swarm before sending more work.")
         if body.model and body.model != member.model:
@@ -233,6 +245,11 @@ class SwarmService:
         db.add(SwarmTurn(
             turn_id=turn.id, mission_id=mission.id, generation=mission.generation, generated=generated,
         ))
+        if not generated:
+            # Serialize a new human input against proposed completion. This
+            # works for queued input and steering without relying on wall clocks.
+            mission.completion_turn_id = None
+            mission.completion_summary = None
 
     async def editable_input(self, db: AsyncSession, turn: Turn) -> None:
         binding = await db.get(SwarmTurn, turn.id)
@@ -244,6 +261,20 @@ class SwarmService:
                 409, "This input belongs to an accepted swarm mission. "
                 "Send a correction in the member chat or use Stop team.",
             )
+
+    async def shared_artifact(
+        self, db: AsyncSession, actor: User, session_id: str, source_id: str | None,
+    ) -> bool:
+        if source_id is None:
+            return False
+        destination = await self.member(db, session_id)
+        source = await self.member(db, source_id)
+        if destination is None or source is None or destination.mission_id != source.mission_id:
+            return False
+        # Saved outputs are shared within the admitted mission. Working history
+        # and unattached/input uploads retain their existing session boundaries.
+        await self.database.allowed_session(db, source_id, actor)
+        return True
 
     async def authorize(self, db: AsyncSession, turn: Turn, *, scope: RunScope | None = None) -> SwarmMember | None:
         member = await self.member(db, turn.session_id)
@@ -293,6 +324,8 @@ class SwarmService:
     async def stop_in(self, db: AsyncSession, mission: SwarmMission, status: str, reason: str) -> None:
         mission.status = status
         mission.reason = reason
+        mission.completion_turn_id = None
+        mission.completion_summary = None
         mission.revision += 1
         mission.updated_at = now()
         members = list(await db.scalars(select(SwarmMember.session_id).where(
@@ -336,6 +369,8 @@ class SwarmService:
                 mission.generation += 1
                 mission.status = "active"
                 mission.reason = ""
+                mission.completion_turn_id = None
+                mission.completion_summary = None
                 if expired(mission):
                     mission.ends_at = deadline(mission.budget_seconds)
                 members = list(await db.scalars(select(SwarmMember).where(SwarmMember.mission_id == mission.id)))

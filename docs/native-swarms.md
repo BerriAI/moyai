@@ -2,7 +2,9 @@
 
 Choose **Swarm** on the new-session screen, describe one shared goal, select
 2–20 workers, and choose a work window. The default is 20 workers, plus the
-coordinator, working until explicitly paused or stopped. Selected worker models
+coordinator, with no automatic time expiry. The coordinator finishes a satisfied
+goal after the workers settle; explicitly ongoing goals can continue until
+paused or stopped. Selected worker models
 rotate across the saved roster; an empty selection inherits the coordinator's
 model. Every execution uses Pydantic AI/Harness through the configured LiteLLM
 Responses endpoint.
@@ -11,6 +13,8 @@ Each member has a persistent native conversation and its own Modal computer.
 The team shares a public board, not a filesystem. Open a member from the roster
 to inspect its full answer, activity, files, questions, and computer, or to send
 it a direct instruction. Member conversations retain the mission's visibility.
+Saved artifact links can also be previewed from another conversation in the same
+mission. Input uploads and unrelated conversations keep their own boundaries.
 Only the original owner can direct the team or change its controls.
 
 Workers volunteer to lead, and the first eligible claim wins atomically.
@@ -37,6 +41,10 @@ It does not expose private reasoning or credentials.
   conversations in a new generation. Pending human questions/approvals remain
   pending until answered; they are not automatically approved or discarded.
   Failed work and uncertain effects require human recovery.
+- The coordinator can finish a satisfied goal only after workers, queued input
+  and uncertain actions settle. Completion becomes durable after its final answer
+  is saved. A later human input cancels pending completion; a follow-up to an
+  already-completed mission reopens the same team without replaying its old jobs.
 - A finite window includes startup, queueing, and pauses. Expiry pauses the
   mission. Resuming an expired finite window renews its duration; an unexpired
   window retains its deadline. Changing the window updates its deadline from
@@ -60,14 +68,18 @@ explicitly because each member has an independent filesystem.
 
 | Tool | Behavior |
 | --- | --- |
-| `swarm_board(after=0)` | Reads the caller's trusted identity, goal, roster, leadership, assignments and paginated public posts. |
+| `swarm_board(after=None)` | Reads the caller's trusted identity, goal, roster, leadership, assignments and recent public posts. Supply a cursor to continue, or 0 to read older history. |
+| `swarm_read(sequence=0, offset=0)` | Reads complete shared text in bounded pages: sequence 0 is the original goal; other sequences identify board posts. |
 | `swarm_claim_lead(plan)` | Atomically claims worker leadership; concurrent callers receive the actual winner. |
 | `swarm_assign(member_id, task)` | Queues bounded work in an existing worker conversation. |
 | `swarm_publish(message)` | Persists a public finding and makes it eligible for a coalesced notification. |
+| `swarm_finish(summary)` | Lets the coordinator finish a satisfied goal after workers settle and its final answer is saved. |
 
 Tools are scoped by the server-authored `RunScope`, never by a model-selected
 mission or owner. Mutation receipts use native run/tool-call identities and
-commit with their effects. Nested native delegation is unavailable inside a
+commit with their effects. Board previews preserve pagination and roster details
+within the Harness output limit; full shared text remains readable in pages.
+Nested native delegation is unavailable inside a
 swarm so it cannot create untracked workers sharing a member's computer.
 Ordinary Chat retains its normal native delegation capabilities.
 
@@ -85,7 +97,7 @@ is not provided by this native feature.
 ## API and deployment
 
 `POST /api/swarms` accepts the ordinary message fields plus `workers`,
-`worker_models`, `visibility`, and `budget_seconds` (0 means until stopped;
+`worker_models`, `visibility`, and `budget_seconds` (0 means no time limit;
 finite windows are 60–2,592,000 seconds). It returns the coordinator session and
 initial turn. `GET /api/sessions/{id}/swarm` reads the mission; `after` selects a
 chronological board cursor. `POST /api/swarms/{id}/control` accepts an action

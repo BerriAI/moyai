@@ -103,6 +103,25 @@ async def tick(service: SwarmService, run: MissionRun) -> MissionTick:
                     f"status:{turn.id}:{turn.status}", turn.session_id,
                 )
 
+        if mission.completion_turn_id is not None:
+            completion = await db.get(Turn, mission.completion_turn_id)
+            if completion is not None and completion.status == "completed" and completion.result_accepted:
+                await service.post(
+                    db, mission, "completed",
+                    service.database.security.unseal(mission.completion_summary).decode()
+                    if mission.completion_summary else "The coordinator completed the goal.",
+                    f"complete:{completion.id}", mission.id,
+                )
+                mission.status = "completed"
+                mission.reason = "Goal completed. Send a follow-up to continue with the same team."
+                mission.revision += 1
+                mission.next_round_at = None
+                return MissionTick(exists=False)
+            if completion is None or completion.status in {"failed", "stopped", "waiting"}:
+                await service.stop_in(db, mission, "attention", "The final synthesis needs human recovery.")
+                return MissionTick(exists=False)
+            return MissionTick()
+
         async def idle(member: SwarmMember) -> bool:
             session = sessions[member.session_id]
             if session is None or session.active_turn or session.status in {"failed", "stopped", "waiting"}:
