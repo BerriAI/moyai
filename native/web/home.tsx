@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { ArrowUp, ArrowUpRight, Code2, Search, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/textarea"
+import { SkillComposer } from "./skill-composer"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { mountSculpture } from "@/moyai-sculpture"
@@ -49,7 +49,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     && !accountNotice && selectedAccounts.every(id => accounts.some(row => row.id === id && row.enabled && (isPrivate || row.shared))))
   const sculpture = useRef<HTMLDivElement>(null)
   const stars = useRef<HTMLCanvasElement>(null)
-  const input = useRef<HTMLTextAreaElement>(null)
+  const input = useRef<HTMLDivElement>(null)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
   const mounted = useRef(true)
@@ -75,11 +75,11 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     return () => controller.abort()
   }, [productMode, accountScope, isPrivate])
 
-  async function send() {
-    if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)) return
+  async function send(prompt = draft) {
+    if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!prompt.trim() && !pictures.files.length)) return
     submitting.current = true
     setBusy(true); setError("")
-    const auth = csrfToken(), prompt = draft, attachments = pictures.readyFiles
+    const auth = csrfToken(), attachments = pictures.readyFiles
     try {
       const submission = homeSubmission(prompt, model, isPrivate, attachments.map(file => file.id), selectedAccounts, accounts)
       if (admission.current?.signature !== submission.signature) admission.current = { signature: submission.signature, request: crypto.randomUUID() }
@@ -113,7 +113,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         {error && <p className="error" role="alert">{error}</p>}
         <div className="composer home-composer">
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <Textarea ref={input} value={draft} aria-label="Message Moyai" placeholder="Ask Moyai to build, investigate, or pick up a thread…" onChange={event => setDraft(event.target.value)} onPaste={busy ? undefined : pictures.paste} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
+          <SkillComposer ref={input} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
           <div className="composer-actions">
             <AttachButton add={pictures.add} disabled={busy} />
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>

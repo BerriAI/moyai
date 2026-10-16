@@ -120,9 +120,27 @@ Automations, Memory, Connections and Secrets. Administrators also see Users,
 Performance and Spend & usage. These pages use native application records,
 not the legacy application's database or APIs.
 
-- **Skills:** bundled instructions stay available; personal and shared saved
-  skills load through Pydantic's deferred capability mechanism. Personal skills
-  are limited to their owner's private web conversations.
+- **Skills:** type `/` anywhere in the home or conversation composer, then search
+  by name. Use the arrow keys and Enter/Tab, or click a result, to insert an
+  inline icon-and-name token at the cursor, such as **Team** for `/team`.
+  Icons come from a set of 30 consistent outlines, matched to the skill name
+  where possible, with a stable fallback so they do not shuffle on reload.
+  Keep typing before or after it; Backspace removes it, or select the token
+  and press Delete. Copy/paste within
+  Moyai and queued-message editing preserve the selection. Sent messages retain
+  the selected name and icon after reload, even if the skill is subsequently
+  changed or removed. Code examples and escaped references remain literal.
+  A unique leading `/team` short name also works when sent directly; duplicate
+  names require a scoped reference from the picker.
+  Personal skills are limited to their owner's private web conversations.
+  Existing-product installations load the original personal/organization
+  instructions and supporting-file contents at execution, without converting or
+  rewriting the library. Archived, disabled, inaccessible or ambiguous skills
+  fail explicitly. Up to eight skill selections and 500,000 characters
+  of combined skill context are supported per message. Supporting-file contents
+  are provided to the agent; files needed for execution must first be written
+  to its workspace. Standalone bundled and saved skills also remain available
+  through Pydantic's deferred capability mechanism.
 - **Memory:** inspect and edit the Harness memory store in your authorized
   namespaces. Version checks reject conflicting edits. Other users' personal
   memory is not available to administrators.
