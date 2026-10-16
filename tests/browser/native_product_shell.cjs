@@ -101,6 +101,8 @@ for(const width of [1440,768,320])test(`skill picker, chip, keyboard and canonic
   const box=await options.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=width+1);
   await input.press('Enter');
   const chip=page.getByLabel('Selected skills');await chip.waitFor();assert.match(await chip.innerText(),/team/);
+  assert.equal(await chip.locator('.skill-chip').evaluate(el=>getComputedStyle(el).borderTopStyle),'solid');
+  assert.notEqual(await chip.locator('.skill-chip').evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)');
   assert.equal(await input.inputValue(),'');assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,0);
   await input.fill('Inspect the issue.');
   await input.press('Enter');

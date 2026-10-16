@@ -46,8 +46,9 @@ export const SkillComposer = React.forwardRef<HTMLTextAreaElement, {
   const draft = skillDraft(value)
   const query = draft.text.match(/^\/([^\s/]*)$/)?.[1]
   const wantsPicker = focused && query !== undefined && !disabled
+  const needsCatalog = wantsPicker || draft.references.length > 0
   useEffect(() => {
-    if (!focused && !draft.references.length) return
+    if (!needsCatalog) return
     const cacheKey = `${scope}:${version}`
     if (loadedCatalog.current === cacheKey) return
     const controller = new AbortController()
@@ -67,7 +68,7 @@ export const SkillComposer = React.forwardRef<HTMLTextAreaElement, {
       setState({ scope, rows: [...rows.values()], loading: false, error: "" })
     })().catch(reason => { if (!controller.signal.aborted && csrfToken() === auth) setState({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
-  }, [scope, focused, version])
+  }, [scope, needsCatalog, version])
   useEffect(() => { setActive(0); setDismissed(false) }, [query])
   useEffect(() => {
     const clear = () => { setState({ scope: "", rows: [], loading: false, error: "" }); setVersion(value => value + 1) }
