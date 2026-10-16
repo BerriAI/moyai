@@ -30,6 +30,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .contracts import RunScope
 from .models import Base, now
+from .usage_projection import ProjectionError, UsageProjection
 
 if TYPE_CHECKING:
     from .database import Database
@@ -180,8 +181,12 @@ class UsageCapture:
         self.streaming = False
         self.buffer = b""
         self.event = b""
-        self.drop_line = False
-        self.drop_event = False
+        self.projection = UsageProjection(max_bytes=MAX_CAPTURE_BYTES)
+        self.projection_failed = False
+        self._projection_reason = "invalid_usage_body"
+        self.data_line: bool | None = None
+        self.data_space = False
+        self.event_has_data = False
         self.disabled = False
         self.finished = False
         self._finish_task: asyncio.Task[None] | None = None
@@ -256,75 +261,103 @@ class UsageCapture:
                 self.values.update(cost_usd=cost, cost_status="actual", cost_source="response_usage")
 
     def _event(self) -> None:
-        if self.drop_event:
-            self.drop_event = False
-        elif self.event == b"[DONE]":
+        if self.event.rstrip(b"\r") == b"[DONE]":
             self.terminal = True
-        elif self.event:
+        elif self.event_has_data and not self.projection_failed:
             try:
-                value = json.loads(self.event, parse_float=Decimal)
-                if isinstance(value, dict):
-                    kind = value.get("type")
-                    final = kind in {"response.completed", "response.failed", "response.incomplete"}
-                    # Chat Completions' final usage-only chunk is also a receipt.
-                    final = final or (
-                        kind is None and value.get("choices") == [] and isinstance(value.get("usage"), dict)
-                    )
-                    self.consume(value, final=final)
-                    if kind in {"response.completed", "response.failed", "response.incomplete"}:
-                        self.terminal = True
-                        self.values["status"] = {
-                            "response.completed": "completed", "response.failed": "failed",
-                            "response.incomplete": "interrupted",
-                        }[kind]
-            except (ValueError, UnicodeDecodeError, RecursionError, InvalidOperation, OverflowError):
-                self.values["coverage_error"] = "invalid_usage_frame"
+                value = self.projection.finish()
+                kind = value.get("type")
+                final = kind in {"response.completed", "response.failed", "response.incomplete"}
+                # Chat Completions' final usage-only chunk is also a receipt.
+                final = final or (
+                    kind is None and value.get("choices") == [] and isinstance(value.get("usage"), dict)
+                )
+                self.consume(value, final=final)
+                if kind in {"response.completed", "response.failed", "response.incomplete"}:
+                    self.terminal = True
+                    self.values["status"] = {
+                        "response.completed": "completed", "response.failed": "failed",
+                        "response.incomplete": "interrupted",
+                    }[kind]
+            except (ValueError, RecursionError, InvalidOperation, OverflowError) as error:
+                self._projection_error(error)
+                self.values["coverage_error"] = self._projection_reason
+        elif self.event_has_data:
+            # [DONE] is not JSON. Only report a parse failure after its complete
+            # event has been distinguished from the protocol sentinel.
+            self.values["coverage_error"] = self._projection_reason
         self.event = b""
+        self.event_has_data = False
+        self.projection = UsageProjection(max_bytes=MAX_CAPTURE_BYTES)
+        self.projection_failed = False
 
-    def _line(self, line: bytes) -> None:
-        line = line.rstrip(b"\r")
-        if not line:
+    def _projection_error(self, error: Exception) -> None:
+        self.projection_failed = True
+        self._projection_reason = (
+            str(error) if isinstance(error, ProjectionError) and str(error) != "invalid_usage_json"
+            else "invalid_usage_frame" if self.streaming else "invalid_usage_body"
+        )
+
+    def _project(self, data: bytes) -> None:
+        if self.streaming:
+            self.event = (self.event + data)[:16]
+        if not self.projection_failed:
+            try:
+                self.projection.feed(data)
+            except (ValueError, RecursionError, InvalidOperation, OverflowError) as error:
+                self._projection_error(error)
+
+    def _line_part(self, data: bytes) -> None:
+        if self.data_line is None:
+            size = min(5 - len(self.buffer), len(data))
+            self.buffer += data[:size]
+            data = data[size:]
+            if len(self.buffer) < 5:
+                return
+            self.data_line = self.buffer == b"data:"
+            self.buffer = b""
+            if self.data_line:
+                if self.event_has_data:
+                    self._project(b"\n")
+                self.event_has_data, self.data_space = True, True
+        if self.data_line and data:
+            if self.data_space:
+                data = data.removeprefix(b" ")
+                self.data_space = False
+            self._project(data)
+
+    def _end_line(self) -> None:
+        if self.data_line is None and self.buffer in {b"", b"\r"}:
             self._event()
-        elif line.startswith(b"data:") and not self.drop_event:
-            data = line[5:].removeprefix(b" ")
-            if len(self.event) + len(data) + 1 > MAX_CAPTURE_BYTES:
-                self.event, self.drop_event = b"", True
-                self.values["coverage_error"] = "oversized_usage_frame"
-            else:
-                self.event += (b"\n" if self.event else b"") + data
+        self.buffer, self.data_line = b"", None
+        self.data_space = False
+
+    def _piece(self, piece: bytes) -> None:
+        if not self.streaming:
+            self._project(piece)
+            return
+        parts = piece.split(b"\n")
+        for index, part in enumerate(parts):
+            # A CR belongs to the SSE line ending, including when its LF
+            # arrives in the following transport chunk.
+            self._line_part(part)
+            if index < len(parts) - 1:
+                self._end_line()
 
     def feed(self, chunk: bytes) -> None:
         if self.disabled:
             return
         try:
-            if self.decoder:
-                chunk = self.decoder.decompress(chunk, MAX_CAPTURE_BYTES + 1)
-                if self.decoder.unconsumed_tail or len(chunk) > MAX_CAPTURE_BYTES:
-                    self.disabled = True
-                    self.decoder = None
-                    self.values["coverage_error"] = "oversized_compressed_chunk"
-                    return
-            # A transport may return a very large chunk. Bound our own buffer
-            # independently of the SDK's buffering and preserve every input byte.
+            # Both wire chunks and compressed output are processed in bounded
+            # pieces. Model content is validated and skipped by the projector.
             for offset in range(0, len(chunk), 16 * 1024):
                 piece = chunk[offset:offset + 16 * 1024]
-                if not self.streaming:
-                    if len(self.buffer) + len(piece) > MAX_CAPTURE_BYTES:
-                        self.buffer, self.disabled = b"", True
-                        self.values["coverage_error"] = "oversized_usage_body"
-                        return
-                    self.buffer += piece
+                if self.decoder is None:
+                    self._piece(piece)
                     continue
-                self.buffer += piece
-                while b"\n" in self.buffer:
-                    line, self.buffer = self.buffer.split(b"\n", 1)
-                    if not self.drop_line:
-                        self._line(line)
-                    self.drop_line = False
-                if len(self.buffer) > MAX_CAPTURE_BYTES:
-                    self.buffer, self.event = b"", b""
-                    self.drop_line = self.drop_event = True
-                    self.values["coverage_error"] = "oversized_usage_frame"
+                while piece:
+                    self._piece(self.decoder.decompress(piece, 16 * 1024))
+                    piece = self.decoder.unconsumed_tail
         except (ValueError, OverflowError, zlib.error):
             self.disabled = True
             self.buffer = self.event = b""
@@ -361,13 +394,17 @@ class UsageCapture:
         self.exhausted = exhausted
         if not self.disabled:
             if self.streaming:
-                self._line(self.buffer)
+                self._end_line()
                 self._event()
             elif exhausted:
                 try:
-                    self.consume(json.loads(self.buffer, parse_float=Decimal), final=True)
-                except (ValueError, UnicodeDecodeError, RecursionError, InvalidOperation, OverflowError):
-                    self.values["coverage_error"] = "invalid_usage_body"
+                    if self.projection_failed:
+                        self.values["coverage_error"] = self._projection_reason
+                    else:
+                        self.consume(self.projection.finish(), final=True)
+                except (ValueError, RecursionError, InvalidOperation, OverflowError) as error:
+                    self._projection_error(error)
+                    self.values["coverage_error"] = self._projection_reason
         self.buffer = self.event = b""
         self.decoder = None
         if self.values["status"] == "pending":
