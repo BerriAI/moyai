@@ -269,8 +269,10 @@ class APIRelease(Release):
                         or self.baseline.get('core') != 'pydantic-v1'
                         or self.baseline.get('native', {}).get('state') != 'receipted'
                         or self.baseline.get('native_drain', {}).get('paused') is not False
+                        or self.baseline.get('coordinators') != [self.identities['coordinator']]
+                        or self.baseline.get('brokers') != [self.identities['broker']]
                         or self.baseline.get('broker_leaders') != [self.identities['broker']]
-                        or set(self.baseline['owners']) != set(self.identities.values())):
+                        or sorted(self.baseline['owners']) != sorted(self.identities.values())):
                     raise ReleaseError('Native API preflight requires four healthy identified roles and active native receipts.')
             old_owner = self.baseline['api_owner']
             if (not old_owner or len(set(self.baseline['owners'])) != 4

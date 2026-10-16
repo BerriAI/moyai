@@ -101,7 +101,8 @@ def test_native_candidate_incompatibility_never_mutates(native_api, fault):
 
 
 @pytest.mark.parametrize('fault', ['paused', 'missing_receipt', 'wrong_role', 'wrong_core',
-                                  'missing_identity', 'broker_leader', 'unready_worker'])
+                                  'missing_identity', 'broker_leader', 'unready_worker',
+                                  'coordinator_owner', 'broker_owner', 'duplicate_owner'])
 def test_native_baseline_must_be_running_and_correlated_before_writes(native_api, fault):
     release, render, _ = native_api
     probe = release.probe
@@ -113,6 +114,9 @@ def test_native_baseline_must_be_running_and_correlated_before_writes(native_api
         if fault == 'wrong_core': state['core'] = 'legacy'
         if fault == 'missing_identity': state['identity'] = None
         if fault == 'broker_leader': state['broker_leaders'] = []
+        if fault == 'coordinator_owner': state['coordinators'] = ['2@worker']
+        if fault == 'broker_owner': state['brokers'] = ['2@worker']
+        if fault == 'duplicate_owner': state['owners'].append(state['owners'][0])
         if fault == 'unready_worker' and service.role == 'worker': state['ready'] = False
         return state
     release.probe = invalid
