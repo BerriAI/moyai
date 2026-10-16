@@ -22,6 +22,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIResponsesModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
 from sqlalchemy import select, text, update
+from starlette.responses import Response
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import ExecuteActivityInput
 from test_inference_usage import WireStream, payload
@@ -49,6 +50,10 @@ from moyai.product_inference_routes import product_inference_routes
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
 product_database = authority.product_database
 admitted_product = authority.admitted_product
+ACCESS_HEADERS = {
+    "CF-Access-Client-Id": "synthetic-broker.access",
+    "CF-Access-Client-Secret": "synthetic-access-secret",
+}
 
 
 @pytest_asyncio.fixture
@@ -444,12 +449,20 @@ async def test_key_rotation_during_recovery_does_not_assign_receipt(inference):
     assert (await requests(inference))[0].cost_usd is None
 
 
-async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inference, monkeypatch):
+@pytest.mark.parametrize("protected", [False, True])
+async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inference, monkeypatch, protected):
     from moyai import product_inference_routes as routes
 
     ctx = inference
+    ctx.service.settings = ctx.service.settings.model_copy(update={
+        "public_url": "https://workspace.invalid",
+        "cloudflare_access_client_id": ACCESS_HEADERS["CF-Access-Client-Id"] if protected else "",
+        "cloudflare_access_client_secret": ACCESS_HEADERS["CF-Access-Client-Secret"] if protected else "",
+    })
     calls = []
     async def upstream(request):
+        assert request.headers["authorization"] == "Bearer synthetic-inference-key"
+        assert all(name not in request.headers for name in ACCESS_HEADERS)
         calls.append(request)
         return httpx2.Response(
             200, stream=WireStream(json.dumps(payload(cost="0.43")).encode()),
@@ -460,6 +473,18 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
     ))
     app = FastAPI()
     app.include_router(product_inference_routes(ctx.service))
+    broker_calls = []
+
+    @app.middleware("http")
+    async def access_gate(request, call_next):
+        broker_calls.append(request)
+        assert str(request.url) == "https://workspace.invalid/broker/native/v1/responses"
+        if protected and any(request.headers.get(name) != value for name, value in ACCESS_HEADERS.items()):
+            return Response("Synthetic Cloudflare Access refusal", status_code=401)
+        if not protected:
+            assert all(name not in request.headers for name in ACCESS_HEADERS)
+        return await call_next(request)
+
     worker_database = SimpleNamespace(
         settings=ctx.product.settings, product_identity=ctx.product.adapter,
     )
@@ -505,26 +530,79 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
         assert row.cost_usd == "0.43" and row.status == "completed"
         assert len(calls) == 1 and row.id == calls[0].headers["x-litellm-call-id"]
         assert row.gateway_id == "exact-call-id"
+        assert len(broker_calls) == 2
     finally:
         await worker.close()
 
 
-async def test_broker_rejects_missing_signature_and_altered_payload(inference):
+@pytest.mark.parametrize("protected", [False, True])
+@pytest.mark.parametrize("route", ["responses", "responses/compact", "chat/completions"])
+async def test_broker_request_uses_only_configured_access_credentials(inference, protected, route):
+    from moyai import product_inference_routes as routes
+    from moyai.inference_usage import UsageCapture
+
+    service = inference.service
+    service.settings = service.settings.model_copy(update={
+        "public_url": "https://workspace.invalid/",
+        "cloudflare_access_client_id": ACCESS_HEADERS["CF-Access-Client-Id"] if protected else "",
+        "cloudflare_access_client_secret": ACCESS_HEADERS["CF-Access-Client-Secret"] if protected else "",
+    })
+    activity = InferenceActivity(
+        inference.product.database, inference.scope, "signed/1", logical_identity="signed", requests=1,
+    )
+    original = httpx2.Request(
+        "POST", "https://gateway.invalid/v1/" + route, json={"model": "test"},
+        headers={
+            "Authorization": "Bearer synthetic-inference-key", "Accept": "text/event-stream",
+            **dict.fromkeys(ACCESS_HEADERS, "untrusted-incoming-value"),
+        },
+    )
+    signed = routes.broker_request(service, original, UsageCapture(activity, "f" * 64, original))
+    assert str(signed.url) == "https://workspace.invalid/broker/native/v1/" + route
+    assert signed.content == original.content and signed.headers["accept"] == "text/event-stream"
+    assert signed.headers["accept-encoding"] == "identity"
+    assert signed.headers["authorization"] != original.headers["authorization"]
+    for name, value in ACCESS_HEADERS.items():
+        assert signed.headers.get(name) == (value if protected else None)
+        assert original.headers[name] == "untrusted-incoming-value"
+    scope, identity, logical, ordinal = routes._verify(
+        service, signed.headers["authorization"], route, original.content,
+    )
+    assert (scope.actor_id, scope.turn_id) == (inference.scope.actor_id, inference.scope.turn_id)
+    assert (identity, logical, ordinal) == ("signed/1", "signed", 1)
+    assert all(not grant.credential for grant in scope.grants)
+    envelope = json.dumps(routes._signer(service).loads(signed.headers["authorization"].removeprefix("Bearer ")))
+    assert all(value not in envelope for value in ACCESS_HEADERS.values())
+
+
+async def test_broker_rejects_missing_signature_and_altered_payload(inference, monkeypatch):
+    from itsdangerous.timed import TimestampSigner
+
     from moyai.inference_usage import UsageCapture
     from moyai.product_inference_routes import broker_request
 
+    inference.service.settings = inference.service.settings.model_copy(update={
+        "cloudflare_access_client_id": ACCESS_HEADERS["CF-Access-Client-Id"],
+        "cloudflare_access_client_secret": ACCESS_HEADERS["CF-Access-Client-Secret"],
+    })
     app = FastAPI()
     app.include_router(product_inference_routes(inference.service))
     activity = InferenceActivity(
         inference.product.database, inference.scope, "signed/1", logical_identity="signed", requests=1,
     )
     original = httpx2.Request("POST", "https://gateway.invalid/v1/responses", json={"model": "test"})
+    stamp = TimestampSigner("synthetic").get_timestamp()
+    monkeypatch.setattr(TimestampSigner, "get_timestamp", lambda _: stamp)
     signed = broker_request(inference.service, original, UsageCapture(activity, "f" * 64, original))
     assert "synthetic-inference-key" not in signed.headers["authorization"]
+    assert all(signed.headers[name] == value for name, value in ACCESS_HEADERS.items())
     async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app)) as client:
-        unsigned = await client.post(str(signed.url), content=original.content)
+        unsigned = await client.post(str(signed.url), headers=ACCESS_HEADERS, content=original.content)
         altered = await client.post(str(signed.url), headers=signed.headers, content=b'{"model":"other"}')
-    assert unsigned.status_code == altered.status_code == 403
+        wrong_route = await client.post(str(signed.url) + "/compact", headers=signed.headers, content=original.content)
+        monkeypatch.setattr(TimestampSigner, "get_timestamp", lambda _: stamp + 302)
+        expired = await client.post(str(signed.url), headers=signed.headers, content=original.content)
+    assert unsigned.status_code == altered.status_code == wrong_route.status_code == expired.status_code == 403
     assert not await requests(inference)
 
 

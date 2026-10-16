@@ -59,14 +59,20 @@ def broker_request(
     })
     if len(envelope) > MAX_ENVELOPE_BYTES:
         raise InferenceAdmissionError("The native inference authority envelope exceeds its bound.")
+    headers = {
+        "Authorization": "Bearer " + envelope, "Content-Type": "application/json",
+        "Accept": request.headers.get("accept", "application/json"),
+        "Accept-Encoding": "identity",
+    }
+    if service.settings.cloudflare_access_client_id:
+        headers.update({
+            "CF-Access-Client-Id": service.settings.cloudflare_access_client_id,
+            "CF-Access-Client-Secret": service.settings.cloudflare_access_client_secret,
+        })
     return httpx2.Request(
         "POST", service.settings.public_url.rstrip("/") + "/broker/native/v1/" + route,
         content=content,
-        headers={
-            "Authorization": "Bearer " + envelope, "Content-Type": "application/json",
-            "Accept": request.headers.get("accept", "application/json"),
-            "Accept-Encoding": "identity",
-        },
+        headers=headers,
         extensions=request.extensions,
     )
 
