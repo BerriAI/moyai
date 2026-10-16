@@ -107,6 +107,42 @@ def ensure_stream_process(name, deadline, *command):
     pid_file.write_text(str(launch(*command).pid))
 
 
+def ensure_driver(helper, deadline):
+    """Keep one resident browser driver for this guest version; replace an older one.
+
+    The driver holds the Playwright connection between commands, which removes
+    the per-command interpreter, driver and CDP attach cost. It stays private to
+    this desktop state directory and exits by itself when idle.
+    """
+    command = (sys.executable, helper, "serve", str(STATE))
+    pid_file = STATE / "browser-driver.pid"
+    try:
+        pid = int(pid_file.read_text())
+        process = Path(f"/proc/{pid}")
+        running = tuple(part.decode() for part in (process / "cmdline").read_bytes().split(b"\0") if part)
+        if running != command:
+            if running[:1] == command[:1] and running[2:3] == command[2:3] and running[3:4] == command[3:4]:
+                # Only an older driver of this desktop state is replaced.
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(50):
+                    remaining(deadline, 1)
+                    if not process.exists() or (process / "stat").read_text().split()[2] == "Z":
+                        break
+                    time.sleep(.1)
+            raise FileNotFoundError
+    except (FileNotFoundError, ProcessLookupError, ValueError):
+        (STATE / browser_runtime.SOCKET_NAME).unlink(missing_ok=True)
+        pid_file.write_text(str(launch(*command).pid))
+    socket_path = STATE / browser_runtime.SOCKET_NAME
+    for _ in range(30):
+        if socket_path.exists():
+            return True
+        if deadline - time.time() <= 1:
+            return False
+        time.sleep(.1)
+    return False
+
+
 def release_vnc_input():
     """Synchronous x11vnc gone hook, only for the exclusive initialized client.
 
@@ -329,9 +365,13 @@ def command(body):
                 if body["command"]["action"] != "open":
                     raise ValueError("Open the shared browser first.")
                 start(deadline)
-            return browser_runtime.operate(
-                body["command"], deadline, ENV, diagnostics=bool(body.get("browser_diagnostics")),
-            )
+            diagnostics = bool(body.get("browser_diagnostics"))
+            if ensure_driver(helper, deadline):
+                try:
+                    return browser_runtime.request(STATE, body["command"], deadline, ENV, diagnostics=diagnostics)
+                except browser_runtime.DriverUnavailable:
+                    pass  # Nothing was dispatched; use a private driver for this command.
+            return browser_runtime.operate(body["command"], deadline, ENV, diagnostics=diagnostics)
         if not display_alive():
             return {"available": False, "width": WIDTH, "height": HEIGHT}
         if action == "open":

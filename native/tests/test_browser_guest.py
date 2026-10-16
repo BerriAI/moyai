@@ -174,3 +174,71 @@ def test_new_tab_does_not_depend_on_a_previously_closed_target(browser):
         time.time() + 25, {},
     )
     assert result["tab_id"] == "target-new"
+
+
+def test_resident_driver_reuses_one_connection_and_reattaches_after_browser_loss(browser, monkeypatch):
+    calls = browser[3]
+    connected = [True]
+    connection = SimpleNamespace(
+        contexts=[sys.modules["playwright.sync_api"].sync_playwright().__enter__().chromium.connect_over_cdp("probe").contexts[0]],
+        is_connected=lambda: connected[0],
+        new_browser_cdp_session=lambda: SimpleNamespace(detach=lambda: None),
+        close=lambda: calls.append(("disconnect",)),
+    )
+    attach = []
+    started = []
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", SimpleNamespace(sync_playwright=lambda: SimpleNamespace(
+        start=lambda: (started.append(1), SimpleNamespace(chromium=SimpleNamespace(
+            connect_over_cdp=lambda endpoint, **kwargs: (attach.append(endpoint), connection)[1])))[1])))
+    resident = guest.Resident()
+    for _ in range(3):
+        result = guest.operate({"action": "tabs"}, time.time() + 25, {}, resident=resident)
+    assert result["tabs"][1]["active"] and started == [1] and attach == ["http://127.0.0.1:9222"]
+    assert ("disconnect",) not in calls  # The shared connection outlives each command.
+    connected[0] = False
+    guest.operate({"action": "tabs"}, time.time() + 25, {}, resident=resident)
+    assert attach == ["http://127.0.0.1:9222"] * 2 and started == [1]
+
+
+def test_resident_driver_drops_connection_after_interrupted_command(browser, monkeypatch):
+    second, calls = browser[1], browser[3]
+    base = sys.modules["playwright.sync_api"].sync_playwright().__enter__().chromium.connect_over_cdp("probe")
+    connection = SimpleNamespace(contexts=base.contexts, is_connected=lambda: True,
+                                 new_browser_cdp_session=lambda: SimpleNamespace(detach=lambda: None),
+                                 close=lambda: calls.append(("disconnect",)))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", SimpleNamespace(sync_playwright=lambda: SimpleNamespace(
+        start=lambda: SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=lambda endpoint, **kwargs: connection)))))
+    resident = guest.Resident()
+    with pytest.raises(ValueError):
+        guest.operate({"action": "click", "tab_id": "gone", "x": 1, "y": 1}, time.time() + 25, {}, resident=resident)
+    assert ("disconnect",) not in calls  # A structured refusal keeps the healthy connection.
+    second.evaluate = lambda script: (_ for _ in ()).throw(TimeoutError("The desktop action expired."))
+    with pytest.raises(TimeoutError):
+        guest.operate({"action": "inspect", "tab_id": second.identity}, time.time() + 25, {}, resident=resident)
+    assert calls[-1] == ("disconnect",) and resident.browser is None
+
+
+def test_driver_socket_round_trip_preserves_results_and_structured_errors(browser, monkeypatch, tmp_path):
+    import threading
+    base = sys.modules["playwright.sync_api"].sync_playwright().__enter__().chromium.connect_over_cdp("probe")
+    connection = SimpleNamespace(contexts=base.contexts, is_connected=lambda: True,
+                                 new_browser_cdp_session=lambda: SimpleNamespace(detach=lambda: None), close=lambda: None)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", SimpleNamespace(sync_playwright=lambda: SimpleNamespace(
+        start=lambda: SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=lambda endpoint, **kwargs: connection)))))
+    state = tmp_path / "state"
+    with pytest.raises(guest.DriverUnavailable):
+        guest.request(state, {"action": "tabs"}, time.time() + 5, {"DISPLAY": ":99"})
+    server = threading.Thread(target=guest.serve, args=(state,), kwargs={"idle_seconds": 2}, daemon=True)
+    server.start()
+    for _ in range(50):
+        if (state / guest.SOCKET_NAME).exists():
+            break
+        time.sleep(.02)
+    result = guest.request(state, {"action": "tabs"}, time.time() + 5, {"DISPLAY": ":99"})
+    assert [tab["id"] for tab in result["tabs"]] == ["target-one", "target-two"]
+    with pytest.raises(ValueError, match="This browser tab closed"):
+        guest.request(state, {"action": "click", "tab_id": "gone", "x": 1, "y": 1}, time.time() + 5, {})
+    with pytest.raises(TimeoutError):
+        guest.request(state, {"action": "tabs"}, time.time() - 1, {})
+    server.join(5)
+    assert not server.is_alive() and not (state / guest.SOCKET_NAME).exists()  # Idle exit cleans up.
