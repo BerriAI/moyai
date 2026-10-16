@@ -65,6 +65,11 @@ before(async () => {
   server = await createServer({
     configFile: false, root, cacheDir: cache, logLevel: "error",
     resolve: { alias: { "@": path.join(root, "frontend") } },
+    // Lazy decoration must not trigger a Vite reload while the form is in use.
+    optimizeDeps: {
+      entries: ["native/web/main.tsx"],
+      include: ["three", "three/examples/jsm/loaders/GLTFLoader.js"],
+    },
     server: { host: "127.0.0.1", port: 0, strictPort: true },
     plugins: [tailwindcss(), {
       name: "swarm-component-regression",
