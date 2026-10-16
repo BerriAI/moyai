@@ -199,3 +199,17 @@ async def test_scoped_legacy_receipt_uniqueness_and_cross_source_ids_survive(cut
         assert await db.scalar(text(
             f"SELECT count(*) FROM {ctx.storage.ledger} WHERE source_id='native-observation'"
         )) == 2
+
+
+async def test_long_historical_identity_survives_without_relaxing_native_identity_limits(cutover):
+    ctx = cutover
+    identity = "historical:" + "u" * 600
+    await seed(ctx, old=[old_row(id="long-history", user_id=identity)])
+    await consolidate(ctx.engine, ctx.storage)
+    async with ctx.engine.connect() as db:
+        assert await db.scalar(text(
+            "SELECT user_id FROM moyai.model_requests WHERE id='long-history'"
+        )) == identity
+    with pytest.raises(IntegrityError) as rejected:
+        await seed(ctx, new=[new_row(id="long-native", request_key="long-native-key", actor_id=identity)])
+    assert getattr(rejected.value.orig, "sqlstate", None) == "23514"
