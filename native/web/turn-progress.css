@@ -1,4 +1,4 @@
-.turn-progress{margin:20px 0 12px;min-width:0;color:var(--ui-muted)}
+.turn-progress{margin-block:20px 12px;min-width:0;color:var(--ui-muted)}
 .turn-progress-toggle{justify-content:flex-start;gap:8px;height:auto;min-height:36px;padding:6px 0;color:var(--ui-muted);font-weight:400;white-space:normal;text-align:left}
 .turn-progress-toggle:hover{background:transparent;color:var(--ui-foreground)}
 .turn-progress-toggle svg{flex-shrink:0}
