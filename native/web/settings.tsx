@@ -540,7 +540,7 @@ function ProductSkillDialog({ skill, onClose }: { skill: ProductSkill; onClose: 
   const resource = useResource<ProductSkillDetail>(`/product/skills/${encodeURIComponent(skill.id)}`)
   const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus() }}>
-    <DialogHeader><DialogTitle>{skill.name}</DialogTitle><DialogDescription>The original skill and supporting files are retained. Conversion to the new runtime is deferred.</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>{skill.name}</DialogTitle><DialogDescription>Type / in chat to select this skill. Its original instructions and supporting files are retained.</DialogDescription></DialogHeader>
     <LoadState resource={resource}>{detail => <><div className="ns-field"><label>Saved instructions<Textarea readOnly aria-label="Saved skill instructions" value={detail.instructions} rows={12} /></label></div>{detail.files.length > 0 && <section><h3>Supporting files</h3><ul className="ns-supporting-files">{detail.files.map(file => {
       const href = productSkillFileUrl(detail.id, file.path, detail.revision)
       return <li key={file.path}>{href ? <a className="ns-link" href={href} download>{file.path}</a> : <span>{file.path} · Download unavailable</span>}<small> · {file.size.toLocaleString()} bytes</small></li>
@@ -581,7 +581,7 @@ function ProductSkillsPage() {
   return <LoadState resource={resource}>{data => {
     if (data.capabilities?.read !== true) return <div className="ns-empty" role="status"><h2>Original skill library unavailable</h2><p>{data.note || "The server has not enabled access to the canonical skill library."}</p><Button variant="outline" onClick={resource.refresh}>Retry</Button></div>
     const rows = data.skills.filter(row => contains(search, row.name, row.description, row.reference) && (scope === "all" || row.scope === scope))
-    return <><p className="ns-notice">{data.note || "Your original skill library is retained. Skill conversion is deferred; these records are read-only here."}</p>
+    return <><p className="ns-notice">{data.note || "Type / in chat to select a skill from your original library."}</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
         filter={<Choice label="Skill scope" value={scope} onChange={setScope} options={[{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "organization", label: "Organization" }]} />} />
       <label className="check-label"><Checkbox checked={archived} onCheckedChange={value => { setArchived(value === true); setPages(1); setSelected(null) }} />Include archived skills</label>

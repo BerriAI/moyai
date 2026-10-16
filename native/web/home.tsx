@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { ArrowUp, ArrowUpRight, Code2, Search, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/textarea"
+import { SkillComposer } from "./skill-composer"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { mountSculpture } from "@/moyai-sculpture"
@@ -113,7 +113,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         {error && <p className="error" role="alert">{error}</p>}
         <div className="composer home-composer">
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <Textarea ref={input} value={draft} aria-label="Message Moyai" placeholder="Ask Moyai to build, investigate, or pick up a thread…" onChange={event => setDraft(event.target.value)} onPaste={busy ? undefined : pictures.paste} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
+          <SkillComposer ref={input} value={draft} onChange={setDraft} onSend={() => void send()} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
           <div className="composer-actions">
             <AttachButton add={pictures.add} disabled={busy} />
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>

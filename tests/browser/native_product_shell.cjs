@@ -50,6 +50,10 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/settings/users/role')return state.roleConflict ? json({detail:'This role changed since you opened it. Refresh and try again.'},409) : json(data);
   if(url.pathname==='/api/settings/users')return json({source:'product',note:'Organization sign-in manages accounts.',capabilities:{roles:true,create:false,update:false,delete:false},users:[{id:'teammate@example.test',email:'teammate@example.test',username:'teammate@example.test',display_name:'Teammate',role:'member',revision:7,enabled:true}]});
   if(url.pathname==='/api/settings/overview')return json({counts:{},capabilities:{}});
+  if(url.pathname==='/api/skills') {
+    if(state.skillError)return json({detail:'Temporary skill outage.'},503);
+    return json({skills:(state.skills||[]).filter(row=>url.searchParams.get('shared')!=='true'||row.scope!=='personal'),has_more:false,next_offset:null});
+  }
   if(url.pathname==='/api/settings/skills')return json({skills:[],capabilities:{}});
   if(url.pathname==='/api/settings/automations')return json({automations:[],capabilities:{}});
   if(url.pathname.startsWith('/api/sessions/')) {
@@ -82,6 +86,45 @@ before(async()=>{
   await server.listen();base=`http://127.0.0.1:${server.httpServer.address().port}`;browser=await chromium.launch({headless:true});
 });
 after(async()=>{for(const client of clients)client.end();await browser?.close();await server?.close();});
+
+for(const width of [1440,768,320])test(`skill picker, chip, keyboard and canonical submission at ${width}px`,async t=>{
+  const skills=[
+    {id:'personal-team',name:'team',description:'Investigate a bug with a team.',scope:'personal',reference:'personal:team',icon:'👥'},
+    {id:'org-team',name:'team',description:'Organization workflow.',scope:'organization',reference:'org:team',icon:'code'},
+  ];
+  reset({status:'completed',skills});
+  const page=await pageFor(t,'#',width), input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('/team');
+  const options=page.getByRole('listbox',{name:'Skills'});
+  await options.waitFor();assert.equal(await options.getByRole('option').count(),2);
+  assert.match(await options.innerText(),/Personal/);assert.match(await options.innerText(),/Organization/);
+  const box=await options.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=width+1);
+  await input.press('Enter');
+  const chip=page.getByLabel('Selected skills');await chip.waitFor();assert.match(await chip.innerText(),/team/);
+  assert.equal(await input.inputValue(),'');assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,0);
+  await input.fill('Inspect the issue.');
+  await input.press('Enter');
+  await waitFor(()=>state.requests.some(r=>r.method==='POST'&&r.path.endsWith('/messages')));
+  const sent=state.requests.find(r=>r.method==='POST'&&r.path.endsWith('/messages'));
+  assert.equal(sent.body.prompt,'/personal:team Inspect the issue.');
+  await page.goto(base+'/#'+sessionId);await input.fill('/team');await options.waitFor();
+  await input.press('ArrowDown');await input.press('Tab');
+  assert.match(await chip.getAttribute('aria-label'),/Selected skills/);
+  await page.getByRole('button',{name:'Remove team skill'}).click();assert.equal(await chip.count(),0);
+  await input.fill('/nomatch');await page.getByRole('status').filter({hasText:'No matching skills'}).waitFor();
+  await input.fill('/team');await options.waitFor();await input.press('Escape');await options.waitFor({state:'hidden'});
+  assert.equal(await input.inputValue(),'/team');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('skill catalog retries and excludes personal skills in shared sessions',async t=>{
+  reset({skillError:true,individual:false,skills:[{id:'p',name:'private-only',description:'Private',scope:'personal',reference:'personal:private-only'}]});
+  const page=await pageFor(t,'#'),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('/');await page.getByText('Couldn’t load your skills.').waitFor();
+  state.skillError=false;await page.getByRole('button',{name:'Retry skills'}).click();
+  await page.getByText('No matching skills available in shared sessions.').waitFor();
+  assert.equal(await page.getByRole('option').count(),0);
+});
 
 for(const width of [1440,768,320])test(`palette keyboard, escaped body search, focus handoff and historical isolation at ${width}px`,async t=>{
   reset();const page=await pageFor(t,'#'+sessionId,width);await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
+from fastapi import HTTPException
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -39,7 +40,10 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
             prepared = await prepare_product_turn(runtime, prepared, recover_workspace=recover_workspace)
         prepared.images = await runtime.database.input_images(turn_id, session_id=prepared.scope.session_id)
         await hydrate(runtime, prepared)
+        prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, prepared.scope)
         return prepared
+    except HTTPException as error:
+        raise ApplicationError(str(error.detail), type="SkillUnavailable", non_retryable=True) from error
     except PermissionError as error:
         raise ApplicationError(str(error), type="PermissionDenied", non_retryable=True) from error
     finally:
@@ -86,6 +90,13 @@ async def prepare_steering(parent_id: str, turn_id: str) -> SteeringInput:
     prepared = await runtime.database.prepare_steering(parent_id, turn_id)
     prepared.images = await runtime.database.input_images(turn_id)
     await hydrate(runtime, prepared)
+    from .skill_invocations import references
+    if references(prepared.prompt)[0]:
+        try:
+            parent = await runtime.database.prepare(parent_id)
+            prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, parent.scope)
+        except HTTPException as error:
+            raise ApplicationError(str(error.detail), type="SkillUnavailable", non_retryable=True) from error
     return prepared
 
 
