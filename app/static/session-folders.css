@@ -30,11 +30,13 @@
 .session-section-heading[aria-expanded="false"]>.icon-chevron{transform:rotate(-90deg);opacity:1}
 .session-link-meta .session-pr-count{display:inline-flex;align-items:center;gap:3px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .session-link-meta:has(.session-pr-count,.session-slack-logo){gap:3px 6px}
-.session-link-meta .pr-open{color:var(--ui-success)}
-.session-link-meta .pr-merged{color:var(--purple)}
-.session-link-meta .pr-closed{color:var(--ui-danger)}
-.session-link-meta .pr-review{color:var(--ui-warning)}
-.session-link-meta .pr-unknown,.session-link-meta .is-stale{color:var(--muted)}
+.session-link-meta .pr-open{color:var(--ui-success);--session-pr-fill:var(--ui-success-bg)}
+.session-link-meta .pr-merged{color:var(--ui-merged);--session-pr-fill:var(--ui-merged-bg)}
+.session-link-meta .pr-closed{color:var(--ui-danger);--session-pr-fill:var(--ui-danger-bg)}
+.session-link-meta .pr-review{color:var(--ui-warning);--session-pr-fill:var(--ui-warning-bg)}
+.session-link-meta .pr-unknown,.session-link-meta .is-stale{color:var(--muted);--session-pr-fill:var(--soft)}
+/* Paint the badge without adding padding or changing compact row geometry. */
+.session-link-meta :is(.session-pr-count,.session-pr-label){background:var(--session-pr-fill);border-radius:3px;box-shadow:0 0 0 2px var(--session-pr-fill)}
 .session-pr-label{white-space:nowrap}
 .session-meta-separator{color:var(--muted)}
 .session-slack-logo{display:block;flex-shrink:0}
