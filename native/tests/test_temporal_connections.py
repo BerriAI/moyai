@@ -154,6 +154,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         await Replayer(
             interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            interceptors=[ActivityCapacity()],
         ).replay_workflow(history)
 
     assert calls == ["test/selected"]

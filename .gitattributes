@@ -1,3 +1,0 @@
-# Vite output includes upstream license text and meaningful template whitespace.
-# Review the corresponding native/web sources; keep builds byte-reproducible.
-native/src/moyai/static/** linguist-generated=true -whitespace

@@ -2,10 +2,10 @@ name: Native Pydantic runtime
 
 on:
   pull_request:
-    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', 'docker_start.py', 'render_start.py', '.github/workflows/pydantic-native.yml']
+    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', '.dockerignore', 'docker_start.py', 'render_start.py', 'deploy/docker/**', 'scripts/build_docker_bundle.py', '.github/workflows/pydantic-native.yml', '.github/workflows/docker-release.yml']
   push:
     branches: [main]
-    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', 'docker_start.py', 'render_start.py', '.github/workflows/pydantic-native.yml']
+    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', '.dockerignore', 'docker_start.py', 'render_start.py', 'deploy/docker/**', 'scripts/build_docker_bundle.py', '.github/workflows/pydantic-native.yml', '.github/workflows/docker-release.yml']
 
 permissions:
   contents: read
@@ -38,6 +38,10 @@ jobs:
         working-directory: native
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.13'
@@ -59,4 +63,4 @@ jobs:
       - run: npm run typecheck:native
       - run: node --test tests/test_native_*.cjs
       - run: npm run build:native
-      - run: git diff --exit-code -- native/src/moyai/static
+      - run: test -z "$(git ls-files -- native/src/moyai/static)"

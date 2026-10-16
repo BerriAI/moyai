@@ -1,0 +1,28 @@
+services:
+  runtime:
+    image: ${MOYAI_IMAGE:?Set MOYAI_IMAGE to the selected release image digest}
+    init: true
+    env_file:
+      - path: .env
+        format: raw
+    environment:
+      DATA_DIR: /data
+      MOYAI_CORE: pydantic
+      PORT: "8787"
+    volumes:
+      - moyai-state:/data
+    restart: unless-stopped
+    stop_grace_period: 300s
+    healthcheck:
+      test: ["CMD", "/app/native/.venv/bin/python", "/app/docker_healthcheck.py"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+  setup:
+    extends:
+      service: runtime
+    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "initialize"]
+    restart: "no"
+    healthcheck:
+      disable: true
