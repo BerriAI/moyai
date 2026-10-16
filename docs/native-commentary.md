@@ -48,6 +48,22 @@ suppressed when the turn finishes, so it cannot overwrite a final answer.
 Approval requests reuse the primary reply while retaining their confirmed
 message timestamp and action checks. Control notices remain independent.
 
+Thread replies expose an **Open session** URL button during progress and at
+completion. Final answers that explicitly link GitHub PRs include up to five
+deduplicated cards with a LiteLLM violet (`#5B3FD1`) border, **View PR**,
+**Review changes**, and **Open session** buttons. Markdown link labels supply
+the heading; bare links show the PR number and repository. These are links
+from the answer, not claims of creation, approval, CI status, or merge. No
+GitHub lookup or personal credential is needed. Code examples do not make
+cards. Slack controls native button colors and fonts.
+
+Blocks and attachments are saved in the same durable outbox as the text.
+Edits explicitly replace both fields so an earlier card or approval cannot
+remain attached to a later answer. Plain-text standalone outbox rows queued
+before this change still drain normally. URL-button callbacks are acknowledged
+through the signed interaction endpoint without submitting another agent turn.
+Owner notifications are separate and unchanged.
+
 No personal Slack token or extra model call is used to render these updates.
 The web and Slack adapters consume the same native commentary projection, with
 current requester/destination authorization checked by each delivery surface.
