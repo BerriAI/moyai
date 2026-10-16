@@ -37,6 +37,8 @@ from moyai.inference_usage import (
     UsageCapture,
     money,
 )
+from moyai.models import Event
+from moyai.performance import PREFIX
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
@@ -482,3 +484,8 @@ async def test_native_temporal_retry_counts_paid_attempts_and_replay_does_not_bi
     assert all(row.actor_id == prepared.scope.actor_id and row.turn_id == turn.id for row in recorded)
     assert all(row.cost_status == "actual" for row in recorded)
     assert sum(Decimal(row.cost_usd) for row in recorded) == Decimal("0.02")
+    if runtime.database.performance_tasks:
+        await asyncio.gather(*runtime.database.performance_tasks)
+    async with runtime.database.sessions() as db:
+        dispatch, = list(await db.scalars(select(Event).where(Event.kind == PREFIX + "dispatch")))
+    assert json.loads(dispatch.content)["attempt_id"] == recorded[0].id

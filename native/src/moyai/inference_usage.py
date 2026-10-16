@@ -126,6 +126,8 @@ class InferenceActivity:
     latest: UsageCapture | None = None
     logical_identity: str | None = None
     admission_error: Exception | None = None
+    foreground: bool = False
+    broker_received_at: str | None = None
 
     def capture(self, request: httpx.Request) -> UsageCapture:
         self.requests += 1
@@ -474,6 +476,7 @@ class InferenceUsageTransport(httpx.AsyncBaseTransport):
         self.require_admission = require_admission
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        received_at = now()
         context = INFERENCE_ACTIVITY.get()
         generation = request.method == "POST" and request.url.path.rstrip("/").endswith(
             ("/responses", "/responses/compact", "/chat/completions")
@@ -524,6 +527,20 @@ class InferenceUsageTransport(httpx.AsyncBaseTransport):
                 raise
         else:
             await capture.persist()
+        # No await between this observation and the underlying outbound attempt.
+        # The broker supplies its own ingress time; never accept a client clock.
+        dispatch_at = now()
+        if (
+            context.foreground and context.scope.surface != "memory_review"
+            and not request.url.path.rstrip("/").endswith("/responses/compact")
+        ):
+            from .performance import evidence, record_dispatch
+            record_dispatch(context.database, evidence(
+                context.scope.session_id, context.scope.turn_id, "dispatch", dispatch_at,
+                broker_received_at=context.broker_received_at or received_at,
+                route="broker" if context.broker_received_at else "direct",
+                attempt_id=capture.values["id"],
+            ))
         try:
             response = await self.transport.handle_async_request(request)
         except BaseException as error:

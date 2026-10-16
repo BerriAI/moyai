@@ -32,6 +32,27 @@ export type TurnUsage = {
   usage_role?: "steering_input" | "inference_turn"; cost_models?: string[]
   queue_ms: number | null; latency_ms: number | null; total_ms: number | null
   cost_usd: number | null; pricing_status: string
+  api_to_dispatch_ms?: number | null; api_to_worker_ms?: number | null
+  worker_to_broker_ms?: number | null; broker_to_dispatch_ms?: number | null
+  computer_ready_ms?: number | null; computer_mode?: string | null; computer_status?: string | null
+  api_received_at?: string | null; worker_picked_up_at?: string | null
+  broker_received_at?: string | null; first_dispatch_at?: string | null
+  dispatch_attempt_id?: string | null; dispatch_route?: string | null
+}
+export type TimingDistribution = { samples: number; mean_ms: number | null; p50_ms: number | null; p95_ms: number | null; max_ms?: number | null }
+export type TimingCard = TimingDistribution & { pending: number; missing: number }
+export type TimingCardKey = "startup" | "queue" | "broker" | "computer"
+export type TimingCards = Record<TimingCardKey, TimingCard>
+export type TimingInterval = TimingCards & { start: string; end: string }
+export type NativePerformance = {
+  eligible_turns: number; api_received_samples: number; missing_dispatch_samples: number
+  dispatch: TimingDistribution
+  breakdown: {
+    samples: number; api_to_dispatch_ms: TimingDistribution; api_to_worker_ms: TimingDistribution
+    worker_to_broker_ms: TimingDistribution; broker_to_dispatch_ms: TimingDistribution
+  }
+  computer: { cold: TimingDistribution; restore: TimingDistribution; reuse: TimingDistribution; requested: number; failed: number; pending: number }
+  cards?: TimingCards; trend?: TimingInterval[]
 }
 export type UserAggregate = Partial<ReportSummary> & { user_id: string }
 export type UserReportRow = { user_id: string; label: string; secondary?: string; search: string; metrics: UserAggregate }
@@ -43,11 +64,12 @@ export type AnalyticsReport = {
   models: string[]; users: ReportUser[]; total: number; limit: number; offset: number
   start: string; end: string; preset?: string; timezone?: string; currency?: string
   cost_note?: string; latency_note?: string
+  performance?: NativePerformance
   coverage?: {
     legacy_turns: number; ledger_requests: number; priced_requests: number; unpriced_requests: number; unknown_request_turns?: number; capture_gap_turns?: number; linked_cost_limited?: boolean
     pr_receipts: number; pr_status_checked: number; pr_status_unknown: number; pr_tracking: string; pr_merge_date_unknown?: number; unclassified_confirmed_create_calls?: number
   }
-  methodology?: { sessions?: string; prs_created?: string; prs_merged?: string; cost?: string; requests?: string; model?: string; cost_per_merged_pr?: string }
+  methodology?: { sessions?: string; prs_created?: string; prs_merged?: string; cost?: string; requests?: string; model?: string; cost_per_merged_pr?: string; startup?: string; startup_breakdown?: string; computer_readiness?: string; timing_coverage?: string; timing_cards?: string }
   capabilities?: { pr_analytics?: boolean; reported_costs?: boolean }
 }
 

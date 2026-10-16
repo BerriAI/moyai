@@ -62,6 +62,45 @@
 .native-analytics .analytics-users-methodology { margin-top: 12px; }
 .native-analytics .analytics-users-methodology summary { cursor: pointer; width: fit-content; }
 .native-analytics .analytics-users-table:focus-visible, .native-analytics .analytics-users-methodology summary:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 3px; }
+.native-analytics .performance-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 24px; }
+.native-analytics :is(.performance-card, .performance-trend) { min-width: 0; padding: 24px; gap: 0; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-subtle); box-shadow: none; }
+.native-analytics .performance-card h2 { margin: 0 0 8px; font-size: 16px; }
+.native-analytics .performance-description { margin: 0; min-height: 40px; font-size: 13px; line-height: 1.6; color: var(--ui-muted); }
+.native-analytics .performance-average { margin: 16px 0; font-size: 36px; font-weight: 500; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.native-analytics .performance-average span { margin-inline-start: 8px; color: var(--ui-muted); font-size: 13px; font-weight: 400; }
+.native-analytics .performance-percentiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 16px; }
+.native-analytics .performance-percentiles dt { font-size: 13px; color: var(--ui-muted); }
+.native-analytics .performance-percentiles dd { margin: 4px 0 0; font-size: 16px; font-variant-numeric: tabular-nums; }
+.native-analytics .performance-coverage { margin: 4px 0 0; font-size: 13px; color: var(--ui-muted); }
+.native-analytics .performance-trend { margin-bottom: 40px; }
+.native-analytics .performance-section-heading, .native-analytics .performance-chart-range { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.native-analytics .performance-section-heading h2 { margin: 0; }
+.native-analytics .performance-section-heading > span, .native-analytics .performance-chart-range { color: var(--ui-muted); font-size: 12px; }
+.native-analytics .performance-legend { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 20px 0 12px; font-size: 13px; }
+.native-analytics .performance-legend > span { display: inline-flex; align-items: center; gap: 8px; }
+.native-analytics .performance-legend i { width: 16px; height: 3px; background: currentColor; }
+.native-analytics .performance-series-startup { color: var(--ui-primary); }
+.native-analytics .performance-series-queue { color: var(--chart-green); }
+.native-analytics .performance-series-broker { color: var(--chart-amber); }
+.native-analytics .performance-series-computer { color: var(--chart-teal); }
+.native-analytics .performance-chart-scroll { min-width: 0; overflow-x: auto; }
+.native-analytics .performance-chart-scroll svg { display: block; width: 100%; min-width: 600px; height: auto; }
+.native-analytics .performance-gridline { stroke: var(--ui-border); stroke-dasharray: 3 5; }
+.native-analytics .performance-axis-label { fill: var(--ui-muted); font-size: 12px; }
+.native-analytics .performance-line { fill: none; stroke: currentColor; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.native-analytics .performance-series-queue .performance-line { stroke-dasharray: 5 3; }
+.native-analytics .performance-series-broker .performance-line { stroke-dasharray: 2 3; }
+.native-analytics .performance-series-computer .performance-line { stroke-dasharray: 9 3; }
+.native-analytics .performance-point { fill: currentColor; }
+.native-analytics .performance-chart-range { margin: 8px 0 16px; }
+.native-analytics .performance-intervals summary { cursor: pointer; width: fit-content; font-size: 13px; color: var(--ui-muted); }
+.native-analytics .performance-intervals .analytics-table-frame { margin-top: 16px; }
+.native-analytics .performance-chart-scroll:focus-visible, .native-analytics .performance-intervals summary:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 3px; }
+@media (max-width: 480px) {
+  .native-analytics .performance-metrics { grid-template-columns: minmax(0, 1fr); }
+  .native-analytics :is(.performance-card, .performance-trend) { padding: 16px; }
+  .native-analytics .performance-average { font-size: 32px; }
+}
 @media (max-width: 900px) {
   .native-analytics .analytics-actions { justify-content: flex-start; }
 }

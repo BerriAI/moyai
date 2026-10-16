@@ -44,7 +44,10 @@ def continuation_routes(runtime: Any, reader) -> APIRouter:
             raise HTTPException(401, "The product requester changed.")
         if body.expected_source_fingerprint is None:
             raise HTTPException(422, "Review the source continuation preview before sending.")
-        return await service.continue_session(principal, current.user, run_id, body)
+        return await service.continue_session(
+            principal, current.user, run_id, body,
+            received_at=getattr(request.state, "moyai_received_at", None),
+        )
 
     async def allowed(current, run_id: str):
         if current.principal is None:
