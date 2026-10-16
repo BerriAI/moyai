@@ -1943,9 +1943,11 @@ def _create_app(settings, store):
             await database(harness_gateway.live_context.require_current, run, request, selected_model)
             client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
             status = 'unknown'
-            upstream = await client.send(client.build_request('POST',
+            outgoing = client.build_request('POST',
                 settings.litellm_api_base.rstrip('/') + '/chat/completions', json=payload,
-                headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}), stream=True)
+                headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id})
+            accounting.dispatched(request)
+            upstream = await client.send(outgoing, stream=True)
             await accounting.headers(upstream, False)
             if upstream.status_code >= 400:
                 status = 'failed'

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -92,6 +93,7 @@ class BrokerDiagnosticsMiddleware:
         observation = {}
         if match[2] in MODEL_ROUTES:
             scope['moyai_model_diagnostic'] = observation
+            scope['moyai_broker_received_at'] = datetime.now(timezone.utc).isoformat()
         trace_started = time.time_ns()
         started = time.monotonic()
         status, response_bytes, response_started = None, 0, False

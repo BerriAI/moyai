@@ -379,8 +379,10 @@ class HarnessGateway:
             base = self.settings.litellm_api_base.rstrip('/')
             upstream_route = '/v1/chat/completions' if compact else route
             url = base + upstream_route.removeprefix('/v1') if base.endswith('/v1') else base + upstream_route
-            upstream = await client.send(client.build_request('POST', url,
-                json=gateway_payload(payload, upstream_route), headers=headers), stream=True)
+            outgoing = client.build_request('POST', url,
+                json=gateway_payload(payload, upstream_route), headers=headers)
+            accounting.dispatched(request)
+            upstream = await client.send(outgoing, stream=True)
             await accounting.headers(upstream, capture.streaming)
             if upstream.status_code >= 400:
                 raw_error = bytearray()
