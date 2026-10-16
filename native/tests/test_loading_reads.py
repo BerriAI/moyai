@@ -26,7 +26,7 @@ async def test_combined_reference_read_uses_real_current_product_identity(runtim
     )
     async with runtime.database.sessions.begin() as db:
         db.add(user)
-    session = await runtime.database.create_session(user, NewSession())
+    session = await runtime.database.create_session(user, NewSession(visibility="private"))
     cookie, _ = identity_fixtures.google_cookie(identity)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
@@ -48,7 +48,7 @@ async def test_combined_reference_read_uses_real_current_product_identity(runtim
 
 
 async def test_transcript_snapshot_skips_optional_store_and_heavy_turn_columns(runtime, actor, monkeypatch):
-    session = await runtime.database.create_session(actor, NewSession())
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(prompt="Saved prompt", request_key="one"))
     async with runtime.database.sessions.begin() as db:
         saved = await db.get(Turn, turn.id)

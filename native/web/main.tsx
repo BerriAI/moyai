@@ -6,6 +6,8 @@ import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, ListTree, LockKey
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import { SkillComposer } from "./skill-composer"
+import { SkillMessage } from "./skill-content"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "@/theme.css"
@@ -423,7 +425,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [sendingNow, setSendingNow] = useState<Set<string>>(() => new Set())
   const fileDrop = useFileDrop(pictures.add, setError, busy || Boolean(editing) || !visible)
   const [editText, setEditText] = useState("")
-  const composerInput = useRef<HTMLTextAreaElement>(null)
+  const composerInput = useRef<HTMLDivElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
@@ -594,17 +596,18 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 180) element.scrollTop = element.scrollHeight
   }, [liveText])
 
-  async function send() {
+  async function send(promptOverride?: string) {
+    const prompt = promptOverride ?? (editing ? editText : draft)
     if (editing) {
-      if (busy || !editText.trim()) return
+      if (busy || !prompt.trim()) return
       setBusy(true); setError("")
-      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt: editText }); setEditing(null); await load() }
+      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt }); setEditing(null); await load() }
       catch (error) { setError(String(error)) } finally { setBusy(false) }
       return
     }
-    if ((!draft.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
+    if ((!prompt.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
     setBusy(true); setError("")
-    const body = { prompt: draft, model, mode, connections: selectedAccounts, attachments: pictures.readyFiles.map(file => file.id) }
+    const body = { prompt, model, mode, connections: selectedAccounts, attachments: pictures.readyFiles.map(file => file.id) }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
     try {
@@ -664,7 +667,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
-                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : message.content}</div>}
+                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
@@ -683,7 +686,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
-            <span><small>Queued after the current task</small><span>{message.content || "File message"}</span></span>
+            <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
             <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={async () => { try { await api(`/turns/${message.turn_id}`, "DELETE"); if (editing?.id === message.id) setEditing(null); await load() } catch (error) { setError(String(error)) } }}><X size={14} /></Button>
@@ -691,7 +694,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
             <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
-            <Textarea ref={composerInput} aria-label="Message Moyai" placeholder="Describe the work…" value={editing ? editText : draft} onChange={e => editing ? setEditText(e.target.value) : setDraft(e.target.value)} onPaste={editing || busy ? undefined : pictures.paste} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={editing ? undefined : pictures.paste} />
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
@@ -779,7 +782,7 @@ function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelec
     <Button className="side-chat-new" disabled={busy} onClick={async () => {
       setBusy(true); setError("")
       try {
-        const next = await api<Session>("/sessions", "POST", { visibility: individual ? "private" : "shared", model: defaultModel })
+        const next = await api<Session>("/sessions", "POST", { visibility: "shared", model: defaultModel })
         if (alive.current) onSelect(next)
         // The session already exists; a sidebar refresh failure must not turn
         // a confirmed creation into an invitation to create it again.

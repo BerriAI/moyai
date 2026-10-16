@@ -152,7 +152,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             )}
 
     runtime.models["test"].stream_function = stream
-    session = await runtime.database.create_session(actor, NewSession())
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="Read the selected repository.", request_key="connection-read",
         connections=[connection.id, unrelated.id],
