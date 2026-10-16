@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from datetime import timedelta
 
 from temporalio.client import WorkflowExecutionStatus, WorkflowHistory
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -96,6 +97,7 @@ def make_worker(runtime: Runtime) -> Worker:
         interceptors=interceptors,
         max_concurrent_activities=32,
         max_concurrent_workflow_tasks=16,
+        graceful_shutdown_timeout=timedelta(seconds=runtime.settings.worker_shutdown_seconds),
     )
 
 

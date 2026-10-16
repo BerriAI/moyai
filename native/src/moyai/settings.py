@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     temporal_queue: str = Field(default="moyai-pydantic-v1", validation_alias="TEMPORAL_TASK_QUEUE")
     temporal_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="TEMPORAL_API_KEY")
     temporal_tls: bool = Field(default=False, validation_alias="TEMPORAL_TLS")
+    worker_shutdown_seconds: int = Field(
+        default=0, ge=0, le=240, validation_alias="MOYAI_WORKER_SHUTDOWN_SECONDS",
+    )
+    http_shutdown_seconds: int = Field(
+        default=20, ge=1, le=270, validation_alias="MOYAI_HTTP_SHUTDOWN_SECONDS",
+    )
     modal_app: str = Field(
         default="moyai-pydantic",
         validation_alias=AliasChoices("MOYAI_MODAL_APP", "MODAL_APP_NAME"),
