@@ -33,8 +33,13 @@ class UserRoles:
         return bool(email and email.rpartition('@')[2] in self.settings.google_domains())
 
     def role_in(self, conn, email):
-        row = conn.execute('SELECT role FROM user_roles WHERE email=?', (email,)).fetchone()
-        return row['role'] if row else ('admin' if email in self.settings.google_admins() else 'member')
+        return self.role_and_revision_in(conn, email)[0]
+
+    def role_and_revision_in(self, conn, email):
+        row = conn.execute('SELECT role,revision FROM user_roles WHERE email=?', (email,)).fetchone()
+        return (row['role'], row['revision']) if row else (
+            'admin' if email in self.settings.google_admins() else 'member', 0,
+        )
 
     def role(self, email):
         with self.store.connect() as conn:

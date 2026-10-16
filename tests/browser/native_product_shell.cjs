@@ -19,6 +19,7 @@ async function handle(req,res,next) {
   let body=''; for await(const chunk of req)body+=chunk;
   const data=body?JSON.parse(body):null;
   state.requests.push({path:url.pathname,query:url.search,method:req.method,body:data,headers:req.headers});
+  if(state.holds?.[url.pathname])await state.holds[url.pathname];
   const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
   if(url.pathname==='/api/auth/config')return json({mode:state.mode,password_enabled:state.password,google_enabled:state.google,access_enabled:state.access});
   if(url.pathname==='/api/login'){state.signedIn=true;return json({csrf:'fixture-csrf'});}
@@ -61,10 +62,12 @@ async function handle(req,res,next) {
       res.on('close',()=>clients.delete(res));return;
     }
     if(url.pathname.endsWith('/messages'))return json(req.method==='POST'?{}:state.messages);
-    if(url.pathname.endsWith('/plan'))return json([]);
+    if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
+    if(url.pathname.endsWith('/activity'))return json([]);
     if(url.pathname.endsWith('/read'))return json({});
     if(req.method==='PATCH')return json({...session(),...data});
-    return json({session:session(url.pathname.split('/')[3]),turns:[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[]});
+    const row=session(url.pathname.split('/')[3]);
+    return json({session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[]});
   }
   return json({detail:'Fixture endpoint not implemented: '+url.pathname},404);
 }
@@ -83,6 +86,34 @@ before(async()=>{
 });
 after(async()=>{for(const client of clients)client.end();await browser?.close();await server?.close();});
 
+test('home and inventory render while account/folder reads and decoration are held',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holds:{'/api/connections':held,'/api/session-folders':held}});
+  const page=await browser.newPage();t.after(()=>page.close());
+  await page.route('**/frontend/moyai-sculpture.ts',route=>route.abort());
+  await page.goto(base+'/');
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await page.locator(`[data-session-key="native:${sessionId}"]`).waitFor();
+  assert.ok(state.requests.some(req=>req.path==='/api/connections'));
+  assert.equal(await page.getByText('Opening workspace…',{exact:true}).count(),0);
+});
+
+test('resolved conversation opens without plan/activity reads; plan loads only when opened',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holds:{[`/api/sessions/${sessionId}/plan`]:held},plan:[{id:'p',content:'Review the measurements',status:'pending'}]});
+  const page=await pageFor(t);
+  await page.getByText('Inspect this repository.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(req=>req.path===`/api/sessions/${sessionId}`).length,1);
+  assert.ok(state.requests.some(req=>req.query.includes('resolve=true')&&req.query.includes('include_activity=false')));
+  assert.ok(!state.requests.some(req=>req.path===`/api/history/sessions/${sessionId}`||req.path.endsWith('/plan')||req.path.endsWith('/activity')));
+  await page.getByRole('button',{name:'Open side panel',exact:true}).click();
+  await page.getByRole('button',{name:'Add panel tab',exact:true}).click();
+  await page.getByRole('menuitem',{name:/Plan/}).click();
+  await page.getByText('Loading plan…',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).isVisible(),true);
+  release();await page.locator('.plan-row').filter({hasText:'Review the measurements'}).waitFor();
+});
+
 for(const width of [1440,768,320])test(`palette keyboard, escaped body search, focus handoff and historical isolation at ${width}px`,async t=>{
   reset();const page=await pageFor(t,'#'+sessionId,width);await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
   const input=page.getByRole('textbox',{name:'Message Moyai'});await input.focus();
@@ -90,7 +121,9 @@ for(const width of [1440,768,320])test(`palette keyboard, escaped body search, f
   await dialog.getByRole('option',{name:'Saved earlier investigation',exact:false}).waitFor();
   await search.press('ArrowUp');assert.match(await dialog.locator('[role=option][aria-selected=true]').innerText(),/Current native work/);
   await search.press('ArrowDown');assert.match(await dialog.locator('[role=option][aria-selected=true]').innerText(),/Start session/);
-  await search.press('Escape');await dialog.waitFor({state:'hidden'});assert.equal(await input.evaluate(el=>el===document.activeElement),true);
+  await search.press('Escape');await dialog.waitFor({state:'hidden'});
+  await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Message Moyai');
+  assert.equal(await input.evaluate(el=>el===document.activeElement),true);
   dialog=await palette(page);search=dialog.getByRole('combobox');await search.fill('Rename');await search.press('Enter');
   const rename=page.getByRole('dialog',{name:'Rename session',exact:true});await rename.waitFor();assert.equal(await rename.getByRole('textbox').evaluate(el=>el===document.activeElement),true);
   await page.keyboard.press('Control+k');assert.equal(await page.getByRole('dialog',{name:'Commands and session search'}).count(),0);
@@ -127,7 +160,7 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
 test('access revocation removes transcript, draft and panel state before reauthorization',async t=>{
   reset();const page=await pageFor(t);const input=page.getByRole('textbox',{name:'Message Moyai'});await input.waitFor();await input.fill('private draft');await waitFor(()=>clients.size>0);
   emit({type:'response_start',run_id:turnId,step:1},0);emit({type:'text_start',index:0,text:'Sensitive live text'},1);await page.getByText('Sensitive live text',{exact:true}).waitFor();
-  state.denied=true;emit({},undefined,'access_revoked');await page.getByText('Error: Session access revoked.',{exact:true}).waitFor();
+  state.denied=true;emit({},undefined,'access_revoked');await page.getByText(/Session access revoked\./).waitFor();
   assert.equal(await page.getByText('Sensitive live text',{exact:true}).count(),0);assert.equal(await input.count(),0);
   assert.equal(await page.locator('.tabbed-panel').count(),0);await waitFor(()=>clients.size===0);
 });

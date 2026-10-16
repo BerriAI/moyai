@@ -656,6 +656,36 @@ def test_merge_keeps_original_ids_and_source_collisions():
     assert "source" not in native[0] and "source" not in legacy[0]
 
 
+async def test_inventory_sources_overlap_and_final_acl_recheck_still_filters(unified, monkeypatch):
+    native_started, legacy_started = asyncio.Event(), asyncio.Event()
+    native_list = unified.service.native_list
+    legacy_list = unified.product.history.sessions
+
+    async def native(*args, **kwargs):
+        native_started.set()
+        await asyncio.wait_for(legacy_started.wait(), 2)
+        return await native_list(*args, **kwargs)
+
+    async def legacy(*args, **kwargs):
+        legacy_started.set()
+        await asyncio.wait_for(native_started.wait(), 2)
+        return await legacy_list(*args, **kwargs)
+
+    monkeypatch.setattr(unified.service, "native_list", native)
+    monkeypatch.setattr(unified.product.history, "sessions", legacy)
+    result = await unified.service.listing(unified.reader)
+    assert {row["source"] for row in result["sessions"]} == {"native", "legacy"}
+    # A permission change after one source completes must still be fenced
+    # when the merged result is published.
+    async def privatized(*args, **kwargs):
+        result = await legacy_list(*args, **kwargs)
+        await unified.product.sql("UPDATE runs SET private_owner_id=:owner WHERE id=:id", owner=BOB, id=ROOT)
+        return result
+    monkeypatch.setattr(unified.product.history, "sessions", privatized)
+    result = await unified.service.listing(unified.reader)
+    assert all(row["source"] != "legacy" for row in result["sessions"])
+
+
 async def test_unified_source_dispatch_does_not_guess_from_identical_id(unified):
     for source, expected in (("native", "Native conversation"), ("legacy", "Earlier session")):
         result = await unified.client.get(f"/api/history/sessions/{ROOT}", params={"source": source})

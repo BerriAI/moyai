@@ -82,7 +82,7 @@ before(async () => {
   server = await createServer({
     configFile: false, root, cacheDir: cache, logLevel: 'error',
     resolve: { alias: { '@': path.join(root, 'frontend') } },
-    server: { host: '127.0.0.1', port: 0, strictPort: true },
+    server: { host: '127.0.0.1', port: 0, strictPort: false },
     plugins: [{
       name: 'isolated-workspace-overlay-regression',
       resolveId(id) { if (id === moduleUrl) return entry; },
@@ -264,5 +264,6 @@ test('reduced motion removes both animations without losing keyboard dismissal',
   assert.equal(await content.evaluate(element => getComputedStyle(element).animationName), 'none');
   await page.keyboard.press('Escape');
   await content.waitFor({ state: 'detached' });
+  await page.waitForFunction(() => document.activeElement?.textContent === 'Workspace');
   assert(await page.getByRole('button', { name: 'Workspace', exact: true }).evaluate(element => element === document.activeElement));
 });

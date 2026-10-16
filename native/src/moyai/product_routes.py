@@ -337,12 +337,12 @@ class ProductReadService:
         offsets = self.offsets(cursor, cursor_scope)
         pages: dict[str, dict[str, Any]] = {}
         notices, states = [], {}
-        for selected in (("native", "legacy") if source == "all" else (source,)):
+        async def read_source(selected: Source) -> None:
             if selected == "legacy" and self.history is None:
                 states[selected] = "disabled"
                 if source == "legacy":
                     raise HTTPException(503, "Existing product history is not configured.")
-                continue
+                return
             try:
                 async with asyncio.timeout(10):
                     if selected == "native":
@@ -373,6 +373,17 @@ class ProductReadService:
                     raise HTTPException(503, "Session history is temporarily unavailable.") from None
                 states[selected] = "unavailable"
                 notices.append(f"{selected.capitalize()} history is temporarily unavailable. Refresh to retry.")
+        # Each source owns/releases its connections before revalidation. Keep
+        # at most two reads in flight, including with one-slot database pools.
+        tasks = [asyncio.create_task(read_source(selected))
+                 for selected in (("native", "legacy") if source == "all" else (source,))]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         # Current authority fences partial results too. A source failure never downgrades ACL.
         await self.current(reader)
         if "native" in pages:
