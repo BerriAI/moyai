@@ -145,14 +145,16 @@ so Nginx resolves the new container addresses.
 
 ### Choose the topology
 
-Set `COMPOSE_FILE=compose.yaml` for one application container with an embedded
-worker and dispatcher. It uses the fresh native application's account and
-conversation model.
+Before the first `sh moyai.sh up`, leave `MOYAI_INSTALL_TOPOLOGY` unset or export
+`MOYAI_INSTALL_TOPOLOGY=standalone` for one application container with an embedded
+worker and dispatcher. The helper selects `compose.yaml`. This mode uses the
+fresh native application's account and conversation model.
 
-Set `COMPOSE_FILE=compose.split.yaml` for the API, coordinator, broker, and worker
-as separate containers. This mode prepares both canonical product and native
-execution schemas and uses the product's identity, storage, and accounting
-adapters. It starts the coordinator before the other roles and resumes execution
+Export `MOYAI_INSTALL_TOPOLOGY=split` for the API, coordinator, broker, and worker
+as separate containers. The helper selects `compose.split.yaml`. This mode
+prepares both canonical product and native execution schemas and uses the
+product's identity, storage, and accounting adapters. It starts the coordinator
+before the other roles and resumes execution
 only after all four report the same release identity.
 The proxy exposes broker routing before activation, while browser and webhook
 requests receive maintenance HTTP 503. Activation checks the public
@@ -162,9 +164,10 @@ balancer during this check. If Cloudflare Access protects the public origin,
 configure `CLOUDFLARE_ACCESS_CLIENT_ID` and `CLOUDFLARE_ACCESS_CLIENT_SECRET`
 with permission to reach the broker routes.
 
-These modes have different identity/schema contracts. Changing `COMPOSE_FILE`
-does not migrate an existing standalone installation into the split topology.
-Use a new installation or an explicitly verified migration.
+These modes have different identity/schema contracts. Changing the topology
+variable or `COMPOSE_FILE` does not migrate an existing standalone installation
+into the split topology. Use a new installation or an explicitly verified
+migration.
 
 ### Choose Temporal
 
@@ -173,13 +176,18 @@ For Temporal Cloud or an existing self-hosted server, keep
 `TEMPORAL_NAMESPACE`, and the appropriate TLS/API-key settings. The namespace
 must already exist. Moyai does not request cloud-administration credentials.
 
-For the included server, set `MOYAI_TEMPORAL_MODE=bundled` and append
-`:compose.temporal.yaml` to `COMPOSE_FILE`. Supply a dedicated
-`MOYAI_TEMPORAL_DATABASE_PASSWORD`. Leave `TEMPORAL_NAMESPACE` empty to use an
+For the included server, export `MOYAI_TEMPORAL_MODE=bundled` before the first
+`sh moyai.sh up`. The helper adds `compose.temporal.yaml` automatically and
+generates a database password, or uses `MOYAI_TEMPORAL_DATABASE_PASSWORD` if you
+export one. Leave `TEMPORAL_NAMESPACE` empty to use an
 installation-specific name, or choose one. The package starts a separate
 PostgreSQL service for Temporal persistence/visibility, applies the pinned
 Temporal schemas, and registers the namespace. Its database volume survives
 container restarts. Temporal remains internal to the Compose network.
+
+If you prepare `.env` manually instead of using automatic configuration, select
+the topology's Compose file in `COMPOSE_FILE`, append `:compose.temporal.yaml`
+for bundled Temporal, and supply its database password yourself.
 
 ### Start
 
@@ -340,7 +348,7 @@ From the repository root:
 docker build --build-arg MOYAI_BUILD_SHA="$(git rev-parse HEAD)" -t moyai-local .
 ```
 
-Then configure the checked-out bundle:
+Export the service settings from this guide, then start the checked-out bundle:
 
 ```sh
 cd deploy/docker
