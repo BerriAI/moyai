@@ -1,6 +1,6 @@
 # Explicit PostgreSQL schema migrations
 
-The canonical product requires revision **21**, with compatibility floor **19**.
+The canonical product requires revision **21**, with compatibility floor **20**.
 The Pydantic application and Harness have separate receipts; see the
 [deployment contract](pydantic-deployment.md). Use the guarded maintenance release
 for current native upgrades. The retained online migration engine and its ledger
@@ -51,20 +51,20 @@ transition before enabling them. A normal pre-deploy hook that runs while the ol
 app is live will be rejected. Once this activation is complete, deploy the bridge
 at the same schema revision to all four roles before using online expansions.
 An installation still on an earlier revision, such as revision 14, first needs
-the one-time maintenance adoption of revision 21; the empty online registry
-does not provide a migration path for it.
+the one-time maintenance adoption of revision 21; the online registry only
+declares the additive step from revision 20 to 21.
 
 ## Private-session upgrade
 
-Revision 19 adds immutable private ownership and personal Slack grants. It also
-advances the compatibility baseline to 19: older application code treats all
+Revision 19 introduced immutable private ownership and personal Slack grants. It
+advanced the compatibility baseline to 19: older application code treats all
 sessions as shared and cannot safely overlap once private sessions exist.
 
 Use the coordinated maintenance steps above for an existing revision-18 deployment:
 back up the database, drain work, stop **all four roles** (including the dedicated
 API), run `python -m app.schema_migrations --apply` from the target release, and
 start every role at that release with `MOYAI_SCHEMA_MODE=verify`. Confirm the
-migration prints revision 19, health checks pass, and an ordinary saved session
+migration prints the current revision 21, health checks pass, and an ordinary saved session
 opens before reopening ingress. Verify that a private test session returns 404
 for a second individual account.
 
@@ -83,8 +83,9 @@ entire plan and records it while making no database or service writes.
 `app/online_schema_migrations.json` is the explicit reviewed registry. Each step
 names its source and target revision, their digests from `schema_versions.json`,
 the unchanged compatibility revision, and a list of declarative operations.
-Steps must be contiguous. The bridge initially has an empty registry and retains
-compatibility revision 19, preserving the existing role fingerprints.
+Steps must be contiguous. The current registry declares revision 20 to 21 at
+compatibility revision 20. It adds nullable timing fields to `performance_samples`;
+it does not authorize a rolling transition to the native runtime.
 
 Protocol 1 accepts only:
 

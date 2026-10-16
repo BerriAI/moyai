@@ -2,7 +2,7 @@
 
 Moyai keeps sessions, messages, permissions, spending records and file metadata in its configured SQLite or PostgreSQL database. With private object storage configured, new upload parts, image previews, result ZIPs and browser captures go to an S3-compatible bucket. Complete attachment manifests bind those immutable parts to the original size and hash. The database holds their references. Existing authenticated Moyai URLs, draft ownership, agent scope and media range requests continue to work.
 
-Without this configuration, the existing local storage behavior remains. Increasing the Render disk to 10 GB gives recovery headroom; it does not move existing bytes or set up object storage. SQLite still grows with structured history. Monitor database volume usage separately.
+These settings govern canonical historical storage. Existing local payloads remain readable on their original disk, and the maintenance tools can inspect them without an object destination. Current existing-product deployments require an explicit private object destination, shared by every role; see the [deployment contract](pydantic-deployment.md). Increasing the Render disk to 10 GB gives recovery headroom; it does not move existing bytes or set up object storage. Monitor database volume usage separately.
 
 ## Configure the destination
 
