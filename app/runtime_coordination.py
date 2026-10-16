@@ -35,7 +35,7 @@ def require_shared_artifacts(store):
         for path in root.rglob('*'):
             if path.is_symlink() or (path.is_file() and not path.name.startswith('.upload-')
                                      and path.relative_to(root).as_posix() not in manifested):
-                raise ValueError('Migrate and verify legacy artifact files before enabling distributed roles. See docs/runtime-scaling.md.')
+                raise ValueError('Migrate and verify legacy artifact files before enabling distributed roles. See docs/object-storage.md.')
 
 
 class WorkerRoleMiddleware:

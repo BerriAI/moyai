@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from .db import database
-from sandbox.aws_credentials import bundle, cache_paths, profile_fields
+from app.aws_credentials import bundle, cache_paths, profile_fields
 
 AWS_LOGIN_DESCRIPTION = (
     'Start, poll or cancel a personal AWS IAM Identity Center device login. First inspect credentials_list '

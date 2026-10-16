@@ -75,3 +75,35 @@ print(json.dumps({"revision": SCHEMA_REVISION, "preserved": True}))
     finally:
         with psycopg.connect(url, autocommit=True) as connection:
             connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+def test_schema_initializers_have_a_versioned_manifest():
+    # A schema edit without a new revision must fail CI, including optional
+    # components and backend-specific functions/triggers used by the migrator.
+    import ast
+    import hashlib
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    from app import schema_migrations as migration
+    from app.schema_initializers import TABLES
+    sources = {}
+    for path in (root / 'app').glob('*.py'):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if path.name == 'schema_initializers.py' and isinstance(node, ast.FunctionDef) and node.name.startswith('initialize_'):
+                component = node.name.removeprefix('initialize_')
+                node.name = 'initialize_schema'
+                sources[f'{component}.py:initialize_schema'] = ast.dump(node, include_attributes=False)
+                continue
+            if isinstance(node, ast.FunctionDef) and node.name in {'initialize_schema', '_initialize_schema', 'initialize_defaults'}:
+                sources[f'{path.name}:{node.name}'] = ast.dump(node, include_attributes=False)
+    sources['database_schema'] = ast.dump(ast.parse((root / 'app/database_schema.py').read_text()), include_attributes=False)
+    sources['components'] = list(migration.COMPONENTS)
+    sources['trace_tables'] = sorted(TABLES)
+    assert {k.split(':')[0][:-3] for k in sources if k.endswith(':initialize_schema')} == (
+        set(migration.COMPONENTS) | {'attachments', 'slack_mentions', 'blob_storage', 'trace_outbox'})
+    signature = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+    versions = json.loads((root / 'app/schema_versions.json').read_text())
+    assert list(versions) == [str(i) for i in range(1, migration.SCHEMA_REVISION + 1)]
+    assert versions[str(migration.SCHEMA_REVISION)] == signature, (
+        'Schema changed. Increment SCHEMA_REVISION and append its source digest to app/schema_versions.json: ' + signature)

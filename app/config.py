@@ -528,7 +528,7 @@ class Settings(BaseSettings):
     @classmethod
     def substrate_key(cls, value):
         if value:
-            from sandbox.substrate_protocol import private_key
+            from app.substrate_protocol import private_key
             private_key(value)
         return value
 

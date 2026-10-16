@@ -1,7 +1,7 @@
 """Reusable, database-independent report arithmetic.
 
-Calendar presets match app/static/analytics.js. Receipt-cohort versus merge-event
-semantics follow app/pr_analytics.py; no legacy engine or database is imported.
+Calendar presets match the shared frontend analytics helper. Receipt-cohort versus
+merge-event semantics preserve the original product reporting contract; no legacy engine or database is imported.
 """
 
 from __future__ import annotations

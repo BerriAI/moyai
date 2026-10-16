@@ -1,69 +1,24 @@
 [project]
-name = "hermes-workspace"
+name = "moyai-workspace"
 version = "0.1.0"
-description = "An internal agent workspace with Hermes, Modal sandboxes, and native app connections."
+description = "Moyai on Pydantic AI Harness, Modal, Temporal, and LiteLLM."
 requires-python = ">=3.12"
-dependencies = [
-  "fastapi>=0.115,<1",
-  "uvicorn>=0.34,<1",
-  "httpx>=0.28,<1",
-  # Session titles also use this SDK; keep its usage schema compatible with OpenAI.
-  "openai-agents==0.20.0",
-  "openai==2.54.0",
-  "cryptography>=44",
-  "pydantic-settings>=2.8,<3",
-  "modal>=1.4,<2",
-  "grpclib>=0.4.9,<1",
-  "protobuf>=6.33.6,<7",
-  "itsdangerous>=2.2,<3",
-  "PyJWT[crypto]>=2.10,<3",
-  "agentchat",
-  "temporalio>=1.34,<2",
-  "pillow>=11.3,<13",
-  "opentelemetry-sdk>=1.39,<2",
-  "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
-  "boto3>=1.43.109,<2",
-  "psycopg[binary,pool]>=3.2,<4",
-  # Experimental official integration; upgrade the pinned graph with replay tests.
-  "temporalio-deepagents==0.0.1",
-  "deepagents==0.7.15",
-  "langchain-openai>=1.3,<2",
-  "pyyaml>=6,<7",
-]
+dependencies = ["moyai-pydantic[product]"]
 
 [project.optional-dependencies]
-postgres-migration = [
-    "psycopg[binary]>=3.2,<4",
-    "sqlglot>=28,<29",
-]
+postgres-migration = ["sqlglot>=28,<29"]
 
 [dependency-groups]
-dev = [
-    "pytest>=8,<10",
-    "pytest-asyncio>=0.25,<2",
-    "claude-agent-sdk==0.2.163",
-    "openai-codex==0.161.0",
-    "websockets==16.1.1",
-]
-eval = [
-    "lens-evals==0.1.0a3",
-    "pytest>=8,<10",
-]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.14", "pyright>=1.1"]
+
+[tool.uv.workspace]
+members = ["native"]
+
+[tool.uv.sources]
+moyai-pydantic = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = ["sqlite_only: validates SQLite file or checkpoint behavior"]
-
-[tool.uv.sources]
-agentchat = { git = "https://github.com/BerriAI/agentchat.git", rev = "8876e361c4071b4906916452ff3e6c35b1a9c78b" }
-lens-evals = { git = "https://github.com/BerriAI/lens.git", rev = "0054665e59200d72b969c4e10c999e5044b7a608", subdirectory = "src/sdk" }
-
-[tool.lens]
-project = "moyai"
-
-[tool.lens.connections.moyai]
-base_url_env = "MOYAI_EVAL_URL"
-auth = "moyai_session"
-password_env = "MOYAI_EVAL_PASSWORD"

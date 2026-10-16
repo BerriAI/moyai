@@ -67,7 +67,7 @@ def legacy_automation_counts(connection):
     if connection.execute("SELECT to_regclass('automations')").fetchone()[0] is not None:
         # This is the installed source's format, inspected in legacy Python.
         # Importing its definitions does not instantiate a scheduler or client.
-        from app.automations import SCHEDULE_VERSION
+        from app.automation_definitions import SCHEDULE_VERSION
         require(type(SCHEDULE_VERSION) is int and SCHEDULE_VERSION > 0)
         counts['legacy_automations'] = connection.execute("""
             SELECT count(*) FROM automations WHERE paused IS DISTINCT FROM 1

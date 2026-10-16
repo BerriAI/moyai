@@ -33,7 +33,7 @@ const examples=()=>['hourly','daily','weekdays','weekly','cron','once'].map(freq
 test('all six calendar types retain the exact Timing payload fields',()=>{
   for(const example of examples()){data.validateAutomation(example);assert.deepEqual(Object.keys(example.triggers[0].schedule).sort(),['frequency','time','weekday','timezone','cron','run_at'].sort());}
 });
-const python=path.join(root,'native/.venv/bin/python');
+const python=path.join(root,'.venv/bin/python');
 test('all six calendar types conform to canonical Python Timing and Definition',{skip:!fs.existsSync(python)&&'Native Python environment is not installed in this frontend-only job'},()=>{
   const result=spawnSync(python,['-c','import json,sys; from app.automation_definitions import Definition; rows=json.load(sys.stdin); [Definition.model_validate(row) for row in rows]; print(len(rows))'],{cwd:root,input:JSON.stringify(examples()),encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'6');

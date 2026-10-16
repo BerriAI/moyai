@@ -14,7 +14,7 @@ from psycopg import sql
 import pytest
 
 from scripts.release import maintenance_probe as probe
-from test_postgres_runtime import target  # noqa: F401
+from postgres_fixture import target  # noqa: F401
 
 
 def response(role='worker', *, staged=False, status=200, owner='42'):

@@ -9,7 +9,7 @@ from app.config import Settings
 from app.database import DatabaseError, PostgresDatabase
 from app.db import Store
 from app import schema_migrations
-from test_postgres_runtime import target  # noqa: F401
+from postgres_fixture import target  # noqa: F401
 
 
 @pytest.fixture

@@ -76,7 +76,7 @@ def test_transport_runs_installed_native_command_only_after_exact_source_probe(m
     monkeypatch.setattr(control.subprocess, 'run', run)
     assert control.execute({'service': service, 'command': command, 'body': body},
                            probe_fn=lambda _: state) == value
-    assert calls[0][0] == ['/app/native/.venv/bin/python', '-m', 'moyai.product_drain', command]
+    assert calls[0][0] == ['/app/.venv/bin/python', '-m', 'moyai.product_drain', command]
     assert json.loads(calls[0][1]['input']) == body
     assert calls[0][1]['capture_output'] and calls[0][1]['timeout'] == 25
     calls.clear()

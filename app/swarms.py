@@ -13,11 +13,11 @@ from uuid import uuid4
 from .db import database, now
 
 # Agent behavior is shared with SDK consumers; this module owns persistence.
-from agent.swarm.planning import (
+from app.legacy_swarm_planning import (
     INITIAL_TEAM_SIZE, ROUND_DELAY_SECONDS,
     Runtime, continuation_message, coordinator_prompt, plan_swarm,
 )
-from agent.swarm.timing import (
+from app.legacy_swarm_timing import (
     is_swarm_hold_command, parse_swarm_time_intent, SwarmTimeIntentKind, validate_swarm_budget,
 )
 from .swarm_collaboration import create_team_in

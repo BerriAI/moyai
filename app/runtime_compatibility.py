@@ -3,7 +3,7 @@
 Bump API_PROTOCOL_REVISION for incompatible changes to API durable writes,
 coordinator inboxes, execution state, broker capabilities or signed sessions.
 Equal revisions declare compatibility; they do not establish it automatically.
-See docs/api-replicas.md for the review and cross-release rehearsal requirements.
+See docs/pydantic-deployment.md for the review and cross-release rehearsal requirements.
 """
 import hashlib
 import json

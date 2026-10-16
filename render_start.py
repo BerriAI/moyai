@@ -1,21 +1,11 @@
-"""Render control plane; agent execution uses the configured sandbox provider.
-
-Initial deployments run a maintenance app. After the old web service is stopped,
-set RENDER_MIGRATION_STAGE=false to import its final Modal Volume checkpoint.
-An existing Render database is never overwritten by bootstrap.
-"""
+"""Render role listeners with a maintenance boundary and graceful routing handoff."""
 import asyncio
 import logging
 import os
-from pathlib import Path
-import re
 import signal
-import shutil
-import sqlite3
 import time
 from urllib.parse import urlparse
 
-import modal
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
@@ -110,87 +100,21 @@ def configure_environment():
     os.environ.setdefault("DATA_DIR", "/var/data/moyai")
 
 
-async def import_checkpoint(directory: Path, volume):
-    """Stage and validate a read-only copy; publish the database last."""
-    target = directory / "workspace.db"
-    if target.exists():
-        return False
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    staged = directory / ".modal-import"
-    if staged.exists():
-        shutil.rmtree(staged)
-    staged.mkdir(mode=0o700)
-
-    async def download(remote, local):
-        with local.open("wb") as output:
-            local.chmod(0o600)
-            async for chunk in volume.read_file.aio(remote):
-                output.write(chunk)
-
-    try:
-        await download("workspace.db", staged / "workspace.db")
-        with sqlite3.connect(staged / "workspace.db") as db:
-            if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise RuntimeError("The imported checkpoint failed integrity validation.")
-            ids = {row[0] for row in db.execute("SELECT id FROM runs")}
-            connections = db.execute("SELECT COUNT(*) FROM connections").fetchone()[0]
-            # A cutover must not silently interrupt somebody's in-flight work.
-            active = db.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted')").fetchone()[0]
-            if active:
-                raise RuntimeError("The source checkpoint has active sessions. Stop the old web service cleanly before importing.")
-        archives = staged / "artifacts"
-        archives.mkdir(mode=0o700)
-        count = 0
-        for entry in await volume.listdir.aio("/", recursive=True):
-            remote = entry.path.lstrip("/")
-            if re.fullmatch(r"artifacts/[0-9a-f]{32}\.zip", remote) and Path(remote).stem in ids:
-                await download(remote, archives / Path(remote).name)
-                count += 1
-        target_archives = directory / "artifacts"
-        target_archives.mkdir(mode=0o700, exist_ok=True)
-        for artifact in archives.iterdir():
-            artifact.replace(target_archives / artifact.name)
-        (staged / "workspace.db").replace(target)
-        print(f"Imported {len(ids)} sessions, {connections} app connections, and {count} result archives.", flush=True)
-        return True
-    finally:
-        shutil.rmtree(staged, ignore_errors=True)
 
 
-async def bootstrap():
-    from app.config import Settings
-    settings = Settings(_env_file=None)
-    if settings.moyai_database_url:
-        return
-    if (settings.data_dir / "workspace.db").exists():
-        return
-    source = os.environ.get("BOOTSTRAP_MODAL_VOLUME", "")
-    if not source:
-        raise RuntimeError("No database exists. Set BOOTSTRAP_MODAL_VOLUME for the migration; refusing an empty workspace.")
-    client = await modal.Client.from_credentials.aio(settings.modal_token_id, settings.modal_token_secret)
-    volume = modal.Volume.from_name(source, client=client)
-    await import_checkpoint(settings.data_dir, volume)
 
 
-def broker_failed():
-    # Uvicorn has loaded the application before its first serving tick.
-    from app.main import app
-    owner = app.state.broker_requests
-    return bool(owner and owner.failed)
 
 
 def main():
-    from docker_start import ensure_selected_interpreter, selected_core
-    ensure_selected_interpreter()
-    core = selected_core()
+    from docker_start import selected_core
+    selected_core()
     configure_environment()
     stage = os.environ.get("RENDER_MIGRATION_STAGE", "true").lower()
     if stage not in {"true", "false"}:
         raise RuntimeError("RENDER_MIGRATION_STAGE must be true or false.")
-    if stage == "false" and core == "legacy":
-        asyncio.run(bootstrap())
-    target = maintenance if stage == "true" else "app.main:app"
-    if stage == "false" and core == "pydantic":
+    target = maintenance
+    if stage == "false":
         # No legacy bootstrap or app.main import in this branch. Native startup
         # verifies schemas, source fencing and canonical role ownership.
         from moyai.product_config import load_product_config
@@ -207,11 +131,10 @@ def main():
         # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
         proxy_headers=False,
     )
-    server = (RenderOverlapServer(config, failure_check=broker_failed
-                                  if core == 'legacy' and stage == 'false' and role == 'broker' else None)
+    server = (RenderOverlapServer(config)
               if role in {'api', 'broker', 'coordinator'} else uvicorn.Server(config))
     lifecycle = None
-    if core == "pydantic" and stage == "false":
+    if stage == "false":
         lifecycle = getattr(getattr(target, "state", None), "product_lifecycle", None)
         if lifecycle is not None:
             lifecycle.retire = lambda: setattr(server, "should_exit", True)

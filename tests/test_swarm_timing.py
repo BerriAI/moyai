@@ -3,7 +3,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from agent.swarm.timing import (
+from app.legacy_swarm_timing import (
     MAX_DURATION_SECONDS,
     MIN_DURATION_SECONDS,
     SwarmTimeIntent,
@@ -127,7 +127,7 @@ def test_budget_validation_rejects_invalid_values_without_coercion(seconds):
     'no need to continue', 'Please stay paused.', 'Could you please stop?',
 ])
 def test_explicit_hold_commands_do_not_authorize_automatic_resume(message):
-    from agent.swarm.timing import is_swarm_hold_command
+    from app.legacy_swarm_timing import is_swarm_hold_command
     assert is_swarm_hold_command(message)
     assert parse_swarm_time_intent(message) is None
 
@@ -139,5 +139,5 @@ def test_explicit_hold_commands_do_not_authorize_automatic_resume(message):
     '', None, 'stop' + ' ' * 513,
 ])
 def test_hold_detection_is_anchored_and_does_not_invert_other_commands(message):
-    from agent.swarm.timing import is_swarm_hold_command
+    from app.legacy_swarm_timing import is_swarm_hold_command
     assert not is_swarm_hold_command(message)

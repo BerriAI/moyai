@@ -18,7 +18,7 @@ import httpx
 import jwt
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
-from agent.github_paths import publishable_path
+from app.github_paths import publishable_path
 from .connector_errors import ConnectorError
 from .db import now
 from .github_repositories import GitHubRepositories

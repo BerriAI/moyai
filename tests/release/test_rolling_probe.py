@@ -12,7 +12,7 @@ import pytest
 
 from scripts.release.deploy import GitHub, ReleaseError
 from scripts.release.rolling_probe import health_identity, snapshot
-from test_postgres_runtime import target  # noqa: F401
+from postgres_fixture import target  # noqa: F401
 
 
 @pytest.fixture
@@ -254,7 +254,7 @@ def test_required_rolling_workflows_run_for_every_main_push(workflow):
     # changes. Requiring an exact-SHA check while filtering it out deadlocks CI.
     text = Path('.github/workflows', workflow).read_text()
     pull_request, push = text.split('  push:\n', 1)
-    assert '  pull_request:\n    paths:' in pull_request
+    assert '  pull_request:' in pull_request
     push = push.split('\npermissions:', 1)[0]
     assert '    branches: [main]' in push
     assert 'paths' not in push

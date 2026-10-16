@@ -10,8 +10,8 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .model_selection import gateway_model
-from agent.activity import public_text
-from sandbox.broker_failure import provider_error, request_ids, safe_error
+from app.activity_text import public_text
+from app.broker_failure import provider_error, request_ids, safe_error
 
 
 class ModelContextLimits(BaseModel):

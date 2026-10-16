@@ -104,7 +104,7 @@ test('Home first message includes only eligible selected account IDs and stable 
   assert.equal(homeSubmission('Task','model',false,[],['organization'],accounts).visibility,'shared');
 });
 
-const python=path.join(root,'native/.venv/bin/python');
+const python=path.join(root,'.venv/bin/python');
 test('UI note/credential payloads validate against canonical and native-root Python schemas',{skip:!fs.existsSync(python)&&'Native Python environment not installed'},()=>{
   const payload={note:ui.productMemoryWrite(note(),{title:'Saved title',content:'Saved note content',kind:'preference',repo_url:''},'request-0001'),create:ui.productCredentialBody(draft({root_id:'native:'+nativeId,lifetime:'session'}),undefined,'request-0001'),update:ui.productCredentialBody(draft({value:''}),secret(),'ignored')};
   const result=spawnSync(python,['-c','import json,sys; from app.memory import Note; from moyai.product_secrets import ProductSaveSecret,ProductUpdateSecret; v=json.load(sys.stdin); Note.model_validate(v["note"]); ProductSaveSecret.model_validate(v["create"]); ProductUpdateSecret.model_validate(v["update"]); print("validated")'],{cwd:root,input:JSON.stringify(payload),encoding:'utf8'});

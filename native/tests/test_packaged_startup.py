@@ -12,7 +12,6 @@ environment = environment_fixture
 @pytest.mark.parametrize("failed", [False, True])
 @pytest.mark.parametrize("entrypoint", ["docker", "render"])
 def test_native_owner_loss_exit_status_after_server_cleanup(environment, monkeypatch, failed, entrypoint):
-    import docker_start
     import render_start
     import uvicorn
 
@@ -45,7 +44,6 @@ def test_native_owner_loss_exit_status_after_server_cleanup(environment, monkeyp
             **environment, "MOYAI_PUBLIC_URL": "https://package.example.test",
             "RENDER_SERVICE_ID": "srv-synthetic-package", "RENDER_MIGRATION_STAGE": "false",
         })
-        monkeypatch.setattr(docker_start, "ensure_selected_interpreter", lambda: None)
         monkeypatch.setattr(render_start, "RenderOverlapServer", Server)
         call = render_start.main
     if failed:

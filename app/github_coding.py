@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from agent.activity import public_text
+from app.activity_text import public_text
 from .connector_errors import ConnectorError
 
 PAGE_SIZE = 30

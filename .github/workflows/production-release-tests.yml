@@ -1,7 +1,6 @@
 name: Production release rehearsal
 on:
   pull_request:
-    paths: ['scripts/release/**', 'scripts/online_migration_probe.py', 'tests/release/**', 'tests/test_online_migrations.py', 'app/config.py', 'app/database.py', 'app/runtime_compatibility.py', 'app/schema_migrations.py', 'app/schema_versions.json', 'app/online_migrations.py', 'app/online_schema_migrations.json', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
   push:
     branches: [main]
 permissions:
@@ -28,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Verify release ordering, failures and real PostgreSQL drain guards
-        run: uv run --frozen --python 3.13 pytest -q tests/release tests/test_render.py tests/test_online_migrations.py
+        run: uv run --frozen --python 3.13 pytest -q tests/release tests/test_render.py tests/test_render_shutdown.py tests/test_online_migrations.py
       - name: Keep old and new readers working through a real additive migration
         run: uv run --frozen --python 3.13 python -m scripts.online_migration_probe --output /tmp/moyai-online-migration
       - uses: actions/upload-artifact@v4

@@ -5,6 +5,7 @@ description = "Moyai built on Pydantic AI Harness, Modal, Temporal, and LiteLLM.
 requires-python = ">=3.12"
 dependencies = [
     "pydantic-ai[temporal]==2.55.0",
+    "openai==3.29.0",
     "pydantic-ai-harness[coder,modal,skills,github,linear,notion,slack,temporal,playwright,code-mode]==0.55.0",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
@@ -19,13 +20,12 @@ dependencies = [
     "itsdangerous>=2.2,<3",
     "boto3>=1.43,<2",
     "pillow>=12.3,<13",
-]
-
-[project.optional-dependencies]
-product = [
     "PyJWT[crypto]>=2.10,<3",
     "psycopg[binary,pool]>=3.2,<4",
 ]
+
+[project.optional-dependencies]
+product = []  # Kept for existing installation commands; product support is always installed.
 
 [dependency-groups]
 dev = [

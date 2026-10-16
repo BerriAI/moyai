@@ -10,7 +10,8 @@ import psycopg
 import pytest
 
 from app.config import Settings
-from app.main import create_app
+from app.db import Store
+from app.schema_migrations import initialize_components
 from scripts.release.deploy import Release
 from scripts.release.probe import POLICY_FIELDS, policy_fingerprint, snapshot
 
@@ -23,17 +24,22 @@ def production_shape(tmp_path, request):
     schema = 'moyai_release_' + uuid4().hex
     with psycopg.connect(url, autocommit=True) as connection:
         connection.execute(f'CREATE SCHEMA "{schema}"')
-    app = None
+    store = None
     try:
         settings = Settings(_env_file=None, data_dir=tmp_path, moyai_database_url=url,
             moyai_database_schema=schema, moyai_database_initialize=True, moyai_runtime_role='coordinator',
             temporal_enabled=True, object_storage_bucket='synthetic-release',
             session_secret='synthetic-release-key', encryption_key=Fernet.generate_key().decode(),
             session_titles_enabled=False, moyai_separate_broker=getattr(request, 'param', False))
-        app = create_app(settings)
-        yield app.state.store, url, schema, settings
+        store = Store(settings.data_dir, default_model=settings.resolve_model(),
+            database_url=url, database_schema=schema, database_initialize=True,
+            application_instance=True, runtime_role=settings.moyai_runtime_role,
+            runtime_settings=settings)
+        initialize_components(store)
+        store.database.configure_runtime(settings)
+        yield store, url, schema, settings
     finally:
-        if app: app.state.store.close()
+        if store: store.close()
         with psycopg.connect(url, autocommit=True) as connection:
             connection.execute(f'DROP SCHEMA "{schema}" CASCADE')
 

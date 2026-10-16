@@ -13,7 +13,7 @@ pytest.importorskip('sqlglot')
 
 from app import postgres_migration as migration
 from app.config import Settings
-from app.main import create_app
+from canonical_fixture import open_services as create_app
 
 
 @pytest.fixture
@@ -236,10 +236,11 @@ def test_destination_schema_is_explicit_and_restricted(schema):
 
 
 def test_temporal_admission_index_is_ported_and_checked_for_drift(source, target):
-    from app.temporal_runtime import TemporalRunManager
     store = source.state.store
-    manager = TemporalRunManager(store, source.state.settings)
-    manager.submit(store.run(source.state.test_run_id))
+    # Preserve the historical admission row and its partial indexes without
+    # loading a retired executor to manufacture the migration fixture.
+    store.execute('INSERT INTO durable_sessions(run_id,revision) VALUES (?,1)',
+                  (source.state.test_run_id,))
     url, name = target
     assert migration.transfer(store.path.parent, url, name)['verified']
     with psycopg.connect(url) as conn:

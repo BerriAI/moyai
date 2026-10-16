@@ -33,6 +33,7 @@ def maintenance_contract(environment):
     source = '''import json
 from scripts.release.rolling_contract import contract
 from app.config import Settings
+from moyai.product_config import select_core
 from app.database import runtime_fingerprint
 from app.schema_migrations import SCHEMA_REVISION
 from pathlib import Path
@@ -40,7 +41,7 @@ import app.schema_migrations
 value = contract()
 settings = Settings(_env_file=None)
 value.update(source_policy=runtime_fingerprint(settings), default_harness=settings.default_harness(),
-    core=getattr(settings, "moyai_core", "legacy"),
+    core=select_core(),
     source_schema_digest=json.loads(Path(app.schema_migrations.__file__).with_name('schema_versions.json').read_text())[str(SCHEMA_REVISION)])
 print(json.dumps(value))
 '''
@@ -84,8 +85,8 @@ class MaintenanceRelease(RollingRelease):
         self.drained = False
         self.candidate_policy_active = False
         self.retired = set()
-        if target_core not in {'preserve', 'legacy', 'pydantic'}:
-            raise ReleaseError('Unknown candidate core; no changes made.')
+        if target_core not in {'preserve', 'pydantic'}:
+            raise ReleaseError('Only the Pydantic candidate core is supported; no changes made.')
         self.target_core = target_core
         self.native_manifest, self.native_migrate = native_manifest, native_migrate
         self.core_changes = {}

@@ -3,8 +3,8 @@
 Older records stay readable. Missing evidence is unknown, not a negative receipt.
 No error prose, provider body, tool input/output or stack is used for classification.
 """
-from agent.activity import public_text
-from sandbox.broker_failure import safe_error, safe_id, safe_recovery as recovery_record
+from app.activity_text import public_text
+from app.broker_failure import safe_error, safe_id, safe_recovery as recovery_record
 
 
 CATEGORIES = {

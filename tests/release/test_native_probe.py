@@ -13,7 +13,7 @@ import pytest
 
 from scripts.release import native_probe, native_migration, maintenance_migration
 from scripts.release.maintenance_probe import drain_counts
-from test_postgres_runtime import target  # noqa: F401
+from postgres_fixture import target  # noqa: F401
 
 
 @pytest.fixture
@@ -155,9 +155,9 @@ def test_schema_identifiers_are_checked_before_any_query(monkeypatch, schema):
 def test_real_harness_receipt_matches_legacy_interpreter_shape_and_rejects_drift(native_db, tmp_path):
     connection, schema = native_db
     root = Path(__file__).resolve().parents[2]
-    interpreter = root / 'native/.venv/bin/python'
+    interpreter = Path(native_migration.native_python(root))
     if not interpreter.exists():
-        pytest.skip('Install the separately locked native interpreter for SDK receipt comparison.')
+        pytest.skip('Install the workspace interpreter for SDK receipt comparison.')
     # Real SDK schema operations against the isolated database. No Runtime,
     # model, Temporal client, provider, filesystem blob, or application starts.
     code = '''
@@ -195,7 +195,7 @@ asyncio.run(main())
 
 def test_actual_postgres_shortened_index_collision_is_rejected_by_pure_candidate_check():
     root = Path(__file__).resolve().parents[2]
-    interpreter = root / 'native/.venv/bin/python'
+    interpreter = Path(native_migration.native_python(root))
     if not interpreter.is_file():
         pytest.skip('Install the locked native interpreter for actual SQLAlchemy name rendering.')
     source = native_migration.SCHEMA_IDENTIFIERS_SOURCE + '''
@@ -336,7 +336,7 @@ def test_core_switch_accounts_for_native_canonical_event_inbox_before_migration(
 
 @pytest.mark.parametrize('fault', [None, 'enabled', 'revision', 'version', 'error', 'event'])
 def test_source_automation_pause_and_inbox_are_rechecked_under_exclusive_guard(guard, fault):
-    from app.automations import SCHEDULE_VERSION
+    from app.automation_definitions import SCHEDULE_VERSION
     from scripts.release.maintenance_probe import legacy_automation_counts
     connection, _, execute, calls, _ = guard
     connection.execute('''CREATE TABLE automations(
@@ -380,9 +380,9 @@ def test_actual_product_provision_and_verify_cli_under_canonical_exclusive_lock(
 
     connection, native_schema = native_db
     root = Path(__file__).resolve().parents[2]
-    interpreter = root / 'native/.venv/bin/python'
+    interpreter = Path(native_migration.native_python(root))
     if not interpreter.exists():
-        pytest.skip('Install the separately locked native product environment for CLI integration.')
+        pytest.skip('Install the workspace environment for CLI integration.')
     source = 'moyai_release_cli_' + uuid4().hex
     url = os.environ['MOYAI_TEST_POSTGRES_URL']
     key = Fernet.generate_key().decode()

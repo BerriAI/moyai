@@ -2,10 +2,8 @@ name: Native Pydantic runtime
 
 on:
   pull_request:
-    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', 'docker_start.py', 'render_start.py', '.github/workflows/pydantic-native.yml']
   push:
     branches: [main]
-    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', 'docker_start.py', 'render_start.py', '.github/workflows/pydantic-native.yml']
 
 permissions:
   contents: read
@@ -46,17 +44,3 @@ jobs:
       - run: uv run pyright
       - run: uv run pytest -q --tb=short
       - run: uv build
-  web:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck:native
-      - run: node --test tests/test_native_*.cjs
-      - run: npm run build:native
-      - run: git diff --exit-code -- native/src/moyai/static

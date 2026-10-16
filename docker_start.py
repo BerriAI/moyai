@@ -6,26 +6,11 @@ import sys
 
 
 def selected_core() -> str:
-    """Keep the selector dependency-free in the legacy entry interpreter."""
-    core = os.environ.get("MOYAI_CORE", "legacy").strip()
-    if core not in {"legacy", "pydantic"}:
-        raise ValueError("MOYAI_CORE must be legacy or pydantic.")
+    """Reject retired execution engines before starting a service."""
+    core = os.environ.get("MOYAI_CORE", "pydantic").strip()
+    if core != "pydantic":
+        raise ValueError("Only MOYAI_CORE=pydantic is supported; use an earlier image to recover a retired engine.")
     return core
-
-
-def native_python() -> Path:
-    executable = Path(__file__).resolve().parent / "native" / ".venv" / "bin" / "python"
-    if not executable.is_file():
-        raise RuntimeError("The locked native interpreter is missing; rebuild the image with the native product extra.")
-    return executable
-
-
-def ensure_selected_interpreter() -> None:
-    """Direct Render invocations also switch before importing native services."""
-    if selected_core() == "pydantic":
-        executable = native_python()
-        if Path(sys.prefix).resolve() != executable.parent.parent.resolve():
-            os.execv(str(executable), [str(executable), *sys.argv])
 
 
 def prepare_data_directory(directory: Path, uid: int, gid: int) -> None:
@@ -44,17 +29,12 @@ def prepare_data_directory(directory: Path, uid: int, gid: int) -> None:
 
 
 def server_command() -> list[str]:
-    core = selected_core()
-    executable = str(native_python()) if core == "pydantic" else sys.executable
+    selected_core()
     if os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get('RENDER_SERVICE_ID'):
-        return [executable, str(Path(__file__).with_name("render_start.py"))]
-    if core == "pydantic":
-        host = "127.0.0.1" if os.environ.get("MOYAI_PRODUCT_LOCAL_REHEARSAL") == "true" else "0.0.0.0"
-        return [executable, "-m", "moyai.product_start", "serve", "--host", host,
-                "--port", os.environ.get("PORT", "8787")]
-    return [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0",
-            "--port", os.environ.get("PORT", "8787"), "--workers", "1",
-            "--timeout-graceful-shutdown", "20"]
+        return [sys.executable, str(Path(__file__).with_name("render_start.py"))]
+    host = "127.0.0.1" if os.environ.get("MOYAI_PRODUCT_LOCAL_REHEARSAL") == "true" else "0.0.0.0"
+    return [sys.executable, "-m", "moyai.product_start", "serve", "--host", host,
+            "--port", os.environ.get("PORT", "8787")]
 
 
 def main() -> None:

@@ -60,13 +60,13 @@ def require_startable(config: ProductConfig) -> RolePlan:
 
 
 def check_runtime_dependencies() -> dict[str, str]:
-    """Check the separate native lock, without importing any old agent engine."""
+    """Check the shared runtime lock, without importing any old agent engine."""
     installed: dict[str, str] = {}
     for name, expected in RUNTIME_VERSIONS.items():
         try:
             actual = metadata.version(name)
         except metadata.PackageNotFoundError:
-            raise ProductDeploymentError("Use the locked native interpreter with the product extra.") from None
+            raise ProductDeploymentError("Install Moyai using the repository lock.") from None
         if actual != expected:
             raise ProductDeploymentError(f"The native runtime requires locked {name}=={expected}.")
         installed[name] = actual
@@ -75,7 +75,7 @@ def check_runtime_dependencies() -> dict[str, str]:
     except metadata.PackageNotFoundError:
         pass
     else:
-        raise ProductDeploymentError("Legacy agent SDKs must remain in the separate legacy interpreter.")
+        raise ProductDeploymentError("Retired agent SDKs cannot be installed in the Moyai runtime.")
     try:
         for name in (
             "jwt", "psycopg", "psycopg_pool", "app.config", "app.security",
@@ -83,7 +83,7 @@ def check_runtime_dependencies() -> dict[str, str]:
         ):
             import_module(name)
     except ImportError:
-        raise ProductDeploymentError("Install the native product extra and make the root app package importable.") from None
+        raise ProductDeploymentError("Install the complete Moyai package, including its product services.") from None
     return installed
 
 

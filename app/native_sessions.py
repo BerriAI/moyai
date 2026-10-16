@@ -6,7 +6,7 @@ import re
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 
-from sandbox.broker_transport import CONTENT_TYPE
+from app.broker_transport import CONTENT_TYPE
 from .db import database
 
 

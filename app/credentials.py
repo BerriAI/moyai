@@ -16,7 +16,7 @@ from .database import Connection, DatabaseRow
 from .db import database, now
 from .identities import PROFILE_MAX_AGE_SECONDS
 from .aws_login import AWSLogin, AWS_LOGIN_DESCRIPTION, login_required
-from sandbox.aws_credentials import bundle as aws_bundle
+from app.aws_credentials import bundle as aws_bundle
 
 
 # Inference keys retain fixed origins/routes and never enter the sandbox.

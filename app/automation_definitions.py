@@ -165,3 +165,7 @@ class Launch(BaseModel):
 class Claim(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     item_key: str = Field(min_length=1, max_length=160, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.:/-]*$')
+
+
+# Original Temporal schedule synchronization receipt, retained for drain checks.
+SCHEDULE_VERSION = 1

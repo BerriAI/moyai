@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from agent.swarm.planning import (
+from app.legacy_swarm_planning import (
     DEFAULT_ROLES,
     INITIAL_TEAM_SIZE,
     Role,
@@ -158,11 +158,11 @@ import sys
 
 class RejectHostImport:
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.', 1)[0] in {'app', 'sandbox', 'fastapi', 'temporalio', 'psycopg', 'sqlite3'}:
+        if fullname.split('.', 1)[0] in {'sandbox', 'fastapi', 'temporalio', 'psycopg', 'sqlite3'}:
             raise AssertionError(f'Swarm planning imported host dependency {fullname}')
 
 sys.meta_path.insert(0, RejectHostImport())
-from agent.swarm.planning import Runtime, plan_team
+from app.legacy_swarm_planning import Runtime, plan_team
 assert len(plan_team('Explain the tradeoffs.', runtimes=[Runtime('harness', 'model')])) == 10
 '''
     result = subprocess.run([sys.executable, '-c', source],

@@ -8,7 +8,7 @@ import json
 
 from pydantic import Field
 
-from agent.swarm.contracts import Arguments
+from app.legacy_swarm_contracts import Arguments
 from .db import now
 
 

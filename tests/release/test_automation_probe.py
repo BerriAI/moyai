@@ -12,7 +12,7 @@ from temporalio.client import Schedule, ScheduleActionStartWorkflow, ScheduleSpe
 from scripts.release import automation_probe
 from scripts.release.maintenance_probe import legacy_automation_counts
 from scripts.release.deploy import COORDINATOR, ReleaseError, Service
-from test_postgres_runtime import target  # noqa: F401
+from postgres_fixture import target  # noqa: F401
 
 
 @pytest.mark.parametrize('fault', [None, 'unpaused', 'queue', 'workflow', 'missing'])
@@ -47,7 +47,7 @@ def test_exact_remote_schedule_state_and_queue_are_required(fault):
 
 @pytest.fixture
 def source(target, monkeypatch):
-    from app.automations import SCHEDULE_VERSION
+    from app.automation_definitions import SCHEDULE_VERSION
     url, schema = target
     with psycopg.connect(url, autocommit=True) as connection:
         connection.execute(sql.SQL('SET search_path TO {},pg_catalog').format(sql.Identifier(schema)))
