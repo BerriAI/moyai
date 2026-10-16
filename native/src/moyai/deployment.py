@@ -65,8 +65,23 @@ async def initialize_locked(environment: dict[str, str], state: dict | None, val
     return {"installation": "initialized", "revision": state["revision"], "model_execution": "not_checked"}
 
 
-async def control(values: dict[str, str], command: str, *, request_key: str | None = None) -> dict:
-    from .product_drain_cli import DrainCommand, ExpectedWorker, execute
+def control_intent(values: dict[str, str], status: dict, request_key: str) -> dict:
+    from .product_drain_cli import DrainCommand, ExpectedWorker
+
+    if len(status["workers"]) != 1:
+        raise InstallationError("Maintenance requires exactly one live, registered worker.")
+    worker = {key: value for key, value in status["workers"][0].items() if key != "maintenance_drain"}
+    return DrainCommand(
+        core="pydantic-v1", native_schema=values["MOYAI_NATIVE_SCHEMA"],
+        task_queue=values["MOYAI_NATIVE_TASK_QUEUE"], expected_generation=status["generation"],
+        expected_worker=ExpectedWorker.model_validate(worker), request_key=request_key,
+    ).model_dump(exclude_none=True)
+
+
+async def control(
+    values: dict[str, str], command: str, *, request_key: str | None = None, intent: dict | None = None,
+) -> dict:
+    from .product_drain_cli import DrainCommand, execute
 
     if values["MOYAI_PRODUCT_MODE"] != "existing":
         raise InstallationError("Coordinated maintenance commands require the split deployment.")
@@ -75,17 +90,46 @@ async def control(values: dict[str, str], command: str, *, request_key: str | No
         core="pydantic-v1", native_schema=values["MOYAI_NATIVE_SCHEMA"],
         task_queue=values["MOYAI_NATIVE_TASK_QUEUE"],
     )
+    if intent is not None:
+        recorded = DrainCommand.model_validate(intent)
+        if (recorded.native_schema, recorded.task_queue) != (body.native_schema, body.task_queue):
+            raise InstallationError("The recorded maintenance scope changed.")
+        return await execute(command, recorded)
     status = await execute("status", body)
     if command == "status":
         return status
-    if len(status["workers"]) != 1:
-        raise InstallationError("Maintenance requires exactly one live, registered worker.")
-    worker = {key: value for key, value in status["workers"][0].items() if key != "maintenance_drain"}
-    intent = DrainCommand(
-        **body.model_dump(exclude_none=True), expected_generation=status["generation"],
-        expected_worker=ExpectedWorker.model_validate(worker), request_key=request_key or uuid4().hex,
+    return await execute(command, DrainCommand.model_validate(control_intent(values, status, request_key or uuid4().hex)))
+
+
+def confirms(status: dict, intent: dict, *, paused: bool) -> bool:
+    worker = intent["expected_worker"]
+    return (
+        all(status.get(name) == intent[name] for name in ("protocol", "core", "native_schema", "task_queue", "request_key"))
+        and status.get("generation") == intent["expected_generation"] + 1
+        and status.get("paused") is paused
+        and status.get("requester") == {"pid": worker["pid"], "backend_start": worker["backend_start"]}
+        and status.get("source_policy") == worker["source_policy"]
     )
-    return await execute(command, intent)
+
+
+async def reconcile_control(values: dict[str, str], command: str, intent: dict) -> dict:
+    """Inspect a lost acknowledgement before repeating the original fenced command."""
+    status = await control(values, "status")
+    paused = command == "request"
+    if confirms(status, intent, paused=paused):
+        return status
+    workers = [{key: value for key, value in worker.items() if key != "maintenance_drain"}
+               for worker in status["workers"]]
+    if (
+        status["generation"] != intent["expected_generation"] or status["paused"] is paused
+        or workers != [intent["expected_worker"]]
+        or not paused and status["state"] != "drained"
+    ):
+        raise InstallationError("The maintenance generation or worker changed; inspect the recorded operation.")
+    receipt = await control(values, command, intent=intent)
+    if not confirms(receipt, intent, paused=paused):
+        raise InstallationError("The worker did not confirm the recorded maintenance operation; ingress remains closed.")
+    return receipt
 
 
 async def health(values: dict[str, str]) -> None:
@@ -159,27 +203,41 @@ async def activate(environment: dict[str, str], state: dict, values: dict[str, s
 async def begin_upgrade(args: argparse.Namespace, environment: dict[str, str], state: dict, values: dict[str, str]) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40}", args.revision) or args.revision == state["revision"]:
         raise InstallationError("Select a different release image with its full embedded revision.")
-    if state["phase"] != "initialized" or state.get("upgrade") or state["revision"] != values["MOYAI_BUILD_SHA"]:
+    upgrade = state.get("upgrade")
+    if state["revision"] != values["MOYAI_BUILD_SHA"] or (
+        upgrade is None and state["phase"] != "initialized"
+    ) or (
+        upgrade is not None and (
+            state["phase"] not in {"initialized", "upgrading"} or upgrade["source"] != state["revision"]
+            or upgrade["target"] != args.revision or upgrade["phase"] not in {"requesting_drain", "drained"}
+        )
+    ):
         raise InstallationError("The source installation is not a settled baseline.")
     await health(values)
     status = await control(values, "status")
-    if status["paused"]:
-        raise InstallationError("Finish the existing maintenance operation before starting an upgrade.")
+    if upgrade is None:
+        if status["paused"]:
+            raise InstallationError("Finish the existing maintenance operation before starting an upgrade.")
+        intent = uuid4().hex
+        upgrade = state["upgrade"] = {
+            "source": state["revision"], "target": args.revision, "intent": intent, "phase": "requesting_drain",
+            "drain_command": control_intent(values, status, intent),
+        }
+        write_state(environment, state)
     ingress(environment, ready=False)
-    intent = uuid4().hex
-    state["upgrade"] = {
-        "source": state["revision"], "target": args.revision, "intent": intent, "phase": "requesting_drain",
-    }
-    write_state(environment, state)
-    await control(values, "request", request_key=intent)
+    if "drain_command" not in upgrade:
+        raise InstallationError("The earlier upgrade lacks its exact drain command; inspect its native receipt before recovery.")
+    await reconcile_control(values, "request", upgrade["drain_command"])
     async with asyncio.timeout(args.timeout):
         while True:
             status = await control(values, "status")
+            if not confirms(status, upgrade["drain_command"], paused=True):
+                raise InstallationError("The drain generation changed while waiting; inspect the recorded operation.")
             if status["state"] == "drained":
                 break
             await asyncio.sleep(2)
     state["phase"] = "upgrading"
-    state["upgrade"].update(phase="drained", generation=status["generation"])
+    upgrade.update(phase="drained", generation=status["generation"])
     write_state(environment, state)
     return {"upgrade": "drained", "source": state["revision"], "target": args.revision}
 
@@ -324,21 +382,27 @@ async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dic
         await health(values)
         upgrade = state.get("upgrade")
         if upgrade:
-            status = await control(values, "status")
-            if (
-                upgrade["phase"] != "awaiting_resume" or status["generation"] != upgrade["generation"]
-                or status["state"] != "drained"
-            ):
+            if upgrade["phase"] not in {"awaiting_resume", "resuming"}:
                 raise InstallationError("Inspect the pending upgrade and exact maintenance generation before resume.")
-            upgrade["phase"] = "resuming"
-            write_state(environment, state)
-        status = await control(values, "resume")
+            if upgrade["phase"] == "awaiting_resume":
+                status = await control(values, "status")
+                if status["generation"] != upgrade["generation"] or status["state"] != "drained":
+                    raise InstallationError("Inspect the pending upgrade and exact maintenance generation before resume.")
+                upgrade.update(phase="resuming", resume_command=control_intent(values, status, uuid4().hex))
+                write_state(environment, state)
+            if "resume_command" not in upgrade:
+                raise InstallationError("The earlier upgrade lacks its exact resume command; inspect its native receipt.")
+            status = await reconcile_control(values, "resume", upgrade["resume_command"])
+        else:
+            status = await control(values, "status")
+            if status["paused"]:
+                status = await control(values, "resume")
+        if status["paused"]:
+            raise InstallationError("The worker did not confirm resume; ingress remains closed.")
         if upgrade:
             state["last_upgrade"] = state.pop("upgrade")
             state["last_upgrade"]["phase"] = "completed"
             write_state(environment, state)
-        if status["paused"]:
-            raise InstallationError("The worker did not confirm resume; ingress remains closed.")
         ingress(environment, ready=True)
         return status
     raise InstallationError("Unsupported installation command.")

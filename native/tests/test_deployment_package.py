@@ -404,15 +404,26 @@ async def test_ingress_opens_only_after_confirmed_resume(install_environment, mo
     async def control(values, operation, **kwargs):
         assert not marker.exists()
         events.append(operation)
-        return {
+        worker = {"pid": 42, "backend_start": "2026-10-16T00:00:00+00:00",
+                  "source_policy": "a" * 64, "worker_policy": "b" * 64}
+        status = {
             "generation": 0, "request_key": "bootstrap", "state": "drained" if operation == "status" else "running",
             "paused": operation == "status", "counts": {},
+            "protocol": 1, "core": "pydantic-v1", "native_schema": values["MOYAI_NATIVE_SCHEMA"],
+            "task_queue": values["MOYAI_NATIVE_TASK_QUEUE"], "workers": [{**worker, "maintenance_drain": False}],
+            "source_policy": worker["source_policy"],
+            "requester": {"pid": worker["pid"], "backend_start": worker["backend_start"]},
         }
+        if operation == "resume":
+            intent = kwargs.get("intent")
+            if intent:
+                status.update(generation=intent["expected_generation"] + 1, request_key=intent["request_key"])
+        return status
 
     monkeypatch.setattr(deployment, "health", health)
     monkeypatch.setattr(deployment, "control", control)
     await deployment.dispatch(argparse.Namespace(command=command), install_environment)
-    assert events == ["broker-ready", "status", "resume"]
+    assert events == ["broker-ready", "status", *(["status"] if command == "resume" else []), "resume"]
     assert marker.is_file() and marker.stat().st_mode & 0o777 == 0o644
     persisted = read_state(install_environment)
     assert persisted["phase"] == "initialized"
