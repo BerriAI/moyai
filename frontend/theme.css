@@ -31,28 +31,30 @@
 
 :root {
   color-scheme: dark;
-  --ui-canvas: #03070c;
-  --ui-background: #0d1726;
-  --ui-subtle: #09111d;
-  --ui-foreground: #eef5fb;
-  --ui-primary: #b7cdfa;
-  --ui-primary-foreground: #101b2c;
-  --ui-secondary: #122238;
-  --ui-muted: #a9bdce;
-  --ui-control-border: #60768b;
-  --ui-border: #25384c;
+  --ui-canvas: #070b14;
+  --ui-background: #182131;
+  --ui-subtle: #101623;
+  --ui-foreground: #f4f7fc;
+  --ui-primary: #b8a8ff;
+  --ui-primary-foreground: #171126;
+  --ui-secondary: #202b3d;
+  --ui-muted: #c0cadb;
+  --ui-control-border: #64748b;
+  --ui-border: #334155;
   --ui-destructive: #a73b49;
-  --ui-danger: #f0a7af;
-  --ui-danger-bg: #321e29;
+  --ui-danger: #ffadbc;
+  --ui-danger-bg: #421e2b;
   --ui-danger-border: #704653;
-  --ui-success: #a9dcc9;
-  --ui-success-bg: #112b29;
+  --ui-success: #86efac;
+  --ui-success-bg: #103323;
   --ui-success-border: #35594e;
-  --ui-warning: #efd398;
-  --ui-warning-bg: #2a2418;
+  --ui-warning: #ffd58a;
+  --ui-warning-bg: #3b2d13;
   --ui-warning-border: #655532;
+  --ui-merged: #ddc6ff;
+  --ui-merged-bg: #36234d;
   --ui-overlay: #01050bc9;
-  --ui-shadow: 0 24px 80px #00000080, 0 0 0 1px #b7cdfa08;
+  --ui-shadow: 0 24px 80px #00000080, 0 0 0 1px #b8a8ff08;
 }
 
 /* Geometry remains in the workspace styles; these rules describe the shared

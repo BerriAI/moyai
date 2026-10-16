@@ -13,7 +13,7 @@
 .pr-view .pr-state-open, .pr-view .pr-check-success { color: var(--ui-success); border-color: var(--ui-success-border); background: var(--ui-success-bg); }
 .pr-view .pr-state-draft, .pr-view .pr-check-pending { color: var(--ui-warning); border-color: var(--ui-warning-border); background: var(--ui-warning-bg); }
 .pr-view .pr-state-closed, .pr-view .pr-check-failure, .pr-view .pr-check-error { color: var(--ui-danger); border-color: var(--ui-danger-border); background: var(--ui-danger-bg); }
-.pr-view .pr-state-merged { color: var(--ui-primary); border-color: var(--ui-control-border); background: var(--ui-secondary); }
+.pr-view .pr-state-merged { color: var(--ui-merged); border-color: var(--ui-control-border); background: var(--ui-merged-bg); }
 .pr-view .pr-state-unknown { color: var(--ui-muted); border-color: var(--ui-border); }
 .pr-view .pr-added { color: var(--ui-success); font-variant-numeric: tabular-nums; }
 .pr-view .pr-removed { color: var(--ui-danger); font-variant-numeric: tabular-nums; }

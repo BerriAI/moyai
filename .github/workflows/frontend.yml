@@ -20,7 +20,6 @@ jobs:
           python-version: '3.13'
       - run: uv sync --frozen
       - run: npm run typecheck
-      - run: npm test
       - run: npm run build
       - run: test -z "$(git ls-files -- native/src/moyai/static)"
       - run: npx playwright install --with-deps chromium

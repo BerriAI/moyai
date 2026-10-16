@@ -210,10 +210,11 @@
 
 .sidebar .session-pr-indicator svg { width: 13px; height: 13px; }
 .sidebar .session-pr-count { font-variant-numeric: tabular-nums; }
-.sidebar .session-pr-ready { color: var(--ui-success); }
-.sidebar .session-pr-merged { color: var(--ui-primary); }
-.sidebar .session-pr-closed { color: var(--ui-danger); }
-.sidebar .session-pr-draft { color: var(--ui-muted); }
+.sidebar .session-pr-ready { color: var(--ui-success); --session-pr-fill: var(--ui-success-bg); }
+.sidebar .session-pr-merged { color: var(--ui-merged); --session-pr-fill: var(--ui-merged-bg); }
+.sidebar .session-pr-closed { color: var(--ui-danger); --session-pr-fill: var(--ui-danger-bg); }
+.sidebar .session-pr-draft { color: var(--ui-muted); --session-pr-fill: var(--ui-secondary); }
+.sidebar .session-pr-content { background: var(--session-pr-fill); border-radius: 3px; box-shadow: 0 0 0 2px var(--session-pr-fill); }
 
 /* Popovers are portaled outside the sidebar, so use a dedicated class. */
 .native-session-menu.sidebar-pr-menu > p { padding: 6px 8px; color: var(--ui-muted); font-size: 12px; }

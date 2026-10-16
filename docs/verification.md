@@ -59,7 +59,7 @@ CSRF, credential redaction, persistent sessions/connections across restart, UID 
 mounted-directory ownership, symlink handling, staging, and invalid distributed
 configuration. It makes no model or cloud-computer requests.
 
-CI runs these checks in the frontend, native runtime, PostgreSQL runtime/migration,
+CI runs these checks in the UI unit, frontend, native runtime, PostgreSQL runtime/migration,
 production release rehearsal and Docker workflows. The release gate requires the
 exact selected main commit's checks, including docs-only changes.
 

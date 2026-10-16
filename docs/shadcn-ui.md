@@ -2,7 +2,8 @@
 
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
-`frontend/theme.css`. The retired escaped-template renderer is no longer used.
+`frontend/theme.css`: Midnight violet uses deep navy, lavender actions, near-white
+text and semantic status colors. The retired escaped-template renderer is no longer used.
 
 Use direct React components for buttons, dialogs, forms, selects and menus.
 Preserve labels, focus behavior, portal geometry and permission-driven actions.

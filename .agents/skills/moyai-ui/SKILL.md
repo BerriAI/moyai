@@ -5,8 +5,8 @@ description: Build or refine Moyai's native React frontend using its established
 
 # Moyai UI
 
-Preserve the deep-space workspace: near-black navy surfaces, icy-blue actions,
-ivory text, local Geist typography and restrained glass panels. The home screen
+Preserve the Midnight violet workspace: near-black navy surfaces, lavender actions,
+near-white text, local Geist typography and opaque slate composer panels. The home screen
 uses the deterministic constellation and Moyai sculpture; chat and Settings stay
 quiet for sustained work. Inspect the current screens before changing them.
 
@@ -31,7 +31,9 @@ row while filters/actions retain their intrinsic width; on narrow screens it
 gets its own row. Preserve complete labels or provide explicit expansion.
 
 Use one primary action per context. Colors communicate status alongside text,
-not alone. Dialogs need names, labels, errors, cancellation and contained scrolling.
+not alone. Green means ready/open, amber needs attention, red means error/closed,
+and purple means merged. Confine PR status fills to badges; keep session rows neutral.
+Dialogs need names, labels, errors, cancellation and contained scrolling.
 Tables scroll within their own labelled, keyboard-focusable container. Keep normal
 text contrast at 4.5:1 and meaningful boundaries/focus at 3:1.
 

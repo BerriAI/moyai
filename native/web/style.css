@@ -195,7 +195,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .home-form { text-align: left; }
 .home-privacy { font-size: 13px; }
 .home-privacy-hint { color: var(--ui-muted); margin-block: 10px 16px; font-size: 12px; }
-.home-composer { background: color-mix(in srgb, var(--ui-background) 92%, transparent); border-radius: 18px; box-shadow: 0 8px 45px color-mix(in srgb, var(--ui-primary) 7%, transparent); }
+.home-composer { background: var(--ui-background); border-radius: 18px; box-shadow: 0 8px 45px color-mix(in srgb, var(--ui-primary) 7%, transparent); }
 .home-composer textarea { min-height: 112px; padding: 22px 24px; font-size: 15px; resize: none; }
 .home-composer .send-actions { margin-left: auto; }
 .home-composer .send-actions [data-slot="select-trigger"] { width: auto; max-width: 230px; background: transparent; border: 0; }
