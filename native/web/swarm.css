@@ -1,0 +1,37 @@
+.home-mode-options { display: flex; justify-content: center; gap: 8px; margin-bottom: 12px; }
+.swarm-setup { min-width: 0; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 12px; padding: 16px; margin: 12px 0; }
+.swarm-setup legend { padding: 0 6px; font-size: 13px; }
+.swarm-setup p { margin: 12px 0; font-size: 13px; }
+.swarm-settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.swarm-settings-row label { display: grid; min-width: 0; gap: 6px; font-size: 13px; }
+.swarm-models { display: grid; gap: 8px; margin-top: 12px; }
+.swarm-models label { display: flex; gap: 8px; overflow-wrap: anywhere; }
+.swarm-panel { flex: 0 0 auto; min-width: 0; padding: 12px 20px; border-bottom: 1px solid var(--ui-border); }
+.swarm-heading { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swarm-heading > a { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.swarm-controls { display: flex; gap: 4px; margin-left: auto; }
+.swarm-details { margin-top: 12px; max-height: 45vh; overflow: auto; scrollbar-gutter: stable; }
+.swarm-window { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+.swarm-window > button { width: 160px; }
+.swarm-roster { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 12px 0; }
+.swarm-member { display: grid; gap: 4px; border: 1px solid var(--ui-border); border-radius: 8px; padding: 10px 12px; min-width: 0; color: inherit; text-decoration: none; font-size: 13px; }
+.swarm-member[aria-current="page"], .swarm-member:hover { background: var(--ui-secondary); }
+.swarm-member:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; }
+.swarm-member strong { display: flex; gap: 8px; align-items: center; font-weight: 500; }
+.swarm-member small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ui-muted); }
+.swarm-lead { color: var(--ui-primary); font-size: 11px; }
+.swarm-goal { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.swarm-details summary { cursor: pointer; padding: 6px 0; font-size: 13px; }
+.swarm-post { padding: 12px 0; border-bottom: 1px solid var(--ui-border); font-size: 13px; overflow-wrap: anywhere; }
+.swarm-post > div:first-child { display: flex; gap: 8px; align-items: center; }
+.swarm-post time { margin-left: auto; color: var(--ui-muted); font-size: 12px; }
+.swarm-post .message-content { margin: 8px 0; }
+.swarm-post .message-content p { margin: 6px 0; }
+.swarm-post > a { font-size: 12px; }
+@media (max-width: 600px) {
+  .swarm-panel { padding: 12px; }
+  .swarm-roster { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .swarm-controls { width: 100%; margin-left: 0; }
+  .swarm-controls button { min-height: 44px; }
+  .swarm-settings-row { grid-template-columns: 1fr; gap: 12px; }
+}

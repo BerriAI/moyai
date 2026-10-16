@@ -47,7 +47,8 @@ MEMORY_REVIEW_SCHEMA_VERSION = "2026-10-15-product-memory-review-v11"
 DRAIN_SCHEMA_VERSION = "2026-10-15-product-drain-v12"
 GIT_OPERATION_SCHEMA_VERSION = "2026-10-15-product-git-operations-v13"
 EXECUTION_COMPATIBILITY_SCHEMA_VERSION = "2026-10-16-product-execution-v14"
-PRODUCT_SCHEMA_VERSION = EXECUTION_COMPATIBILITY_SCHEMA_VERSION
+SWARM_SCHEMA_VERSION = "2026-10-16-native-swarms-v15"
+PRODUCT_SCHEMA_VERSION = SWARM_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -95,6 +96,10 @@ MEMORY_REVIEW_TABLES = frozenset({"moyai_product_memory_reviews"})
 DRAIN_STATE_TABLE = "moyai_product_drain_state"
 DRAIN_TABLES = frozenset({DRAIN_STATE_TABLE, "moyai_product_drain_workers", "moyai_product_drain_receipts"})
 GIT_OPERATION_TABLES = frozenset({"moyai_product_git_operations"})
+SWARM_TABLES = frozenset({
+    "moyai_swarm_missions", "moyai_swarm_members", "moyai_swarm_posts",
+    "moyai_swarm_turns", "moyai_swarm_operations",
+})
 MIGRATIONS = (
     (AUTHORITY_SCHEMA_VERSION, AUTHORITY_TABLES),
     (AUTOMATION_SCHEMA_VERSION, AUTOMATION_TABLES),
@@ -111,6 +116,7 @@ MIGRATIONS = (
     (GIT_OPERATION_SCHEMA_VERSION, GIT_OPERATION_TABLES),
     # A durable release barrier: v13 candidates cannot resume the new workflow commands.
     (EXECUTION_COMPATIBILITY_SCHEMA_VERSION, frozenset()),
+    (SWARM_SCHEMA_VERSION, SWARM_TABLES),
 )
 
 
@@ -147,6 +153,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "product_memory_review_models",
         "product_drain_models",
         "product_github_models",
+        "swarm_models",
     ):
         import_module(f"{__package__}.{module}")
     included = frozenset().union(*(item[1] for item in MIGRATIONS[:versions.index(version) + 1]))

@@ -66,6 +66,8 @@ release procedure.
 
 - [Using Moyai](docs/usage.md): chat, files, computer control, connections, Settings,
   Slack, approvals and recovery.
+- [Swarms](docs/native-swarms.md): persistent teams, shared findings, independent
+  member computers, and durable Pause/Resume/time controls on Pydantic AI.
 - [Architecture](docs/architecture.md): how requests move through the system and
   which data belongs to each service.
 - [Production deployment](docs/production-deploy.md): existing-product setup,

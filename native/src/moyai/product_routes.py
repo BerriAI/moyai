@@ -25,6 +25,7 @@ from .models import Message, Session, SessionPreference, SessionRead, Turn, User
 from .product_files import routes as file_routes
 from .product_history import MAX_MESSAGE_CHARS, MAX_OFFSET, MAX_PAGE, Principal, bounded
 from .product_history import routes as legacy_routes
+from .swarm_models import SwarmMember
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -210,7 +211,12 @@ class ProductReadService:
         scope: NavigationScope = "all",
     ) -> dict[str, Any]:
         async with self.runtime.database.sessions() as db:
-            query = self.native_query(reader).where(self.visible(reader, deleted=deleted))
+            query = self.native_query(reader).where(
+                self.visible(reader, deleted=deleted),
+                ~select(SwarmMember.session_id).where(
+                    SwarmMember.session_id == Session.id, SwarmMember.position > 0,
+                ).exists(),
+            )
             if not deleted:
                 query = query.where(Session.archived.is_(archived))
                 if scope == "mine":

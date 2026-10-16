@@ -215,6 +215,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     from .product_routes import routes as product_routes
     app.include_router(product_routes(runtime, actor))
     app.include_router(settings_routes(runtime, actor))
+    from .swarm_routes import routes as swarm_routes
+    app.include_router(swarm_routes(runtime, actor))
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -389,6 +391,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             result: dict[str, Any] = {
                 "session": session_view(row), "turns": [turn_view(turn) for turn in turns],
             }
+            swarm_member = await runtime.database.swarms.member(db, session_id)
+            if swarm_member is not None:
+                result["session"]["swarm_id"] = swarm_member.mission_id
             preference = await db.get(SessionPreference, (user.id, session_id))
             result["session"]["pinned"] = bool(preference and preference.pinned)
             result["session"]["folder"] = preference.folder if preference else ""
@@ -482,6 +487,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if turn is None or turn.actor_id != user.id:
                 raise HTTPException(404, "Message not found.")
             await runtime.database.allowed_session(db, turn.session_id, user)
+            await runtime.database.swarms.editable_input(db, turn)
             changed = await db.scalar(update(Turn).where(
                 Turn.id == turn.id, Turn.status == "queued"
             ).values(prompt=runtime.security.seal(body.prompt)).returning(Turn.id))
@@ -503,6 +509,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if turn is None or turn.actor_id != user.id:
                 raise HTTPException(404, "Message not found.")
             await runtime.database.allowed_session(db, turn.session_id, user)
+            await runtime.database.swarms.editable_input(db, turn)
             changed = await db.scalar(update(Turn).where(
                 Turn.id == turn.id, Turn.status == "queued"
             ).values(status="stopped", finished_at=now()).returning(Turn.id))

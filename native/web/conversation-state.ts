@@ -5,6 +5,7 @@ export type Session = SidebarSession & {
   visibility: string; surface: string; model: string; active_turn: string | null
   read_marker_key?: string; completion_marker?: string; save_warning?: string
   workspace?: { id: string; provider: string }
+  swarm_id?: string
 }
 export type Turn = {
   id: string; actor_id: string; status: string; mode?: string; connections: string[]; error?: string
