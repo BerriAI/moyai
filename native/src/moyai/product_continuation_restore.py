@@ -351,7 +351,12 @@ class ProductWorkspaceRestorer:
                 raise ValueError("The workspace transition plan failed integrity verification.")
         if plan is None and not context.get("environment_snapshot_id") and not context.get("repo_url"):
             return prepared
-        async with self.slots, self.lock(scope):
+        from .performance import computer_timing
+        mode = "reuse" if prepared.workspace else "restore" if plan else "cold"
+        async with (
+            computer_timing(self.runtime.database, scope, mode, preparation=True),
+            self.slots, self.lock(scope),
+        ):
             with tempfile.TemporaryDirectory(prefix="moyai-continuation-") as temporary:
                 return await self._prepare_locked(prepared, context, plan, Path(temporary))
 

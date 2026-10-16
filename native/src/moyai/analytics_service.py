@@ -12,6 +12,7 @@ from cryptography.fernet import InvalidToken
 from fastapi import HTTPException, Response
 from sqlalchemy import func, or_, select, tuple_
 
+from . import performance_report
 from .analytics import (
     ReportRange,
     UsageEvent,
@@ -310,6 +311,7 @@ async def report(
             turns.extend((await db.execute(select(*TURN_COLUMNS).where(Turn.id.in_(missing_ids)))).all())
         if len(turns) > MAX_TURNS:
             raise HTTPException(422, "More than 10,000 active turns match. Narrow the filters.")
+        timing = await performance_report.observations(db, turns, period)
         ledger_counts = dict((await db.execute(select(InferenceUsage.turn_id, func.count()).where(
             InferenceUsage.turn_id.in_([row.id for row in turns]),
         ).group_by(InferenceUsage.turn_id))).all())
@@ -376,6 +378,8 @@ async def report(
         row, per_turn[row.id], deltas.get(row.id, dict.fromkeys(USAGE_COUNTERS, 0)), unknown, gaps,
         steering=row.id in steering,
     ) for row in turns]
+    for row in rows:
+        row.update(timing.get(row["id"], performance_report.timing_view({})))
     receipt_rows = publications
     publications = [
         row for row in unique_publications(publications)
@@ -558,6 +562,7 @@ async def report(
             "by_user": by_user, "by_model": by_model, "models": sorted({row.model for row in turns}),
             "users": users, "total": len(rows), "limit": limit, "offset": offset,
             "start": lower, "end": upper, "preset": period.preset, "timezone": "UTC", "currency": "USD",
+            "performance": performance_report.metrics(list(timing.values())),
             "coverage": {
                 "legacy_turns": len(totals.legacy_turns), "ledger_requests": len(ledger),
                 "unknown_request_turns": len(totals.unknown_request_turns),
@@ -574,6 +579,7 @@ async def report(
                 "pr_tracking": "confirmed_native_github_tool_receipts",
             },
             "methodology": {
+                **performance_report.METHODOLOGY,
                 "sessions": "Created uses Session.created_at; active is distinct sessions with a newly admitted turn or recorded inference in range. Daily active counts are distinct per UTC date.",
                 "prs_created": "Confirmed native GitHub create_pull_request receipts, dated by confirmation. Attachments, mentions, shell/CLI creations and old engine history are not counted.",
                 "prs_merged": "Verified GitHub merge events in range, including older creations. Status counts describe the creation cohort's current verified state; unavailable reads remain unknown.",

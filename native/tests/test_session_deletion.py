@@ -322,14 +322,14 @@ async def test_delete_between_authorization_and_admission_cannot_leave_queued_wo
         checked, release = asyncio.Event(), asyncio.Event()
         original = submitting._submit
 
-        async def delayed(user, session_id, body, fingerprint):
+        async def delayed(user, session_id, body, fingerprint, **kwargs):
             # Simulate access checked before admission, then let deletion win.
             # Pause before _submit's first write: its User fence now holds the
             # SQLite writer lock, so deletion cannot commit after that point.
             await submitting.session(user, session_id)
             checked.set()
             await release.wait()
-            return await original(user, session_id, body, fingerprint)
+            return await original(user, session_id, body, fingerprint, **kwargs)
 
         monkeypatch.setattr(submitting, "_submit", delayed)
         task = asyncio.create_task(submitting.submit(actor, session.id, NewMessage(

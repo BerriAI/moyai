@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 import json
 import time
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 import modal
@@ -18,6 +18,7 @@ from sqlalchemy import delete, select, update
 
 from .contracts import PreparedTurn, RunScope
 from .models import ComputerLease, ComputerOperation, Effect, Session, Turn, User
+from .performance import ComputerTiming, computer_timing
 from .product_continuation_errors import preparation_blocked
 
 if TYPE_CHECKING:
@@ -277,6 +278,13 @@ async def prepare_workspace(runtime: Runtime, prepared: PreparedTurn) -> Prepare
     reference = prepared.workspace
     if not reference or reference.get("provider") != "modal":
         return prepared
+    async with computer_timing(runtime.database, prepared.scope, "reuse", preparation=True) as timing:
+        return await _prepare_workspace(runtime, prepared, reference, timing)
+
+
+async def _prepare_workspace(
+    runtime: Runtime, prepared: PreparedTurn, reference: dict[str, Any], timing: ComputerTiming,
+) -> PreparedTurn:
     database, scope = runtime.database, prepared.scope
     await database.authorize_scope(scope)
     async with database.sessions.begin() as db:
@@ -288,6 +296,7 @@ async def prepare_workspace(runtime: Runtime, prepared: PreparedTurn) -> Prepare
         alive = await live_sandbox(reference)
     saved, expected = None, None
     if not alive:
+        timing.mode = "restore"
         async with database.sessions.begin() as db:
             session, _ = await locked_scope(database, db, scope, status="running")
             if json.loads(session.workspace or "null") != reference:

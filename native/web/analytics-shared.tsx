@@ -50,6 +50,12 @@ export function AnalyticsMetrics({ items }: { items: [string, string, string?][]
   return <>{parse(analyticsMetrics(items))}</>
 }
 
+export function ReportTable({ label, columns, children }: { label: string; columns: React.ReactNode[]; children: React.ReactNode }) {
+  return <div className="analytics-table-frame" role="region" aria-label={label} tabIndex={0}><Table>
+    <TableHeader><TableRow>{columns.map((column, index) => <TableHead scope="col" key={index}>{column}</TableHead>)}</TableRow></TableHeader><TableBody>{children}</TableBody>
+  </Table></div>
+}
+
 export function AnalyticsLegend({ series, cumulative = false }: { series: ChartSeries[]; cumulative?: boolean }) {
   return <>{parse(analyticsLegend(series, cumulative))}</>
 }

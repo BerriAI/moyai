@@ -218,6 +218,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        if not hasattr(request.state, "moyai_received_at"):
+            request.state.moyai_received_at = now()
         if request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.startswith("/hooks/"):
             origin = request.headers.get("origin")
             expected = runtime.settings.public_url.rstrip("/") or str(request.base_url).rstrip("/")
@@ -472,8 +474,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return await runtime.database.messages(user, session_id, after=after)
 
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
-    async def send(session_id: str, body: NewMessage, user: User = Depends(actor)):
-        return turn_view(await runtime.database.submit(user, session_id, body))
+    async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
+        return turn_view(await runtime.database.submit(
+            user, session_id, body, received_at=request.state.moyai_received_at,
+        ))
 
     @app.patch("/api/turns/{turn_id}")
     async def edit_queued(turn_id: str, body: QueuedEdit, user: User = Depends(actor)):

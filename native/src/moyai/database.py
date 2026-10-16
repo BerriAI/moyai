@@ -38,6 +38,7 @@ from .models import (
     Base,
     ComputerOperation,
     Connection,
+    Event,
     LoginAttempt,
     Message,
     ProductTurnAuthority,
@@ -73,6 +74,7 @@ class Database:
     def __init__(self, settings: Settings, security: Security):
         self.settings = settings
         self.security = security
+        self.performance_tasks: set[asyncio.Task[None]] = set()
         self.product_identity: ProductIdentityAdapter | None = None
         self.product_connections: ProductConnections | None = None
         self.product_drain: ProductDrainService | None = None
@@ -156,6 +158,8 @@ class Database:
                     ).on_conflict_do_nothing(index_elements=["username"]))
 
     async def close(self) -> None:
+        if self.performance_tasks:
+            await asyncio.gather(*self.performance_tasks, return_exceptions=True)
         await self.engine.dispose()
 
     @property
@@ -313,14 +317,15 @@ class Database:
 
     async def submit(
         self, actor: User, session_id: str, body: NewMessage, *, db: AsyncSession | None = None,
+        received_at: str | None = None,
     ) -> Turn:
         fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
         if db is not None:
             # Do not recover a conflicting receipt in an independent transaction.
             # The caller must roll back/retry its complete occurrence admission.
-            return await self._submit(actor, session_id, body, fingerprint, db=db)
+            return await self._submit(actor, session_id, body, fingerprint, db=db, received_at=received_at)
         try:
-            return await self._submit(actor, session_id, body, fingerprint)
+            return await self._submit(actor, session_id, body, fingerprint, received_at=received_at)
         except IntegrityError:
             # Two requests can race the first lookup. The database's unique identity decides.
             async with self.sessions() as lookup:
@@ -335,7 +340,7 @@ class Database:
 
     async def _submit(
         self, actor: User, session_id: str, body: NewMessage, fingerprint: str,
-        *, db: AsyncSession | None = None,
+        *, db: AsyncSession | None = None, received_at: str | None = None,
     ) -> Turn:
         async with self._admission_session(db) as transaction:
             product_grant = await self._actor_product_grant(transaction, actor)
@@ -413,6 +418,11 @@ class Database:
                     turn.status = "steering"
             transaction.add(turn)
             await transaction.flush()
+            if received_at is not None:
+                from .performance import evidence
+                # Commit with the original admission, never with an idempotent
+                # resend. Rejected submissions produce no timing observation.
+                transaction.add(Event(**evidence(session_id, turn.id, "received", received_at)))
             self._bind_product_grant(transaction, turn, product_grant)
             for position, image_id in enumerate(body.attachments):
                 # Reserve the upload's destination atomically before publishing

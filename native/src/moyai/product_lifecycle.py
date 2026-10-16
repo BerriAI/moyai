@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 from app.db import database as source_io
 from starlette.responses import JSONResponse
 
+from .models import now
+
 if TYPE_CHECKING:
     from .runtime import Runtime
 
@@ -213,6 +215,10 @@ class ProductRoleMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] not in {"http", "websocket"}:
             return await self.app(scope, receive, send)
+        if scope["type"] == "http":
+            # Include the broker ownership/database gate in broker preparation.
+            # This is server state, never a timestamp accepted from a header.
+            scope.setdefault("state", {})["moyai_received_at"] = now()
         life, path = self.lifecycle, scope.get("path", "")
         health = path == "/health"
         allowed = health or (
