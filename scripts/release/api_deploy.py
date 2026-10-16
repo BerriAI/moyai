@@ -49,8 +49,7 @@ def topology(service):
     return {**{key: service.get(key) for key in ('name', 'type', 'suspended', 'autoDeploy',
                 'autoDeployTrigger', 'branch', 'repo', 'ownerId', 'rootDir')},
             'details': {key: details.get(key) for key in ('region', 'numInstances', 'autoscaling',
-                'disk', 'runtime', 'sshAddress', 'envSpecificDetails', 'maxShutdownDelaySeconds',
-                'healthCheckPath')}}
+                'disk', 'runtime', 'sshAddress', 'envSpecificDetails', 'maxShutdownDelaySeconds')}}
 
 
 class APIRelease(Release):
@@ -90,8 +89,6 @@ class APIRelease(Release):
                     or docker.get('dockerfilePath') not in {'Dockerfile', './Dockerfile'}
                     or docker.get('dockerContext') != '.' or metadata.get('rootDir', '') not in {'', '.'}):
                 raise ReleaseError('API requires diskless Docker startup, no command overrides, and a 300-second shutdown allowance.')
-            if self.native and details.get('healthCheckPath') != '/health':
-                raise ReleaseError('Native API replacement requires Render HTTP readiness at /health before traffic switches.')
         self.topologies[service_id] = topology(metadata)
         return item, owner
 

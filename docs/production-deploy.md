@@ -62,9 +62,12 @@ Select **api**, **preserve**, and initially **preflight_only: true** on the chos
 main commit. Native API preflight requires the exact commit's Docker, native
 runtime, PostgreSQL runtime and release-controller CI. It verifies all four
 running role identities, their health, native application/Harness receipts and
-the unpaused maintenance generation. The API must be diskless with Render's
-HTTP health-check path set to `/health` and a 300-second shutdown allowance;
-a TCP-only startup check does not qualify traffic switching.
+the unpaused maintenance generation. The API must be diskless, use the reviewed
+Docker entrypoint without command overrides, and have a 300-second shutdown
+allowance. Render private services use TCP checks: the native Uvicorn listener
+opens only after application lifespan startup completes. The release CI tests
+this socket boundary and shutdown draining; post-switch probes additionally
+verify HTTP readiness and the exact native process identity.
 
 The candidate must have exactly the same canonical schema revision, native
 migration manifests, framework versions and API/background compatibility

@@ -27,7 +27,6 @@ def native_api(setup):
     for env in render.env.values():
         env.update(MOYAI_CORE='pydantic', MOYAI_PRODUCT_MODE='existing',
                    MOYAI_COORDINATOR_HANDOFF='true', MOYAI_NATIVE_SCHEMA=NATIVE['schema'])
-    render.metadata[API_ID]['serviceDetails']['healthCheckPath'] = '/health'
     probe = render.probe
     def native_probe(service):
         state = probe(service)
@@ -66,15 +65,6 @@ def test_native_preflight_does_not_pause_or_write(native_api):
     release.preflight_only = True
     release.run()
     assert release.record['status'] == 'preflight_passed'
-    assert not render.calls
-
-
-@pytest.mark.parametrize('path', [None, '', '/'])
-def test_native_api_requires_provider_http_readiness_before_switch(native_api, path):
-    release, render, _ = native_api
-    render.metadata[API_ID]['serviceDetails']['healthCheckPath'] = path
-    with pytest.raises(ReleaseError, match='HTTP readiness'):
-        release.run()
     assert not render.calls
 
 
