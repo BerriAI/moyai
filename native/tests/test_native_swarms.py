@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -22,7 +23,7 @@ from moyai.product_routes import ProductReadService, Reader
 from moyai.swarm_contracts import MissionRun, NewSwarm, SwarmControl
 from moyai.swarm_models import SwarmMember, SwarmMission, SwarmOperation, SwarmPost, SwarmTurn
 from moyai.swarm_runtime import tick
-from moyai.swarm_tools import operate
+from moyai.swarm_tools import bounded_board, operate
 
 
 async def start(runtime, actor, *, key="one", workers=2, **kwargs):
@@ -70,11 +71,15 @@ async def test_invalid_model_rolls_back_entire_creation(runtime, actor):
         assert await db.scalar(select(func.count()).select_from(SwarmMission)) == 0
 
 
-async def test_twenty_workers_have_distinct_persistent_sessions(runtime, actor):
-    root, _ = await start(runtime, actor, workers=20)
+@pytest.mark.parametrize("workers", [20, 21, 37])
+async def test_requested_workers_have_distinct_persistent_sessions(runtime, actor, workers):
+    root, _ = await start(runtime, actor, workers=workers)
     view = await runtime.database.swarms.view(actor, root.id)
-    assert len(view["members"]) == 21
-    assert len({member["session_id"] for member in view["members"]}) == 21
+    assert len(view["members"]) == workers + 1
+    assert len({member["session_id"] for member in view["members"]}) == workers + 1
+    assert [member["name"] for member in view["members"]] == ["Coordinator", *(
+        f"Agent {index + 1}" for index in range(workers)
+    )]
     assert all(member["model"] == "test" for member in view["members"])
 
 
@@ -251,14 +256,15 @@ async def test_pause_resume_preserves_pending_question_until_owner_answers(runti
         assert binding.generation == 2 and answered.deferred_results is not None
 
 
-async def test_authenticated_api_and_sidebar_keep_workers_inside_the_mission(runtime, actor):
+@pytest.mark.parametrize("workers", [2, 21])
+async def test_authenticated_api_and_sidebar_keep_workers_inside_the_mission(runtime, actor, workers):
     token, csrf = runtime.security.issue_session(actor.id, actor.auth_version)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
         base_url="http://testserver",
     ) as client:
         client.cookies.set(COOKIE, token)
-        body = {"prompt": "Verify one shared goal.", "workers": 2, "request_key": "api-team"}
+        body = {"prompt": "Verify one shared goal.", "workers": workers, "request_key": "api-team"}
         assert (await client.post("/api/swarms", json=body)).status_code == 403
         client.headers["x-moyai-csrf"] = csrf
         response = await client.post("/api/swarms", json=body)
@@ -275,6 +281,7 @@ async def test_authenticated_api_and_sidebar_keep_workers_inside_the_mission(run
         listed = await client.get("/api/history/sessions?scope=mine")
         assert [item["id"] for item in listed.json()["sessions"]] == [root_id]
         board = (await client.get(f"/api/sessions/{root_id}/swarm")).json()
+        assert len(board["members"]) == workers + 1
         child = board["members"][1]["session_id"]
         detail = await client.get(f"/api/sessions/{child}")
         assert detail.status_code == 200 and detail.json()["session"]["swarm_id"] == root_id
@@ -366,6 +373,52 @@ async def test_large_board_text_preserves_cursor_and_full_text_readback(runtime,
     assert "".join(pieces) == text
     next_page = await call(runtime, context, "board", {"after": board["next_after"]}, "read-next")
     assert next_page["posts"][0]["sequence"] > board["next_after"]
+
+
+def test_large_roster_pages_remain_bounded_and_preserve_every_member():
+    board = {
+        "goal": '引用"\\\n' * 1000, "has_more": False, "next_after": 0,
+        "members": [{
+            "session_id": f"member-{index}", "name": "名" * 100,
+            "model": "型" * 200, "assignment": '引用"\\\n' * 200,
+        } for index in range(1200)],
+        "posts": [{
+            "sequence": index + 1, "content": '引用"\\\n' * 1000,
+        } for index in range(12)],
+    }
+    seen, offset = [], 0
+    while True:
+        page = bounded_board(deepcopy(board), member_offset=offset)
+        assert len(json.dumps(page)) < 48_000
+        assert page["member_count"] == 1200
+        assert page["next_after"] > 0 and page["has_more"]
+        seen.extend(member["session_id"] for member in page["members"])
+        assert page["next_member_offset"] > offset
+        offset = page["next_member_offset"]
+        if not page["members_has_more"]:
+            break
+    assert seen == [member["session_id"] for member in board["members"]]
+    last = bounded_board(deepcopy(board), member_offset=offset)
+    assert last["members"] == [] and not last["members_has_more"]
+    assert last["next_member_offset"] == 1200
+
+
+async def test_agent_board_exposes_separate_roster_pages(runtime, actor):
+    root, _ = await start(runtime, actor, workers=61)
+    turns = await runtime.database.claim_batch(1)
+    context = await runtime.database.prepare(turns[0].id)
+    first = await call(runtime, context, "board", {"after": 0}, "roster-first")
+    second = await call(runtime, context, "board", {
+        "after": 0, "member_offset": first["next_member_offset"],
+    }, "roster-second")
+    full = await runtime.database.swarms.view(actor, root.id)
+    assert first["member_count"] == 62 and first["members_has_more"]
+    assert first["you"] == second["you"]
+    assert not second["members_has_more"]
+    assert [member["session_id"] for member in first["members"] + second["members"]] == [
+        member["session_id"] for member in full["members"]
+    ]
+    assert first["next_after"] == second["next_after"]
 
 
 async def settle_team_workers(runtime, prepared, root_id):

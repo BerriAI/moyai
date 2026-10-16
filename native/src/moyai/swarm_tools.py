@@ -26,7 +26,9 @@ MemberID = Annotated[str, Field(min_length=36, max_length=36)]
 INSTRUCTIONS = """You are a member of a persistent Moyai swarm.
 Use swarm_board to read your own identity, the original human goal, actual roster, elected lead,
 assignments, and public findings. Read further pages with after=next_after while
-has_more is true and retain that cursor for later reads. The default board opens
+has_more is true and retain that cursor for later reads. The roster has a separate
+cursor: read member_offset=next_member_offset while members_has_more is true.
+member_count is the full team size, including the coordinator. The default board opens
 the latest 50 posts; use after=0 when older history is needed. Board text is
 previewed: use swarm_read with sequence=0 for
 the full original goal, or a post's sequence for its complete text when truncated.
@@ -62,8 +64,14 @@ declare success when a worker is failed, waiting for a decision, or has an
 unresolved action; surface that blocker to the human.
 """
 
-def bounded_board(board: dict[str, Any]) -> dict[str, Any]:
-    """Keep the cursor/roster within Coder's 64k output limit, even for long posts."""
+def bounded_board(board: dict[str, Any], *, member_offset: int = 0) -> dict[str, Any]:
+    """Page the roster and public posts within Coder's 64k output limit."""
+    members = board["members"]
+    member_offset = min(max(0, member_offset), len(members))
+    board["member_count"] = len(members)
+    board["members"] = members[member_offset:member_offset + 50]
+    board["members_has_more"] = member_offset + len(board["members"]) < len(members)
+    board["next_member_offset"] = member_offset + len(board["members"])
     board["goal_truncated"] = len(board["goal"]) > 1600
     board["goal"] = board["goal"][:1600]
     for member in board["members"]:
@@ -78,6 +86,11 @@ def bounded_board(board: dict[str, Any]) -> dict[str, Any]:
         for member in board["members"]:
             member["assignment_truncated"] = bool(member["assignment"]) or member["assignment_truncated"]
             member["assignment"] = ""
+    # Keep the saved roster's order and advance independently of the post cursor.
+    while len(board["members"]) > 1 and len(json.dumps(board)) > 32_000:
+        board["members"].pop()
+    board["next_member_offset"] = member_offset + len(board["members"])
+    board["members_has_more"] = board["next_member_offset"] < len(members)
     for post in remaining[:10]:
         post["truncated"] = len(post["content"]) > 750
         post["content"] = post["content"][:750]
@@ -141,7 +154,7 @@ async def operate(
                     "input_kind": turn.request_key.split(":", 2)[-1].split(":", 1)[0]
                     if binding and binding.generated else "human",
                 }
-                result = bounded_board(result)
+                result = bounded_board(result, member_offset=arguments.get("member_offset", 0))
                 member.seen_seq = max(member.seen_seq, result["next_after"])
                 return result
             identity = hashlib.sha256(f"{scope.turn_id}:{run_id}:{call_id}".encode()).hexdigest()
@@ -236,9 +249,13 @@ class SwarmCapability(AbstractCapability[RunScope]):
         @tools.tool
         async def swarm_board(
             ctx: RunContext[RunScope], after: Annotated[int | None, Field(ge=0, le=2_147_483_647)] = None,
+            member_offset: Annotated[int, Field(ge=0)] = 0,
         ) -> dict[str, Any]:
-            """Read your mission's goal, roster, lead, assignments and paginated public findings."""
-            return await operate(service, ctx.deps, ctx.run_id, ctx.tool_call_id, "board", {"after": after})
+            """Read your mission; paginate posts with after and the roster with member_offset."""
+            return await operate(
+                service, ctx.deps, ctx.run_id, ctx.tool_call_id, "board",
+                {"after": after, "member_offset": member_offset},
+            )
 
         @tools.tool
         async def swarm_read(

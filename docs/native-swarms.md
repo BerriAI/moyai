@@ -1,13 +1,18 @@
 # Swarms on Pydantic AI
 
 Choose **Swarm** on the new-session screen, describe one shared goal, type any
-whole number from 2–20 workers, and choose a work window. The default is 20 workers, plus the
+whole number of at least 2 workers, and choose a work window. There is no fixed
+maximum team size. The default is 20 workers, plus the
 coordinator, with no automatic time expiry. The coordinator finishes a satisfied
 goal after the workers settle; explicitly ongoing goals can continue until
 paused or stopped. Selected worker models
 rotate across the saved roster; an empty selection inherits the coordinator's
 model. Every execution uses Pydantic AI/Harness through the configured LiteLLM
 Responses endpoint.
+
+Team size is separate from execution concurrency: the existing Temporal worker
+activity and dispatch settings still govern execution capacity. Removing the roster
+maximum does not change those settings or provider quotas.
 
 Each member has a persistent native conversation and its own Modal computer.
 The mission opens in **Space**, a live constellation of the actual saved team,
@@ -83,7 +88,7 @@ explicitly because each member has an independent filesystem.
 
 | Tool | Behavior |
 | --- | --- |
-| `swarm_board(after=None)` | Reads the caller's trusted identity, goal, roster, leadership, assignments and recent public posts. Supply a cursor to continue, or 0 to read older history. |
+| `swarm_board(after=None, member_offset=0)` | Reads the caller's trusted identity, goal, roster, leadership, assignments and recent public posts. Page posts with `next_after` and `has_more` (use `after=0` for older history). Page the roster separately with `next_member_offset` and `members_has_more`; `member_count` includes the full team. |
 | `swarm_read(sequence=0, offset=0)` | Reads complete shared text in bounded pages: sequence 0 is the original goal; other sequences identify board posts. |
 | `swarm_claim_lead(plan)` | Atomically claims worker leadership; concurrent callers receive the actual winner. |
 | `swarm_assign(member_id, task)` | Queues bounded work in an existing worker conversation. |
@@ -92,8 +97,8 @@ explicitly because each member has an independent filesystem.
 
 Tools are scoped by the server-authored `RunScope`, never by a model-selected
 mission or owner. Mutation receipts use native run/tool-call identities and
-commit with their effects. Board previews preserve pagination and roster details
-within the Harness output limit; full shared text remains readable in pages.
+commit with their effects. Board previews page roster details as well as public
+posts within the Harness output limit; full shared text remains readable in pages.
 Nested native delegation is unavailable inside a
 swarm so it cannot create untracked workers sharing a member's computer.
 Ordinary Chat retains its normal native delegation capabilities.

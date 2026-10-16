@@ -29,31 +29,33 @@ const windows = [
 ]
 
 export function validWorkerCount(value: number | null): value is number {
-  return value !== null && Number.isInteger(value) && value >= 2 && value <= 20
+  return value !== null && Number.isSafeInteger(value) && value >= 2
 }
 
 export function SwarmSetup({ value, onChange, models, disabled }: {
   value: SwarmOptions; onChange: (value: SwarmOptions) => void; models: string[]; disabled: boolean
 }) {
-  const workerHint = useId()
+  const workerHint = useId(), windowHint = useId()
   const valid = validWorkerCount(value.workers)
   return <fieldset className="swarm-setup" disabled={disabled}>
     <legend>Team settings</legend>
     <div className="swarm-settings-row">
       <label><span>Workers</span>
-        <Input aria-label="Swarm workers" type="number" min={2} max={20} step={1} required disabled={disabled}
+        <Input aria-label="Swarm workers" type="number" min={2} step={1} required disabled={disabled}
           value={value.workers ?? ""} aria-invalid={!valid} aria-describedby={workerHint}
           onChange={event => onChange({ ...value, workers: event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber })} />
-        <span id={workerHint} className={valid ? "muted" : "error"}>
-          {valid ? "2–20 workers, plus a coordinator." : "Enter a whole number from 2 to 20."}
+        <span id={workerHint} className="swarm-field-hint" data-invalid={!valid}>
+          {valid ? "At least 2 workers, plus a coordinator." : "Enter a whole number of at least 2."}
         </span>
       </label>
       <label><span>Work window</span><Select value={String(value.budget_seconds)} disabled={disabled} onValueChange={seconds => onChange({ ...value, budget_seconds: Number(seconds) })}>
-        <SelectTrigger aria-label="Swarm work window"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Swarm work window" aria-describedby={windowHint}><SelectValue /></SelectTrigger>
         <SelectContent>{windows.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-      </Select></label>
+      </Select><span id={windowHint} className="swarm-field-hint">
+        {value.budget_seconds ? "Maximum time for the entire team." : "Runs until the goal is complete."}
+      </span></label>
     </div>
-    <p className="muted">Each worker has a persistent conversation and its own computer. The team shares one goal and a public board.</p>
+    <p className="muted">Each worker has its own conversation and computer. The team shares a goal and board.</p>
     {models.length > 1 && <details><summary>Worker models · {value.worker_models.length || "inherit coordinator"}</summary>
       <div className="swarm-models">{models.map(model => <label key={model}>
         <Checkbox disabled={disabled} checked={value.worker_models.includes(model)} onCheckedChange={checked => onChange({

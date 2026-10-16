@@ -1,11 +1,14 @@
-.home-mode-options { display: flex; justify-content: center; gap: 8px; margin-bottom: 12px; }
-.swarm-setup { min-width: 0; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 12px; padding: 16px; margin: 12px 0; }
-.swarm-setup legend { padding: 0 6px; font-size: 13px; }
-.swarm-setup p { margin: 12px 0; font-size: 13px; }
-.swarm-settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.swarm-settings-row label { display: grid; min-width: 0; gap: 6px; font-size: 13px; }
-.swarm-settings-row input { font-size: 16px; }
-.swarm-settings-row label > span:last-child { font-size: 12px; }
+.home-mode-options { display: flex; justify-content: center; width: max-content; max-width: 100%; gap: 4px; margin: 0 auto 16px; padding: 4px; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-subtle); }
+.home-mode-options > button { min-width: 76px; }
+.swarm-setup { min-width: 0; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 12px; padding: 20px; margin: 0 0 20px; }
+.swarm-setup legend { float: left; width: 100%; padding: 0; margin: 0 0 16px; font-size: 14px; line-height: 20px; font-weight: 500; }
+.swarm-setup p { margin: 16px 0 0; font-size: 13px; line-height: 20px; }
+.swarm-setup > details { margin-top: 16px; }
+.swarm-settings-row { clear: both; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 20px; }
+.swarm-settings-row > label { display: grid; align-content: start; min-width: 0; gap: 8px; font-size: 13px; line-height: 20px; }
+.swarm-settings-row :is([data-slot="input"], [data-slot="select-trigger"]) { height: 44px; min-height: 44px; margin: 0; padding: 10px 12px; font-size: 16px; font-weight: 400; line-height: 22px; border-radius: 8px; background: var(--ui-background); }
+.swarm-field-hint { color: var(--ui-muted); font-size: 12px; line-height: 18px; }
+.swarm-field-hint[data-invalid="true"] { color: var(--ui-danger); }
 .swarm-models { display: grid; gap: 8px; margin-top: 12px; }
 .swarm-models label { display: flex; gap: 8px; overflow-wrap: anywhere; }
 .swarm-panel { flex: 0 0 auto; min-width: 0; padding: 12px 20px; border-bottom: 1px solid var(--ui-border); }
@@ -36,5 +39,6 @@
   .swarm-roster { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .swarm-controls { width: 100%; margin-left: 0; }
   .swarm-controls button { min-height: 44px; }
-  .swarm-settings-row { grid-template-columns: 1fr; gap: 12px; }
+  .swarm-setup { padding: 16px; }
+  .swarm-settings-row { grid-template-columns: 1fr; gap: 16px; }
 }

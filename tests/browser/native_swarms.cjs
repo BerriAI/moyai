@@ -116,17 +116,18 @@ for (const width of [1440, 768, 320]) {
 test("custom worker counts accept whole numbers and preserve invalid drafts for correction", async t => {
   const page = await pageFor(t);
   const input = page.getByRole("spinbutton", { name: "Swarm workers", exact: true });
-  for (const value of ["2", "3", "7", "17", "20"]) {
+  assert.equal(await input.getAttribute("max"), null);
+  for (const value of ["2", "3", "7", "17", "20", "21", "37", "1000"]) {
     await input.fill(value);
     assert.equal(await input.evaluate(element => element.checkValidity()), true);
     assert.equal(await page.getByLabel("Selected workers").textContent(), value);
   }
-  for (const value of ["", "1", "21", "2.5"]) {
+  for (const value of ["", "0", "1", "-1", "2.5"]) {
     await input.fill(value);
     assert.equal(await input.inputValue(), value);
     assert.equal(await input.evaluate(element => element.checkValidity()), false);
     assert.equal(await input.getAttribute("aria-invalid"), "true");
-    await page.getByText("Enter a whole number from 2 to 20.", { exact: true }).waitFor();
+    await page.getByText("Enter a whole number of at least 2.", { exact: true }).waitFor();
   }
 });
 
@@ -140,19 +141,19 @@ test("home sends exactly the typed count and blocks invalid counts through Enter
   await page.getByRole("button", { name: "Swarm", exact: true }).click();
   const input = page.getByRole("spinbutton", { name: "Swarm workers", exact: true });
   const prompt = page.getByRole("textbox", { name: "Message Moyai", exact: true });
-  await prompt.fill("Compare three independent methods.");
-  for (const value of ["", "1", "21", "2.5"]) {
+  await prompt.fill("Verify a larger team roster.");
+  for (const value of ["", "0", "1", "-1", "2.5"]) {
     await input.fill(value);
     assert.equal(await page.getByRole("button", { name: "Send message", exact: true }).isEnabled(), false);
     await prompt.press("Enter");
   }
   assert.equal(writes.length, 0);
-  await input.fill("3");
+  await input.fill("21");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await page.waitForFunction(() => Boolean(window.startedSwarm));
   assert.equal(writes.length, 1);
-  assert.equal(writes[0].workers, 3);
-  assert.equal(writes[0].prompt, "Compare three independent methods.");
+  assert.equal(writes[0].workers, 21);
+  assert.equal(writes[0].prompt, "Verify a larger team roster.");
 });
 
 for (const width of [1440, 768, 320]) {
