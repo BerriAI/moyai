@@ -167,7 +167,7 @@ function App() {
       const rows = new Map<string, Session>(), notices = new Set<string>()
       let cursor: string | null = null, hasMore = false
       for (let page = 0; page < sessionPageCount; page++) {
-        const next: SessionInventory = await api(`/history/sessions?source=all&limit=100&archived=${listView === "archived"}&deleted=${listView === "deleted"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)
+        const next: SessionInventory = await api(`/history/sessions?source=all&scope=mine&limit=100&archived=${listView === "archived"}&deleted=${listView === "deleted"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)
         if (version !== refreshVersion.current || listViewRef.current !== listView) return null
         for (const row of next.sessions) {
           let unread = row.unread

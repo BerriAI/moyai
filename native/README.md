@@ -161,7 +161,9 @@ feature. Desktop recording, automatic workspace restoration, and restored
 browser-login workflows remain outside this implementation.
 
 The sidebar separates **Participated** (another person's shared session you have
-sent a message to) from **Recent**. Participated starts collapsed; an explicit
+sent a message to) from **Recent** (sessions you created, including linked Slack
+history). This personal list applies to administrators too; unrelated shared
+sessions remain accessible through search or a direct link. Participated starts collapsed; an explicit
 expansion is remembered. Session action menus contain commands for that session;
 the dedicated New session controls create a new one. Pins, folders, collapsed groups and unread
 state are personal. Folder creation, rename and removal preserve session sharing.

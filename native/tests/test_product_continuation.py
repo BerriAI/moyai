@@ -599,6 +599,33 @@ async def test_real_pg_collection_failure_stops_before_old_computer_drain(contin
 
 
 @PG
+async def test_personal_sidebar_recognizes_linked_slack_creator_after_continuation(continuation):
+    from moyai.product_routes import ProductReadService, Reader
+
+    product = continuation
+    slack_id = "slack:sample-team:sample-creator"
+    await product.sql(
+        "INSERT INTO moyai.users(id,kind,email,name,linked_user_id,created_at,updated_at) "
+        "VALUES(:id,'slack','','Linked creator',:actor,'c','u')",
+        id=slack_id, actor=product.actor.id,
+    )
+    await product.sql("UPDATE moyai.runs SET owner_id=:owner,private_owner_id=''", owner=slack_id)
+    result = await admit(product)
+    reader = Reader(product.actor, product.principal)
+    service = ProductReadService(product.runtime)
+    page = await service.listing(reader, scope="mine")
+    assert [row["id"] for row in page["sessions"]] == [result["id"]]
+    row = page["sessions"][0]
+    assert row["owner_id"] == slack_id and row["created_by_me"] and not row["participated"]
+    # Revoking the link removes creator status; the viewer's actual continuation
+    # message still makes this another person's participated session.
+    await product.sql("UPDATE moyai.users SET linked_user_id=NULL WHERE id=:id", id=slack_id)
+    page = await service.listing(reader, scope="mine")
+    row = page["sessions"][0]
+    assert not row["created_by_me"] and row["participated"]
+
+
+@PG
 async def test_real_pg_router_csrf_original_url_and_union_search_no_duplicate(continuation):
     from moyai.product_routes import routes
     product = continuation

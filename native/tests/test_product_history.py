@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from moyai.models import Base, User
+from moyai.models import Base, SessionPreference, Turn, User
 from moyai.models import Message as NativeMessage
 from moyai.models import Session as NativeSession
 from moyai.product_files import PREVIEW_BYTES, ProductFilesAdapter
@@ -685,6 +685,57 @@ async def test_merged_pagination_consumes_only_selected_rows_from_each_source(un
         "native:" + ROOT, "native:" + "6" * 32, "legacy:" + ROOT, "native:" + "7" * 32,
     ]
     assert len(found) == len(set(found)) and cursor is None
+
+
+@pytest.mark.parametrize("role", ["member", "admin"])
+async def test_personal_sidebar_filters_before_pagination_and_keeps_shared_access(unified, role):
+    unified.user.role = role
+    unified.product.identity.person = replace(unified.product.identity.person, role=role)
+    joined, pinned, filed, unrelated = ("5" * 32, "6" * 32, "7" * 32, "8" * 32)
+    for id in (joined, pinned, filed, unrelated):
+        await unified.add_session(id=id, owner=BOB, visibility="shared", updated_at="2026-10-10",
+                                  title="Shared " + id[0])
+    async with unified.sessions.begin() as db:
+        db.add(Turn(session_id=joined, actor_id=ALICE, request_key="contribution",
+                    request_fingerprint="contribution", prompt="sealed-input", model="native-model",
+                    workflow_id="contribution", status="completed"))
+        db.add(SessionPreference(user_id=ALICE, session_id=pinned, pinned=True))
+        db.add(SessionPreference(user_id=ALICE, session_id=filed, folder="Research"))
+    await unified.product.run("9" * 32, owner=BOB, updated_at="2026-10-12", title="Unrelated history")
+    await unified.product.run("a" * 32, owner="slack:T:U", updated_at="2026-10-05", title="My Slack history")
+    await unified.product.run("b" * 32, owner=BOB, updated_at="2026-10-06", title="Joined history")
+    await unified.product.message(id=10, run_id="b" * 32, user_id="slack:T:U")
+    cursor, rows = None, []
+    for _ in range(10):
+        response = await unified.client.get("/api/history/sessions", params={
+            "scope": "mine", "limit": 1, **({"cursor": cursor} if cursor else {}),
+        })
+        assert response.status_code == 200
+        page = response.json()
+        assert len(page["sessions"]) == 1
+        rows.extend(page["sessions"])
+        cursor = page["next_cursor"]
+        if not page["has_more"]:
+            break
+    assert cursor is None
+    indexed = {row["key"]: row for row in rows}
+    assert set(indexed) == {
+        "native:" + ROOT, "native:" + joined, "native:" + pinned, "native:" + filed,
+        "legacy:" + ROOT, "legacy:" + "a" * 32, "legacy:" + "b" * 32,
+    }
+    assert indexed["native:" + ROOT]["created_by_me"]
+    assert indexed["legacy:" + "a" * 32]["created_by_me"]
+    assert not indexed["legacy:" + "a" * 32]["participated"]
+    for key in ("native:" + joined, "legacy:" + "b" * 32):
+        assert indexed[key]["participated"] and not indexed[key]["created_by_me"]
+    assert (await unified.client.get(f"/api/history/sessions/{unrelated}?source=native")).status_code == 200
+    search = await unified.client.get("/api/history/search", params={"source": "native", "q": "Shared 8"})
+    assert [row["id"] for row in search.json()["sessions"]] == [unrelated]
+    # A broad-list cursor cannot silently skip personal entries.
+    broad = (await unified.client.get("/api/history/sessions?limit=1")).json()
+    assert (await unified.client.get("/api/history/sessions", params={
+        "scope": "mine", "cursor": broad["next_cursor"],
+    })).status_code == 422
 
 
 async def test_native_encrypted_search_filters_acl_before_decryption(unified, monkeypatch):

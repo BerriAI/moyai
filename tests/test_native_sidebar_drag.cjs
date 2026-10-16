@@ -8,7 +8,7 @@ const exportsObject = {}
 new Function("exports", ts.transpileModule(source, { compilerOptions: {
   target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS,
 } }).outputText)(exportsObject)
-const { sessionDrop, sessionPlacement, currentDragSession, parseSessionDrag } = exportsObject
+const { sessionDrop, sessionPlacement, sessionCreatedByMe, currentDragSession, parseSessionDrag } = exportsObject
 const id = "11111111-1111-4111-8111-111111111111"
 const nonce = "22222222-2222-4222-8222-222222222222"
 const row = { id, owner_id: "another-member", title: "Synthetic session", status: "idle", archived: false }
@@ -29,7 +29,7 @@ test("an internal current-user drag changes only the caller's folder preference,
 })
 
 test("folders take placement priority over pins, consistently with the existing folder-only Move action", () => {
-  assert.deepEqual(sessionPlacement({ ...row, folder: "today", pinned: true }, [folder]),
+  assert.deepEqual(sessionPlacement({ ...row, folder: "today", pinned: true }, [folder], drag.userId),
     { kind: "folder", key: folder.id, label: "today" })
   const result = drop({ folder: "today", pinned: true }, { kind: "unfiled" })
   assert.deepEqual(result.body, { folder: "" })
@@ -40,7 +40,7 @@ test("folders take placement priority over pins, consistently with the existing 
 
 test("dropping on any unfiled group clears the folder and derives participation without mutating it", () => {
   for (const participated of [true, false]) {
-    const result = drop({ folder: "today", participated }, { kind: "unfiled" })
+    const result = drop({ folder: "today", participated, owner_id: participated ? row.owner_id : drag.userId }, { kind: "unfiled" })
     assert.deepEqual(result.body, { folder: "" })
     assert.equal(result.expand, participated ? "participated" : "recent")
     assert.equal(result.row.participated, participated)
@@ -80,6 +80,24 @@ test("malformed and oversized drag data is inert; unknown folder preferences rem
     JSON.stringify({ ...drag, extra: "untrusted" }), JSON.stringify({ ...drag, nonce: "bad" })]) {
     assert.equal(parseSessionDrag(raw), null)
   }
-  assert.equal(sessionPlacement({ ...row, folder: "unavailable", participated: true }, [folder]).key, "participated")
+  assert.equal(sessionPlacement({ ...row, folder: "unavailable", participated: true }, [folder], drag.userId).key, "participated")
   assert.equal(row.folder, undefined)
+})
+
+test("Recent requires ownership, including canonical linked identities; participation is other people's work", () => {
+  assert.equal(sessionPlacement(row, [], drag.userId).kind, "hidden")
+  assert.equal(sessionPlacement({ ...row, participated: true }, [], drag.userId).kind, "participated")
+  assert.equal(sessionPlacement({ ...row, owner_id: drag.userId }, [], drag.userId).kind, "recent")
+  const linked = { ...row, owner_id: "slack:team:creator", created_by_me: true }
+  assert.equal(sessionCreatedByMe(linked, drag.userId), true)
+  assert.equal(sessionPlacement(linked, [], drag.userId).kind, "recent")
+  assert.equal(sessionPlacement({ ...linked, participated: true }, [], drag.userId).kind, "recent")
+  assert.equal(sessionPlacement({ ...row, pinned: true }, [], drag.userId).kind, "pinned")
+})
+
+test("unfiling someone else's unparticipated session does not promise to move it to Recent", () => {
+  const result = drop({ folder: "today" }, { kind: "unfiled" })
+  assert.deepEqual(result.body, { folder: "" })
+  assert.equal(result.expand, "")
+  assert.equal(result.message, "Removed from folder.")
 })
