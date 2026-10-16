@@ -39,7 +39,11 @@ export type TurnUsage = {
   broker_received_at?: string | null; first_dispatch_at?: string | null
   dispatch_attempt_id?: string | null; dispatch_route?: string | null
 }
-export type TimingDistribution = { samples: number; mean_ms: number | null; p50_ms: number | null; p95_ms: number | null }
+export type TimingDistribution = { samples: number; mean_ms: number | null; p50_ms: number | null; p95_ms: number | null; max_ms?: number | null }
+export type TimingCard = TimingDistribution & { pending: number; missing: number }
+export type TimingCardKey = "startup" | "queue" | "broker" | "computer"
+export type TimingCards = Record<TimingCardKey, TimingCard>
+export type TimingInterval = TimingCards & { start: string; end: string }
 export type NativePerformance = {
   eligible_turns: number; api_received_samples: number; missing_dispatch_samples: number
   dispatch: TimingDistribution
@@ -48,6 +52,7 @@ export type NativePerformance = {
     worker_to_broker_ms: TimingDistribution; broker_to_dispatch_ms: TimingDistribution
   }
   computer: { cold: TimingDistribution; restore: TimingDistribution; reuse: TimingDistribution; requested: number; failed: number; pending: number }
+  cards?: TimingCards; trend?: TimingInterval[]
 }
 export type UserAggregate = Partial<ReportSummary> & { user_id: string }
 export type UserReportRow = { user_id: string; label: string; secondary?: string; search: string; metrics: UserAggregate }
@@ -64,7 +69,7 @@ export type AnalyticsReport = {
     legacy_turns: number; ledger_requests: number; priced_requests: number; unpriced_requests: number; unknown_request_turns?: number; capture_gap_turns?: number; linked_cost_limited?: boolean
     pr_receipts: number; pr_status_checked: number; pr_status_unknown: number; pr_tracking: string; pr_merge_date_unknown?: number; unclassified_confirmed_create_calls?: number
   }
-  methodology?: { sessions?: string; prs_created?: string; prs_merged?: string; cost?: string; requests?: string; model?: string; cost_per_merged_pr?: string; startup?: string; startup_breakdown?: string; computer_readiness?: string; timing_coverage?: string }
+  methodology?: { sessions?: string; prs_created?: string; prs_merged?: string; cost?: string; requests?: string; model?: string; cost_per_merged_pr?: string; startup?: string; startup_breakdown?: string; computer_readiness?: string; timing_coverage?: string; timing_cards?: string }
   capabilities?: { pr_analytics?: boolean; reported_costs?: boolean }
 }
 

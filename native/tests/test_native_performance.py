@@ -19,7 +19,7 @@ from moyai.execution import AuthorizedActivity
 from moyai.inference_usage import INFERENCE_ACTIVITY, InferenceActivity, InferenceUsageTransport
 from moyai.models import Event, Turn
 from moyai.performance import PREFIX, computer_timing, evidence, record
-from moyai.performance_report import metrics, observations, timing_view
+from moyai.performance_report import cards, metrics, observations, summarize, timing_view
 
 
 def stamp(seconds: int) -> str:
@@ -125,7 +125,9 @@ def test_breakdown_means_share_a_cohort_and_missing_or_reversed_times_stay_unkno
         "dispatch": {"at": stamp(3), "broker_received_at": stamp(2)},
     })
     result = metrics([full, partial, skew, timing_view({})])
-    assert result["dispatch"] == {"samples": 2, "mean_ms": 7000, "p50_ms": 4000, "p95_ms": 10000}
+    assert result["dispatch"] == {
+        "samples": 2, "mean_ms": 7000, "p50_ms": 4000, "p95_ms": 10000, "max_ms": 10000,
+    }
     assert result["missing_dispatch_samples"] == 2
     breakdown = result["breakdown"]
     assert breakdown["samples"] == 1
@@ -167,6 +169,9 @@ async def test_report_is_admin_only_root_scoped_bounded_and_csv_keeps_evidence(r
         report = response.json()
         assert report["performance"]["dispatch"]["mean_ms"] == 4000
         assert report["performance"]["eligible_turns"] == 1
+        assert report["performance"]["cards"]["queue"]["mean_ms"] == 1000
+        assert report["performance"]["cards"]["startup"]["max_ms"] == 4000
+        assert len(report["performance"]["trend"]) == 24
         assert "Secret" not in response.text and "encrypted" not in response.text
         filtered = await client.get("/api/settings/performance" + query + "&model=absent")
         assert filtered.json()["performance"]["eligible_turns"] == 0
@@ -313,3 +318,70 @@ async def test_restore_is_not_ready_until_sdk_ensure_and_keeps_original_mode_and
     assert after.created_at == before.created_at
     assert json.loads(after.content)["status"] == "ready"
     assert json.loads(after.content)["mode"] == "restore"
+
+
+def test_cards_measure_partial_stages_without_changing_the_additive_cohort():
+    full = timing_view({
+        "received": {"at": stamp(0)}, "worker": {"at": stamp(1)},
+        "dispatch": {"at": stamp(4), "broker_received_at": stamp(3)},
+    })
+    waiting = {**timing_view({
+        "received": {"at": stamp(0)}, "worker": {"at": stamp(2)},
+        "computer": {"at": stamp(2), "mode": "cold", "status": "pending"},
+    }), "_status": "running"}
+    historical = {**timing_view({}), "_status": "completed"}
+    result = cards([full, waiting, historical])
+    assert result["queue"]["samples"] == 2
+    assert result["queue"]["mean_ms"] == 1500 and result["queue"]["max_ms"] == 2000
+    assert result["startup"]["samples"] == result["broker"]["samples"] == 1
+    assert result["startup"]["pending"] == result["startup"]["missing"] == 1
+    assert result["computer"]["samples"] == result["computer"]["missing"] == 0
+    assert result["computer"]["pending"] == 1  # Historical/model-only turns are not missing computers.
+    assert metrics([full, waiting, historical])["breakdown"]["samples"] == 1
+
+
+def test_cards_keep_zero_measurements_and_do_not_call_reversed_timestamps_waiting():
+    zero = timing_view({
+        "received": {"at": stamp(0)}, "worker": {"at": stamp(0)},
+        "dispatch": {"at": stamp(0), "broker_received_at": stamp(0)},
+        "computer": {"at": stamp(0), "finished_at": stamp(0), "mode": "reuse", "status": "ready"},
+    })
+    invalid = {**timing_view({
+        "received": {"at": stamp(4)}, "worker": {"at": stamp(3)},
+        "dispatch": {"at": stamp(2), "broker_received_at": stamp(5)},
+        "computer": {"at": stamp(4), "finished_at": stamp(1), "mode": "restore", "status": "ready"},
+    }), "_status": "running"}
+    for metric in cards([zero, invalid]).values():
+        assert metric["samples"] == 1 and metric["max_ms"] == metric["mean_ms"] == 0
+        assert metric["pending"] == 0 and metric["missing"] == 1
+
+
+def test_card_trends_use_all_records_and_keep_empty_intervals_as_gaps():
+    period = report_range("custom", "2026-10-16", "2026-10-17")
+    timing = {str(index): timing_view({
+        "received": {"at": stamp(0)}, "worker": {"at": stamp(1)},
+        "dispatch": {"at": stamp(4), "broker_received_at": stamp(3)},
+    }) for index in range(51)}
+    turns = [SimpleNamespace(
+        id=str(index), status="completed",
+        created_at="2026-10-16T01:00:00+00:00" if index < 50 else "2026-10-16T23:59:59+00:00",
+    ) for index in range(51)]
+    report = summarize(timing, turns, period)
+    assert report["cards"]["startup"]["samples"] == 51  # Not the 50-row UI page.
+    assert len(report["trend"]) == 24
+    assert report["trend"][0]["startup"]["mean_ms"] is None
+    assert report["trend"][1]["startup"]["samples"] == 50
+    assert report["trend"][23]["startup"]["samples"] == 1
+    assert sum(item["queue"]["samples"] for item in report["trend"]) == 51
+    assert all(item["computer"]["mean_ms"] is None for item in report["trend"])
+    assert report["trend"][-1]["end"] == period.end.isoformat()
+
+
+def test_trend_handles_sub_micro_bucket_ranges_without_zero_width_intervals():
+    period = report_range("custom", stamp(0), "2026-10-16T10:00:00.000001+00:00")
+    turns = [SimpleNamespace(id="one", status="completed", created_at=stamp(0))]
+    report = summarize({"one": timing_view({})}, turns, period)
+    assert len(report["trend"]) == 1
+    assert report["trend"][0]["start"] == period.start.isoformat()
+    assert report["trend"][0]["end"] == period.end.isoformat()
+    assert report["trend"][0]["startup"]["mean_ms"] is None

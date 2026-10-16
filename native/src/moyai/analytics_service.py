@@ -562,7 +562,7 @@ async def report(
             "by_user": by_user, "by_model": by_model, "models": sorted({row.model for row in turns}),
             "users": users, "total": len(rows), "limit": limit, "offset": offset,
             "start": lower, "end": upper, "preset": period.preset, "timezone": "UTC", "currency": "USD",
-            "performance": performance_report.metrics(list(timing.values())),
+            "performance": performance_report.summarize(timing, turns, period),
             "coverage": {
                 "legacy_turns": len(totals.legacy_turns), "ledger_requests": len(ledger),
                 "unknown_request_turns": len(totals.unknown_request_turns),

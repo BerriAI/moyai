@@ -1,22 +1,38 @@
+import { Card } from "@/components/ui/card"
 import { TableCell, TableRow } from "@/components/ui/table"
-import type { NativePerformance } from "./analytics-data"
-import { elapsed, spendCount } from "./analytics-format"
-import { AnalyticsMetrics, ReportTable } from "./analytics-shared"
+import type { NativePerformance, TimingCard } from "./analytics-data"
+import { elapsed, finiteValue, spendCount } from "./analytics-format"
+import { ReportTable } from "./analytics-shared"
+import { PerformanceTrend, timingSeries } from "./performance-trend"
+
+function PerformanceCard({ title, description, metric, id }: {
+  title: string; description: string; metric: TimingCard; id: string
+}) {
+  const duration = (value: unknown) => finiteValue(value) ? elapsed(value) : "—"
+  return <Card className="performance-card" role="region" aria-labelledby={id}>
+    <h2 id={id}>{title}</h2><p className="performance-description">{description}</p>
+    <p className="performance-average" title={finiteValue(metric.mean_ms) ? undefined : "Not measured"}>{duration(metric.mean_ms)}<span>average</span></p>
+    <dl className="performance-percentiles">
+      <div><dt>Median</dt><dd title={finiteValue(metric.p50_ms) ? undefined : "Not measured"}>{duration(metric.p50_ms)}</dd></div>
+      <div><dt>p95</dt><dd title={finiteValue(metric.p95_ms) ? undefined : "Not measured"}>{duration(metric.p95_ms)}</dd></div>
+      <div><dt>Slowest</dt><dd title={finiteValue(metric.max_ms) ? undefined : "Not measured"}>{duration(metric.max_ms)}</dd></div>
+    </dl>
+    <p className="performance-coverage">{spendCount(metric.samples)} measured · {spendCount(metric.pending)} waiting</p>
+    {metric.missing > 0 && <p className="performance-coverage">{spendCount(metric.missing)} without a usable timing</p>}
+  </Card>
+}
 
 export function StartupPerformance({ data }: { data?: NativePerformance }) {
   if (!data) return <p className="analytics-status" role="status">Startup measurements are unavailable from this server. The native API and execution workers need the performance instrumentation release.</p>
   const { dispatch, breakdown, computer } = data
   return <>
+    {data.cards ? <div className="performance-metrics">
+      {timingSeries.map(item => <PerformanceCard key={item.key} title={item.title} description={item.description} metric={data.cards![item.key]} id={`performance-${item.key}`} />)}
+    </div> : <p className="analytics-status">The four-card report is unavailable from this server. Update the native API to load its measurements.</p>}
+    {!dispatch.samples && <p className="analytics-status" role="status">No complete startup measurements in this range yet. New web messages acquire timings once the updated API, execution worker and broker are running. Older records are not backfilled.</p>}
+    <PerformanceTrend rows={data.trend} />
     <section className="analytics-section" aria-labelledby="startup-timing-title">
-      <h2 id="startup-timing-title">API receipt → first foreground LiteLLM dispatch</h2>
-      <p className="analytics-status">Time Moyai spends getting an accepted message to its first outbound model attempt. Ends after broker admission, before waiting for the gateway response.</p>
-      <AnalyticsMetrics items={[
-        ["Mean startup", elapsed(dispatch.mean_ms)], ["Median startup (p50)", elapsed(dispatch.p50_ms)],
-        ["p95 startup", elapsed(dispatch.p95_ms)],
-        ["Measured root turns", `${spendCount(dispatch.samples)} / ${spendCount(data.eligible_turns)}`, `${spendCount(data.missing_dispatch_samples)} without a complete measurement`],
-      ]} />
-      {!dispatch.samples && <p className="analytics-status" role="status">No complete startup measurements in this range yet. New web messages acquire timings once the updated API, execution worker and broker are running. Older records are not backfilled.</p>}
-      <h3>Where Moyai spent the time</h3>
+      <h2 id="startup-timing-title">Startup breakdown</h2>
       <p className="analytics-status">Component means use the same {spendCount(breakdown.samples)} complete root turns and add to the total below.</p>
       <ReportTable label="Startup breakdown" columns={["Stage", "Mean", "What it includes"]}>
         <TableRow><TableCell>API → execution worker</TableCell><TableCell>{elapsed(breakdown.api_to_worker_ms.mean_ms)}</TableCell><TableCell>Authentication, admission, queue wait and worker pickup</TableCell></TableRow>

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
+from datetime import timedelta
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from .analytics import percentile, utc
+from .analytics import ReportRange, percentile, utc
 from .models import Event
 from .performance import KINDS, PREFIX
 
@@ -22,6 +24,7 @@ def distribution(values: list[float]) -> dict[str, Any]:
     return {
         "samples": len(values), "mean_ms": sum(values) / len(values) if values else None,
         "p50_ms": percentile(values, .5), "p95_ms": percentile(values, .95),
+        "max_ms": max(values) if values else None,
     }
 
 
@@ -62,6 +65,8 @@ def timing_view(value: dict[str, Any]) -> dict[str, Any]:
         "broker_received_at": broker, "first_dispatch_at": outbound,
         "dispatch_attempt_id": dispatch.get("attempt_id"), "dispatch_route": dispatch.get("route"),
         "api_to_dispatch_ms": elapsed(received, outbound),
+        "queue_pickup_ms": elapsed(received, worker),
+        "broker_preparation_ms": elapsed(broker, outbound),
         # Keep the additive breakdown on precisely the same complete cohort.
         "api_to_worker_ms": parts[0] if complete else None,
         "worker_to_broker_ms": parts[1] if complete else None,
@@ -74,6 +79,56 @@ def timing_view(value: dict[str, Any]) -> dict[str, Any]:
             elapsed(computer.get("at"), computer.get("finished_at"))
             if computer.get("status") == "ready" else None
         ),
+    }
+
+
+CARD_FIELDS = {
+    "startup": ("api_to_dispatch_ms", "first_dispatch_at"),
+    "queue": ("queue_pickup_ms", "worker_picked_up_at"),
+    "broker": ("broker_preparation_ms", "first_dispatch_at"),
+    "computer": ("computer_ready_ms", "computer_ready_at"),
+}
+
+
+def cards(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for name, (field, end) in CARD_FIELDS.items():
+        cohort = [row for row in rows if row.get("computer_status") is not None] if name == "computer" else rows
+        observed = [row[field] for row in cohort if row.get(field) is not None]
+        pending = sum(
+            row.get(field) is None and (
+                row.get("computer_status") in {"pending", "prepared"} if name == "computer" else
+                bool(row.get("api_received_at")) and row.get(end) is None
+                and row.get("_status") in {"queued", "starting", "running"}
+            )
+            for row in cohort
+        )
+        result[name] = {
+            **distribution(observed), "pending": pending,
+            "missing": len(cohort) - len(observed) - pending,
+        }
+    return result
+
+
+def summarize(timing: dict[str, dict[str, Any]], turns: list[Any], period: ReportRange) -> dict[str, Any]:
+    """Cards and 24 fixed intervals use the full bounded cohort, never one page."""
+    rows = [{**timing[turn.id], "_status": turn.status, "_created_at": turn.created_at}
+            for turn in turns if turn.id in timing]
+    duration = period.end - period.start
+    count = min(24, duration // timedelta(microseconds=1))
+    boundaries = [period.start + duration * index / count for index in range(count + 1)]
+    buckets: list[list[dict[str, Any]]] = [[] for _ in range(count)]
+    for row in rows:
+        created = utc(row["_created_at"])
+        if created is not None and period.contains(created):
+            buckets[bisect_right(boundaries, created) - 1].append(row)
+    return {
+        **metrics(rows), "cards": cards(rows),
+        "trend": [{
+            "start": boundaries[index].isoformat(),
+            "end": boundaries[index + 1].isoformat(),
+            **cards(bucket),
+        } for index, bucket in enumerate(buckets)],
     }
 
 
@@ -133,5 +188,14 @@ METHODOLOGY = {
         "unknown, never backfilled from billing timestamps. Cross-process timings require synchronized "
         "server clocks. The first outbound attempt keeps its own broker arrival, including retries "
         "and late settlement after cancellation."
+    ),
+    "timing_cards": (
+        "The four cards measure startup, queue pickup, broker preparation and computer readiness "
+        "independently. A queue sample can exist before any model request. Computer samples include "
+        "only turns with an acquisition observation. Waiting means an observed acquisition is pending "
+        "or a live web turn has not reached the card's endpoint; other missing/invalid observations "
+        "stay missing. Percentiles use nearest rank. The trend uses up to 24 fixed intervals across the "
+        "selected range, grouped by root-turn admission time, from the whole filtered cohort. Empty "
+        "intervals are gaps. The four series overlap and must not be added together."
     ),
 }
