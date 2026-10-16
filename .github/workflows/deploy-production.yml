@@ -33,7 +33,7 @@ jobs:
   deploy-production:
     if: github.repository == 'BerriAI/moyai' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Maintenance drains, stages and activates every role (10 deployments).
+    # Native same-core maintenance uses 8 deployments in 5 batches; core switches use 10.
     timeout-minutes: 300
     environment: moyai-production
     steps:

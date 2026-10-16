@@ -35,7 +35,7 @@ def cutover(tmp_path):
                                       'legacy_automations', 'legacy_events', 'legacy_schedule_count'), 0))
     render.owners = {sid: [f'{index}@2026-10-15T00:00:00+00:00']
                      for index, sid in enumerate(render.env, 1)}
-    control = {'receipt': None, 'calls': []}
+    control = {'receipt': None, 'calls': [], 'expected_deploys': 10}
     github, elapsed = Candidate(), [0]
     github.rolling_ready, github.forward_from = github.ready, lambda *args: None
     github.native_ready = lambda sha: True
@@ -91,7 +91,7 @@ def cutover(tmp_path):
             if command == 'request':
                 assert not render.history  # Source worker has not been restarted yet.
             else:
-                assert len(render.history) == 10
+                assert len(render.history) == control['expected_deploys']
                 assert render.env[WORKER]['MAINTENANCE_DRAIN'] == 'false'
             control['receipt'] = {
                 **{key: body[key] for key in ('protocol', 'core', 'native_schema', 'task_queue')},
@@ -394,6 +394,7 @@ def test_preserve_uses_native_source_selection_without_rewriting_selector(cutove
 
 
 def seed_native_source(release, render):
+    release.test_control['expected_deploys'] = 8 if render.candidate_contract.get('core') == 'pydantic' else 10
     release.test_control['receipt'] = {
         'protocol': 1, 'core': 'pydantic-v1', 'native_schema': MANIFEST['schema'],
         'task_queue': 'native-fixture-v1', 'generation': 1, 'paused': False, 'request_key': 'prior-resume',
@@ -427,7 +428,7 @@ def test_uncertain_native_control_write_is_not_retried_or_automatically_reversed
     release.native_control = uncertain
     with pytest.raises(ReleaseError, match='lost native CAS'):
         release.run()
-    assert len(render.history) == (0 if command == 'request' else 10)
+    assert len(render.history) == (0 if command == 'request' else 8)
     assert sum(entry[0] == command for entry in release.test_control['calls']) == 1
     assert release.record['native_control'][-1]['confirmed'] is False
 
@@ -456,7 +457,7 @@ def test_same_core_parked_turns_survive_replacement_then_explicit_resume(cutover
         return value
     release.native_control = checkpoint
     release.run()
-    assert release.record['status'] == 'success' and len(render.history) == 10
+    assert release.record['status'] == 'success' and len(render.history) == 8
     assert render.counts['native_runs'] == 1 and not release.test_control['receipt']['paused']
 
 

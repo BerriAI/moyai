@@ -5,6 +5,7 @@ its new contracts only after every old owner has retired. Ambiguous control-plan
 writes are recorded once and never retried or automatically rolled back.
 """
 from copy import deepcopy
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ import sys
 from uuid import uuid4
 
 from scripts.release.deploy import (ACTIVE_DEPLOYS, BROKER, COORDINATOR, WORKER,
-    MUTABLE, Release, ReleaseError, SHARED_DEFAULTS, SHARED_KEYS)
+    MUTABLE, Release, ReleaseError, Service, SHARED_DEFAULTS, SHARED_KEYS)
 from scripts.release.rolling_deploy import (RollingRelease, candidate_migration_plan,
     valid_contract, valid_schema_support)
 from scripts.release.native_migration import candidate_manifest
@@ -26,6 +27,15 @@ COUNTS = ('unsafe_sessions', 'executing_sessions', 'legacy_active_sessions',
           'model_requests', 'live_leases')
 INVENTORIES = ('owners', 'coordinators', 'brokers', 'broker_leaders')
 DEFAULT_HARNESS = 'deepagents-temporal'
+
+
+@dataclass
+class Replacement:
+    target: Service
+    old_owner: str | None
+    receipt: dict
+    requested: bool = False
+    new_owner: str | None = None
 
 
 def maintenance_contract(environment):
@@ -99,6 +109,35 @@ class MaintenanceRelease(RollingRelease):
         self.automation_probe = automation_probe
         self.legacy_schedule_count = None
         self.legacy_automation_receipt = None
+        self.batch: dict[str, Replacement] = {}
+
+    @property
+    def native_maintenance(self):
+        return (self.source_core == 'pydantic' and self.candidate is not None
+                and self.candidate.get('core') == 'pydantic' and not self.core_changes)
+
+    def selected_roles(self):
+        if self.batch:
+            return {sid for sid, item in self.batch.items() if item.requested}
+        return {self.selected} if self.selected else set()
+
+    def replacement_owners(self):
+        if self.batch:
+            return {sid: item.new_owner for sid, item in self.batch.items() if item.new_owner}
+        return {self.selected: self.replacement} if self.replacement else {}
+
+    def permitted_deploys(self, service_id):
+        if self.batch:
+            item = self.batch.get(service_id)
+            return {item.receipt['id']} if item and item.receipt['id'] else set()
+        return super().permitted_deploys(service_id)
+
+    def unchanged(self):
+        self.check_control_plane()
+        if self.batch:
+            self.observe_batch()
+        if self.baseline is not None:
+            self.check_unaffected()
 
     def source(self, service):
         candidate_settings = (self.candidate is not None
@@ -156,12 +195,14 @@ class MaintenanceRelease(RollingRelease):
         if self.drained and any(state[key] for key in count_keys):
             raise ReleaseError('Execution or leases reappeared after the maintenance drain.')
         owners = set(state['owners'])
-        fixed = {identity for sid, identity in self.identities.items() if sid != self.selected}
-        old = self.identities.get(self.selected)
-        extra = {self.replacement} if self.replacement else set()
-        allowed = fixed | ({old} if old else set()) | extra
+        selected = self.selected_roles()
+        replacements = self.replacement_owners()
+        fixed = {identity for sid, identity in self.identities.items() if sid not in selected}
+        old = {identity for sid, identity in self.identities.items() if sid in selected}
+        extra = set(replacements.values())
+        allowed = fixed | old | extra
         if (not fixed <= owners or not owners <= allowed
-                or (not self.selected and owners != allowed)
+                or (not selected and owners != allowed)
                 or (settled and owners != fixed | extra)):
             self.record['ownership_failure'] = {
                 'observed_count': len(owners), 'allowed_count': len(allowed),
@@ -173,21 +214,25 @@ class MaintenanceRelease(RollingRelease):
             raise ReleaseError('A retired runtime owner reappeared.')
         coordinator = ({self.identities[COORDINATOR]} if COORDINATOR in self.identities else set())
         broker = ({self.identities[BROKER]} if BROKER in self.identities else set())
-        if self.selected == COORDINATOR:
-            coordinator |= extra
-        if self.selected == BROKER:
-            broker |= extra
+        if COORDINATOR in replacements:
+            coordinator.add(replacements[COORDINATOR])
+        if BROKER in replacements:
+            broker.add(replacements[BROKER])
         actual_coordinators, actual_brokers, leaders = (set(state[k]) for k in INVENTORIES[1:])
         if (not actual_coordinators <= (coordinator & owners) or len(actual_coordinators) > 1
                 or actual_brokers != (broker & owners) or not leaders <= actual_brokers or len(leaders) > 1):
             raise ReleaseError('Coordinator or broker ownership moved outside the selected role.')
-        if self.selected != COORDINATOR and actual_coordinators != coordinator:
+        if COORDINATOR not in selected and actual_coordinators != coordinator:
             raise ReleaseError('The expected coordinator leader disappeared.')
-        if self.selected != BROKER and leaders != broker:
+        if BROKER not in selected and leaders != broker:
             raise ReleaseError('The expected broker maintenance leader disappeared.')
         if settled:
-            expected_coordinator = extra if self.selected == COORDINATOR else coordinator
-            expected_broker = extra if self.selected == BROKER else broker
+            expected_coordinator = (
+                {replacements[COORDINATOR]} if COORDINATOR in replacements else set()
+            ) if COORDINATOR in selected else coordinator
+            expected_broker = (
+                {replacements[BROKER]} if BROKER in replacements else set()
+            ) if BROKER in selected else broker
             if actual_coordinators != expected_coordinator or leaders != expected_broker:
                 raise ReleaseError('Selected role leadership did not settle.')
 
@@ -209,7 +254,7 @@ class MaintenanceRelease(RollingRelease):
 
     def check_unaffected(self):
         for sid, service in self.running.items():
-            if sid == self.selected:
+            if sid in self.selected_roles():
                 continue
             state = self.required_state(service)
             self.check_state(state)
@@ -558,6 +603,152 @@ class MaintenanceRelease(RollingRelease):
         self.save()
         self.unchanged()
 
+    def observe_batch(self):
+        states = {}
+        for sid, item in self.batch.items():
+            if not item.receipt['id']:
+                continue
+            state = self.candidate_state(item.target, 'maintenance_batch_readiness')
+            if state is None:
+                continue
+            self.check_source(item.target, state, require_ready=False)
+            identity = state.get('identity')
+            staged = item.target.env['RENDER_MIGRATION_STAGE'] == 'true'
+            if not staged:
+                if not isinstance(identity, str) or not identity or identity == item.old_owner:
+                    self.rotate_probe(item.target)
+                    continue
+                others = {value.new_owner for key, value in self.batch.items() if key != sid}
+                if identity in self.identities.values() or identity in self.retired or identity in others:
+                    raise ReleaseError('Candidate claimed an existing or retired process identity.')
+                if item.new_owner is not None and item.new_owner != identity:
+                    raise ReleaseError('Candidate process identity changed unexpectedly.')
+                item.new_owner = identity
+                item.receipt['observed_owner'] = identity
+            states[sid] = state
+        # Discover every candidate identity before validating shared ownership
+        # snapshots; a peer may have started before this role's probe completed.
+        for state in states.values():
+            self.check_state(state)
+        self.save()
+        return states
+
+    def transition_batch(self, service_ids, sha, *, staged):
+        """Overlap independent Render replacements, recording each mutation once."""
+        allowed = {WORKER, BROKER, COORDINATOR} if staged else {WORKER, self.api_service_id}
+        if (set(service_ids) != allowed or len(service_ids) != len(allowed)
+                or not self.native_maintenance or not self.drained
+                or not self.native_control_receipt or not self.native_control_receipt['paused']
+                or self.selected is not None or self.batch or sha != self.record['commit']):
+            raise ReleaseError('Concurrent replacement requires the verified native maintenance boundary.')
+        if staged:
+            if (self.api_service_id in self.identities
+                    or self.running[self.api_service_id].env['RENDER_MIGRATION_STAGE'] != 'true'):
+                raise ReleaseError('Stage and retire the API before replacing background roles together.')
+        elif (not self.record.get('zero_owner_boundary_verified')
+                or not {COORDINATOR, BROKER} <= self.identities.keys()
+                or any(sid in self.identities for sid in service_ids)):
+            raise ReleaseError('Activate coordinator and broker before replacing the staged worker and API together.')
+
+        self.unchanged()
+        # Configure all targets while their old processes are still independently
+        # checked. Environment writes keep the existing per-write intent protocol.
+        for sid in service_ids:
+            service = self.expected[sid]
+            changes = {'RENDER_MIGRATION_STAGE': str(staged).lower()}
+            if staged:
+                changes['MOYAI_BUILD_SHA'] = sha
+            self.configure(service, changes)
+        self.unchanged()
+        group = {'roles': [self.expected[sid].role for sid in service_ids],
+                 'staged': staged, 'status': 'preparing', 'deployments': []}
+        self.record.setdefault('batches', []).append(group)
+        for sid in service_ids:
+            target = deepcopy(self.expected[sid])
+            target.sha = sha
+            entry = {'service': sid, 'role': target.role, 'sha': sha,
+                     'staged': staged, 'drain': target.env['MAINTENANCE_DRAIN'] == 'true',
+                     'id': None, 'status': 'prepared', 'old_owner': self.identities.get(sid)}
+            self.batch[sid] = Replacement(target, self.identities.get(sid), entry)
+            group['deployments'].append(entry)
+        self.save()
+
+        # POSTs remain bounded, ordered mutations. Render performs their builds
+        # and replacements concurrently; no threads share controller state.
+        for sid, item in self.batch.items():
+            self.unchanged()
+            self.rotate_probe(item.target)
+            item.requested = True
+            item.receipt['status'] = 'requested'
+            self.record['deploys'].append(item.receipt)
+            self.save()
+            result = self.render.call('POST', f'/services/{sid}/deploys',
+                                      {'commitId': sha, 'clearCache': 'do_not_clear'})
+            identity = result.get('id') if isinstance(result, dict) else None
+            if not isinstance(identity, str) or not re.fullmatch('dep-[a-z0-9]+', identity):
+                raise ReleaseError('Render returned an invalid deployment identity; inspect the recorded intent.')
+            if any(peer.receipt['id'] == identity for key, peer in self.batch.items() if key != sid):
+                raise ReleaseError('Render returned a reused deployment identity; inspect the recorded intents.')
+            item.target.deploy_id = item.receipt['id'] = identity
+            self.save()
+            if result.get('status') is not None and result['status'] not in ACTIVE_DEPLOYS | {'live'}:
+                item.receipt['status'] = result['status']
+                self.save()
+                raise ReleaseError('A concurrent deployment failed; no further deployment was requested.')
+        group['status'] = 'replacing'
+        self.save()
+
+        def live():
+            self.check_control_plane()
+            complete = True
+            for sid, item in self.batch.items():
+                value = self.render.call('GET', f"/services/{sid}/deploys/{item.receipt['id']}")
+                if value.get('commit', {}).get('id') != sha:
+                    raise ReleaseError('Render selected a different commit; release stopped.')
+                item.receipt['status'] = value.get('status')
+                self.save()
+                if item.receipt['status'] not in ACTIVE_DEPLOYS | {'live'}:
+                    raise ReleaseError('A concurrent deployment failed; inspect every recorded intent before recovery.')
+                complete = complete and item.receipt['status'] == 'live'
+            return complete
+
+        self.wait(live, 'Concurrent Render deployments timed out; inspect every recorded intent before recovery.',
+                  self.deploy_timeout)
+
+        def ready():
+            self.check_control_plane()
+            states = self.observe_batch()
+            self.check_unaffected()
+            if len(states) != len(self.batch) or any(not state['ready'] for state in states.values()):
+                return False
+            old_owners = {item.old_owner for item in self.batch.values() if item.old_owner}
+            if any(old_owners & set(state['owners']) for state in states.values()):
+                return False
+            for state in states.values():
+                self.check_state(state, settled=True)
+            return True
+
+        self.wait(ready, 'Concurrent readiness or exact old-owner retirement was not confirmed; release stopped.',
+                  self.readiness_timeout + self.retirement_timeout)
+        for sid, item in self.batch.items():
+            if item.old_owner:
+                self.retired.add(item.old_owner)
+            if item.new_owner:
+                self.identities[sid] = item.new_owner
+            else:
+                self.identities.pop(sid, None)
+            service = self.expected[sid]
+            service.sha, service.deploy_id = item.target.sha, item.target.deploy_id
+            self.running[sid] = deepcopy(item.target)
+            self.schema_supports[sid] = deepcopy(self.source(item.target).get('schema_support'))
+            item.receipt.update(status='verified', new_owner=item.new_owner,
+                                old_owner_retired=bool(item.old_owner))
+            self.record.setdefault('replacements', []).append(deepcopy(item.receipt))
+        group['status'] = 'verified'
+        self.batch.clear()
+        self.save()
+        self.unchanged()
+
     def preflight(self):
         if (not re.fullmatch('srv-[a-z0-9]+', self.api_service_id)
                 or self.api_service_id in {COORDINATOR, WORKER, BROKER}):
@@ -706,8 +897,9 @@ class MaintenanceRelease(RollingRelease):
             if self.source_core == 'pydantic':
                 self.begin_native_drain()
             worker = self.expected[WORKER]
-            self.phase('Pause new execution on the existing worker build')
-            self.transition_service(worker, worker.sha, {'MAINTENANCE_DRAIN': 'true'})
+            if not self.native_maintenance:
+                self.phase('Pause new execution on the existing worker build')
+                self.transition_service(worker, worker.sha, {'MAINTENANCE_DRAIN': 'true'})
             self.phase('Wait for saved work, model requests and execution leases to drain')
             def drained():
                 self.unchanged()
@@ -721,10 +913,15 @@ class MaintenanceRelease(RollingRelease):
             self.record['drain_verified'] = True
             self.save()
             # Staging API first gates intake during the incompatible transition.
-            for sid in (self.api_service_id, WORKER, BROKER, COORDINATOR):
+            staging = (self.api_service_id,) if self.native_maintenance else (
+                self.api_service_id, WORKER, BROKER, COORDINATOR)
+            for sid in staging:
                 service = self.expected[sid]
                 self.phase('Stage candidate ' + service.role + ' and retire its old runtime owner')
                 self.transition_service(service, sha, {'RENDER_MIGRATION_STAGE': 'true', 'MOYAI_BUILD_SHA': sha})
+            if self.native_maintenance:
+                self.phase('Stage native worker, broker and coordinator together; require every old owner to retire')
+                self.transition_batch((WORKER, BROKER, COORDINATOR), sha, staged=True)
             self.unchanged()
             if self.identities:
                 raise ReleaseError('Old runtime owners remain; candidate coordinator was not activated.')
@@ -738,14 +935,20 @@ class MaintenanceRelease(RollingRelease):
                 self.migrate_offline(plan)
             if self.native_plan:
                 self.migrate_native()
-            for sid in (COORDINATOR, BROKER, WORKER, self.api_service_id):
+            activation = (COORDINATOR, BROKER) if self.native_maintenance else (
+                COORDINATOR, BROKER, WORKER, self.api_service_id)
+            for sid in activation:
                 service = self.expected[sid]
                 self.phase('Activate matching candidate ' + service.role + ' while execution remains drained')
                 self.transition_service(service, sha, {'RENDER_MIGRATION_STAGE': 'false'})
+            if self.native_maintenance:
+                self.phase('Activate native worker and API together while the maintenance generation remains paused')
+                self.transition_batch((WORKER, self.api_service_id), sha, staged=False)
             self.unchanged()
-            self.phase('Release worker drain after all four candidate roles are verified')
             native = self.candidate.get('core') == 'pydantic'
-            self.transition_service(worker, sha, {'MAINTENANCE_DRAIN': 'false'}, release_drain=not native)
+            if not self.native_maintenance:
+                self.phase('Release worker drain after all four candidate roles are verified')
+                self.transition_service(worker, sha, {'MAINTENANCE_DRAIN': 'false'}, release_drain=not native)
             if native:
                 self.phase('Resume the native maintenance generation after every candidate role and retirement verifies')
                 self.change_native_control('resume')
