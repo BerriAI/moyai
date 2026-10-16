@@ -228,7 +228,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
           <ActionItem disabled={busy} onClick={() => { close(); openEditor({ action: "folder-remove", folder }) }}><Trash2 />Remove folder</ActionItem>
         </>}</ActionMenu>}
       </div>
-      <div id={`sessions-${encodeURIComponent(key)}`} hidden={!expanded}>{rows(items)}{!items.length && <p className="folder-empty">{folder ? "Drag sessions here, or use their ⋯ menu." : label === "Participated" ? "Shared sessions you’ve contributed to." : "No sessions here yet."}</p>}</div>
+      <div id={`sessions-${encodeURIComponent(key)}`} hidden={!expanded}>{rows(items)}{!items.length && <p className="folder-empty">{loading && !sessions.length ? "Loading sessions…" : folder ? "Drag sessions here, or use their ⋯ menu." : label === "Participated" ? "Shared sessions you’ve contributed to." : "No sessions here yet."}</p>}</div>
     </section>
   }
   return <>

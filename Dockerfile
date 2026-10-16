@@ -8,7 +8,7 @@ COPY frontend ./frontend
 COPY native/web ./native/web
 RUN npm run build:native
 
-FROM public.ecr.aws/docker/library/python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
+FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
 COPY --from=uv /uv /usr/local/bin/uv
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
@@ -29,7 +29,7 @@ ARG MOYAI_BUILD_SHA=""
 LABEL org.opencontainers.image.source="https://github.com/BerriAI/moyai"
 LABEL org.opencontainers.image.revision="${MOYAI_BUILD_SHA}"
 RUN printf '%s\n' "$MOYAI_BUILD_SHA" > /app/build-revision
-ENV DATA_DIR=/data PYTHONUNBUFFERED=1 MOYAI_CORE=pydantic
+ENV DATA_DIR=/data PYTHONUNBUFFERED=1 MOYAI_CORE=pydantic PATH="/app/.venv/bin:${PATH}"
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s CMD /app/.venv/bin/python /app/docker_healthcheck.py
 ENTRYPOINT ["/app/.venv/bin/python", "/app/docker_start.py"]

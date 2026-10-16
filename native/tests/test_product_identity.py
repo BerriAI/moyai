@@ -28,7 +28,7 @@ from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness import Memory
 from pydantic_ai_harness.memory import InMemoryStore
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from temporalio import activity
@@ -197,6 +197,36 @@ async def test_existing_signed_google_identity_exact_id_and_live_roles(product):
     )
     with pytest.raises(HTTPException):
         await product.adapter.require_current(principal.grant)
+
+
+async def test_positive_schema_cache_never_caches_account_authority(product):
+    async with product.writer.begin() as conn:
+        await conn.run_sync(User.__table__.create)
+        await conn.execute(User.__table__.insert().values(
+            id="google:member-sub", username="member", display_name="Member",
+            password="", role="member", enabled=True, auth_version=1,
+        ))
+    statements = []
+    def observed(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+    event.listen(product.source.sync_engine, "before_cursor_execute", observed)
+    try:
+        principal = await product.adapter.current("google:member-sub")
+        await product.adapter.require_current(principal.grant)
+        assert sum("table_info" in sql for sql in statements) == 1
+        assert sum("SELECT role,revision" in sql for sql in statements) == 2
+        async with product.writer.begin() as conn:
+            await conn.execute(text("UPDATE moyai_users SET enabled=false"))
+        with pytest.raises(HTTPException) as denied:
+            await product.adapter.require_current(principal.grant)
+        assert denied.value.status_code == 401
+        async with product.writer.begin() as conn:
+            await conn.execute(text("DROP TABLE moyai_users"))
+        with pytest.raises(HTTPException) as missing:
+            await product.adapter.require_current(principal.grant)
+        assert missing.value.status_code == 503
+    finally:
+        event.remove(product.source.sync_engine, "before_cursor_execute", observed)
 
 
 @pytest.mark.parametrize("headers", [

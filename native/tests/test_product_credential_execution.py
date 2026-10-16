@@ -54,7 +54,7 @@ async def credentials(admitted_product):
         ),
     )
     vault = ProductSecrets(runtime)
-    session, turn, prepared = await authority.active_turn(product)
+    session, turn, prepared = await authority.active_turn(product, private=True)
     return SimpleNamespace(product=product, service=vault.execution, vault=vault, scope=prepared.scope,
                            session=session, turn=turn, runtime=runtime)
 
