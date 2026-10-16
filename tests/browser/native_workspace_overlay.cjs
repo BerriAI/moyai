@@ -91,7 +91,10 @@ before(async () => {
         vite.middlewares.use((request, response, next) => {
           const url = new URL(request.url, 'http://localhost');
           if (url.pathname === '/') {
-            response.setHeader('Content-Type', 'text/html'); response.end(html); return;
+            void vite.transformIndexHtml(url.pathname, html).then(document => {
+              response.setHeader('Content-Type', 'text/html'); response.end(document);
+            }).catch(next);
+            return;
           }
           if (url.pathname === '/api/sessions/overlay-fixture/workspace') {
             response.setHeader('Content-Type', 'application/json');
@@ -111,6 +114,10 @@ before(async () => {
     }],
   });
   await server.listen();
+  // This virtual entry cannot be found by Vite's file-system dependency scan.
+  // Finish its cold import discovery before testing layout and focus behavior.
+  await server.transformRequest(moduleUrl);
+  await server.waitForRequestsIdle();
   address = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ headless: true });
 });
@@ -124,12 +131,17 @@ after(async () => {
 async function pageFor(t, options = {}, query = '') {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, ...options });
   const errors = [];
+  const loadingErrors = [];
   page.on('pageerror', error => errors.push(error.message));
+  page.on('requestfailed', request => loadingErrors.push(`${request.url()}: ${request.failure()?.errorText}`));
+  page.on('console', message => { if (message.type() === 'error') loadingErrors.push(message.text()); });
   await page.route('**/*', route =>
     new URL(route.request().url()).origin === address ? route.continue() : route.abort());
   t.after(async () => { await page.close(); assert.deepEqual(errors, [], 'No browser runtime errors'); });
   await page.goto(address + '/' + query);
-  await page.getByRole('button', { name: 'Workspace', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Workspace', exact: true }).waitFor().catch(error => {
+    throw new Error(`Workspace fixture failed to load: ${loadingErrors.join('\n')}`, { cause: error });
+  });
   return page;
 }
 
