@@ -67,14 +67,20 @@ def legacy_automation_counts(connection):
     if connection.execute("SELECT to_regclass('automations')").fetchone()[0] is not None:
         # This is the installed source's format, inspected in legacy Python.
         # Importing its definitions does not instantiate a scheduler or client.
-        from app.automation_definitions import SCHEDULE_VERSION
-        require(type(SCHEDULE_VERSION) is int and SCHEDULE_VERSION > 0)
+        from app import automation_definitions
+        if hasattr(automation_definitions, 'SCHEDULE_VERSION'):
+            schedule_version = automation_definitions.SCHEDULE_VERSION
+        else:
+            # Pre-consolidation images define this in their scheduler module.
+            # Resolve the installed source, not the candidate's module layout.
+            from app.automations import SCHEDULE_VERSION as schedule_version
+        require(type(schedule_version) is int and schedule_version > 0)
         counts['legacy_automations'] = connection.execute("""
             SELECT count(*) FROM automations WHERE paused IS DISTINCT FROM 1
                 OR synced_revision IS DISTINCT FROM revision
                 OR synced_schedule_version IS DISTINCT FROM %s
                 OR sync_error IS DISTINCT FROM ''
-        """, (SCHEDULE_VERSION,)).fetchone()[0]
+        """, (schedule_version,)).fetchone()[0]
     if connection.execute("SELECT to_regclass('automation_events')").fetchone()[0] is not None:
         counts['legacy_events'] = connection.execute(
             "SELECT count(*) FROM automation_events WHERE status='pending'"
