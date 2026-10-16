@@ -122,7 +122,7 @@ not the legacy application's database or APIs.
 
 - **Skills:** type `/` anywhere in the home or conversation composer, then search
   by name. Use the arrow keys and Enter/Tab, or click a result, to insert an
-  inline icon-and-`/team` token at the cursor. Keep typing before or after it;
+  inline icon-and-name token at the cursor, such as **Team** for `/team`. Keep typing before or after it;
   Backspace removes it, or select the token and press Delete. Copy/paste within
   Moyai and queued-message editing preserve the selection. Sent messages retain
   the selected name and icon after reload, even if the skill is subsequently

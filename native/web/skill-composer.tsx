@@ -14,7 +14,7 @@ import { mergeRegister } from "@lexical/utils"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { api, csrfToken } from "./api"
-import { SkillIcon, skillScopeName, type ComposerSkill } from "./skill-content"
+import { SkillIcon, skillDisplayName, skillScopeName, type ComposerSkill } from "./skill-content"
 import { $createSkillNode, SkillNode } from "./skill-node"
 import { skillDisplayText, skillMentions, skillQueryAllowed, transcriptSkills } from "./skill-mentions"
 import "./skill-composer.css"
@@ -198,6 +198,7 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
             <ContentEditable ref={bindInput}
               className="skill-editor" aria-label="Message Moyai" aria-multiline="true" aria-disabled={disabled}
               aria-controls={open ? id : undefined} aria-expanded={open} aria-autocomplete="list"
+              aria-describedby={open ? `${id}-help` : undefined}
               aria-activedescendant={open && matches.length ? `${id}-${selectedIndex}` : undefined}
               onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
               onPasteCapture={event => { onPaste?.(event); if (event.defaultPrevented) event.stopPropagation() }} />
@@ -208,13 +209,17 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
       <PopoverContent className="skill-picker" side="top" align="start" sideOffset={8}
         onOpenAutoFocus={event => event.preventDefault()} onCloseAutoFocus={event => event.preventDefault()}
         onInteractOutside={event => { if (event.target instanceof Node && input.current?.contains(event.target)) event.preventDefault() }}>
-        <div className="skill-picker-heading"><span>Skills</span><small>↑ ↓ to browse · Enter to select</small></div>
+        <div className="skill-picker-heading">Skills</div>
+        <span className="visually-hidden" id={`${id}-help`}>Use the arrow keys to browse skills, Enter to select, or Escape to close.</span>
         {loading ? <p role="status">Loading skills…</p> : state.error ? <div role="alert"><p>Couldn’t load your skills.</p><Button type="button" variant="outline" size="sm" onMouseDown={event => event.preventDefault()} onClick={() => setVersion(value => value + 1)}>Retry skills</Button></div>
           : matches.length ? <div id={id} role="listbox" aria-label="Skills" className="skill-options">{matches.map((skill, index) =>
             <button type="button" role="option" aria-selected={selectedIndex === index} tabIndex={-1}
-              id={`${id}-${index}`} key={skill.reference} className="skill-option" onMouseDown={event => event.preventDefault()} onClick={() => pick(skill)}>
-              <span className="skill-option-icon"><SkillIcon skill={skill} /></span>
-              <span className="skill-option-copy"><span className="skill-option-title">{skill.name}<small>{skillScopeName(skill.scope)}</small></span><span className="skill-option-description">{skill.description}</span></span>
+              id={`${id}-${index}`} key={skill.reference} className="skill-option"
+              title={`${skillDisplayName(skill.name)} · ${skillScopeName(skill.scope)}\n${skill.description}`}
+              onMouseDown={event => event.preventDefault()} onClick={() => pick(skill)}>
+              <span className="skill-option-icon"><SkillIcon /></span>
+              <span className="skill-option-copy"><span className="skill-option-title">{skillDisplayName(skill.name)}</span><span className="skill-option-description">{skill.description}</span></span>
+              <span className="skill-option-scope">{skillScopeName(skill.scope)}</span>
             </button>)}</div>
           : <p role="status">No matching skills{shared ? " available in shared sessions" : ""}. <a href="#settings/skills">View skills</a></p>}
       </PopoverContent>

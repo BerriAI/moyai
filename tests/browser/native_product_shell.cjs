@@ -114,8 +114,8 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   const box=await options.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=width+1);
   await input.press('Enter');
   const mention=input.getByLabel('/team skill');await mention.waitFor();
-  assert.equal(await mention.locator('.skill-emoji').innerText(),'👥');
-  assert.match(await input.innerText(),/^Please use 👥\/team /);
+  assert.equal(await mention.locator('svg.lucide-box').count(),1);
+  assert.match(await input.innerText(),/^Please use Team /);
   assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,0);
   await input.pressSequentially('to inspect the issue.');
   await input.press('Enter');
@@ -123,10 +123,10 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   const sent=state.requests.find(r=>r.method==='POST'&&r.path.endsWith('/messages'));
   assert.equal(sent.body.prompt,'Please use [/team](moyai-skill:personal%3Ateam?icon=%F0%9F%91%A5) to inspect the issue.');
   const saved=page.locator('.transcript').getByLabel('/team skill');await saved.waitFor();
-  assert.equal(await saved.locator('.skill-emoji').innerText(),'👥');
+  assert.equal(await saved.locator('svg.lucide-box').count(),1);
   state.skills=[];await page.reload();await saved.waitFor();
-  assert.equal(await saved.locator('.skill-emoji').innerText(),'👥');
-  assert.match(await saved.locator('..').innerText(),/Please use 👥\/team to inspect the issue\./);
+  assert.equal(await saved.locator('svg.lucide-box').count(),1);
+  assert.match(await saved.locator('..').innerText(),/Please use Team to inspect the issue\./);
   state.skills=skills;
   await page.goto(base+'/#'+sessionId);await input.fill('/team');await options.waitFor();
   await input.press('ArrowDown');await input.press('Tab');
@@ -144,7 +144,7 @@ test('inline mention editing preserves middle-of-text insertion, undo, copy/past
   const page=await pageFor(t,'#'+sessionId),input=page.getByRole('textbox',{name:'Message Moyai'}),options=page.getByRole('listbox',{name:'Skills'});
   await input.fill('Before  after');await input.press('Home');for(let i=0;i<7;i++)await input.press('ArrowRight');
   await input.pressSequentially('/team');await options.waitFor();await input.press('Enter');
-  await input.getByLabel('/team skill').waitFor();assert.match(await input.innerText(),/^Before 👥\/team  after$/);
+  await input.getByLabel('/team skill').waitFor();assert.match(await input.innerText(),/^Before Team  after$/);
   await input.press('ControlOrMeta+z');await input.getByLabel('/team skill').waitFor({state:'hidden'});
   assert.equal(await input.innerText(),'Before /team after');
   await input.press('ControlOrMeta+Shift+z');await input.getByLabel('/team skill').waitFor();
@@ -159,12 +159,12 @@ test('inline mention editing preserves middle-of-text insertion, undo, copy/past
     const clipboardData=new DataTransfer();clipboardData.setData('application/x-moyai-message',data.rich);clipboardData.setData('text/plain',data.text);
     el.dispatchEvent(new ClipboardEvent('paste',{clipboardData,bubbles:true,cancelable:true}));
   },clipboard);
-  await input.getByLabel('/team skill').waitFor();assert.equal(await input.innerText(),'Before 👥/team  after');
+  await input.getByLabel('/team skill').waitFor();assert.equal(await input.innerText(),'Before Team  after');
   await input.getByLabel('/team skill').click();
   await input.press('Delete');assert.equal(await input.getByLabel('/team skill').count(),0);
   await input.fill('Example: `use /team');await page.waitForTimeout(100);assert.equal(await options.count(),0);
   await input.fill('A new line');await input.press('Shift+Enter');await input.pressSequentially('then /team');await options.waitFor();
-  await input.press('Enter');assert.match(await input.innerText(),/A new line\nthen 👥\/team/);
+  await input.press('Enter');assert.match(await input.innerText(),/A new line\nthen Team/);
   const posts=state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length;
   await input.dispatchEvent('keydown',{key:'Enter',isComposing:true});assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,posts);
 });
