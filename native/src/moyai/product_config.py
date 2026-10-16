@@ -192,10 +192,21 @@ def load_product_config(environment: Mapping[str, str] | None = None) -> Product
             raise ProductConfigurationError(
                 "Select an explicit product mode; existing product schema settings cannot bootstrap standalone."
             )
+        native_schema = env.get("MOYAI_NATIVE_DATABASE_SCHEMA", "")
+        schema_mode = env.get("MOYAI_NATIVE_SCHEMA_MODE", "bootstrap")
+        if schema_mode not in {"bootstrap", "verify"}:
+            raise ProductConfigurationError("Standalone schema mode must be bootstrap or verify.")
+        if native_schema and (
+            not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", native_schema)
+            or native_schema in {"public", "information_schema"} or native_schema.startswith("pg_")
+        ):
+            raise ProductConfigurationError("Select a dedicated native PostgreSQL schema.")
+        if schema_mode == "verify" and (not native_schema or not env.get("MOYAI_DATABASE_URL")):
+            raise ProductConfigurationError("Standalone schema verification requires PostgreSQL and its native schema.")
         return ProductConfig(
             product_mode="standalone", role="standalone",
             database_url=env.get("MOYAI_DATABASE_URL", ""), product_schema=None,
-            native_schema=None, native_schema_mode="bootstrap",
+            native_schema=native_schema or None, native_schema_mode=cast(Literal["bootstrap", "verify"], schema_mode),
             native_encryption_key=SecretStr(env.get("ENCRYPTION_KEY", "")),
             native_task_queue=env.get("TEMPORAL_TASK_QUEUE", "moyai-pydantic-v1"),
             native_key_format=NATIVE_KEY_FORMAT, native_object_prefix="moyai",

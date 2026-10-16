@@ -131,8 +131,8 @@ async def prepare_native_schema(config: ProductConfig, *, apply: bool) -> dict[s
     await asyncio.to_thread(verify_product_schema, config)
     import asyncpg
     from sqlalchemy.exc import SQLAlchemyError
-    from sqlalchemy.ext.asyncio import create_async_engine
 
+    from .postgres import create_engine
     from .product_continuation_schema import (
         install_source_continuation_fence,
         verify_source_continuation_fence,
@@ -142,7 +142,7 @@ async def prepare_native_schema(config: ProductConfig, *, apply: bool) -> dict[s
     from .stores import NativeStores
 
     settings = _settings(config)
-    engine = create_async_engine(settings.sqlalchemy_url, pool_pre_ping=True)
+    engine = create_engine(settings.sqlalchemy_url, pool_pre_ping=True)
     stores = NativeStores(settings)
     try:
         if apply:
@@ -214,7 +214,7 @@ def main(argv: list[str] | None = None) -> None:
         app = create_application(config, host=args.host)
         server = uvicorn.Server(uvicorn.Config(
             app, host=args.host, port=args.port, workers=1,
-            proxy_headers=False, timeout_graceful_shutdown=20,
+            proxy_headers=False, timeout_graceful_shutdown=_settings(config).http_shutdown_seconds,
         ))
         lifecycle = getattr(app.state, "product_lifecycle", None)
         if lifecycle is not None:

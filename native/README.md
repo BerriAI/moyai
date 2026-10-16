@@ -45,13 +45,22 @@ loads a step snapshot and launches a competing agent.
 From the repository root:
 
 ```sh
-npm ci
-npm run build:native
 cd native
 uv sync --frozen
 cp .env.example .env
 chmod 600 .env
 ```
+
+Building the Python package from this repository requires Node.js 22 and npm.
+The build hook runs `npm ci` and `npm run build:native` from the repository root.
+Generated files under `native/src/moyai/static` are ignored by Git and included
+in both the wheel and source distribution. A wheel built from the source
+distribution reuses those assets without requiring Node.js. The Dockerfile builds
+the same assets in a separate Node stage and copies them into the Python image;
+Node.js and frontend build dependencies stay in the build stage.
+
+After editing frontend sources, run `npm run build:native` from the repository
+root before checking the running application.
 
 Configure a strong `WORKSPACE_PASSWORD`, your LiteLLM gateway URL/key, an enabled
 model alias, and Modal authentication. The current inference binding uses the

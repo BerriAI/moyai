@@ -1,0 +1,30 @@
+services:
+  setup:
+    extends:
+      file: compose.common.yaml
+      service: setup
+    environment:
+      MOYAI_INSTALL_TOPOLOGY: standalone
+  app:
+    extends:
+      file: compose.common.yaml
+      service: runtime
+    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "serve", "standalone"]
+    environment:
+      MOYAI_INSTALL_TOPOLOGY: standalone
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+  proxy:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    ports:
+      - "${MOYAI_BIND_ADDRESS:-127.0.0.1}:${MOYAI_PORT:-8787}:8080"
+    volumes:
+      - ./nginx.standalone.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+        restart: true
+    restart: unless-stopped
+volumes:
+  moyai-state:

@@ -252,10 +252,15 @@ async def test_existing_unsplit_native_history_replays_with_versioned_routing(ru
         assert scenario.model_calls == calls
 
 
-async def test_split_workers_register_one_owner_before_polling_and_all_become_ready(runtime):
+@pytest.mark.parametrize("shutdown_seconds", [0, 240])
+async def test_split_workers_register_one_owner_before_polling_and_all_become_ready(runtime, shutdown_seconds):
+    runtime.settings.worker_shutdown_seconds = shutdown_seconds
     async with await WorkflowEnvironment.start_local(plugins=[PydanticAIPlugin()]) as environment:
         runtime.client = environment.client
         pools = make_worker(runtime)
+        allowances = [worker.config()["graceful_shutdown_timeout"].total_seconds() for worker in pools.workers]
+        assert sum(allowances) == shutdown_seconds
+        assert all(value > 0 for value in allowances) if shutdown_seconds else not any(allowances)
 
         async def register():
             assert not any(worker.is_running for worker in pools.workers)

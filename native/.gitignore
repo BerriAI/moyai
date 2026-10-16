@@ -4,6 +4,7 @@
 !.env.example
 node_modules/
 web/dist/
+src/moyai/static/
 dist/
 __pycache__/
 .pytest_cache/

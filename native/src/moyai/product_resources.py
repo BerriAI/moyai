@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from .postgres import create_engine
 from .product_files import ProductFilesAdapter
 from .product_history import ProductHistoryAdapter
 from .product_identity import ProductIdentityAdapter
@@ -36,7 +37,7 @@ class ProductResources:
             raise ValueError("Existing-product execution requires the canonical PostgreSQL database.")
         self.settings, self.native_engine = settings, native_engine
         url = settings.moyai_database_url
-        self.engine = create_async_engine(
+        self.engine = create_engine(
             "postgresql+asyncpg://" + url.split("://", 1)[1],
             pool_pre_ping=True,
             pool_size=settings.moyai_database_pool_size, max_overflow=0, pool_timeout=10,

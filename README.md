@@ -69,6 +69,12 @@ Read the full story in the launch post: [Moyai is now open source](https://docs.
 
 ## Getting started
 
+For a Docker installation of the Pydantic AI/Harness core, use the
+[Docker package](deploy/docker/README.md). It supports standalone and four-service
+deployments with PostgreSQL, S3-compatible storage, and external or bundled
+Temporal. See the [implementation plan](docs/docker-deployment-plan.md) for scope
+and follow-up work.
+
 Choose **Modal, [Substrate](docs/substrate.md), or [AWS Lambda MicroVMs](docs/aws-lambda-microvms.md)** for agent sandboxes in **Settings → Runtime**. Modal is the default. Follow the provider's setup guide to connect your own infrastructure.
 
 This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Agent SDK harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
