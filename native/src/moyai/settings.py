@@ -64,6 +64,21 @@ class Settings(BaseSettings):
         default="moyai-pydantic",
         validation_alias=AliasChoices("MOYAI_MODAL_APP", "MODAL_APP_NAME"),
     )
+    sandbox_provider: Literal["modal", "lambda"] = Field(default="modal", validation_alias="SANDBOX_PROVIDER")
+    lambda_region: str = Field(default="us-east-1", validation_alias="LAMBDA_REGION")
+    lambda_profile: str = Field(default="", validation_alias="LAMBDA_PROFILE")
+    lambda_image: str = Field(default="", validation_alias="LAMBDA_IMAGE")
+    lambda_image_version: str = Field(default="", validation_alias="LAMBDA_IMAGE_VERSION")
+    lambda_checkpoint_bucket: str = Field(default="", validation_alias="LAMBDA_CHECKPOINT_BUCKET")
+    lambda_checkpoint_prefix: str = Field(
+        default="moyai-native-lambda", pattern=r"^[A-Za-z0-9_-][A-Za-z0-9_/-]*$",
+        validation_alias="LAMBDA_CHECKPOINT_PREFIX",
+    )
+    lambda_execution_role_arn: str = Field(default="", validation_alias="LAMBDA_EXECUTION_ROLE_ARN")
+    lambda_egress_connector: str = Field(default="", validation_alias="LAMBDA_EGRESS_CONNECTOR")
+    lambda_checkpoint_timeout: int = Field(
+        default=900, ge=30, le=900, validation_alias="SNAPSHOT_TIMEOUT_SECONDS",
+    )
     computer_lifetime: int = Field(default=3600, ge=60, le=86400, validation_alias="MOYAI_COMPUTER_TIMEOUT")
     computer_idle_timeout: int = Field(
         default=600, ge=60, le=86400, validation_alias="MOYAI_COMPUTER_IDLE_TIMEOUT"
@@ -142,6 +157,10 @@ class Settings(BaseSettings):
         return value
 
     def validate_worker(self, *, brokered: bool = False) -> None:
+        if self.sandbox_provider == "lambda" and not all((
+            self.lambda_region, self.lambda_image, self.lambda_image_version, self.lambda_checkpoint_bucket,
+        )):
+            raise ValueError("Lambda requires LAMBDA_REGION, LAMBDA_IMAGE, LAMBDA_IMAGE_VERSION and LAMBDA_CHECKPOINT_BUCKET.")
         if not self.gateway_key.get_secret_value() and not (
             self.product_mode == "existing" and brokered
         ):

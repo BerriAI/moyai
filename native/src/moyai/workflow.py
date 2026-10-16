@@ -201,7 +201,9 @@ class TurnWorkflow(PydanticAIWorkflow):
                 try:
                     await workflow.execute_activity(
                         "moyai_save_computer_v1", args=[turn_id, reference],
-                        start_to_close_timeout=timedelta(minutes=3),
+                        start_to_close_timeout=timedelta(
+                            minutes=17 if reference and reference.get("provider") == "lambda" else 3,
+                        ),
                         retry_policy=RetryPolicy(maximum_attempts=1),
                     )
                 except ActivityError:

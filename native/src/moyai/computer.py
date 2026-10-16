@@ -208,9 +208,13 @@ async def request(runtime: Runtime, session: Session, body: dict) -> dict:
     if not session.workspace:
         raise HTTPException(409, "Send Moyai a task to start this conversation's computer.")
     reference = TypeAdapter(WorkspaceRef).validate_json(session.workspace)
-    if reference.provider != "modal":
-        raise HTTPException(409, "Desktop access requires a Modal computer.")
-    workspace = Workspace(ModalSandbox(working_dir="/workspace").backend(reference))
+    if reference.provider == "lambda":
+        from .lambda_workspace import LambdaBackend
+        workspace = Workspace(LambdaBackend(runtime.settings, ref=reference))
+    elif reference.provider == "modal":
+        workspace = Workspace(ModalSandbox(working_dir="/workspace").backend(reference))
+    else:
+        raise HTTPException(409, "Desktop access requires a supported cloud computer.")
     try:
         return await guest_request(workspace, body)
     except WorkspaceUnavailableError as error:

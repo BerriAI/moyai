@@ -3,7 +3,7 @@
 Moyai is a shared AI workspace for coding and connected-service tasks. Chat with
 an agent, steer its work, answer questions, inspect its computer, and keep the
 resulting files and history. Pydantic AI and Harness provide the agent; Temporal
-runs durable execution, Modal provides its computer, and LiteLLM supplies models.
+runs durable execution, Modal or AWS Lambda MicroVMs provide its computer, and LiteLLM supplies models.
 
 The application has one Python installation, one lockfile, and one React frontend.
 An existing deployment keeps its users, permissions, historical sessions,
@@ -20,6 +20,9 @@ available when your laptop is off. The local quickstart manages SQLite, encrypte
 file storage and a local Temporal development server automatically. You only
 need a model gateway, an enabled Responses-capable model, and Modal credentials.
 Agents execute in Modal computers; Docker hosts the Moyai application.
+
+For AWS ARM64 computers, follow the [native Lambda MicroVM setup](docs/aws-lambda-microvms.md).
+Modal remains the default for the quickstart below.
 
 ### Option 1: Try locally with Docker
 

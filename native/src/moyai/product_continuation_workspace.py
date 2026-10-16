@@ -416,7 +416,7 @@ class ProductWorkspaceCompatibility:
                     ):
                         raise PermissionError("The repository receipt belongs to a different task authority.")
                     await self.runtime.database._check_product_turn(db, turn, grant)
-                    if prepared.workspace and prepared.workspace.get("provider") == "modal":
+                    if prepared.workspace and prepared.workspace.get("provider") in {"modal", "lambda"}:
                         # The current session computer may belong to a later
                         # turn. Historical memory reads use this exact receipt.
                         receipt = await connections.repository_receipt(
