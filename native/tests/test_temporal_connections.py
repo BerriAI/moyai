@@ -21,6 +21,7 @@ from moyai.models import Connection, Turn, new_id
 from moyai.product_connections import ProductGitHubToolset
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
@@ -152,6 +153,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         replaying = True
         await Replayer(
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            interceptors=[ActivityCapacity()],
         ).replay_workflow(history)
 
     assert calls == ["test/selected"]
