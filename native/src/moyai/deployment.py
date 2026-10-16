@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import re
+from contextlib import nullcontext
 from uuid import uuid4
 
 import asyncpg
@@ -22,6 +23,7 @@ from .deployment_config import (
     configuration,
     new_state,
     read_state,
+    standalone_lock,
     state_path,
     write_state,
 )
@@ -55,6 +57,8 @@ async def initialize_locked(environment: dict[str, str], state: dict | None, val
         write_state(environment, state)
         raise
     state.update(phase="initialized", schemas=schemas)
+    if values["MOYAI_PRODUCT_MODE"] == "standalone":
+        state["activation_pending"] = False
     write_state(environment, state)
     return {"installation": "initialized", "revision": state["revision"], "model_execution": "not_checked"}
 
@@ -164,6 +168,55 @@ async def apply_upgrade(environment: dict[str, str], state: dict, values: dict[s
     return {"upgrade": "prepared", "revision": state["revision"], "execution": "paused"}
 
 
+async def standalone_unsettled(values: dict[str, str]) -> dict[str, int]:
+    from sqlalchemy import func, select
+
+    from .database import Database
+    from .models import Turn
+    from .product_drain import TERMINAL_TURNS, ProductDrainService
+    from .security import Security
+
+    configured = deployment_checks.settings(values)
+    database = Database(configured, Security(configured.master_key))
+    try:
+        async with database.sessions.begin() as session:
+            turns = await session.scalar(select(func.count()).select_from(Turn).where(
+                Turn.status.not_in(TERMINAL_TURNS),
+            ))
+            effects, requests = await ProductDrainService._unsettled(session)
+            return {"turns": turns or 0, "effects": effects, "requests": requests}
+    finally:
+        await database.close()
+
+
+async def standalone_upgrade(
+    args: argparse.Namespace, environment: dict[str, str], state: dict, values: dict[str, str],
+) -> dict:
+    if (
+        values["MOYAI_PRODUCT_MODE"] != "standalone" or state["phase"] != "initialized"
+        or state.get("upgrade") or state["revision"] != args.source_revision
+        or state["revision"] == values["MOYAI_BUILD_SHA"] or state.get("standalone_lock_protocol") != 1
+    ):
+        raise InstallationError("Standalone upgrades require the original stopped installation and a new image revision.")
+    with standalone_lock(environment):
+        async with deployment_bootstrap.installation_lock(values):
+            counts = await standalone_unsettled(values)
+            if any(counts.values()):
+                raise InstallationError(
+                    "Unfinished standalone work remains. Restart the old image and finish or reconcile it before upgrading."
+                )
+            state.update(phase="upgrading", upgrade={
+                "source": state["revision"], "target": values["MOYAI_BUILD_SHA"], "phase": "migrating",
+            })
+            write_state(environment, state)
+            schemas = await deployment_bootstrap.provision(values, fresh=False)
+            state.update(phase="initialized", revision=values["MOYAI_BUILD_SHA"], schemas=schemas)
+            state["last_upgrade"] = state.pop("upgrade")
+            state["last_upgrade"]["phase"] = "completed"
+            write_state(environment, state)
+    return {"upgrade": "prepared", "revision": state["revision"]}
+
+
 async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dict:
     if args.command == "namespace":
         if environment.get("MOYAI_TEMPORAL_MODE") != "bundled":
@@ -198,6 +251,8 @@ async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dic
         return await begin_upgrade(args, environment, state, values)
     if args.command == "apply-upgrade":
         return await apply_upgrade(environment, state, values)
+    if args.command == "standalone-upgrade":
+        return await standalone_upgrade(args, environment, state, values)
     if args.command == "recover-setup":
         if state["phase"] not in {"prepared", "failed"} or state["revision"] != values["MOYAI_BUILD_SHA"]:
             raise InstallationError("Setup recovery requires the original failed installation and image.")
@@ -256,6 +311,8 @@ def main() -> None:
     upgrade = commands.add_parser("begin-upgrade")
     upgrade.add_argument("--revision", required=True)
     upgrade.add_argument("--timeout", type=int, default=900)
+    offline = commands.add_parser("standalone-upgrade")
+    offline.add_argument("--source-revision", required=True)
     pause = commands.add_parser("pause")
     pause.add_argument("--timeout", type=int, default=900)
     serve = commands.add_parser("serve")
@@ -278,7 +335,9 @@ def main() -> None:
                 raise InstallationError("The selected role does not match the persisted installation topology.")
             os.environ.update(values)
             from .product_start import main as start
-            start(["serve", "--host", "0.0.0.0", "--port", "8787"])
+            lock = standalone_lock(environment) if args.role == "standalone" else nullcontext()
+            with lock:
+                start(["serve", "--host", "0.0.0.0", "--port", "8787"])
             return
         lock = state_path(environment).parent / ".installation.lock"
         lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

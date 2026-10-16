@@ -16,6 +16,7 @@ Use Docker Compose 2.30 or newer for raw env-file support.
 
 Download `moyai-docker.tar.gz` from a Moyai GitHub release and extract it. The
 bundle's `.env.example` already names the release image by immutable digest.
+Until a release includes that bundle, use the checkout build instructions below.
 From the extracted `moyai-docker` directory:
 
 ```sh
@@ -97,7 +98,7 @@ probe, checks the Temporal namespace, lists the selected gateway model, and
 authenticates the Modal client. It then prepares application schemas. These
 checks do not execute a model or start a computer.
 
-Retrieve a generated password only in your private terminal:
+Retrieve the generated initial password only in your private terminal:
 
 ```sh
 docker compose run --rm --no-deps setup \
@@ -147,16 +148,16 @@ data.
 
 ## Maintenance upgrades
 
-The split package supports planned maintenance upgrades within the Pydantic
+The package supports planned maintenance upgrades within the Pydantic
 core. Download and inspect the candidate release before the maintenance window.
-Back up application data, objects, and installation state. Keep the old image
+Back up application data, objects, `.env`, and installation state. Keep the old image
 digest and current bundle for recovery.
 
 ```sh
 sh upgrade.sh ghcr.io/berriai/moyai@sha256:THE_CANDIDATE_DIGEST
 ```
 
-The helper requests a generation-bound drain from the live worker, waits for
+For split mode, the helper requests a generation-bound drain from the live worker, waits for
 safe saved boundaries, stops ingress and the four old owners, prepares schemas
 with the new image, and starts matching new roles. It resumes only after their
 health identities match. Existing queued/parked native work remains preserved.
@@ -171,10 +172,14 @@ possibly applied migration or resume command blindly. Use the installed image's
 or complete a reviewed repair for a partial migration. A changed schema may
 prevent rollback to the old image.
 
-Standalone installations currently require a planned offline upgrade: finish
-work, stop ingress and the application, preserve backups, and use a reviewed
-schema transition. The split upgrade helper deliberately rejects standalone
-mode. Bundled Temporal version/database upgrades are a separate maintenance
+For standalone mode, finish all work first. The same helper stops ingress and
+the application, verifies that the application released its runtime lock, and
+refuses to migrate while unfinished turns or uncertain effects/requests remain.
+If that check fails before migration, restart the old image and settle the work.
+Standalone replicas are unsupported; the shared runtime lock prevents a second
+container in the installation from starting.
+
+Bundled Temporal version/database upgrades are a separate maintenance
 operation; an application image upgrade does not update the pinned Temporal
 services.
 

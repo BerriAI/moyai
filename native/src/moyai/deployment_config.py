@@ -10,6 +10,7 @@ import re
 import secrets
 import tempfile
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -67,6 +68,20 @@ def write_state(environment: Mapping[str, str], state: dict) -> None:
             os.close(parent)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+@contextmanager
+def standalone_lock(environment: Mapping[str, str]):
+    import fcntl
+
+    path = state_path(environment).parent / ".standalone-runtime.lock"
+    with path.open("a") as handle:
+        os.chmod(path, 0o600)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise InstallationError("The standalone application is still running; stop it before maintenance.") from None
+        yield
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -243,4 +258,5 @@ def new_state(environment: Mapping[str, str], values: Mapping[str, str]) -> dict
     return {
         "version": 1, "scope": values["MOYAI_INSTALL_SCOPE"], "secrets": generated,
         "phase": "prepared", "revision": values["MOYAI_BUILD_SHA"], "activation_pending": True,
+        "standalone_lock_protocol": 1,
     }

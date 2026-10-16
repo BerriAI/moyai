@@ -16,6 +16,7 @@ from moyai.deployment_config import (
     configuration,
     new_state,
     read_state,
+    standalone_lock,
     write_state,
 )
 from moyai.product_config import load_product_config
@@ -271,3 +272,51 @@ async def test_unknown_migration_outcome_is_not_automatically_retried(install_en
     with pytest.raises(InstallationError, match="recorded target"):
         await deployment.apply_upgrade(install_environment, persisted, values)
     provision.assert_awaited_once()
+
+
+def test_standalone_runtime_lock_excludes_second_instance_and_migration(install_environment):
+    with (
+        standalone_lock(install_environment),
+        pytest.raises(InstallationError, match="still running"),
+        standalone_lock(install_environment),
+    ):
+        pytest.fail("Another process acquired the runtime lock.")
+    with standalone_lock(install_environment):
+        pass
+
+
+async def test_standalone_upgrade_refuses_unfinished_work(install_environment, monkeypatch):
+    state, _ = prepared(install_environment)
+    state["phase"] = "initialized"
+    values = configuration({**install_environment, "MOYAI_BUILD_SHA": "2" * 40}, state)
+    monkeypatch.setattr(deployment, "standalone_unsettled", AsyncMock(return_value={
+        "turns": 1, "effects": 0, "requests": 0,
+    }))
+    provision = AsyncMock()
+    monkeypatch.setattr(deployment.deployment_bootstrap, "provision", provision)
+    with pytest.raises(InstallationError, match="Unfinished standalone"):
+        await deployment.standalone_upgrade(
+            argparse.Namespace(source_revision="1" * 40), install_environment, state, values,
+        )
+    assert state["phase"] == "initialized"
+    provision.assert_not_awaited()
+
+
+async def test_standalone_offline_upgrade_retains_keys_and_records_revision(install_environment, monkeypatch):
+    state, _ = prepared(install_environment)
+    state["phase"] = "initialized"
+    original_keys = dict(state["secrets"])
+    values = configuration({**install_environment, "MOYAI_BUILD_SHA": "2" * 40}, state)
+    monkeypatch.setattr(deployment, "standalone_unsettled", AsyncMock(return_value={
+        "turns": 0, "effects": 0, "requests": 0,
+    }))
+    monkeypatch.setattr(deployment.deployment_bootstrap, "provision", AsyncMock(return_value={"native": "v13"}))
+    result = await deployment.standalone_upgrade(
+        argparse.Namespace(source_revision="1" * 40), install_environment, state, values,
+    )
+    assert result["revision"] == "2" * 40
+    assert state["secrets"] == original_keys
+    assert state["phase"] == "initialized"
+    assert state["last_upgrade"]["phase"] == "completed"
+    assert state["last_upgrade"]["source"] == "1" * 40
+    assert "upgrade" not in state

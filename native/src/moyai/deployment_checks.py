@@ -29,6 +29,7 @@ from .storage import ObjectStore
 def settings(values: Mapping[str, str]) -> Settings:
     return cast(Settings, cast(type[BaseSettings], Settings)(
         _env_file=None,
+        product_mode=values["MOYAI_PRODUCT_MODE"],
         data_dir=values["DATA_DIR"],
         database_url=values["MOYAI_DATABASE_URL"],
         database_schema=values["MOYAI_NATIVE_DATABASE_SCHEMA"],
