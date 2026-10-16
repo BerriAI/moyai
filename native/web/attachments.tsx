@@ -35,7 +35,7 @@ export function useAttachments(onError: (message: string) => void) {
     try { await queue.current!.add(files) } catch (error) { onError(String(error)) }
   }
 
-  function paste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+  function paste(event: React.ClipboardEvent<HTMLElement>) {
     const files = Array.from(event.clipboardData.items)
       .filter(item => item.kind === "file" && item.type.startsWith("image/"))
       .map(item => item.getAsFile()).filter((file): file is File => file !== null)

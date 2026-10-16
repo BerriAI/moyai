@@ -49,7 +49,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     && !accountNotice && selectedAccounts.every(id => accounts.some(row => row.id === id && row.enabled && (isPrivate || row.shared))))
   const sculpture = useRef<HTMLDivElement>(null)
   const stars = useRef<HTMLCanvasElement>(null)
-  const input = useRef<HTMLTextAreaElement>(null)
+  const input = useRef<HTMLDivElement>(null)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
   const mounted = useRef(true)
@@ -75,11 +75,11 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     return () => controller.abort()
   }, [productMode, accountScope, isPrivate])
 
-  async function send() {
-    if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)) return
+  async function send(prompt = draft) {
+    if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!prompt.trim() && !pictures.files.length)) return
     submitting.current = true
     setBusy(true); setError("")
-    const auth = csrfToken(), prompt = draft, attachments = pictures.readyFiles
+    const auth = csrfToken(), attachments = pictures.readyFiles
     try {
       const submission = homeSubmission(prompt, model, isPrivate, attachments.map(file => file.id), selectedAccounts, accounts)
       if (admission.current?.signature !== submission.signature) admission.current = { signature: submission.signature, request: crypto.randomUUID() }
@@ -113,7 +113,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         {error && <p className="error" role="alert">{error}</p>}
         <div className="composer home-composer">
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <SkillComposer ref={input} value={draft} onChange={setDraft} onSend={() => void send()} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
+          <SkillComposer ref={input} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
           <div className="composer-actions">
             <AttachButton add={pictures.add} disabled={busy} />
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>

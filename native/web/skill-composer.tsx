@@ -1,54 +1,108 @@
-import React, { useEffect, useId, useRef, useState } from "react"
-import { BookOpen, Bug, Code2, FileText, GitPullRequest, Globe, Image, Rocket, Search, Shield, Sparkles, Terminal, Users, Video, X } from "lucide-react"
+import React, { useCallback, useEffect, useId, useRef, useState } from "react"
+import {
+  $createLineBreakNode, $createParagraphNode, $createTextNode, $getNodeByKey, $getRoot, $getSelection,
+  $isNodeSelection, $isRangeSelection, $isTextNode, COMMAND_PRIORITY_HIGH, COPY_COMMAND, CUT_COMMAND,
+  HISTORY_PUSH_TAG, KEY_DOWN_COMMAND, PASTE_COMMAND, SKIP_DOM_SELECTION_TAG, type LexicalNode,
+} from "lexical"
+import { LexicalComposer } from "@lexical/react/LexicalComposer"
+import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext"
+import { ContentEditable } from "@lexical/react/LexicalContentEditable"
+import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin"
+import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin"
+import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary"
+import { mergeRegister } from "@lexical/utils"
 import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/textarea"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { api, csrfToken } from "./api"
+import { SkillIcon, skillScopeName, type ComposerSkill } from "./skill-content"
+import { $createSkillNode, SkillNode } from "./skill-node"
+import { skillDisplayText, skillMentions, skillQueryAllowed, transcriptSkills } from "./skill-mentions"
 import "./skill-composer.css"
 
-export type ComposerSkill = { id: string; name: string; description: string; scope: string; reference: string; icon?: string }
 type SkillPage = { skills: ComposerSkill[]; has_more: boolean; next_offset: number | null }
-const scopeName = (scope: string) => ({ personal: "Personal", organization: "Organization", org: "Organization", shared: "Shared", bundled: "Built in" }[scope] || scope)
-const icons = { code: Code2, terminal: Terminal, users: Users, team: Users, search: Search, research: Search, document: FileText, file: FileText, review: GitPullRequest, "git-pull-request": GitPullRequest, shield: Shield, globe: Globe, bug: Bug, rocket: Rocket, image: Image, video: Video, book: BookOpen, sparkles: Sparkles }
-
-export function SkillIcon({ skill }: { skill: Pick<ComposerSkill, "name" | "icon"> }) {
-  if (skill.icon && /\p{Extended_Pictographic}/u.test(skill.icon) && [...skill.icon].length <= 12) {
-    return <span className="skill-emoji" aria-hidden="true">{skill.icon}</span>
-  }
-  const hint = skill.icon && skill.icon !== "auto" ? skill.icon : /team/.test(skill.name) ? "team" : /review|pr/.test(skill.name) ? "review" : /research/.test(skill.name) ? "search" : "sparkles"
-  const Icon = icons[hint as keyof typeof icons] || Sparkles
-  return <Icon aria-hidden="true" size={17} />
-}
-
-export function skillDraft(value: string): { references: string[]; text: string } {
-  let text = value
-  const references: string[] = []
-  // A terminating space commits a selection. An unfinished scoped name stays editable.
-  for (let match; (match = text.match(/^\s*\/((?:personal|org|shared|bundled):[A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s+/));) {
-    references.push(match[1]); text = text.slice(match[0].length)
-  }
-  return { references, text }
-}
-
-function compose(references: string[], text: string) { return references.map(reference => `/${reference} `).join("") + text }
-
-export const SkillComposer = React.forwardRef<HTMLTextAreaElement, {
-  value: string; onChange: (value: string) => void; onSend: () => void
-  onPaste?: React.ClipboardEventHandler<HTMLTextAreaElement>
+type Query = { key: string; start: number; end: number; text: string }
+type Props = {
+  value: string; onChange: (value: string) => void; onSend: (value: string) => void
+  onPaste?: React.ClipboardEventHandler<HTMLElement>
   placeholder: string; shared?: boolean; disabled?: boolean
-}>(function SkillComposer({ value, onChange, onSend, onPaste, placeholder, shared = false, disabled = false }, forwardedRef) {
-  const input = useRef<HTMLTextAreaElement | null>(null)
+}
+const CLIPBOARD_TYPE = "application/x-moyai-message"
+
+function $textNodes(text: string): LexicalNode[] {
+  return text.split("\n").flatMap((line, index) => [
+    ...(index ? [$createLineBreakNode()] : []), ...(line ? [$createTextNode(line)] : []),
+  ])
+}
+function $contentNodes(value: string, legacy = false): LexicalNode[] {
+  const nodes: LexicalNode[] = []
+  let offset = 0
+  for (const skill of legacy ? transcriptSkills(value) : skillMentions(value)) {
+    nodes.push(...$textNodes(value.slice(offset, skill.start)), $createSkillNode(skill))
+    offset = skill.end
+  }
+  nodes.push(...$textNodes(value.slice(offset)))
+  return nodes
+}
+function $setContent(value: string) { $getRoot().clear().append($createParagraphNode().append(...$contentNodes(value, true))) }
+function $query(): Query | null {
+  const selection = $getSelection()
+  if (!$isRangeSelection(selection) || !selection.isCollapsed() || selection.anchor.type !== "text") return null
+  const node = selection.anchor.getNode()
+  if (!$isTextNode(node)) return null
+  const offset = selection.anchor.offset, text = node.getTextContent()
+  const match = /(?:^|[\s([{])\/([A-Za-z0-9_.:-]*)$/.exec(text.slice(0, offset))
+  if (!match) return null
+  const preceding = selection.clone()
+  preceding.anchor.set($getRoot().getKey(), 0, "element")
+  if (!skillQueryAllowed(preceding.getTextContent())) return null
+  return { key: node.getKey(), start: offset - match[1].length - 1,
+    end: offset + (/^[A-Za-z0-9_.:-]*/.exec(text.slice(offset))?.[0].length || 0), text: match[1] }
+}
+
+export const SkillComposer = React.forwardRef<HTMLDivElement, Props>(function SkillComposer(props, ref) {
+  return <LexicalComposer initialConfig={{
+    namespace: "moyai-composer", nodes: [SkillNode], editable: !props.disabled,
+    onError: error => { throw error }, editorState: () => $setContent(props.value),
+  }}><InlineComposer {...props} inputRef={ref} /><HistoryPlugin /></LexicalComposer>
+})
+
+function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared = false, disabled = false, inputRef }: Props & { inputRef: React.ForwardedRef<HTMLDivElement> }) {
+  const [editor] = useLexicalComposerContext()
+  const input = useRef<HTMLDivElement | null>(null), latest = useRef({ onChange, onSend })
+  const bindInput = useCallback((node: HTMLDivElement | null) => {
+    input.current = node
+    if (typeof inputRef === "function") inputRef(node)
+    else if (inputRef) inputRef.current = node
+  }, [inputRef])
+  latest.current = { onChange, onSend }
   const id = useId(), auth = csrfToken(), scope = `${auth}:${shared}`
   const [focused, setFocused] = useState(false), [dismissed, setDismissed] = useState(false)
-  const [version, setVersion] = useState(0), [active, setActive] = useState(0)
-  const loadedCatalog = useRef("")
+  const [query, setQuery] = useState<Query | null>(null), [version, setVersion] = useState(0), [active, setActive] = useState(0)
+  const [empty, setEmpty] = useState(!value)
+  const emitted = useRef(value), loadedCatalog = useRef("")
   const [state, setState] = useState<{ scope: string; rows: ComposerSkill[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
-  const draft = skillDraft(value)
-  const query = draft.text.match(/^\/([^\s/]*)$/)?.[1]
-  const wantsPicker = focused && query !== undefined && !disabled
-  const needsCatalog = wantsPicker || draft.references.length > 0
+  const wantsPicker = focused && query !== null && !disabled
+
+  useEffect(() => editor.registerUpdateListener(({ editorState, tags }) => {
+    editorState.read(() => {
+      const next = $getRoot().getTextContent()
+      setEmpty(!next)
+      const nextQuery = $query()
+      setQuery(previous => previous?.key === nextQuery?.key && previous?.start === nextQuery?.start
+        && previous?.end === nextQuery?.end && previous?.text === nextQuery?.text ? previous : nextQuery)
+      if (!tags.has("external-value") && emitted.current !== next) {
+        emitted.current = next; latest.current.onChange(next)
+      }
+    })
+  }), [editor])
   useEffect(() => {
-    if (!needsCatalog) return
+    if (value === emitted.current) return
+    emitted.current = value
+    editor.update(() => $setContent(value), { tag: ["external-value", SKIP_DOM_SELECTION_TAG] })
+  }, [editor, value])
+  useEffect(() => { editor.setEditable(!disabled) }, [editor, disabled])
+  useEffect(() => {
+    if (!wantsPicker) return
     const cacheKey = `${scope}:${version}`
     if (loadedCatalog.current === cacheKey) return
     const controller = new AbortController()
@@ -68,8 +122,8 @@ export const SkillComposer = React.forwardRef<HTMLTextAreaElement, {
       setState({ scope, rows: [...rows.values()], loading: false, error: "" })
     })().catch(reason => { if (!controller.signal.aborted && csrfToken() === auth) setState({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
-  }, [scope, needsCatalog, version])
-  useEffect(() => { setActive(0); setDismissed(false) }, [query])
+  }, [scope, wantsPicker, version])
+  useEffect(() => { setActive(0); setDismissed(false) }, [query?.key, query?.start, query?.text])
   useEffect(() => {
     const clear = () => { setState({ scope: "", rows: [], loading: false, error: "" }); setVersion(value => value + 1) }
     window.addEventListener("moyai:access-changed", clear)
@@ -77,64 +131,93 @@ export const SkillComposer = React.forwardRef<HTMLTextAreaElement, {
   }, [])
   const rows = state.scope === scope ? state.rows : []
   const loading = state.scope !== scope || state.loading
-  const matches = rows.filter(skill => !draft.references.includes(skill.reference) && `${skill.name} ${skill.reference} ${skill.description}`.toLowerCase().includes((query || "").toLowerCase()))
-    .sort((a, b) => Number(b.name === query) - Number(a.name === query) || a.name.localeCompare(b.name)).slice(0, 30)
+  const matches = rows.filter(skill => `${skill.name} ${skill.reference} ${skill.description}`.toLowerCase().includes((query?.text || "").toLowerCase()))
+    .sort((a, b) => Number(b.name === query?.text) - Number(a.name === query?.text) || a.name.localeCompare(b.name)).slice(0, 30)
   const selectedIndex = Math.min(active, Math.max(matches.length - 1, 0))
   const open = wantsPicker && !dismissed
   function pick(skill: ComposerSkill) {
-    onChange(compose([...new Set([...draft.references, skill.reference])], ""))
-    setDismissed(true); input.current?.focus()
+    if (!query) return
+    editor.update(() => {
+      const node = $getNodeByKey(query.key)
+      if (!$isTextNode(node)) return
+      node.select(query.start, query.end)
+      const selection = $getSelection()
+      if ($isRangeSelection(selection)) selection.insertNodes([$createSkillNode(skill), $createTextNode(" ")])
+    }, { tag: HISTORY_PUSH_TAG })
+    setDismissed(true); editor.focus()
   }
-  function remove(index: number) {
-    onChange(compose(draft.references.filter((_, item) => item !== index), draft.text))
-    input.current?.focus()
-  }
+  useEffect(() => editor.registerCommand(KEY_DOWN_COMMAND, event => {
+    if (event.isComposing || editor.isComposing()) return false
+    if (open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault(); setActive(index => matches.length ? (index + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length : 0); return true
+    }
+    if (open && event.key === "Escape") { event.preventDefault(); setDismissed(true); return true }
+    if (open && !event.shiftKey && (event.key === "Enter" || event.key === "Tab") && matches.length) {
+      event.preventDefault(); pick(matches[selectedIndex]); return true
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault()
+      if (!open || (!loading && !state.error)) latest.current.onSend($getRoot().getTextContent())
+      return true
+    }
+    return false
+  }, COMMAND_PRIORITY_HIGH), [editor, open, matches, selectedIndex, query, loading, state.error])
+  useEffect(() => {
+    function copy(event: ClipboardEvent | KeyboardEvent | null, cut: boolean) {
+      const selection = $getSelection()
+      if (!event || !("clipboardData" in event) || !event.clipboardData || !selection) return false
+      const text = selection.getTextContent()
+      if (!skillMentions(text).length) return false
+      event.preventDefault()
+      event.clipboardData.setData("text/plain", skillDisplayText(text))
+      event.clipboardData.setData(CLIPBOARD_TYPE, text)
+      if (cut && $isRangeSelection(selection)) selection.removeText()
+      else if (cut && $isNodeSelection(selection)) selection.getNodes().forEach(node => node.remove())
+      return true
+    }
+    return mergeRegister(
+      editor.registerCommand(COPY_COMMAND, event => copy(event, false), COMMAND_PRIORITY_HIGH),
+      editor.registerCommand(CUT_COMMAND, event => copy(event, true), COMMAND_PRIORITY_HIGH),
+      editor.registerCommand(PASTE_COMMAND, event => {
+        if (!("clipboardData" in event) || !event.clipboardData) return false
+        const text = event.clipboardData.getData(CLIPBOARD_TYPE) || event.clipboardData.getData("text/plain")
+        const selection = $getSelection()
+        if (!$isRangeSelection(selection) || !skillMentions(text).length) return false
+        event.preventDefault(); selection.insertNodes($contentNodes(text)); return true
+      }, COMMAND_PRIORITY_HIGH),
+    )
+  }, [editor])
   useEffect(() => {
     if (open) document.getElementById(`${id}-${selectedIndex}`)?.scrollIntoView({ block: "nearest" })
   }, [open, selectedIndex, id])
   return <div className="skill-composer">
-    {draft.references.length > 0 && <div className="skill-chips" aria-label="Selected skills">{draft.references.map((reference, index) => {
-      const skill = rows.find(row => row.reference === reference) || { name: reference.split(":").slice(1).join(":"), scope: reference.split(":")[0], icon: "auto" }
-      return <span className="skill-chip" key={`${reference}-${index}`} title={`/${reference} · ${scopeName(skill.scope)}`}>
-        <SkillIcon skill={skill} /><span>{skill.name}</span>
-        <Button type="button" variant="ghost" size="icon-sm" disabled={disabled} aria-label={`Remove ${skill.name} skill`} onClick={() => remove(index)}><X size={13} /></Button>
-      </span>
-    })}</div>}
     <Popover open={open} onOpenChange={next => { if (!next) setDismissed(true) }}>
       <PopoverAnchor asChild>
-        <Textarea ref={node => { input.current = node; if (typeof forwardedRef === "function") forwardedRef(node); else if (forwardedRef) forwardedRef.current = node }}
-          aria-label="Message Moyai" placeholder={draft.references.length ? "Add instructions for this skill…" : placeholder}
-          value={draft.text} disabled={disabled}
-          aria-controls={open ? id : undefined} aria-expanded={open} aria-autocomplete="list"
-          aria-activedescendant={open && matches.length ? `${id}-${selectedIndex}` : undefined}
-          onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-          onChange={event => onChange(compose(draft.references, event.target.value))} onPaste={onPaste}
-          onKeyDown={event => {
-            if (event.nativeEvent.isComposing) return
-            if (open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
-              event.preventDefault(); setActive(index => matches.length ? (index + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length : 0); return
-            }
-            if (open && event.key === "Escape") { event.preventDefault(); setDismissed(true); return }
-            if (open && !event.shiftKey && (event.key === "Enter" || event.key === "Tab") && matches.length) {
-              event.preventDefault(); pick(matches[selectedIndex]); return
-            }
-            if (event.key === "Backspace" && !draft.text && draft.references.length) { event.preventDefault(); remove(draft.references.length - 1); return }
-            if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!open || (!loading && !state.error)) onSend() }
-          }} />
+        <div className="skill-editor-wrap">
+          <PlainTextPlugin ErrorBoundary={LexicalErrorBoundary} contentEditable={
+            <ContentEditable ref={bindInput}
+              className="skill-editor" aria-label="Message Moyai" aria-multiline="true" aria-disabled={disabled}
+              aria-controls={open ? id : undefined} aria-expanded={open} aria-autocomplete="list"
+              aria-activedescendant={open && matches.length ? `${id}-${selectedIndex}` : undefined}
+              onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+              onPasteCapture={event => { onPaste?.(event); if (event.defaultPrevented) event.stopPropagation() }} />
+          } />
+          {empty && <span className="skill-editor-placeholder" aria-hidden="true">{placeholder}</span>}
+        </div>
       </PopoverAnchor>
       <PopoverContent className="skill-picker" side="top" align="start" sideOffset={8}
         onOpenAutoFocus={event => event.preventDefault()} onCloseAutoFocus={event => event.preventDefault()}
-        onInteractOutside={event => { if (event.target === input.current) event.preventDefault() }}>
+        onInteractOutside={event => { if (event.target instanceof Node && input.current?.contains(event.target)) event.preventDefault() }}>
         <div className="skill-picker-heading"><span>Skills</span><small>↑ ↓ to browse · Enter to select</small></div>
         {loading ? <p role="status">Loading skills…</p> : state.error ? <div role="alert"><p>Couldn’t load your skills.</p><Button type="button" variant="outline" size="sm" onMouseDown={event => event.preventDefault()} onClick={() => setVersion(value => value + 1)}>Retry skills</Button></div>
           : matches.length ? <div id={id} role="listbox" aria-label="Skills" className="skill-options">{matches.map((skill, index) =>
             <button type="button" role="option" aria-selected={selectedIndex === index} tabIndex={-1}
               id={`${id}-${index}`} key={skill.reference} className="skill-option" onMouseDown={event => event.preventDefault()} onClick={() => pick(skill)}>
               <span className="skill-option-icon"><SkillIcon skill={skill} /></span>
-              <span className="skill-option-copy"><span className="skill-option-title">{skill.name}<small>{scopeName(skill.scope)}</small></span><span className="skill-option-description">{skill.description}</span></span>
+              <span className="skill-option-copy"><span className="skill-option-title">{skill.name}<small>{skillScopeName(skill.scope)}</small></span><span className="skill-option-description">{skill.description}</span></span>
             </button>)}</div>
           : <p role="status">No matching skills{shared ? " available in shared sessions" : ""}. <a href="#settings/skills">View skills</a></p>}
       </PopoverContent>
     </Popover>
   </div>
-})
+}

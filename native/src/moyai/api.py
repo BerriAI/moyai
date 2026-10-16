@@ -482,8 +482,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
-        from .skill_invocations import references
-        if references(body.prompt)[0]:
+        from .skill_invocations import has_invocations
+        if has_invocations(body.prompt):
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
             body = body.model_copy(update={"prompt": await runtime.skill_invocations.normalize(body.prompt, user, session)})

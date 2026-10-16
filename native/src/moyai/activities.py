@@ -90,8 +90,8 @@ async def prepare_steering(parent_id: str, turn_id: str) -> SteeringInput:
     prepared = await runtime.database.prepare_steering(parent_id, turn_id)
     prepared.images = await runtime.database.input_images(turn_id)
     await hydrate(runtime, prepared)
-    from .skill_invocations import references
-    if references(prepared.prompt)[0]:
+    from .skill_invocations import has_invocations
+    if has_invocations(prepared.prompt):
         try:
             parent = await runtime.database.prepare(parent_id)
             prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, parent.scope)

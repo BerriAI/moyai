@@ -120,16 +120,20 @@ Automations, Memory, Connections and Secrets. Administrators also see Users,
 Performance and Spend & usage. These pages use native application records,
 not the legacy application's database or APIs.
 
-- **Skills:** type `/` at the start of a message in the home or conversation
-  composer, then search by name. Use the arrow keys and Enter/Tab, or click a
-  result, to attach an icon-and-name skill chip. Remove it with its × button or
-  Backspace in an empty composer. A unique `/team` short name also works when
-  sent directly; duplicate names require a scoped reference from the picker.
+- **Skills:** type `/` anywhere in the home or conversation composer, then search
+  by name. Use the arrow keys and Enter/Tab, or click a result, to insert an
+  inline icon-and-`/team` token at the cursor. Keep typing before or after it;
+  Backspace removes it, or select the token and press Delete. Copy/paste within
+  Moyai and queued-message editing preserve the selection. Sent messages retain
+  the selected name and icon after reload, even if the skill is subsequently
+  changed or removed. Code examples and escaped references remain literal.
+  A unique leading `/team` short name also works when sent directly; duplicate
+  names require a scoped reference from the picker.
   Personal skills are limited to their owner's private web conversations.
   Existing-product installations load the original personal/organization
   instructions and supporting-file contents at execution, without converting or
   rewriting the library. Archived, disabled, inaccessible or ambiguous skills
-  fail explicitly. Up to eight leading skill references and 500,000 characters
+  fail explicitly. Up to eight skill selections and 500,000 characters
   of combined skill context are supported per message. Supporting-file contents
   are provided to the agent; files needed for execution must first be written
   to its workspace. Standalone bundled and saved skills also remain available

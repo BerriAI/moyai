@@ -17,6 +17,7 @@ from .contracts import RunScope
 from .models import User
 from .product_identity import ProductGrant
 from .settings_models import SettingSkill
+from .skill_mentions import display_text, marker, mentions
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -28,6 +29,8 @@ MAX_CONTEXT = 500_000
 
 def references(prompt: str) -> tuple[list[str], str]:
     """Only leading slash words invoke skills; paths, prose and code stay literal."""
+    if prompt.startswith(("    ", "\t")):
+        return [], prompt
     remaining = prompt.lstrip()
     names: list[str] = []
     while match := TOKEN.match(remaining):
@@ -35,7 +38,19 @@ def references(prompt: str) -> tuple[list[str], str]:
         if len(names) > MAX_SKILLS:
             raise HTTPException(422, f"Select at most {MAX_SKILLS} skills per message.")
         remaining = remaining[match.end():].lstrip()
+    return names, remaining if names else prompt
+
+
+def invocation_names(prompt: str) -> tuple[list[str], str]:
+    names, remaining = references(prompt)
+    names.extend(mention.reference for mention in mentions(remaining))
+    if len(names) > MAX_SKILLS:
+        raise HTTPException(422, f"Select at most {MAX_SKILLS} skills per message.")
     return names, remaining
+
+
+def has_invocations(prompt: str) -> bool:
+    return bool(invocation_names(prompt)[0])
 
 
 class SkillInvocations:
@@ -83,7 +98,7 @@ class SkillInvocations:
         self, prompt: str, *, actor_id: str, visibility: str, surface: str,
         grant: ProductGrant | None,
     ) -> tuple[list[dict[str, Any]], str]:
-        names, remaining = references(prompt)
+        names, remaining = invocation_names(prompt)
         if not names:
             return [], prompt
         if surface != "web":
@@ -107,17 +122,27 @@ class SkillInvocations:
                     content = self.runtime.security.unseal(row["encrypted"]).decode()
                 row = {**row, "instructions": content, "supporting_files": {}}
             selected[row["reference"]] = row
-        return list(selected.values()), remaining
+        return list(selected.values()), display_text(remaining)
 
     async def normalize(self, prompt: str, user: User, session: Any) -> str:
-        selected, remaining = await self.resolve(
+        selected, _ = await self.resolve(
             prompt, actor_id=user.id, visibility=session.visibility, surface=session.surface,
             grant=getattr(user, "product_grant", None),
         )
-        return " ".join([*(f"/{row['reference']}" for row in selected), remaining]) if selected else prompt
+        if not selected:
+            return prompt
+        leading, remaining = references(prompt)
+        for mention in reversed(mentions(remaining)):
+            row = next(row for row in selected if row["reference"] == mention.reference)
+            remaining = remaining[:mention.start] + marker(row["reference"], row.get("icon")) + remaining[mention.end:]
+        prefix = []
+        for name in leading:
+            row = next(row for row in selected if (row["reference"] if ":" in name else row["name"]) == name)
+            prefix.append(marker(row["reference"], row.get("icon")))
+        return " ".join([*prefix, remaining])
 
     async def expand(self, prompt: str, scope: RunScope) -> str:
-        if not references(prompt)[0]:
+        if not has_invocations(prompt):
             return prompt
         await self.runtime.database.authorize_scope(scope)
         selected, remaining = await self.resolve(
