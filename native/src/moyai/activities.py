@@ -11,12 +11,15 @@ from temporalio.exceptions import ApplicationError
 from .answer_settlement import SNAPSHOT_WARNING
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
 from .images import hydrate
+from .models import now
+from .performance import evidence, record
 from .runtime import current
 from .workspace_recovery import prepare_workspace
 
 
 @activity.defn(name="moyai_prepare_turn_v1")
 async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> PreparedTurn:
+    picked_up = now()
     async def heartbeat():
         while True:
             activity.heartbeat("Verifying task authority and preparing the saved computer.")
@@ -26,6 +29,9 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
     try:
         runtime = current()
         prepared = await runtime.database.prepare(turn_id)
+        await record(runtime.database, evidence(
+            prepared.scope.session_id, turn_id, "worker", picked_up,
+        ))
         if recover_workspace and runtime.product is None:
             prepared = await prepare_workspace(runtime, prepared)
         if runtime.product is not None:

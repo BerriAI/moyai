@@ -35,7 +35,8 @@ from moyai.inference_usage import (
     InferenceUsage,
     InferenceUsageTransport,
 )
-from moyai.models import Session
+from moyai.models import Event, Session
+from moyai.performance import PREFIX
 from moyai.product_billing import (
     BillingReader,
     GatewayKeyScope,
@@ -498,6 +499,7 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
         for attempt, expected in ((1, 200), (2, 409)):
             activity = InferenceActivity(
                 worker_database, ctx.scope, f"proxy/{attempt}", logical_identity="proxy",
+                foreground=True,
             )
             token = INFERENCE_ACTIVITY.set(activity)
             try:
@@ -531,6 +533,14 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
         assert len(calls) == 1 and row.id == calls[0].headers["x-litellm-call-id"]
         assert row.gateway_id == "exact-call-id"
         assert len(broker_calls) == 2
+        if ctx.product.database.performance_tasks:
+            await asyncio.gather(*ctx.product.database.performance_tasks)
+        async with ctx.product.database.sessions() as db:
+            timing, = list(await db.scalars(select(Event).where(Event.kind == PREFIX + "dispatch")))
+        details = json.loads(timing.content)
+        assert timing.turn_id == ctx.turn.id and details["route"] == "broker"
+        assert details["attempt_id"] == row.request_key
+        assert details["broker_received_at"] <= timing.created_at
     finally:
         await worker.close()
 
@@ -565,11 +575,12 @@ async def test_broker_request_uses_only_configured_access_credentials(inference,
     for name, value in ACCESS_HEADERS.items():
         assert signed.headers.get(name) == (value if protected else None)
         assert original.headers[name] == "untrusted-incoming-value"
-    scope, identity, logical, ordinal = routes._verify(
+    scope, identity, logical, ordinal, foreground = routes._verify(
         service, signed.headers["authorization"], route, original.content,
     )
     assert (scope.actor_id, scope.turn_id) == (inference.scope.actor_id, inference.scope.turn_id)
     assert (identity, logical, ordinal) == ("signed/1", "signed", 1)
+    assert foreground is False
     assert all(not grant.credential for grant in scope.grants)
     envelope = json.dumps(routes._signer(service).loads(signed.headers["authorization"].removeprefix("Bearer ")))
     assert all(value not in envelope for value in ACCESS_HEADERS.values())

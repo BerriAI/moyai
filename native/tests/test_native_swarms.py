@@ -17,7 +17,7 @@ from test_file_preview import saved_file
 from moyai.api import COOKIE, create_app
 from moyai.contracts import NewMessage
 from moyai.file_preview import FilePreviewService
-from moyai.models import Effect, Message, Session, Turn, User, new_id
+from moyai.models import Effect, Event, Message, Session, Turn, User, new_id
 from moyai.product_routes import ProductReadService, Reader
 from moyai.swarm_contracts import MissionRun, NewSwarm, SwarmControl
 from moyai.swarm_models import SwarmMember, SwarmMission, SwarmOperation, SwarmPost, SwarmTurn
@@ -267,6 +267,11 @@ async def test_authenticated_api_and_sidebar_keep_workers_inside_the_mission(run
         assert response.json()["session"]["swarm_id"] == root_id
         repeated = await client.post("/api/swarms", json=body)
         assert repeated.json()["session"]["id"] == root_id
+        async with runtime.database.sessions() as db:
+            received = list(await db.scalars(select(Event).where(
+                Event.kind == "performance.v1.received", Event.session_id == root_id,
+            )))
+            assert len(received) == 1 and received[0].turn_id == response.json()["turn"]["id"]
         listed = await client.get("/api/history/sessions?scope=mine")
         assert [item["id"] for item in listed.json()["sessions"]] == [root_id]
         board = (await client.get(f"/api/sessions/{root_id}/swarm")).json()

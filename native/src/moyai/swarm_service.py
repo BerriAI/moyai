@@ -99,7 +99,9 @@ class SwarmService:
         if scope.grants_key != mission.grants_key:
             raise HTTPException(403, "The swarm's original account permissions changed. Start a new mission.")
 
-    async def start(self, actor: User, request: NewSwarm) -> tuple[Session, Turn]:
+    async def start(
+        self, actor: User, request: NewSwarm, *, received_at: str | None = None,
+    ) -> tuple[Session, Turn]:
         fingerprint = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
         try:
             async with self.database._admission_session(None) as db:
@@ -123,7 +125,7 @@ class SwarmService:
                 ), db=db)
                 await db.flush()
                 body = NewMessage(**request.model_dump(include=set(NewMessage.model_fields)))
-                turn = await self.database.submit(actor, root.id, body, db=db)
+                turn = await self.database.submit(actor, root.id, body, db=db, received_at=received_at)
                 grants = await self.database.resolve_grants(
                     db, actor.id, request.connections, shared_session=root.visibility == "shared",
                 )

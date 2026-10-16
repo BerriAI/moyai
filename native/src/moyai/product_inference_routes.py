@@ -21,6 +21,7 @@ from starlette.responses import Response, StreamingResponse
 
 from .contracts import RunScope
 from .inference_usage import INFERENCE_ACTIVITY, InferenceActivity, InferenceUsageTransport
+from .models import now
 from .product_inference import InferenceAdmissionError, drain
 
 if TYPE_CHECKING:
@@ -55,6 +56,7 @@ def broker_request(
     envelope = _signer(service).dumps({
         "v": 1, "scope": SCOPE.dump_python(scope), "activity": activity.identity,
         "logical": activity.logical_identity, "ordinal": activity.requests,
+        "foreground": activity.foreground,
         "body": hashlib.sha256(content).hexdigest(), "route": route,
     })
     if len(envelope) > MAX_ENVELOPE_BYTES:
@@ -79,7 +81,7 @@ def broker_request(
 
 def _verify(
     service: ProductInferenceService, authorization: str, route: str, content: bytes | None,
-) -> tuple[RunScope, str, str, int]:
+) -> tuple[RunScope, str, str, int, bool]:
     token = authorization.removeprefix("Bearer ")
     if not authorization.startswith("Bearer ") or len(token) > MAX_ENVELOPE_BYTES:
         raise InferenceAdmissionError("A valid native broker authority envelope is required.")
@@ -90,6 +92,7 @@ def _verify(
             or not isinstance(value.get("body"), str) or len(value["body"]) != 64
             or (content is not None and value["body"] != hashlib.sha256(content).hexdigest())
             or type(value.get("ordinal")) is not int or not 1 <= value["ordinal"] <= 100
+            or type(value.get("foreground", False)) is not bool
             or any(not isinstance(value.get(name), str) or not 1 <= len(value[name]) <= 2000
                    for name in ("activity", "logical"))
         ):
@@ -97,7 +100,7 @@ def _verify(
         scope = SCOPE.validate_python(value["scope"])
         if scope.product_grant is None or any(grant.credential for grant in scope.grants):
             raise ValueError
-        return scope, value["activity"], value["logical"], value["ordinal"]
+        return scope, value["activity"], value["logical"], value["ordinal"], value.get("foreground", False)
     except (BadSignature, ValidationError, ValueError, TypeError, KeyError):
         raise InferenceAdmissionError("The native broker authority envelope is invalid or expired.") from None
 
@@ -170,6 +173,7 @@ def product_inference_routes(service: ProductInferenceService) -> APIRouter:
 
     @router.post("/broker/native/v1/{route:path}")
     async def infer(request: Request, route: str) -> Response:
+        received_at = getattr(request.state, "moyai_received_at", None) or now()
         if route not in ROUTES:
             raise HTTPException(404, "Unknown native inference route.")
         if service.remote:
@@ -185,7 +189,7 @@ def product_inference_routes(service: ProductInferenceService) -> APIRouter:
                 raise HTTPException(413, "The model request exceeds the broker request limit.")
             content.extend(chunk)
         try:
-            scope, identity, logical, ordinal = _verify(
+            scope, identity, logical, ordinal, foreground = _verify(
                 service, authorization, route, bytes(content),
             )
             if scope.surface == "memory_review":
@@ -198,6 +202,7 @@ def product_inference_routes(service: ProductInferenceService) -> APIRouter:
             return Response(status_code=403, headers={"x-moyai-inference-denied": "1"})
         activity = InferenceActivity(
             service.database, scope, identity, requests=ordinal - 1, logical_identity=logical,
+            foreground=foreground, broker_received_at=received_at,
         )
         if scope.surface == "memory_review":
             return await _maintenance_response(service, activity, route, bytes(content))

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
+from app.db import drain
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import TypeAdapter
 from pydantic_ai.workspaces import WorkspaceRef, WorkspaceUnavailableError
@@ -215,7 +216,9 @@ async def relay(runtime: Runtime, socket: WebSocket, remote: ClientConnection, a
                 size += len(value)
             # This is a local DB authorization check, not a Modal execution.
             # Read-only viewers are also enforced by the upstream VNC server.
-            await validate(runtime, access)
+            # Finish SQL/cursor cleanup before propagating cancellation. The
+            # cancellation still prevents this input from being forwarded.
+            await drain(asyncio.create_task(validate(runtime, access)))
             await remote.send(b"".join(packets))
 
     async def send_display():
@@ -229,7 +232,8 @@ async def relay(runtime: Runtime, socket: WebSocket, remote: ClientConnection, a
             await asyncio.sleep(RECHECK_SECONDS)
             # Idle/view-only sockets must also close on revocation, expiry,
             # workspace changes, or release from another API worker.
-            await validate(runtime, access)
+            # A sibling ending the relay must not abandon this check's cursor.
+            await drain(asyncio.create_task(validate(runtime, access)))
 
     tasks = [
         asyncio.create_task(receive_input()), asyncio.create_task(send_input()), asyncio.create_task(send_display()),

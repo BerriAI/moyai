@@ -93,7 +93,9 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
                     "options": [{"label": "Text"}, {"label": "JSON"}],
                 }]
             })]
-        elif scenario == "tools":
+        elif scenario == "stream":
+            calls = [("delegate_task", {"agent_name": "self", "task": "Return the phrase native-child-result."})]
+        elif scenario in {"tools", "workspace"}:
             loader = next(tool for tool in info.function_tools if tool.name == "load_capability")
             loader_key = next(iter(loader.parameters_json_schema["properties"]))
             calls = [
@@ -104,6 +106,9 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
                 ("write_memory", {"content": "The native capability proof succeeded."}),
                 ("delegate_task", {"agent_name": "self", "task": "Return the phrase native-child-result."}),
             ]
+            if scenario == "workspace":
+                calls = [(name, arguments) for name, arguments in calls
+                         if name in {"load_capability", "write_file", "save_artifact", "delegate_task"}]
         elif scenario == "stop":
             calls = [("shell", {
                 "command": "printf started > started.txt; sleep 30; printf finished > forbidden.txt",

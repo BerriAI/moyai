@@ -1,6 +1,6 @@
 """Authenticated product entrypoints for native swarm missions."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from .models import User
 from .runtime import Runtime
@@ -13,8 +13,8 @@ def routes(runtime: Runtime, actor) -> APIRouter:
     service = runtime.database.swarms
 
     @router.post("/api/swarms")
-    async def start(body: NewSwarm, user: User = Depends(actor)):
-        session, turn = await service.start(user, body)
+    async def start(body: NewSwarm, request: Request, user: User = Depends(actor)):
+        session, turn = await service.start(user, body, received_at=request.state.moyai_received_at)
         return {"session": {**session_view(session), "swarm_id": session.id}, "turn": turn_view(turn)}
 
     @router.get("/api/sessions/{session_id}/swarm")

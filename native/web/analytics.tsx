@@ -5,7 +5,8 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api, ApiError } from "./api"
-import { AnalyticsChart, AnalyticsDatePicker, AnalyticsLegend, AnalyticsMetrics } from "./analytics-shared"
+import { AnalyticsChart, AnalyticsDatePicker, AnalyticsLegend, AnalyticsMetrics, ReportTable } from "./analytics-shared"
+import { StartupPerformance } from "./performance"
 import { presetAnalyticsRange } from "./analytics-dates"
 import type { AnalyticsRange } from "./analytics-dates"
 import { dollars, elapsed, finiteValue, spendCount } from "./analytics-format"
@@ -47,12 +48,6 @@ function useReport(path: string, revision: number) {
 
 function ReportSelect({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[] }) {
   return <Select value={value} onValueChange={onChange}><SelectTrigger aria-label={label} title={options.find(item => item.value === value)?.label}><SelectValue /></SelectTrigger><SelectContent className="native-settings-select">{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
-}
-
-function ReportTable({ label, columns, children }: { label: string; columns: React.ReactNode[]; children: React.ReactNode }) {
-  return <div className="analytics-table-frame" role="region" aria-label={label} tabIndex={0}><Table>
-    <TableHeader><TableRow>{columns.map((column, index) => <TableHead scope="col" key={index}>{column}</TableHead>)}</TableRow></TableHeader><TableBody>{children}</TableBody>
-  </Table></div>
 }
 
 function Cost({ row, compact = false }: { row: { cost_usd?: number | null; cost_usd_exact?: string | null; pricing_status?: string; unpriced_requests?: number; unpriced_turns?: number; unknown_request_turns?: number; capture_gap_turns?: number; cost_coverage?: number | null }; compact?: boolean }) {
@@ -208,11 +203,16 @@ function UsageHistory({ data, exportUrl }: { data: AnalyticsReport; exportUrl: (
 
 function TurnTable({ data, performance, offset, onOffset, loading }: { data: AnalyticsReport; performance: boolean; offset: number; onOffset: (offset: number) => void; loading: boolean }) {
   return <>
-    <ReportTable label={performance ? "Recorded turn performance" : "Recorded turn usage"} columns={["Turn / created", "User", "Root turn model / status", ...(performance ? ["Queue wait", "Turn latency", "Total time"] : ["Requests", "Tokens", "Reported cost"])]}>
+    <ReportTable label={performance ? "Recorded turn performance" : "Recorded turn usage"} columns={["Turn / created", "User", "Root turn model / status", ...(performance ? ["API → dispatch", "Startup breakdown", "Computer ready", "Full turn duration"] : ["Requests", "Tokens", "Reported cost"])]}>
       {data.rows.map(row => <TableRow key={row.id}>
         <TableCell><details><summary>{row.id.slice(0, 8)}</summary><code>{row.id}</code><small>Tool calls: {spendCount(row.tool_calls)}</small><small>Cache read: {spendCount(row.cache_read_tokens)} · write: {spendCount(row.cache_write_tokens)}</small>{row.usage_role === "steering_input" && <small>Steering input; inference cost belongs to its parent turn.</small>}{Boolean(row.cost_models?.length) && <small>Inference models: {row.cost_models!.join(", ")}</small>}</details><small>{localDate(row.created_at)}</small></TableCell>
         <TableCell>{data.users.find(user => user.id === row.user_id)?.display_name || data.users.find(user => user.id === row.user_id)?.username || row.user_id}</TableCell><TableCell>{row.model}<small>{row.status}</small></TableCell>
-        {performance ? <><TableCell>{elapsed(row.queue_ms)}</TableCell><TableCell>{elapsed(row.latency_ms)}</TableCell><TableCell>{elapsed(row.total_ms)}</TableCell></> : <><TableCell>{spendCount(row.requests)}</TableCell><TableCell>{spendCount(row.total_tokens)}</TableCell><TableCell>{dollars(row.cost_usd)}<small>{row.pricing_status}</small></TableCell></>}
+        {performance ? <>
+          <TableCell>{elapsed(row.api_to_dispatch_ms)}{row.first_dispatch_at && <details><summary>Timing evidence</summary><small>API: {row.api_received_at || "Unavailable"}</small><small>Worker: {row.worker_picked_up_at || "Unavailable"}</small><small>Broker: {row.broker_received_at || "Unavailable"}</small><small>Dispatch: {row.first_dispatch_at}</small><small>Route: {row.dispatch_route}</small><code>{row.dispatch_attempt_id}</code></details>}</TableCell>
+          <TableCell><small>API → worker: {elapsed(row.api_to_worker_ms)}</small><small>Worker → broker: {elapsed(row.worker_to_broker_ms)}</small><small>Broker → dispatch: {elapsed(row.broker_to_dispatch_ms)}</small></TableCell>
+          <TableCell>{elapsed(row.computer_ready_ms)}<small>{row.computer_mode || "No acquisition evidence"}{row.computer_status ? ` · ${row.computer_status}` : ""}</small></TableCell>
+          <TableCell>{elapsed(row.total_ms)}<small>Accepted → finished: {elapsed(row.latency_ms)}</small></TableCell>
+        </> : <><TableCell>{spendCount(row.requests)}</TableCell><TableCell>{spendCount(row.total_tokens)}</TableCell><TableCell>{dollars(row.cost_usd)}<small>{row.pricing_status}</small></TableCell></>}
       </TableRow>)}
     </ReportTable>
     {!data.rows.length && <p className="analytics-status">No recorded turns match this range and its filters.</p>}
@@ -223,6 +223,9 @@ function TurnTable({ data, performance, offset, onOffset, loading }: { data: Ana
 function PerformanceReport({ data }: { data: AnalyticsReport }) {
   const series = [{ key: "mean_latency_ms", label: "Mean latency (ms)" }], line = { key: "p95_latency_ms", label: "p95 latency (ms)", line: true }
   return <>
+    <StartupPerformance data={data.performance} />
+    <details className="analytics-breakdown">
+    <summary>Full turn duration, including model work and tools</summary>
     <p className="analytics-status">{data.latency_note || "Turn latency is accepted-to-finished wall time, including tools and waits. It is not model time to first token."}</p>
     <AnalyticsMetrics items={[
       ["Mean turn latency", elapsed(data.summary.mean_latency_ms)], ["Median (p50)", elapsed(data.summary.p50_latency_ms)],
@@ -230,6 +233,7 @@ function PerformanceReport({ data }: { data: AnalyticsReport }) {
     ]} /><section className="analytics-section"><div className="analytics-chart-heading"><h2>Turn latency over time</h2><span>Milliseconds · UTC</span></div><AnalyticsLegend series={[...series, line]} />
       <AnalyticsChart rows={data.series.map(day => ({ date: day.date, mean_latency_ms: day.mean_latency_ms, p95_latency_ms: day.p95_latency_ms }))} series={series} line={line} title="Turn latency in milliseconds" area />
     </section>
+    </details>
   </>
 }
 
@@ -254,7 +258,7 @@ export function AnalyticsPage({ kind, headingRef }: { kind: ReportKind; headingR
   const exportKind = kind === "performance" || !aggregateExports ? "turns" : view === "users" ? "users" : "daily"
   const exportUrl = (format: string) => `/api/settings/${kind}?${params}&format=csv&export=${encodeURIComponent(format)}`
   return <div className="native-analytics">
-    <header className="ns-page-heading analytics-report-heading"><div><h1 ref={headingRef} tabIndex={-1}>{kind === "performance" ? "Performance" : "Spend & usage"}</h1><p>{kind === "performance" ? "Recorded turn timings across the workspace." : "Your team’s recorded costs, sessions, and PR outcomes."}</p></div>
+    <header className="ns-page-heading analytics-report-heading"><div><h1 ref={headingRef} tabIndex={-1}>{kind === "performance" ? "Performance" : "Spend & usage"}</h1><p>{kind === "performance" ? "Moyai startup, broker handoff, and computer readiness." : "Your team’s recorded costs, sessions, and PR outcomes."}</p></div>
       <div className="analytics-actions"><AnalyticsDatePicker value={range} onChange={value => { setRange(value); setOffset(0) }} /><Button variant="outline" disabled={resource.loading} onClick={refresh}><RefreshCw size={16} />Refresh</Button></div>
     </header>
     <div className="analytics-toolbar">{kind === "usage" ? <div className="analytics-tabs" role="tablist" aria-label="Spend and usage view">{views.map((item, index) => <Button key={item.id} id={`analytics-tab-${item.id}`} type="button" variant="ghost" role="tab" aria-selected={view === item.id} aria-controls="analytics-report-panel" tabIndex={view === item.id ? 0 : -1} onClick={() => setView(item.id)} onKeyDown={event => {
@@ -270,7 +274,7 @@ export function AnalyticsPage({ kind, headingRef }: { kind: ReportKind; headingR
       <ReportSelect label="Report status" value={filters.status} onChange={value => updateFilter("status", value)} options={[{ value: "all", label: "All statuses" }, ...statuses.map(value => ({ value, label: (value[0].toUpperCase() + value.slice(1)).replaceAll("_", " ") }))]} />
       {Object.values(filters).some(value => value !== "all") && <Button variant="ghost" onClick={() => { setFilters(allFilters); setOffset(0) }}>Clear filters</Button>}
     </div>
-    {resource.data?.methodology?.model && (kind !== "usage" || view !== "users") && <p className="analytics-filter-note">{resource.data.methodology.model}</p>}
+    {resource.data?.methodology?.model && kind === "usage" && view !== "users" && <p className="analytics-filter-note">{resource.data.methodology.model}</p>}
     <div id="analytics-report-panel" role={kind === "usage" ? "tabpanel" : undefined} aria-labelledby={kind === "usage" ? `analytics-tab-${view}` : undefined} aria-busy={resource.loading}>
       {resource.error ? <div className="ns-empty" role="alert"><h2>Unable to load this report</h2><p>{resource.error}</p><Button variant="outline" onClick={refresh}>Try again</Button></div>
         : !resource.data ? <p className="analytics-status" role="status">Loading report…</p> : <>
@@ -278,12 +282,12 @@ export function AnalyticsPage({ kind, headingRef }: { kind: ReportKind; headingR
           {kind === "performance" ? <section className="analytics-section"><h2>Recorded turns</h2><TurnTable data={resource.data} performance offset={offset} onOffset={setOffset} loading={resource.loading} /></section>
             : view === "history" && <details className="analytics-breakdown"><summary>Recorded turns</summary><Button asChild variant="ghost" size="sm"><a href={exportUrl("turns")} download><Download size={14} />Export turns</a></Button><TurnTable data={resource.data} performance={false} offset={offset} onOffset={setOffset} loading={resource.loading} /></details>}
           {(kind !== "usage" || view !== "users") && <details className="analytics-methodology"><summary>About this data</summary>
-            {Object.entries(resource.data.methodology ?? {}).map(([key, text]) => <p key={key}>{text}</p>)}
+            {Object.entries(resource.data.methodology ?? {}).filter(([key]) => ["startup", "startup_breakdown", "computer_readiness", "timing_coverage", "timing_cards"].includes(key) === (kind === "performance")).map(([key, text]) => <p key={key}>{text}</p>)}
             {!resource.data.methodology && <p>{resource.data.cost_note || "Cost coverage and attribution are supplied by the report API."}</p>}
             <p>{resource.data.latency_note || "Turn timing includes tools and waits; it is not time to first token."}</p>
-            <p>Creation-status distributions describe PRs created in the selected range. Merge counts describe verified merge events in the range and may include PRs created earlier.</p>
+            {kind === "usage" && <p>Creation-status distributions describe PRs created in the selected range. Merge counts describe verified merge events in the range and may include PRs created earlier.</p>}
             <p>Charts and aggregates cover all filtered records. Turn history is paginated; CSV exports include the entire selected dataset. Dates use UTC half-open bounds; custom end dates include the whole selected day.</p>
-            <p>Provider invoices and infrastructure billing are not included. Unknown costs and inaccessible PR statuses remain explicitly unavailable.</p>
+            {kind === "usage" && <p>Provider invoices and infrastructure billing are not included. Unknown costs and inaccessible PR statuses remain explicitly unavailable.</p>}
           </details>}
         </>}
     </div>

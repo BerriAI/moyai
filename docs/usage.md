@@ -139,10 +139,34 @@ not the legacy application's database or APIs.
 - **Users:** manage local accounts, roles and enabled state. Changes invalidate
   prior authentication; the final enabled administrator cannot be disabled or
   demoted.
-- **Analytics:** filter and export recorded usage and turn timing. Latency is
-  accepted-to-finished wall time, including tools and waits. Native turn records
-  do not yet carry authoritative billed cost; missing costs are shown as
-  unpriced, never as zero. Provider billing reconciliation remains separate.
+- **Analytics:** filter and export recorded usage and turn timing. Performance
+  leads with API receipt → first foreground LiteLLM outbound attempt, with mean,
+  p50, p95 and coverage. Its API → worker, worker → broker and broker → dispatch
+  means share one complete cohort and add to that cohort's total. This endpoint
+  is dispatch, not LiteLLM receipt or model time to first token.
+  First computer readiness is separate: cold creation, snapshot restoration and
+  reuse end at a successful SDK workspace check. Preparation alone is not ready;
+  failed and incomplete acquisitions have separate counts. Full turn duration
+  remains available under an expandable section.
+
+The Performance page uses four cards in a two-column grid for startup, queue
+pickup, broker preparation and computer readiness. Each card includes its
+average, median/p50, p95, slowest observation and coverage. A trend graph below
+uses up to 24 fixed intervals across the selected range, grouped by admission time;
+missing intervals are gaps. Cards and trends use the entire filtered cohort,
+independently of the recent-turn table's pagination. The cards measure overlapping
+intervals; only the complete-cohort startup breakdown is additive.
+
+Native timings live as content-free `performance.v1.*` observations in the
+existing `moyai_events` table. Roll out the native frontend, API, execution worker
+and broker together through the normal release process; no schema migration or
+new Temporal workflow commands are introduced. Existing history is not backfilled.
+Web messages (including original-session continuation) get an API receipt;
+steering inputs, delegate/maintenance model calls and non-HTTP admissions do not
+become foreground startup samples. The report keeps missing evidence unknown,
+requires ordered server clocks, and uses the first observed outbound attempt's
+own broker receipt even if retries settle out of order. Measurements appear on
+`/api/settings/performance` and in its per-turn CSV export.
 
 ## Separate API and workers (standalone installations)
 
