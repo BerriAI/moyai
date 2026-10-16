@@ -114,7 +114,7 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   const box=await options.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=width+1);
   await input.press('Enter');
   const mention=input.getByLabel('/team skill');await mention.waitFor();
-  assert.equal(await mention.locator('svg.lucide-box').count(),1);
+  assert.equal(await mention.locator('svg[data-skill-icon="team"]').count(),1);
   assert.match(await input.innerText(),/^Please use Team /);
   assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,0);
   await input.pressSequentially('to inspect the issue.');
@@ -123,9 +123,9 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   const sent=state.requests.find(r=>r.method==='POST'&&r.path.endsWith('/messages'));
   assert.equal(sent.body.prompt,'Please use [/team](moyai-skill:personal%3Ateam?icon=%F0%9F%91%A5) to inspect the issue.');
   const saved=page.locator('.transcript').getByLabel('/team skill');await saved.waitFor();
-  assert.equal(await saved.locator('svg.lucide-box').count(),1);
+  assert.equal(await saved.locator('svg[data-skill-icon="team"]').count(),1);
   state.skills=[];await page.reload();await saved.waitFor();
-  assert.equal(await saved.locator('svg.lucide-box').count(),1);
+  assert.equal(await saved.locator('svg[data-skill-icon="team"]').count(),1);
   assert.match(await saved.locator('..').innerText(),/Please use Team to inspect the issue\./);
   state.skills=skills;
   await page.goto(base+'/#'+sessionId);await input.fill('/team');await options.waitFor();
