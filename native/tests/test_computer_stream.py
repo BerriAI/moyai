@@ -4,6 +4,7 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 
+import aiosqlite
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -259,6 +260,53 @@ async def test_relay_checks_input_and_stops_idle_viewing_after_revocation(runtim
         (await db.get(User, actor.id)).enabled = False
     with pytest.raises(HTTPException):
         await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.parametrize("source", ["input", "watch"])
+async def test_relay_cancellation_drains_authorization_before_returning(runtime, actor, monkeypatch, source):
+    session = await ready_computer(runtime, actor)
+    client = new_id()
+    if source == "input":
+        await lease(runtime, session.id, actor, "claim", client)
+    access = await bind(runtime, session.id, actor, client, controlling=source == "input")
+    entered, finish = asyncio.Event(), asyncio.Event()
+    execute = aiosqlite.Cursor.execute
+    paused = False
+
+    async def pause_read(cursor, sql, parameters=None):
+        nonlocal paused
+        result = await execute(cursor, sql, parameters)
+        if not paused and sql.startswith("SELECT"):
+            paused = True
+            entered.set()
+            await finish.wait()
+        return result
+
+    # Pause a real SQLite read before its rows/cursor are consumed. Canceling
+    # the relay must let authorization release that cursor before it returns.
+    monkeypatch.setattr(aiosqlite.Cursor, "execute", pause_read)
+    monkeypatch.setattr("moyai.computer_stream.RECHECK_SECONDS", 60 if source == "input" else .01)
+    socket, remote = Socket(), Remote()
+    task = asyncio.create_task(relay(runtime, socket, remote, access))
+    try:
+        if source == "input":
+            await socket.received.put({"type": "websocket.receive", "bytes": b"cancelled input"})
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=.05)
+        assert not done
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert not remote.sent and not socket.sent
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(User, actor.id)).enabled = False
+    finally:
+        finish.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_websocket_requires_same_origin_cookie_and_view_access(runtime, actor, monkeypatch):

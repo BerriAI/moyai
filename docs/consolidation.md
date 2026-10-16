@@ -8,7 +8,7 @@ links, Midnight violet palette and parallel CI execution. It does not claim pari
 
 ## Size
 
-Application source falls from **102,436 to 61,164 lines (40.3%)** against `cf1844f`.
+Application source falls from **102,436 to 61,168 lines (40.3%)** against `cf1844f`.
 This counts Python, JavaScript/TypeScript, CSS and HTML in the application trees
 and root startup files, including comments/blank lines. It excludes generated
 bundles, vendored code, generated protocol code, tests, scripts and documentation.
