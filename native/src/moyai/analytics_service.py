@@ -28,7 +28,7 @@ from .analytics import (
     utc,
 )
 from .inference_usage import InferenceUsage
-from .models import Effect, Session, Turn, User
+from .models import Effect, ProductTurnAuthority, Session, Turn, User
 from .pr_publications import PRPublication, verified_status
 from .pull_requests import PullRequestService, parse_pr_url
 
@@ -117,6 +117,37 @@ def legacy_event(row: Any, usage: dict[str, int | None]) -> UsageEvent:
     )
 
 
+async def undispatched_failures(runtime: Any, db: Any, records: list[Any]) -> set[str]:
+    """Canonical dispatch commits an admission before any upstream request.
+
+    A terminal failure with product authority and no SDK usage is known unsent
+    only when both ledgers have no attempts or exclusively proven-not-dispatched
+    reservations. Historical/standalone unknowns and dispatched attempts retain
+    their existing missing-cost treatment.
+    """
+    if not getattr(runtime.database, "product_authority_enabled", False):
+        return set()
+    from .product_inference import ProductInferenceRequest
+
+    candidates = {
+        row.id for row in records if row.status == "failed"
+        and not usage_json(row.usage)
+    }
+    if not candidates:
+        return set()
+    return set(await db.scalars(select(ProductTurnAuthority.turn_id).where(
+        ProductTurnAuthority.turn_id.in_(candidates),
+        ~select(ProductInferenceRequest.id).where(
+            ProductInferenceRequest.turn_id == ProductTurnAuthority.turn_id,
+            or_(ProductInferenceRequest.status != "not_dispatched", ProductInferenceRequest.cost_usd.is_not(None)),
+        ).exists(),
+        ~select(InferenceUsage.id).where(
+            InferenceUsage.turn_id == ProductTurnAuthority.turn_id,
+            or_(InferenceUsage.status != "not_dispatched", InferenceUsage.cost_usd.is_not(None)),
+        ).exists(),
+    )))
+
+
 def inference_event(row: InferenceUsage) -> UsageEvent:
     return UsageEvent(
         row.id, row.turn_id, row.session_id, row.actor_id, row.model, record_time(row.created_at),
@@ -160,7 +191,8 @@ def turn_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_latency_ms": sum(durations) / len(durations) if durations else None,
         "p50_latency_ms": percentile(durations, .5), "p95_latency_ms": percentile(durations, .95),
         "priced_turns": sum(row["pricing_status"] == "priced" for row in rows if row["usage_role"] != "steering_input"),
-        "unpriced_turns": sum(row["pricing_status"] != "priced" for row in rows if row["usage_role"] != "steering_input"),
+        "unpriced_turns": sum(row["pricing_status"] in {"partial", "unpriced"} for row in rows
+                             if row["usage_role"] != "steering_input"),
     }
 
 
@@ -316,7 +348,8 @@ async def report(
             InferenceUsage.turn_id.in_([row.id for row in turns]),
         ).group_by(InferenceUsage.turn_id))).all())
         steering = {row.id for row in turns if row.parent_turn and not row.has_preparation and row.id not in ledger_counts}
-        inference_turns = [row for row in turns if row.id not in steering]
+        undispatched = await undispatched_failures(runtime, db, turns)
+        inference_turns = [row for row in turns if row.id not in steering | undispatched]
         deltas = await usage_deltas(runtime, db, inference_turns)
         unknown = {row.id for row in inference_turns if deltas[row.id]["requests"] is None}
         gaps = {
@@ -428,8 +461,10 @@ async def report(
             linked_counts = dict((await db.execute(select(InferenceUsage.turn_id, func.count()).where(
                 InferenceUsage.turn_id.in_([row.id for row in linked_turns]),
             ).group_by(InferenceUsage.turn_id))).all())
+            linked_undispatched = await undispatched_failures(runtime, db, linked_turns)
             linked_turns = [
-                row for row in linked_turns if not row.parent_turn or row.has_preparation or row.id in linked_counts
+                row for row in linked_turns if row.id not in linked_undispatched
+                and (not row.parent_turn or row.has_preparation or row.id in linked_counts)
             ]
         if not linked_limited:
             linked_actors = {row.id: row.actor_id for row in linked_turns}
@@ -567,6 +602,7 @@ async def report(
                 "legacy_turns": len(totals.legacy_turns), "ledger_requests": len(ledger),
                 "unknown_request_turns": len(totals.unknown_request_turns),
                 "capture_gap_turns": len(gaps),
+                "undispatched_failed_turns": len(undispatched),
                 "linked_cost_limited": linked_limited,
                 "priced_requests": totals.priced_requests, "unpriced_requests": totals.unpriced_requests,
                 "pr_receipts": len(publications), "pr_status_checked": checked,
@@ -585,7 +621,7 @@ async def report(
                 "prs_merged": "Verified GitHub merge events in range, including older creations. Status counts describe the creation cohort's current verified state; unavailable reads remain unknown.",
                 "cost": "Actual reported USD subtotal only; partial coverage excludes missing amounts, never estimates them. Inference attempts use their recorded timestamp. Historical usage subtracts the exact admitted conversation's cumulative seed and stays unknown if that seed is unavailable. Only turns with no attempt ledger use this unpriced fallback.",
                 "requests": "New ledger requests count observed HTTP attempts, including retries. Historical fallback uses the admitted-seed usage delta. Attached steering inputs remain in input/turn counts but their inference belongs to the parent turn; they do not add missing-cost records.",
-                "coverage": "Coverage concerns observed records. A verified SDK request delta above ALL attempt rows demonstrates a capture gap; retries can mask gaps, so absence of that signal is not proof of complete billing. Baseline reads are bounded and missing baselines remain unknown.",
+                "coverage": "Coverage concerns observed records. Failed product turns with no SDK usage and no dispatched request in either durable ledger do not add missing costs. A verified SDK request delta above ALL attempt rows demonstrates a capture gap; retries can mask gaps, so absence of that signal is not proof of complete billing. Baseline reads are bounded and missing baselines remain unknown.",
                 "model": "The model filter selects root turns and their PR/session cohort, including child-model attempts. Ledger breakdowns use the actual requested alias. Historical fallback is attributed only to its recorded root model and marked legacy; historical per-request aliases are unavailable.",
                 "cost_per_merged_pr": "Actor inference spend through end across distinct sessions linked to that actor's merged PRs, matching the selected root-turn model filter, divided by verified merge events. Null when linked cost or PR status coverage is incomplete; this is session correlation, not exact per-PR billing.",
             },
