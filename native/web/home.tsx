@@ -10,11 +10,7 @@ import logo from "./assets/moyai-logo.png"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { NewConversation, Session, Turn } from "./conversation-state"
-import { SwarmSetup, type SwarmOptions } from "./swarm"
-
-declare global {
-  interface Window { MoyaiSpace?: { mount(canvas: HTMLCanvasElement, options?: { anchor?: HTMLElement }): () => void } }
-}
+import { SwarmSetup, validWorkerCount, type SwarmOptions } from "./swarm"
 
 type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
 export function homeSubmission(prompt: string, model: string, privateSession: boolean, attachments: string[], selected: string[], available: HomeConnection[]) {
@@ -80,6 +76,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 
   async function send() {
     if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)) return
+    if (swarmMode && !validWorkerCount(swarm.workers)) return
     submitting.current = true
     setBusy(true); setError("")
     const auth = csrfToken(), prompt = draft, attachments = pictures.readyFiles
@@ -134,7 +131,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
           <div className="composer-actions">
             <AttachButton add={pictures.add} disabled={busy} />
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>
-              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
+              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (swarmMode && !validWorkerCount(swarm.workers)) || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
             </div>
           </div>
         </div>

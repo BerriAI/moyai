@@ -390,6 +390,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : [])
   const [plan, setPlan] = useState<Plan[]>([])
   const [draft, setDraft] = useState("")
+  const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
   const [accountRevision, setAccountRevision] = useState(0)
@@ -626,13 +627,17 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     const titles = { "side-chat": "Side chat", computer: "Computer", files: "Files", activity: "Activity", plan: "Plan" }
     openTab({ id: kind === "side-chat" ? `side-chat:new:${crypto.randomUUID()}` : kind, kind, title: titles[kind] })
   }
-  const chat = <section className="chat file-drop-zone" id={chatId} {...fileDrop.handlers}>
+  // Questions and effect reviews remain in the conversation where they can be answered.
+  const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
+    && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
+  const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
         {fileDrop.dragging && <FileDropOverlay />}
-        {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load} />}
-        {originalSessionId && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>
+        {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
+          space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
+        {originalSessionId && !space && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>
           <ProductHistoryPrefix sessionId={originalSessionId} scopeKey={`${authorityKey}:${connectionVersion}`} active={visible} onOpenSession={openSessionReference} />
         </React.Suspense>}
-        <div className="transcript" ref={transcript}
+        <div className="transcript" ref={transcript} hidden={space}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
           {messages.filter(message => message.role !== "system" && !queued.some(item => item.id === message.id)).map(message => {

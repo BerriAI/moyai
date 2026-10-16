@@ -1,7 +1,7 @@
 # Swarms on Pydantic AI
 
-Choose **Swarm** on the new-session screen, describe one shared goal, select
-2–20 workers, and choose a work window. The default is 20 workers, plus the
+Choose **Swarm** on the new-session screen, describe one shared goal, type any
+whole number from 2–20 workers, and choose a work window. The default is 20 workers, plus the
 coordinator, with no automatic time expiry. The coordinator finishes a satisfied
 goal after the workers settle; explicitly ongoing goals can continue until
 paused or stopped. Selected worker models
@@ -10,6 +10,21 @@ model. Every execution uses Pydantic AI/Harness through the configured LiteLLM
 Responses endpoint.
 
 Each member has a persistent native conversation and its own Modal computer.
+The mission opens in **Space**, a live constellation of the actual saved team,
+adapted from the original swarm space view in #362. Every worker remains reachable,
+including larger teams and narrow screens. Nodes show the selected model, current
+status, worker lead, and most recent public finding or saved reply among the latest
+50 board posts. The shared feed shows the six latest public team updates.
+Updates refresh with the existing three-second mission poll; they are not private
+reasoning or a token stream. Animated connections indicate active work, not messages.
+Reduced motion keeps a static graph that still refreshes when team state changes.
+
+Select a member or reply to open its conversation. **Chat** restores the roster,
+full recent board, and mission conversation without discarding the composer draft.
+Questions, credential requests, and unsettled effects open the conversation for
+review instead of being hidden behind Space. Team controls remain available in
+both views, subject to the same owner permissions.
+
 The team shares a public board, not a filesystem. Open a member from the roster
 to inspect its full answer, activity, files, questions, and computer, or to send
 it a direct instruction. Member conversations retain the mission's visibility.

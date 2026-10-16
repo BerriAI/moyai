@@ -4,12 +4,15 @@
 .swarm-setup p { margin: 12px 0; font-size: 13px; }
 .swarm-settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .swarm-settings-row label { display: grid; min-width: 0; gap: 6px; font-size: 13px; }
+.swarm-settings-row input { font-size: 16px; }
+.swarm-settings-row label > span:last-child { font-size: 12px; }
 .swarm-models { display: grid; gap: 8px; margin-top: 12px; }
 .swarm-models label { display: flex; gap: 8px; overflow-wrap: anywhere; }
 .swarm-panel { flex: 0 0 auto; min-width: 0; padding: 12px 20px; border-bottom: 1px solid var(--ui-border); }
 .swarm-heading { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .swarm-heading > a { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
 .swarm-controls { display: flex; gap: 4px; margin-left: auto; }
+.swarm-view-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--ui-border); border-radius: 8px; }
 .swarm-details { margin-top: 12px; max-height: 45vh; overflow: auto; scrollbar-gutter: stable; }
 .swarm-window { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; }
 .swarm-window > button { width: 160px; }
