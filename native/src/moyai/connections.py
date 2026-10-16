@@ -95,9 +95,11 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
             selected.append(tools.prefixed(prefix))
         return CombinedToolset(selected) if selected else None
 
-    # The SDK resolves this factory in its native Temporal activities. Provider
-    # schemas, transport, calls, read-only mode and deferred approvals stay native.
+    # Per-run factories execute in workflow code in the durable SDK. Resolve
+    # selected accounts inside its get-tools/call-tool activities instead:
+    # credential decryption and canonical provider imports are not replay-safe.
+    # Provider schemas, transport, calls and deferred approvals stay SDK-owned.
     return Toolset(
-        DynamicToolset(resolve, id="moyai_connections", per_run_step=False),
+        DynamicToolset(resolve, id="moyai_connections", per_run_step=True),
         id="moyai_connections",
     )
