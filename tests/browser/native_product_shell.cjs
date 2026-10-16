@@ -142,6 +142,17 @@ test('capability-driven product/standalone login and shared session admission',a
   reset({signedIn:false,mode:'standalone',google:false});await page.goto(base+'/');await page.getByLabel('Username',{exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Continue with Google'}).count(),0);
 });
 
+for(const privateSession of [false,true])test(`individual home defaults to shared with private opt-in: ${privateSession}`,async t=>{
+  reset();const page=await pageFor(t,'');
+  const privateChoice=page.getByRole('checkbox',{name:'Private session · Only you'});
+  await privateChoice.waitFor();assert.equal(await privateChoice.isEnabled(),true);assert.equal(await privateChoice.isChecked(),false);
+  await page.getByText(/Workspace members can see messages/).waitFor();
+  if(privateSession)await privateChoice.check();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('A new task');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path==='/api/sessions'&&req.method==='POST'));
+  assert.equal(state.requests.find(req=>req.path==='/api/sessions'&&req.method==='POST').body.visibility,privateSession?'private':'shared');
+});
+
 test('product Users editor exposes roles only and sends the captured optimistic revision',async t=>{
   reset();const page=await pageFor(t,'#settings/users');await page.getByRole('button',{name:'Edit role for teammate@example.test'}).click();
   const dialog=page.getByRole('dialog',{name:'Edit workspace role'});await dialog.waitFor();assert.equal(await dialog.getByRole('textbox').count(),0);assert.equal(await page.getByRole('button',{name:'Add user',exact:true}).count(),0);
@@ -164,8 +175,8 @@ test('composition and late search responses cannot trigger a command or cross a 
   assert.equal(await dialog.getByRole('option',{name:/Rename session|Pin session/}).count(),0);
 });
 
-test('shared identity side chat is admitted as shared and settings aliases replace the chat rail',async t=>{
-  reset({individual:false});const page=await pageFor(t);await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
+for(const individual of [false,true])test(`side chat defaults to shared and settings aliases replace the chat rail: individual=${individual}`,async t=>{
+  reset({individual});const page=await pageFor(t);await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
   await page.getByRole('button',{name:'Open side panel',exact:true}).click();await page.getByRole('button',{name:'Add panel tab',exact:true}).click();
   await page.getByRole('menuitem',{name:/Side chat/}).click();await page.getByRole('button',{name:'New side chat',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/sessions'&&req.method==='POST'));
