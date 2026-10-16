@@ -258,26 +258,4 @@ class InfrastructureCosts:
         return router
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS infrastructure_bills (
-                provider TEXT NOT NULL, month TEXT NOT NULL, amount TEXT NOT NULL,
-                kind TEXT NOT NULL, note TEXT NOT NULL, revision INTEGER NOT NULL,
-                updated_at TEXT NOT NULL, actor TEXT NOT NULL, PRIMARY KEY(provider,month)
-            );
-            CREATE TABLE IF NOT EXISTS infrastructure_bill_audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, month TEXT NOT NULL,
-                actor TEXT NOT NULL, changed_at TEXT NOT NULL, previous TEXT NOT NULL, replacement TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS infrastructure_daily_costs (
-                provider TEXT NOT NULL, scope TEXT NOT NULL, day TEXT NOT NULL, amount TEXT NOT NULL,
-                synced_at TEXT NOT NULL, PRIMARY KEY(provider,scope,day)
-            );
-            CREATE TABLE IF NOT EXISTS infrastructure_sync_jobs (
-                id TEXT PRIMARY KEY, provider TEXT NOT NULL, scope TEXT NOT NULL,
-                start TEXT NOT NULL, "end" TEXT NOT NULL, status TEXT NOT NULL,
-                state TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
-                UNIQUE(provider,scope,start,"end")
-            );
-        ''')
+from .schema_initializers import initialize_infrastructure_costs as initialize_schema

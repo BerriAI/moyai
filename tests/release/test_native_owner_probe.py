@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from scripts.release.rolling_probe import health_identity, snapshot
 from test_rolling_probe import owners, response  # noqa: F401
-from test_postgres_runtime import target  # noqa: F401
+from postgres_fixture import target  # noqa: F401
 
 
 def observe(url, schema):

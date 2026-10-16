@@ -114,7 +114,10 @@ def execute(options, *, probe_fn):
                 and all(state[key] == [] for key in ('owners', 'coordinators', 'brokers', 'broker_leaders')))
     encoded = json.dumps(body)
     require(len(encoded.encode()) <= 16384)
-    result = subprocess.run(['/app/native/.venv/bin/python', '-m', 'moyai.product_drain', command],
+    from pathlib import Path
+    previous = Path('/app/native/.venv/bin/python')
+    executable = str(previous) if previous.is_file() else '/app/.venv/bin/python'
+    result = subprocess.run([executable, '-m', 'moyai.product_drain', command],
         input=encoded, cwd='/app', capture_output=True, text=True, timeout=25)
     require(result.returncode == 0 and len(result.stdout.encode()) <= 16384)
     receipt = json.loads(result.stdout)

@@ -111,7 +111,7 @@ Retrieve the generated initial password only in your private terminal:
 
 ```sh
 docker compose run --rm --no-deps setup \
-  /app/native/.venv/bin/python -m moyai.deployment password
+  /app/.venv/bin/python -m moyai.deployment password
 ```
 
 Open `MOYAI_PUBLIC_URL`, sign in, and ask Moyai to create a small file in its
@@ -124,7 +124,7 @@ Run connection and schema checks again with:
 
 ```sh
 docker compose run --rm --no-deps setup \
-  /app/native/.venv/bin/python -m moyai.deployment check
+  /app/.venv/bin/python -m moyai.deployment check
 ```
 
 ## State and recovery
@@ -146,7 +146,7 @@ problem, then explicitly resume preparation with the original image:
 
 ```sh
 docker compose run --rm --no-deps setup \
-  /app/native/.venv/bin/python -m moyai.deployment recover-setup
+  /app/.venv/bin/python -m moyai.deployment recover-setup
 docker compose up -d
 ```
 
@@ -197,7 +197,7 @@ If the candidate controller exits during `resume`, run:
 
 ```sh
 docker compose run --rm --no-deps setup \
-  /app/native/.venv/bin/python -m moyai.deployment resume
+  /app/.venv/bin/python -m moyai.deployment resume
 ```
 
 This also checks the saved command against the native receipt. A confirmed

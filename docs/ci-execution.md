@@ -38,10 +38,12 @@ and prints the slowest tests to help evaluate balance from actual runner timings
 
 ## Docker startup
 
-The production image build and actual container startup/restart checks run at the
-same time as the five regression groups. The stable `docker` check runs afterward
-and requires both the entire regression matrix and image validation to succeed.
-It rejects failed, cancelled and skipped prerequisites.
+The image build and actual container startup/restart checks run independently
+of the shared-service, release and native test workflows. The stable `docker`
+check covers the image and startup proof; the release controller also requires
+the other checks on the selected commit. Retired-engine regression groups are
+removed with their engines; current shared-service tests run in the PostgreSQL
+runtime workflow.
 
 No production deployment is triggered by this workflow. The release controller's
 existing exact-commit CI checks and maintenance sequence are unchanged.

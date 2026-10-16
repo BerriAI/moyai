@@ -6,7 +6,6 @@ It never imports app.main, constructs clients, or starts application lifecycles.
 """
 import argparse
 import base64
-import importlib
 import json
 
 from .database import DatabaseError, identifier
@@ -55,11 +54,11 @@ def prepare_schema(owner, schema, mode):
 
 
 def initialize_components(store):
+    from . import schema_initializers
     for name in COMPONENTS:
-        importlib.import_module('.' + name, __package__).initialize_schema(store)
-    from .trace_outbox import TABLES, initialize_schema
-    for table in sorted(TABLES):
-        initialize_schema(store, table)
+        getattr(schema_initializers, 'initialize_' + name)(store)
+    for table in sorted(schema_initializers.TABLES):
+        schema_initializers.initialize_trace_outbox(store, table)
 
 
 def initialize_defaults(store, settings):

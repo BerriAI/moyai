@@ -429,3 +429,25 @@ async def test_ingress_opens_only_after_confirmed_resume(install_environment, mo
     assert persisted["phase"] == "initialized"
     assert not persisted["activation_pending"]
     assert "upgrade" not in persisted
+
+
+async def test_split_provision_uses_installed_interpreter_for_canonical_schema(install_environment, monkeypatch):
+    import subprocess
+    import sys
+
+    from moyai import deployment_bootstrap, product_start
+
+    install_environment["MOYAI_INSTALL_TOPOLOGY"] = "split"
+    _, values = prepared(install_environment)
+    calls = []
+
+    def migrate(command, **kwargs):
+        calls.append((command, kwargs["env"]))
+        return subprocess.CompletedProcess(command, 0, '{"schema_revision":21,"status":"ready"}', '')
+
+    monkeypatch.setattr(deployment_bootstrap.subprocess, "run", migrate)
+    monkeypatch.setattr(product_start, "prepare_native_schema", AsyncMock(return_value={"app_schema": "verified"}))
+    result = await deployment_bootstrap.provision(values, fresh=False)
+    assert calls[0][0] == [sys.executable, "-m", "app.schema_migrations", "--apply"]
+    assert calls[0][1]["MOYAI_DATABASE_INITIALIZE"] == "false"
+    assert result == {"product": {"schema_revision": 21, "status": "ready"}, "native": {"app_schema": "verified"}}

@@ -353,3 +353,15 @@ def example(t):
         return {'event':{'id':'event-123','event_type':t.event,'data':{'id':'incident-123','title':'Service unavailable',
             'service':{'id':t.service_id or 'PSERVICE'},'urgency':t.urgency or 'high','status':t.status or 'triggered'}}}
     return {'id':'example-123','event':t.event if t.event!='*' else 'build.ready','title':'Example event','body':'Context for the workflow.'}
+
+
+def sources(row):
+    # Load old single-trigger drafts without discarding them during the upgrade.
+    definition = json.loads(row['definition'])
+    if 'triggers' in definition:
+        return [(t['id'], EventTrigger.model_validate(t['event'])) for t in definition['triggers'] if t.get('event')]
+    event = definition.get('event')
+    if not event:
+        return []
+    event = {k:v for k,v in event.items() if k != 'max_runs_per_hour'}
+    return [('default', EventTrigger.model_validate(event))]

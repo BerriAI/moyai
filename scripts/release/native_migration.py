@@ -9,7 +9,10 @@ from pathlib import Path
 import subprocess
 import sys
 
-NATIVE_PYTHON = '/app/native/.venv/bin/python'
+def native_python(root=Path('/app')):
+    previous = root / 'native/.venv/bin/python'
+    return str(previous if previous.is_file() else root / '.venv/bin/python')
+
 SCHEMA_IDENTIFIERS_SOURCE = '''
 def validate_schema_identifiers(metadata):
     from sqlalchemy.dialects import postgresql
@@ -48,7 +51,7 @@ def candidate_manifest(environment):
     from scripts.release.deploy import ReleaseError
     root = Path(__file__).resolve().parents[2]
     try:
-        result = subprocess.run([str(root / 'native/.venv/bin/python'), '-c', MANIFEST_SOURCE],
+        result = subprocess.run([native_python(root), '-c', MANIFEST_SOURCE],
             cwd=root, env={**environment, 'PATH': os.defpath, 'PYTHONPATH': str(root)},
             capture_output=True, text=True, timeout=60)
         value = json.loads(result.stdout)
@@ -66,7 +69,7 @@ def candidate_manifest(environment):
 
 def native_command(command):
     """Bounded, captured output; errors never echo settings or SQL diagnostics."""
-    result = subprocess.run([NATIVE_PYTHON, '-m', 'moyai.product_start', *command],
+    result = subprocess.run([native_python(), '-m', 'moyai.product_start', *command],
         cwd='/app', capture_output=True, text=True, timeout=480)
     if result.returncode:
         raise ValueError('Native schema command failed.')

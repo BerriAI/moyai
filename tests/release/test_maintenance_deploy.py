@@ -511,3 +511,21 @@ def test_same_build_with_native_override_is_not_a_noop(setup):
     assert len(render.history) == 10
     assert all(env['AGENT_HARNESS'] == 'deepagents-temporal' for env in render.env.values())
     assert release.record['status'] == 'success'
+
+
+def test_real_candidate_contract_rejects_retired_engine_without_running_clients():
+    from scripts.release.maintenance_deploy import maintenance_contract
+    environment = {
+        **MaintenanceRender().env[COORDINATOR],
+        'MOYAI_PUBLIC_URL': 'https://synthetic.example',
+        'MOYAI_NATIVE_SCHEMA': 'native_fixture',
+        'MOYAI_NATIVE_TASK_QUEUE': 'native-fixture-v1',
+        'MOYAI_NATIVE_ENCRYPTION_KEY': 'synthetic-native-key-at-least-32-chars',
+        'MOYAI_NATIVE_KEY_FORMAT': 'sha256-text-fernet-v1',
+        'MOYAI_NATIVE_OBJECT_PREFIX': 'native-fixture',
+        'MOYAI_NATIVE_OBJECT_FORMAT': 'fernet-hmac-sha256-v1',
+        'MOYAI_CORE': 'pydantic',
+    }
+    assert maintenance_contract(environment)['core'] == 'pydantic'
+    with pytest.raises(ReleaseError, match='Candidate maintenance contracts'):
+        maintenance_contract({**environment, 'MOYAI_CORE': 'legacy'})

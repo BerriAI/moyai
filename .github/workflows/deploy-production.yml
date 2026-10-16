@@ -12,7 +12,7 @@ on:
       execution_core:
         description: Pydantic selects the reviewed maintenance cutover; preserve keeps the running core for compatible releases
         type: choice
-        options: [pydantic, preserve, legacy]
+        options: [pydantic, preserve]
         default: pydantic
       preflight_only:
         description: Optional check only (every deployment already runs preflight)
@@ -49,14 +49,15 @@ jobs:
             echo 'Explicit core selection requires a maintenance release.'
             exit 1
           fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
       - uses: astral-sh/setup-uv@v6
         if: inputs.release_type != 'coordinated'
       - name: Install candidate settings dependencies before loading deployment credentials
         if: inputs.release_type != 'coordinated'
         run: uv sync --frozen --python 3.13
-      - name: Install the separately locked native candidate and product adapters
-        if: inputs.release_type == 'maintenance'
-        run: uv sync --project native --frozen --python 3.13 --extra product
       - name: Coordinate app, worker and activated broker deployment
         if: inputs.release_type == 'coordinated'
         env:

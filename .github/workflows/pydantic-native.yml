@@ -2,10 +2,8 @@ name: Native Pydantic runtime
 
 on:
   pull_request:
-    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', '.dockerignore', 'docker_start.py', 'render_start.py', 'deploy/docker/**', 'scripts/build_docker_bundle.py', '.github/workflows/pydantic-native.yml', '.github/workflows/docker-release.yml']
   push:
     branches: [main]
-    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', '.dockerignore', 'docker_start.py', 'render_start.py', 'deploy/docker/**', 'scripts/build_docker_bundle.py', '.github/workflows/pydantic-native.yml', '.github/workflows/docker-release.yml']
 
 permissions:
   contents: read
@@ -100,16 +98,3 @@ jobs:
         run: |
           test "$QUALITY_RESULT" = success
           test "$TESTS_RESULT" = success
-  web:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck:native
-      - run: npm run build:native
-      - run: test -z "$(git ls-files -- native/src/moyai/static)"

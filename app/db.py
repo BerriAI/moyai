@@ -125,13 +125,13 @@ class Store:
     def _initialize(self, directory, default_model, object_storage):
         if self.schema_updates:
             self._initialize_schema(default_model)
-            from .session_privacy import initialize_schema as initialize_privacy
+            from .schema_initializers import initialize_session_privacy as initialize_privacy
             initialize_privacy(self)
-            from .swarms import initialize_schema
+            from .schema_initializers import initialize_swarms as initialize_schema
             initialize_schema(self)
-            from .swarm_chat import initialize_schema as initialize_swarm_chat
+            from .schema_initializers import initialize_swarm_chat as initialize_swarm_chat
             initialize_swarm_chat(self)
-            from .performance import initialize_schema as initialize_performance
+            from .schema_initializers import initialize_performance as initialize_performance
             initialize_performance(self)
         if not self.database:
             self.path.chmod(0o600)

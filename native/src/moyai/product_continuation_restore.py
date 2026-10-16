@@ -96,13 +96,9 @@ class ModalRecoveryTransport:
             block_network=True, timeout=600, idle_timeout=300,
         )
         try:
-            from .agent import PACKAGE_ROOT
+            from app import legacy_artifacts
 
-            collector = PACKAGE_ROOT / "legacy_artifacts.py"
-            if not collector.is_file():
-                collector = Path(__file__).resolve().parents[3] / "sandbox" / "artifacts.py"
-            if not collector.is_file():
-                raise ValueError("Package the reviewed sandbox/artifacts.py recovery collector.")
+            collector = Path(legacy_artifacts.__file__)
             await sandbox.filesystem.write_bytes.aio(GUEST.read_bytes(), "/tmp/moyai-product-restore.py")
             await sandbox.filesystem.write_bytes.aio(collector.read_bytes(), "/tmp/moyai-product-collector.py")
             process = await sandbox.exec.aio(

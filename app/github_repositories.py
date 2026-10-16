@@ -328,8 +328,4 @@ class GitHubRepositories:
         return credentials
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS github_repositories (
-        installation_id INTEGER NOT NULL, repository_id INTEGER NOT NULL,
-        owner_id INTEGER NOT NULL, full_name TEXT NOT NULL, aliases TEXT NOT NULL,
-        PRIMARY KEY(installation_id,repository_id))''')
+from .schema_initializers import initialize_github_repositories as initialize_schema

@@ -153,18 +153,4 @@ class SessionEvents:
                 await asyncio.sleep(1)
 
 
-def initialize_schema(store):
-    from .database_schema import SESSION_EVENT_FUNCTION, SESSION_EVENT_TRIGGERS
-    with store.connect() as conn:
-        conn.begin_write()
-        conn.execute('CREATE TABLE IF NOT EXISTS session_event_consumers (name TEXT PRIMARY KEY)')
-        conn.execute('''CREATE TABLE IF NOT EXISTS session_event_inbox (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            consumer TEXT NOT NULL REFERENCES session_event_consumers(name) ON DELETE CASCADE,
-            run_id TEXT NOT NULL, kind TEXT NOT NULL, UNIQUE(consumer,run_id))''')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_session_event_inbox_order ON session_event_inbox(consumer,id)')
-        if store.database:
-            conn.execute(SESSION_EVENT_FUNCTION.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'))
-        for sqlite, postgres in SESSION_EVENT_TRIGGERS.values():
-            conn.execute(postgres.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER') if store.database
-                         else sqlite.replace('CREATE TRIGGER', 'CREATE TRIGGER IF NOT EXISTS'))
+from .schema_initializers import initialize_session_events as initialize_schema

@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from agent.activity import public_text
+from app.activity_text import public_text
 from .connector_errors import ConnectorError
 
 

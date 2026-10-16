@@ -238,17 +238,4 @@ class BrokerOwnershipMiddleware:
             self.owner.tasks.discard(task)
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS broker_work_owners (
-        kind TEXT NOT NULL, work_id TEXT NOT NULL, owner_pid INTEGER NOT NULL,
-        owner_started TEXT NOT NULL, PRIMARY KEY(kind,work_id))''')
-    # Preserve statuses during the offline migration. An explicit orphan record
-    # lets startup recover pre-protocol work without touching live broker rows.
-    # Current broker routes never create executing approvals; legacy ambiguous
-    # external writes become uncertain on recovery and are never replayed.
-    for kind, table, key, status in (
-            ('model', 'model_requests', 'id', 'pending'),
-            ('context', 'context_jobs', 'operation_id', 'running'),
-            ('approval', 'approvals', 'id', 'executing')):
-        store.execute(f"INSERT INTO broker_work_owners(kind,work_id,owner_pid,owner_started) "
-                      f"SELECT ?,{key},0,'' FROM {table} WHERE status=? ON CONFLICT DO NOTHING", (kind, status))
+from .schema_initializers import initialize_broker_ownership as initialize_schema

@@ -11,7 +11,7 @@ services:
     extends:
       file: compose.common.yaml
       service: runtime
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "serve", "coordinator"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "serve", "coordinator"]
     environment:
       MOYAI_INSTALL_TOPOLOGY: split
     depends_on:
@@ -21,7 +21,7 @@ services:
     extends:
       file: compose.common.yaml
       service: runtime
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "serve", "broker"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "serve", "broker"]
     environment:
       MOYAI_INSTALL_TOPOLOGY: split
     depends_on:
@@ -31,7 +31,7 @@ services:
     extends:
       file: compose.common.yaml
       service: runtime
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "serve", "worker"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "serve", "worker"]
     environment:
       MOYAI_INSTALL_TOPOLOGY: split
     depends_on:
@@ -41,7 +41,7 @@ services:
     extends:
       file: compose.common.yaml
       service: runtime
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "serve", "api"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "serve", "api"]
     environment:
       MOYAI_INSTALL_TOPOLOGY: split
     depends_on:
@@ -51,7 +51,7 @@ services:
     extends:
       file: compose.common.yaml
       service: setup
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "activate"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "activate"]
     environment:
       MOYAI_INSTALL_TOPOLOGY: split
     volumes:

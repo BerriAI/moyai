@@ -1,8 +1,6 @@
 """Durable Slack uploads, using the same attachment pipeline as web inputs."""
 import asyncio
 from email.message import Message
-import hashlib
-import json
 import math
 from pathlib import PurePath
 import random
@@ -15,7 +13,7 @@ import aiohttp
 from .audio import AUDIO_TYPES, AudioTranscriber, audio_type
 from .attachments import filename, inspect_file
 from .connector_errors import ConnectorError
-from .db import database, drain
+from .db import drain
 from .slack_canvas import CanvasFormatError, inspect_canvas, is_canvas
 
 
@@ -106,18 +104,6 @@ def retry_seconds(value):
 async def file_operation(operation, *args):
     """Drain a file operation before cancellation can close its temporary file."""
     return await drain(asyncio.create_task(asyncio.to_thread(operation, *args)))
-
-
-def file_ids(files):
-    """Persist SDK-normalized references; downloads happen on the claimed turn."""
-    from agentchat.channels.slack_files import slack_attachments
-
-    if not isinstance(files, list):
-        return []
-    # The SDK normalizer has a per-call bound. Enumerate every transport batch
-    # without turning that implementation detail into a retained-source limit.
-    return list(dict.fromkeys(item.id for offset in range(0, len(files), 100)
-                              for item in slack_attachments(files[offset:offset+100], limit=100)))
 
 
 class SlackFiles:
@@ -379,114 +365,3 @@ class SlackFiles:
             return inspected
         except ValueError as exc:
             return media_type or 'application/octet-stream', b'', '', str(exc)
-
-    def include_context(self, run_id):
-        """Recover files omitted by app_mention, plus files in the invoked thread.
-
-        Never import unrelated files from nearby channel messages or attach the
-        same frozen context to every follow-up. Keep event-provided IDs first.
-        """
-        store = self.owner.store
-        source, run = store.slack_source(run_id), store.run(run_id)
-        if not source or source['context_status'] != 'ready':
-            return
-        with store.connect() as conn:
-            conn.begin_write()
-            message = conn.execute("SELECT id,status FROM messages WHERE run_id=? AND role='user' ORDER BY id LIMIT 1", (run_id,)).fetchone()
-            if not message or message['id'] != run.get('active_message_id') or message['status'] != 'running':
-                return
-            pending = conn.execute('SELECT * FROM slack_audio_inputs WHERE message_id=?', (message['id'],)).fetchone()
-            if pending and pending['status'] != 'pending':
-                return
-            ids = json.loads(pending['files_json']) if pending else []
-            messages = source.get('messages', [])
-            # Keep directly addressed files first without discarding later ones.
-            messages = sorted(messages, key=lambda item: item['ts'] != source['mention_ts'])
-            for item in messages:
-                if item['ts'] == source['mention_ts'] or source.get('kind') == 'thread':
-                    ids.extend(item.get('file_ids', []))
-            ids = list(dict.fromkeys(ids))
-            if ids:
-                conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?) '
-                             'ON CONFLICT(message_id) DO UPDATE SET files_json=excluded.files_json',
-                             (message['id'], json.dumps(ids)))
-
-    def pending(self, run_id):
-        store = self.owner.store
-        run = store.run(run_id)
-        # Only the claimed turn is read. Queued inputs cannot leak into it.
-        return store.rows("SELECT a.*,m.user_id FROM slack_audio_inputs a JOIN messages m ON m.id=a.message_id "
-                          "WHERE m.run_id=? AND m.id=? AND a.status='pending' AND m.status='running'",
-                          (run_id, run.get('active_message_id')))
-
-    def publish(self, row, team, attachments, errors):
-        store = self.owner.store
-        with store.connect() as conn:
-            conn.begin_write()
-            current = conn.execute('SELECT status FROM messages WHERE id=?', (row['message_id'],)).fetchone()
-            if not current or current['status'] != 'running':
-                return False
-            try:
-                # Remote saves can yield after Slack's download guard.
-                # Recheck the entire batch, including recovered draft IDs,
-                # under the same writer lock that publishes their access.
-                self.check_access(team, connection=conn)
-            except ValueError as exc:
-                attachments = []
-                errors.append(str(exc))
-            store.attachments.bind_in(conn, attachments, row['message_id'], row['user_id'])
-            if errors:
-                explanation = '\n\n[Slack attachments could not be read: ' + ' '.join(dict.fromkeys(errors)) + ' Do not guess the missing content.]'
-                conn.execute('UPDATE messages SET content=content||? WHERE id=?', (explanation, row['message_id']))
-            conn.execute("UPDATE slack_audio_inputs SET status='ready' WHERE message_id=?", (row['message_id'],))
-        return True
-
-    async def publish_and_checkpoint(self, row, team, attachments, errors):
-        if not await database(self.publish, row, team, attachments, errors):
-            return False
-        await self.owner.checkpoints.flush()
-        return True
-
-    async def prepare(self, run_id):
-        store = self.owner.store
-        for row in await database(self.pending, run_id):
-            team = row['user_id'].split(':')[1]
-            await database(store.event, run_id, 'context', 'Reading the files attached to your Slack message')
-            attachments, errors = [], []
-            for file_id in json.loads(row['files_json']):
-                attachment_id = hashlib.sha256(f"slack:{row['message_id']}:{file_id}".encode()).hexdigest()[:32]
-                prior = await database(store.rows, "SELECT size FROM attachments WHERE id=? AND owner_id=? AND upload_state='ready'",
-                                       (attachment_id, row['user_id']))
-                if prior:
-                    attachments.append(attachment_id)
-                    continue
-                try:
-                    async with self.slots:
-                        item = await self.read(file_id, team)
-                    name, raw, inspected = item
-                    try:
-                        await database(store.attachments.save, attachment_id, row['user_id'], name, raw, inspected,
-                                       self.owner.settings.attachment_storage_limit_mb * 1024 * 1024)
-                    finally:
-                        if hasattr(raw, 'close'):
-                            raw.close()
-                    attachments.append(attachment_id)
-                except SlackFileError as exc:
-                    errors.append(str(exc))
-                    try:
-                        await database(store.event, run_id, 'error', str(exc), exc.diagnostic(),
-                                       turn_id=row['message_id'])
-                    except Exception:
-                        # Optional diagnostics must not lose the original error
-                        # or prevent binding the other files. Cancellation and
-                        # process-exit exceptions deliberately still propagate.
-                        pass
-                except ValueError as exc:
-                    errors.append(str(exc))
-                except Exception:
-                    errors.append('Could not read this Slack attachment. Upload it again or describe its contents.')
-            # Keep the commit and its checkpoint owned together. Cancellation
-            # must not discard a successful publication result and skip flush.
-            publication = asyncio.create_task(self.publish_and_checkpoint(row, team, attachments, errors))
-            if not await drain(publication):
-                return

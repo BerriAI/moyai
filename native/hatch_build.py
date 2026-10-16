@@ -1,4 +1,4 @@
-"""Build the native UI and retain runtime resources in source and wheel distributions."""
+"""Ship canonical product services and recovery formats in source and wheel builds."""
 
 import shutil
 import subprocess
@@ -26,15 +26,13 @@ class CustomBuildHook(BuildHookInterface):
             )
         asset_destination = "moyai/static" if self.target_name == "wheel" else "src/moyai/static"
         build_data["force_include"][str(assets)] = asset_destination
-        # A wheel built from the published sdist cannot reach ../sandbox.
-        # The sdist carries the exact canonical bytes captured at its build.
-        source = root / "_build_resources" / "legacy_artifacts.py"
-        if not source.is_file():
-            source = root.parent / "sandbox" / "artifacts.py"
-        if not source.is_file():
-            raise FileNotFoundError("The canonical legacy archive helper is missing from the build inputs.")
-        destination = (
-            "moyai/resources/legacy_artifacts.py"
-            if self.target_name == "wheel" else "_build_resources/legacy_artifacts.py"
-        )
-        build_data["force_include"][str(source)] = destination
+        # Both product integration and local development ship in one installation.
+        shared = root / "_build_resources" / "app"
+        if not shared.is_dir():
+            shared = root.parent / "app"
+        if not (shared / "config.py").is_file():
+            raise FileNotFoundError("The canonical product package is missing from the build inputs.")
+        prefix = "app" if self.target_name == "wheel" else "_build_resources/app"
+        for path in sorted(shared.rglob("*")):
+            if path.is_file() and path.suffix in {".py", ".json"} and "__pycache__" not in path.parts:
+                build_data["force_include"][str(path)] = prefix + "/" + path.relative_to(shared).as_posix()

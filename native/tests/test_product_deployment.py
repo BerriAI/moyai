@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -62,9 +63,10 @@ def configured(env):
     return config
 
 
-def test_legacy_default_and_standalone_remain_usable_without_product_sources(tmp_path):
-    assert select_core({}) == "legacy"
-    assert load_product_config({"MOYAI_DATABASE_URL": "invalid"}) is None
+def test_pydantic_default_and_standalone_remain_usable_without_product_sources(tmp_path):
+    assert select_core({}) == "pydantic"
+    with pytest.raises(ProductConfigurationError):
+        load_product_config({"MOYAI_DATABASE_URL": "invalid"})
     standalone = configured({"MOYAI_CORE": "pydantic"})
     assert standalone.product_mode == "standalone"
     assert standalone.native_schema_mode == "bootstrap"
@@ -283,48 +285,44 @@ def test_native_product_extra_imports_real_product_modules_without_old_agent_sdk
     assert json.loads(result.stdout) == versions
 
 
-def test_root_selector_preserves_legacy_and_uses_separate_native_interpreter(monkeypatch):
+def test_root_selector_uses_one_interpreter_and_rejects_retired_engines(monkeypatch):
     import docker_start
 
     monkeypatch.setattr(os, "environ", {"PORT": "12345"})
-    legacy = docker_start.server_command()
-    assert legacy[0] == sys.executable and "app.main:app" in legacy
+    default = docker_start.server_command()
+    assert default[:4] == [sys.executable, "-m", "moyai.product_start", "serve"]
     monkeypatch.setenv("MOYAI_CORE", "pydantic")
     native = docker_start.server_command()
-    assert native[:4] == [str(ROOT / "native/.venv/bin/python"), "-m", "moyai.product_start", "serve"]
+    assert native[:4] == [sys.executable, "-m", "moyai.product_start", "serve"]
     assert native[-1] == "12345"
     monkeypatch.setenv("RENDER_SERVICE_ID", "synthetic")
     rendered = docker_start.server_command()
-    assert rendered[0] == str(ROOT / "native/.venv/bin/python")
+    assert rendered[0] == sys.executable
     assert Path(rendered[1]).resolve() == ROOT / "render_start.py"
     monkeypatch.setenv("MOYAI_CORE", "typo")
     with pytest.raises(ValueError):
         docker_start.server_command()
 
 
-def test_missing_native_environment_never_falls_back_to_legacy(monkeypatch, tmp_path):
+@pytest.mark.parametrize("core", ["legacy", "typo", ""])
+def test_retired_core_never_falls_back(monkeypatch, core):
     import docker_start
-
-    monkeypatch.setattr(docker_start, "__file__", str(tmp_path / "docker_start.py"))
-    monkeypatch.setattr(os, "environ", {"MOYAI_CORE": "pydantic"})
-    with pytest.raises(RuntimeError, match="locked native interpreter"):
+    monkeypatch.setattr(os, "environ", {"MOYAI_CORE": core})
+    with pytest.raises(ValueError, match="Only MOYAI_CORE=pydantic"):
         docker_start.server_command()
+    with pytest.raises(ProductConfigurationError, match="Only MOYAI_CORE=pydantic"):
+        load_product_config()
 
 
-def test_render_native_selection_does_not_call_legacy_bootstrap(environment, monkeypatch):
+def test_render_starts_the_selected_product_role(environment, monkeypatch):
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
 
-    import docker_start
     import render_start
 
     from moyai import product_start
 
     monkeypatch.setattr(os, "environ", {**environment, "RENDER_MIGRATION_STAGE": "false",
                                       "MOYAI_PUBLIC_URL": "https://synthetic.example.test"})
-    monkeypatch.setattr(docker_start, "ensure_selected_interpreter", lambda: None)
-    bootstrap = AsyncMock()
-    monkeypatch.setattr(render_start, "bootstrap", bootstrap)
     application = SimpleNamespace(state=SimpleNamespace(product_lifecycle=None))
     calls = []
     monkeypatch.setattr(product_start, "create_application", lambda *a, **kw: application)
@@ -340,7 +338,6 @@ def test_render_native_selection_does_not_call_legacy_bootstrap(environment, mon
     monkeypatch.setattr(render_start, "RenderOverlapServer", Server)
     render_start.main()
     assert calls == ["native", "served"]
-    bootstrap.assert_not_awaited()
 
 
 @pytest.mark.parametrize("command", ["user", "dev", "serve", "worker"])
@@ -390,7 +387,6 @@ async def test_cli_dev_uses_effective_native_settings_and_creates_only_its_local
     from argparse import Namespace
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
 
     from fastapi import FastAPI
 

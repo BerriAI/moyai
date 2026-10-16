@@ -42,7 +42,7 @@
 .workspace-picker .workspace-resource-action > svg { flex: none; color: var(--ui-muted); }
 .workspace-picker .workspace-resource-action > svg:last-child { width: 14px; height: 14px; }
 .workspace-picker .workspace-resource-action .workspace-pr-open { color: var(--ui-success); }
-.workspace-picker .workspace-resource-action .workspace-pr-merged { color: var(--ui-primary); }
+.workspace-picker .workspace-resource-action .workspace-pr-merged { color: var(--ui-merged); }
 .workspace-picker .workspace-resource-action .workspace-pr-closed { color: var(--ui-danger); }
 .workspace-picker .workspace-remove { flex: none; margin-inline-end: 2px; color: var(--ui-muted); }
 .workspace-picker .workspace-agent-action:disabled { opacity: 1; color: var(--ui-muted); cursor: default; }

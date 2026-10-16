@@ -4,11 +4,11 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from agent.swarm.types import Agent, Harness
+from app.legacy_swarm_types import Agent, Harness
 
 
 def test_harness_enum_matches_registered_built_in_runtimes():
-    from agent.harnesses.harness_registry import HARNESSES
+    from app.harness_catalog import HARNESSES
 
     assert {harness.value for harness in Harness} == set(HARNESSES)
     assert Harness.CODEX == 'codex'

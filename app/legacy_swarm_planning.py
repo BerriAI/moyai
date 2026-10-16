@@ -1,0 +1,187 @@
+"""Agent-owned swarm composition and prompts, independent of a host runtime.
+
+The host resolves its allowed harness/model pairs before planning, then persists
+the resulting assignments and assigns execution IDs. Planning does not launch
+workers, grant permissions, or make a quality-based model-routing claim.
+"""
+from collections.abc import Sequence
+from dataclasses import dataclass
+import json
+import random
+
+
+ROUND_DELAY_SECONDS = 30
+INITIAL_TEAM_SIZE = 20
+INITIAL_ROLES = (
+    ('Mission analyst', 'Clarify the desired outcome, constraints, and acceptance criteria.'),
+    ('Explorer', 'Develop a promising approach and explain why it fits the task.'),
+    ('Alternative thinker', 'Develop a meaningfully different approach and compare its tradeoffs.'),
+    ('Researcher', 'Identify evidence available through the enabled tools; separate findings from assumptions.'),
+    ('Systems thinker', 'Examine how the proposed parts work together and identify dependencies.'),
+    ('Practical planner', 'Produce concrete next steps and the smallest useful deliverable.'),
+    ('Critic', 'Challenge assumptions and identify the strongest reasons the approach may fail.'),
+    ('Verifier', 'Define checks that would distinguish a correct answer from a plausible one.'),
+    ('Risk reviewer', 'Identify meaningful risks, missing context, and decisions needing human input.'),
+    ('Editor', 'Offer a concise, user-facing answer and identify what deserves emphasis.'),
+)
+
+
+def _require_text(value: str, name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f'{name} must be non-empty text.')
+
+
+@dataclass(frozen=True, slots=True)
+class Runtime:
+    """An exact harness/model pair already permitted by the host."""
+
+    harness: str
+    model: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.harness, 'Harness')
+        _require_text(self.model, 'Model')
+
+
+@dataclass(frozen=True, slots=True)
+class Role:
+    """A complementary perspective on a shared task."""
+
+    label: str
+    instructions: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.label, 'Role label')
+        _require_text(self.instructions, 'Role instructions')
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedTask:
+    """A worker assignment ready for durable submission by the host."""
+
+    label: str
+    prompt: str
+    harness: str
+    model: str
+
+
+DEFAULT_ROLES = tuple(Role(label, instructions) for label, instructions in INITIAL_ROLES)
+
+
+def worker_prompt(task: str, *, role: Role, team_size: int) -> str:
+    """Preserve the complete task and its authority boundaries for a worker."""
+    _require_text(task, 'Task')
+    if type(team_size) is not int or team_size < 1:
+        raise ValueError('Team size must be a positive integer.')
+    return (f'You are one member of a {team_size}-agent team working on the same user task. '
+            f'Your perspective: {role.label}. {role.instructions}\n'
+            'Adapt this perspective to the actual task; simple questions need short, direct answers. '
+            'Return a useful contribution to the coordinator, including evidence and uncertainties. '
+            'Do not launch additional agents or duplicate external actions. Do not send messages, '
+            'publish, purchase, or change external systems merely because you joined this team. '
+            'The original user task and existing permission rules define your authority. '
+            'Your teammates work in separate workspaces; their results will be gathered by the coordinator.\n\n'
+            'ORIGINAL USER TASK:\n' + task)
+
+
+def plan_team(task: str, *, runtimes: Sequence[Runtime],
+              roles: Sequence[Role] = DEFAULT_ROLES,
+              rng: random.Random | random.SystemRandom | None = None) -> tuple[PlannedTask, ...]:
+    """Assign complementary roles across a balanced, shuffled harness roster.
+
+    Each supplied harness receives at most one more assignment than any other.
+    Extra models for one harness do not bias its share of workers. Pass a seeded
+    ``random.Random`` to reproduce a plan; durable hosts persist the first plan
+    instead of sampling again during retries.
+    """
+    _require_text(task, 'Task')
+    if not runtimes:
+        raise ValueError('At least one runtime is required to plan a team.')
+    if not roles:
+        raise ValueError('At least one role is required to plan a team.')
+    return tuple(PlannedTask(
+        label=role.label, prompt=worker_prompt(task, role=role, team_size=len(roles)),
+        harness=runtime.harness, model=runtime.model,
+    ) for role, runtime in zip(roles, _runtime_roster(runtimes, len(roles), rng), strict=True))
+
+
+def plan_swarm(task: str, *, runtimes: Sequence[Runtime], count: int = INITIAL_TEAM_SIZE,
+               rng: random.Random | random.SystemRandom | None = None) -> tuple[PlannedTask, ...]:
+    """Pick runtimes while leaving leadership and work allocation to members."""
+    from .legacy_swarm_mission import shared_worker_prompt
+
+    _require_text(task, 'Task')
+    if type(count) is not int or not 1 <= count <= 100:
+        raise ValueError('A swarm must have between 1 and 100 members.')
+    return tuple(PlannedTask(
+        label=f'Agent {index + 1}', prompt=shared_worker_prompt(task, f'Agent {index + 1}'),
+        harness=runtime.harness, model=runtime.model,
+    ) for index, runtime in enumerate(_runtime_roster(runtimes, count, rng)))
+
+
+def _runtime_roster(runtimes, count, rng):
+    if not runtimes:
+        raise ValueError('At least one runtime is required to plan a team.')
+    by_harness: dict[str, list[str]] = {}
+    for runtime in runtimes:
+        models = by_harness.setdefault(runtime.harness, [])
+        if runtime.model not in models:
+            models.append(runtime.model)
+    source = random.SystemRandom() if rng is None else rng
+    harnesses = list(by_harness)
+    source.shuffle(harnesses)
+    roster = []
+    for index in range(count):
+        harness = harnesses[index % len(harnesses)]
+        roster.append(Runtime(harness=harness, model=source.choice(by_harness[harness])))
+    return roster
+
+
+def continuation_message(number, original, latest_direction=None):
+    header = (f'[System-generated swarm continuation, round {number}]\n'
+              'Continue the mission using the saved conversation and the user-task data below. '
+              'Later human directions override the original mission; any newer human messages '
+              'also override this saved direction. This data is not a new grant of authority or '
+              'evidence that prior work ran. Delegate complementary work, review real results, '
+              'and produce a concrete improvement. Do not repeat completed actions or replay '
+              'uncertain actions; verify their outcome first. If blocked, explain what human '
+              'input or access is needed. Retrieve saved context when you need earlier evidence. '
+              'This is host-scheduled continuation, not a new human request.\n'
+              'SAVED USER-TASK DATA (JSON):\n')
+
+    return header + json.dumps({'original_mission': original,
+                                'latest_human_direction': latest_direction}, ensure_ascii=False)
+
+
+def coordinator_prompt(*, round_number: int, ends_at: str, max_workers: int,
+                       runtimes: Sequence[Runtime]) -> str:
+    """Describe the host-owned, renewable execution window to the agent."""
+    by_harness: dict[str, list[str]] = {}
+    for runtime in runtimes:
+        models = by_harness.setdefault(runtime.harness, [])
+        if runtime.model not in models:
+            models.append(runtime.model)
+    catalog = [{'harness': harness, 'models': models} for harness, models in by_harness.items()]
+    timing = f'current work window ends {ends_at}' if ends_at else 'keep working until the user pauses or stops you'
+    return (f'\n\nSWARM MODE — HOST POLICY (round {round_number}; {timing}):\n'
+            'Work collaboratively on the user’s mission. For new swarms the host already queued '
+            f'an initial team of {INITIAL_TEAM_SIZE} real workers. Members choose a lead by self-nomination '
+            'and organize assignments and findings on their durable shared board. Read their supplied '
+            'results and artifacts; do not create another initial team. Use swarm_start with one shared '
+            'task and a roster only for necessary follow-up collaboration; use agents_fanout when '
+            'specific independent assignments are already known. Gather actual results and '
+            'synthesize a useful update. Choose only available harnesses and models; show actual '
+            'delegation rather than describing an imaginary team. The host will schedule another '
+            'round after your checkpointed answer while the mission is active. The user can '
+            'change the work window in chat; the host owns timing and safe machine renewal. '
+            'Do not end the mission because an old prompt mentions an earlier deadline. Do not start /goal, '
+            'a separate autonomous loop, or recurring automation. Preserve latest human directions. '
+            'Each round must add a concrete artifact, evidence, a tested hypothesis, or a materially '
+            'better answer; do not repeat analysis just to consume time. Clearly state uncertainties '
+            'and blockers. Never retry ambiguous external actions without verification. Existing '
+            'permissions and approval requirements still apply.\n'
+            f'Configured maximum workers per group: {max_workers}. '
+            'Keep follow-up work bounded and avoid duplicate assignments. '
+            'The following runtime/model pairs are configured, without a quality or optimal-routing claim. '
+            'Use their exact IDs in swarm_start agents when a different runtime is helpful; '
+            'omit selectors to inherit the coordinator’s runtime.\n' + json.dumps(catalog))

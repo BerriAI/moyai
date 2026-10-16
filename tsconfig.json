@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
@@ -10,7 +14,16 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "baseUrl": ".",
-    "paths": {"@/*": ["./frontend/*"]}
+    "paths": {
+      "@/*": [
+        "./frontend/*"
+      ]
+    }
   },
-  "include": ["frontend", "vite.config.ts"]
+  "include": [
+    "frontend/components",
+    "frontend/lib",
+    "frontend/moyai-sculpture.ts",
+    "native/web"
+  ]
 }

@@ -296,10 +296,4 @@ class PersonalSlack:
         return callback
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS personal_slack_grants (
-        owner_id TEXT PRIMARY KEY, revision TEXT NOT NULL, encrypted TEXT,
-        label TEXT NOT NULL DEFAULT '', health TEXT NOT NULL DEFAULT 'absent')''')
-    store.execute('''CREATE TABLE IF NOT EXISTS personal_slack_states (
-        state_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL, owner_id TEXT NOT NULL,
-        revision TEXT NOT NULL, expires REAL NOT NULL)''')
+from .schema_initializers import initialize_personal_slack as initialize_schema

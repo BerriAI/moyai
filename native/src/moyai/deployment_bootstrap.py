@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import psycopg
 from psycopg import sql
@@ -52,24 +52,21 @@ async def provision(values: Mapping[str, str], *, fresh: bool) -> dict:
     from .product_start import prepare_native_schema
 
     if values["MOYAI_PRODUCT_MODE"] == "existing":
-        legacy_python = Path("/app/.venv/bin/python")
-        if not legacy_python.is_file():
-            legacy_python = Path(__file__).resolve().parents[3] / ".venv/bin/python"
-        if not legacy_python.is_file():
-            raise InstallationError("The separately locked legacy interpreter is required to prepare the product schema.")
         schema = values["MOYAI_DATABASE_SCHEMA"]
         if fresh:
             def create_schema() -> None:
                 with psycopg.connect(values["MOYAI_DATABASE_URL"], connect_timeout=5) as connection:
                     connection.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
             await asyncio.to_thread(create_schema)
+        # Canonical migration retains historical settings semantics but runs
+        # in this installation; no retired executor or second interpreter loads.
         migration = {
             **values, "MOYAI_CORE": "legacy", "MOYAI_RUNTIME_ROLE": "standalone",
             "MOYAI_DATABASE_INITIALIZE": str(fresh).lower(), "MOYAI_SCHEMA_MODE": "auto",
             "MOYAI_SEPARATE_BROKER": "false", "MOYAI_COORDINATOR_HANDOFF": "false",
         }
         completed = await asyncio.to_thread(
-            subprocess.run, [str(legacy_python), "-m", "app.schema_migrations", "--apply"],
+            subprocess.run, [sys.executable, "-m", "app.schema_migrations", "--apply"],
             env=migration, capture_output=True, text=True, timeout=300, check=False,
         )
         if completed.returncode:

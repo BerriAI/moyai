@@ -1,4 +1,4 @@
-import type { ChartRow, ChartSeries } from "../../app/static/analytics.js?native-analytics"
+import type { ChartRow, ChartSeries } from "./analytics-render.js"
 import { finiteValue } from "./analytics-format"
 
 export type PricingStatus = "priced" | "partial" | "unpriced" | "empty"

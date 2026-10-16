@@ -1,22 +1,37 @@
 # Sign-in and user roles
 
-[Documentation](README.md) · [Project overview](../README.md)
+Local trials use native accounts. Set `WORKSPACE_PASSWORD` before first start,
+sign in as `admin`, and manage users in Settings. Passwords are hashed; role and
+enabled-state changes invalidate prior authorization. The final enabled
+administrator cannot be removed or demoted.
 
-> This guide retains the detailed reference material from the original README.
-> Dated acceptance reports describe past checks, not a current deployment or test result.
+Existing-product mode uses the canonical Moyai identity directory, signing
+secret, cookie and role records. It cannot bootstrap a replacement native admin.
+Historical private ownership, personal credentials and Slack identity links keep
+their original account IDs. Native projections are created only after canonical
+authentication succeeds.
 
-## Google Workspace sign-in
+## Google and Cloudflare
 
-**Live and verified September 29, 2026:** Google-only sign-in is enabled. A real `tin@berri.ai` login reached the existing workspace as an administrator; all 14 saved chats and three organization connections were retained. The previous password and previously issued password sessions were verified to return no access. The dedicated Internal OAuth app is in BerriAI’s `protean-chassis-510202-k5` project. The 74 automated tests pass.
+Keep existing Google OIDC settings and `PUBLIC_URL/auth/google/callback` registered
+at the provider. Google verifies issuer, audience, signature, expiry, nonce,
+verified email and allowed hosted domain. `GOOGLE_ADMIN_EMAILS` supplies defaults
+for identities without an explicit saved role; stored role assignments win.
+Use the canonical Users page for role changes, which checks optimistic revisions,
+last-admin protection and the current actor within the write transaction.
 
-Moyai supports Google OpenID Connect login restricted to configured Google Workspace domains. Create an **Internal** OAuth app in BerriAI’s Google Cloud organization, then a **Web application** client with the exact redirect URI `PUBLIC_URL/auth/google/callback`. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_DOMAINS=berri.ai`, and `GOOGLE_ADMIN_EMAILS=tin@berri.ai` privately on Render. Additional administrator emails are comma-separated. Other verified BerriAI identities become members and use the existing shared connections without individual provider authorization.
+If Cloudflare Access is enabled, retain its existing audience, team and identity
+policy. With `CLOUDFLARE_ACCESS_LOGIN=true`, Moyai verifies the employee assertion
+on each request and maps it to the canonical identity. A plain forwarded-email
+header or machine token cannot establish an employee session. See
+[the edge boundary](cloudflare-access.md).
 
-Administrators can manage roles inside Moyai under **Users**. Search teammates, choose **Change role**, and save **Admin** or **Internal user**. **Add user** can assign a role to an allowed-domain email before its first sign-in; it sends no invitation and does not create a Google account. The person still needs verified Google SSO. Known eligible Slack profiles also appear, without granting Slack identities web authentication.
+After confirming a real administrator login, an operator may disable shared
+password login with `PASSWORD_LOGIN_ENABLED=false`. Preserve `SESSION_SECRET`,
+`ENCRYPTION_KEY` and existing data; do not rotate them as part of consolidation.
+Shared passwords do not identify an individual for personal data access.
 
-Every signed-in user can open **Settings → Spend**. Internal users signed in with Google see only their own LLM costs, requests, tokens, sessions, and models, including usage from Slack identities already linked to their account. Costs follow the sender of each message, so a shared session includes only that person's requests in their personal report. Administrators see the full organization dashboard, including all users, infrastructure, and identity management. The server chooses the scope from the current session and role; request parameters cannot select another user's spend. Shared member passwords cannot identify an individual and require Google sign-in for personal spend.
-
-Roles saved in the app take precedence over `GOOGLE_ADMIN_EMAILS`. That environment list remains the default for emails with no saved assignment, preserving existing admins on rollout. App assignments and their audit trail live in the durable workspace database and survive deploys. Updating the environment alone does not undo an explicit app demotion. Keep at least one valid bootstrap admin configured; use the Users page for day-to-day changes. Role changes take effect on the next authenticated request (refresh an open page to update its controls), including agent organization-skill writes. Admin-only API checks, CSRF protection, stale-edit detection, and a serialized last-admin check prevent unauthorized promotion and concurrent lockout. Admins can demote themselves after another admin is available. Personal skills and secrets keep their existing ownership rules.
-
-Keep `PASSWORD_LOGIN_ENABLED=true` for initial setup. After a real Google administrator login succeeds, set it to `false` and redeploy; this disables password login and invalidates existing password sessions. Preserve `SESSION_SECRET` and `ENCRYPTION_KEY` and existing data during the change. Domain, OAuth client, and administrator-policy changes are checked on subsequent requests. Google sessions last at most 12 hours; Google account suspension is checked on the next Google authentication, not through directory synchronization.
-
-The server verifies Google’s signature, issuer, audience, expiry, nonce, verified email, and hosted-domain claim. Login state is single-use, expires in ten minutes, is bound to the initiating browser, and uses PKCE. Return destinations are restricted to known local app routes. Google login requests only `openid email profile`; Google API access and refresh tokens are not stored. Passwords, authorization codes, and identity tokens must not appear in logs or screenshots. Connection policies apply to all sessions. All enabled connected-app tools, including newly added tools, execute without per-use approval for members and admins. Read-only and paused connection settings, provider permissions and session scope still apply.
+Authorization is checked at admission and again at model/tool boundaries.
+Approval does not override revoked permissions. Personal memory and credentials
+remain private to their owner even when a viewer is an administrator. UI tests
+use synthetic accounts; validate the actual identity provider during deployment.

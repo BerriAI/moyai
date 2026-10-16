@@ -526,7 +526,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, default=Path('release-receipt.json'))
     parser.add_argument('--release-type', choices=['coordinated', 'api', 'rolling', 'maintenance'], default='coordinated')
-    parser.add_argument('--core', choices=['preserve', 'legacy', 'pydantic'], default='preserve',
+    parser.add_argument('--core', choices=['preserve', 'pydantic'], default='preserve',
                         help='Explicit candidate core. A core switch requires maintenance; preserve keeps the running selection.')
     parser.add_argument('--preflight', action='store_true', default=os.environ.get('PREFLIGHT_ONLY') == 'true',
                         help='Check CI, credentials and the current topology without changing production.')

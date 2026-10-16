@@ -14,14 +14,14 @@ if docker compose config --services | grep -qx app; then
     source_revision=$(docker compose exec -T app /bin/cat /app/build-revision)
     docker compose stop proxy app
     MOYAI_IMAGE="$candidate" docker compose run --rm --no-deps setup \
-        /app/native/.venv/bin/python -m moyai.deployment standalone-upgrade --source-revision "$source_revision"
+        /app/.venv/bin/python -m moyai.deployment standalone-upgrade --source-revision "$source_revision"
 else
     topology=split
-    docker compose run --rm --no-deps setup /app/native/.venv/bin/python -m moyai.deployment \
+    docker compose run --rm --no-deps setup /app/.venv/bin/python -m moyai.deployment \
         begin-upgrade --revision "$revision"
     docker compose stop proxy api worker broker coordinator
     MOYAI_IMAGE="$candidate" docker compose run --rm --no-deps setup \
-        /app/native/.venv/bin/python -m moyai.deployment apply-upgrade
+        /app/.venv/bin/python -m moyai.deployment apply-upgrade
 fi
 
 umask 077
@@ -38,7 +38,7 @@ if [ "$topology" = split ]; then
     MOYAI_IMAGE="$candidate" docker compose up -d --no-deps --wait worker
     MOYAI_IMAGE="$candidate" docker compose up -d --no-deps --wait proxy
     MOYAI_IMAGE="$candidate" docker compose run --rm --no-deps setup \
-        /app/native/.venv/bin/python -m moyai.deployment resume
+        /app/.venv/bin/python -m moyai.deployment resume
 else
     MOYAI_IMAGE="$candidate" docker compose up -d --wait app
     MOYAI_IMAGE="$candidate" docker compose up -d --no-deps proxy

@@ -33,11 +33,11 @@ class ProductConfigurationError(ValueError):
     """Safe operator-facing error; never includes configuration values."""
 
 
-def select_core(environment: Mapping[str, str] | None = None) -> Literal["legacy", "pydantic"]:
+def select_core(environment: Mapping[str, str] | None = None) -> Literal["pydantic"]:
     env = os.environ if environment is None else environment
-    value = env.get("MOYAI_CORE", "legacy").strip()
-    if value not in {"legacy", "pydantic"}:
-        raise ProductConfigurationError("MOYAI_CORE must be legacy or pydantic.")
+    value = env.get("MOYAI_CORE", "pydantic").strip()
+    if value != "pydantic":
+        raise ProductConfigurationError("Only MOYAI_CORE=pydantic is supported; retired engines require an earlier image.")
     return value  # type: ignore[return-value]
 
 
@@ -163,11 +163,10 @@ class ProductConfig:
         return result
 
 
-def load_product_config(environment: Mapping[str, str] | None = None) -> ProductConfig | None:
-    """Legacy is the default. Existing mode is explicit and fails closed."""
+def load_product_config(environment: Mapping[str, str] | None = None) -> ProductConfig:
+    """One execution core; existing identity/storage stays explicit and fails closed."""
     env = dict(os.environ if environment is None else environment)
-    if select_core(env) == "legacy":
-        return None
+    select_core(env)
     mode = env.get("MOYAI_PRODUCT_MODE", "standalone")
     if mode not in {"standalone", "existing"}:
         raise ProductConfigurationError("MOYAI_PRODUCT_MODE must be standalone or existing.")

@@ -13,11 +13,11 @@ from uuid import uuid4
 from .db import database, now
 
 # Agent behavior is shared with SDK consumers; this module owns persistence.
-from agent.swarm.planning import (
+from app.legacy_swarm_planning import (
     INITIAL_TEAM_SIZE, ROUND_DELAY_SECONDS,
     Runtime, continuation_message, coordinator_prompt, plan_swarm,
 )
-from agent.swarm.timing import (
+from app.legacy_swarm_timing import (
     is_swarm_hold_command, parse_swarm_time_intent, SwarmTimeIntentKind, validate_swarm_budget,
 )
 from .swarm_collaboration import create_team_in
@@ -25,15 +25,7 @@ from .swarm_collaboration import create_team_in
 INITIAL_TEAM_KEY = 'host-swarm-initial-team'
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS swarm_missions (
-        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-        status TEXT NOT NULL DEFAULT 'active', budget_seconds INTEGER NOT NULL,
-        ends_at TEXT NOT NULL, round INTEGER NOT NULL DEFAULT 1,
-        reason TEXT NOT NULL DEFAULT '', next_at REAL NOT NULL DEFAULT 0,
-        settled_message_id INTEGER NOT NULL DEFAULT 0,
-        answer_digest TEXT NOT NULL DEFAULT '', no_progress INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+from .schema_initializers import initialize_swarms as initialize_schema
 
 
 def public_mission(row):

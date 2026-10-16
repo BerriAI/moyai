@@ -6,7 +6,7 @@ import { ActionItem, ActionMenu, SessionMenu, sessionHash, sessionIsReadOnly, se
 import type { SessionFolder, SidebarSession } from "./session-actions"
 import { currentDragSession, movableSession, SESSION_DRAG_TYPE, sessionCreatedByMe, sessionDrop, sessionPlacement } from "./sidebar-drag"
 import type { SessionDrag, SessionDropTarget, SidebarDragContext } from "./sidebar-drag"
-import slackLogo from "../../app/static/slack-logo.svg"
+import slackLogo from "./assets/slack-logo.svg"
 import "./sidebar-layout.css"
 export type { SessionFolder, SidebarSession } from "./session-actions"
 export type SessionListView = "active" | "archived" | "deleted"

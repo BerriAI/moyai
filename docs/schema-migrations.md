@@ -1,11 +1,11 @@
 # Explicit PostgreSQL schema migrations
 
-Explicit schema verification is the database prerequisite for
-[compatible rolling releases](rolling-deploy.md). This bridge release requires
-revision **19**. Verified roles can overlap under their reviewed protocols and
-shared settings. After every role runs the bridge, future explicitly reviewed
-additive revisions can use the rolling action; initial activation and breaking
-changes still require maintenance. Production is not opted in by merging code.
+The canonical product requires revision **21**, with compatibility floor **20**.
+The Pydantic application and Harness have separate receipts; see the
+[deployment contract](pydantic-deployment.md). Use the guarded maintenance release
+for current native upgrades. The retained online migration engine and its ledger
+support historical schema compatibility; they do not make native rolling releases
+qualified.
 
 `MOYAI_SCHEMA_MODE=auto` remains the default for existing installations and SQLite.
 For an explicitly migrated PostgreSQL schema, use `MOYAI_SCHEMA_MODE=verify` on
@@ -36,13 +36,13 @@ is insufficient.
    python -m app.schema_migrations --apply
    ```
 
-   It prints `{"schema_revision": 19, "status": "ready"}` on success. An empty
+   It prints `{"schema_revision": 21, "status": "ready"}` on success. An empty
    schema must already exist, and requires `MOYAI_DATABASE_INITIALIZE=true`.
    Existing schemas do not need that flag. No credentials are printed.
 4. Set `MOYAI_SCHEMA_MODE=verify` on every role, including the dedicated API.
    Use the same reviewed release and shared settings for this first activation.
    Start the coordinator to publish the contracts, then broker, workers and API.
-   Activate role routing and coordinator handoff following the rolling runbook;
+   Activate role routing and coordinator handoff following the production deployment runbook;
    verify health and an ordinary saved session before reopening ingress.
 
 The API-only and rolling release modes do **not** perform this first migration
@@ -51,20 +51,20 @@ transition before enabling them. A normal pre-deploy hook that runs while the ol
 app is live will be rejected. Once this activation is complete, deploy the bridge
 at the same schema revision to all four roles before using online expansions.
 An installation still on an earlier revision, such as revision 14, first needs
-the one-time maintenance adoption of revision 19; the empty online registry
-does not provide a migration path for it.
+the one-time maintenance adoption of revision 21; the online registry only
+declares the additive step from revision 20 to 21.
 
 ## Private-session upgrade
 
-Revision 19 adds immutable private ownership and personal Slack grants. It also
-advances the compatibility baseline to 19: older application code treats all
+Revision 19 introduced immutable private ownership and personal Slack grants. It
+advanced the compatibility baseline to 19: older application code treats all
 sessions as shared and cannot safely overlap once private sessions exist.
 
 Use the coordinated maintenance steps above for an existing revision-18 deployment:
 back up the database, drain work, stop **all four roles** (including the dedicated
 API), run `python -m app.schema_migrations --apply` from the target release, and
 start every role at that release with `MOYAI_SCHEMA_MODE=verify`. Confirm the
-migration prints revision 19, health checks pass, and an ordinary saved session
+migration prints the current revision 21, health checks pass, and an ordinary saved session
 opens before reopening ingress. Verify that a private test session returns 404
 for a second individual account.
 
@@ -74,8 +74,8 @@ this four-role migration. Do not use it to bypass the compatibility check.
 
 ## Reviewed online expansions
 
-Keep `MOYAI_SCHEMA_MODE=verify`. Use the usual **Deploy production** action with
-**rolling** selected. The controller computes the plan from the immutable
+The following describes the retained canonical online engine. Current native
+releases still use maintenance. Keep `MOYAI_SCHEMA_MODE=verify`. The controller computes the plan from the immutable
 candidate checkout, verifies every live role's installed protocol support, and
 applies the plan before replacing any service. `preflight_only` validates the
 entire plan and records it while making no database or service writes.
@@ -83,8 +83,9 @@ entire plan and records it while making no database or service writes.
 `app/online_schema_migrations.json` is the explicit reviewed registry. Each step
 names its source and target revision, their digests from `schema_versions.json`,
 the unchanged compatibility revision, and a list of declarative operations.
-Steps must be contiguous. The bridge initially has an empty registry and retains
-compatibility revision 19, preserving the existing role fingerprints.
+Steps must be contiguous. The current registry declares revision 20 to 21 at
+compatibility revision 20. It adds nullable timing fields to `performance_samples`;
+it does not authorize a rolling transition to the native runtime.
 
 Protocol 1 accepts only:
 
@@ -142,9 +143,9 @@ force admission by an older binary.
 
 ## Changing the schema
 
-Keep schema setup and legacy backfills in each component's `initialize_schema`
-function (core Store/database methods use `_initialize_schema`). Add new
-components to the dependency-ordered registry in `app/schema_migrations.py`.
+Keep canonical feature schema setup and historical backfills in
+`app/schema_initializers.py`; Store, Security and Spend retain their core methods.
+Register components in dependency order in `app/schema_migrations.py`.
 Do not place DDL, migration backfills or seed writes in ordinary constructors.
 
 Increment `SCHEMA_REVISION` when any initializer changes and **append**, never
@@ -180,13 +181,13 @@ Point `MOYAI_TEST_POSTGRES_URL` at a disposable PostgreSQL database, then run:
 
 ```sh
 python -m pytest -q tests/test_schema_migrations.py
-python -m scripts.schema_migration_probe --output /tmp/moyai-schema-proof
+python -m pytest -q native/tests/test_canonical_schema_migrations.py
 python -m pytest -q tests/test_online_migrations.py tests/release
 python -m scripts.online_migration_probe --output /tmp/moyai-online-migration
 ```
 
-The probe creates/drops only its own randomly named test schema. It records real
-migration and constructor results in JSON and a terminal cast. It does not run
+The canonical regression creates/drops only its own randomly named test schema.
+It verifies migration, historical session preservation and no retired-engine imports. It does not run
 Temporal, inference, or external provider requests; it proves schema admission
 and restart behavior, not production traffic handoff.
 

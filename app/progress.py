@@ -2,7 +2,7 @@
 import json
 from .database import Connection
 
-from agent.activity import focus_text, public_text
+from app.activity_text import focus_text, public_text
 
 
 INACTIVE = {'stopping', 'completed', 'failed', 'cancelled', 'interrupted', 'idle', 'steered'}

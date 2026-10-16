@@ -14,8 +14,7 @@ concurrency:
 
 jobs:
   unit:
-    # Own all legacy and native Node unit tests, including changes that only
-    # trigger Docker or native CI. Browser and build checks keep their own jobs.
+    # Own all native Node unit tests. Browser and build checks keep their own jobs.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -25,7 +24,6 @@ jobs:
           node-version: '22'
           cache: npm
       - uses: astral-sh/setup-uv@v6
-      - run: npm ci
       - name: Install the locked Python schemas used by UI contract checks
-        run: uv sync --project native --frozen --python 3.13 --extra product
+        run: uv sync --frozen --python 3.13
       - run: npm test

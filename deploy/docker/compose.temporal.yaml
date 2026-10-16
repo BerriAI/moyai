@@ -58,7 +58,7 @@ services:
     extends:
       file: compose.common.yaml
       service: setup
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "namespace"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "namespace"]
     depends_on:
       temporal:
         condition: service_healthy

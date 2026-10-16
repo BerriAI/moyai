@@ -6,16 +6,15 @@ const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 const React = require('react');
 const {renderToStaticMarkup} = require('react-dom/server');
-let server, data, ui, triggers, legacy, build;
+let server, data, ui, triggers, helpers;
 const root=path.resolve(__dirname,'..');
 test.before(async()=>{
   const {createServer}=await import('vite');
   server=await createServer({configFile:path.join(root,'native/web/vite.config.ts'),optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true},appType:'custom'});
   data=await server.ssrLoadModule('/product-automation-data.ts');
   ui=await server.ssrLoadModule('/product-automations.tsx');
-  build=await server.ssrLoadModule('/automation-build.ts');
-  triggers=await server.ssrLoadModule('/@fs'+path.join(root,'app/static/automation-triggers.js')+'?native-automation');
-  legacy=await server.ssrLoadModule('/@fs'+path.join(root,'app/static/automations.js')+'?native-automation');
+  helpers=await server.ssrLoadModule('/automation-helpers.js');
+  triggers=helpers;
 });
 test.after(async()=>{await server?.close();});
 const timing=(changes={})=>({frequency:'weekdays',time:'09:00',weekday:1,timezone:'America/Los_Angeles',cron:'',run_at:null,...changes});
@@ -24,28 +23,17 @@ const binding=(changes={})=>({core:'pydantic-v1',generation:2,state:'paused',syn
 const preview=(changes={})=>({id:'a'.repeat(32),owner_id:'viewer',revision:7,definition:definition(),legacy_paused:true,native:binding(),blockers:[],supported:true,activation:'explicit_owner_action_required',execution_visibility:'shared',sharing_notice:'Shared workspace resources.',overlap:'ALLOW_ALL',catchup_seconds:900,capabilities:{update:true,migrate:false,enable:true,pause:false},...changes});
 const render=(Component,props)=>renderToStaticMarkup(React.createElement(Component,props));
 
-test('actual legacy pure helpers are imported without controller/global bootstrap',()=>{
-  assert.deepEqual(Object.keys(triggers).sort(),['automationDefaultSchedule','automationSources','automationTriggers','automationEventFields','automationSetupNotes'].sort());
-  assert.deepEqual(Object.keys(legacy).sort(),['automationTiming','automationHistoryMerge','automationRunStatus'].sort());
-  assert.match(legacy.automationTiming(timing({frequency:'hourly',time:'13:17'})),/Every hour at :17/);
-  assert.match(legacy.automationTiming(timing({frequency:'weekly',weekday:0})),/Sunday at 09:00/);
-  assert.equal(legacy.automationRunStatus({status:'idle',outcome:'completed'}),'Completed');
-  const original=definition();assert.equal(triggers.automationTriggers(original),original.triggers);
-  assert.ok(triggers.automationDefaultSchedule().timezone);
-  assert.equal(globalThis.MoyaiUI,undefined);assert.equal(globalThis.automationRefresh,undefined);
-});
-
-test('build extraction ignores unrelated top-level side effects and fails closed for missing helpers',()=>{
-  const extracted=build.automationDeclarations('globalThis.bad = true; const safe = () => 4, bad = alert(1); function controller(){bootstrap()}',['safe']);
-  assert.match(extracted,/const safe/);assert.doesNotMatch(extracted,/globalThis|alert|controller|bootstrap/);
-  assert.throws(()=>build.automationDeclarations('const renamed = 1',['expected']),/Missing reviewed automation helper/);
+test('automation helpers preserve defaults and calendar summaries',()=>{
+  assert.equal(triggers.automationDefaultSchedule().frequency,'weekdays');
+  assert.match(helpers.automationTiming(timing()),/weekdays/i);
+  assert.deepEqual(triggers.automationTriggers(definition()),definition().triggers);
 });
 
 const examples=()=>['hourly','daily','weekdays','weekly','cron','once'].map(frequency=>definition({triggers:[{id:'stable-'+frequency,schedule:timing({frequency,cron:frequency==='cron'?'*/15 9-17 * * 1-5':'',run_at:frequency==='once'?'2099-10-22T16:00:00Z':null})}]}));
 test('all six calendar types retain the exact Timing payload fields',()=>{
   for(const example of examples()){data.validateAutomation(example);assert.deepEqual(Object.keys(example.triggers[0].schedule).sort(),['frequency','time','weekday','timezone','cron','run_at'].sort());}
 });
-const python=path.join(root,'native/.venv/bin/python');
+const python=path.join(root,'.venv/bin/python');
 test('all six calendar types conform to canonical Python Timing and Definition',{skip:!fs.existsSync(python)&&'Native Python environment is not installed in this frontend-only job'},()=>{
   const result=spawnSync(python,['-c','import json,sys; from app.automation_definitions import Definition; rows=json.load(sys.stdin); [Definition.model_validate(row) for row in rows]; print(len(rows))'],{cwd:root,input:JSON.stringify(examples()),encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'6');
@@ -105,7 +93,7 @@ test('mutation retries reuse their request key while changed intent and revision
 
 test('history reuses canonical deduplication and routes old/new sessions without rewriting IDs',()=>{
   const a={occurrence:'a',created_at:'2026-10-15',engine:'legacy',session_id:'old:id',status:'idle',outcome:'completed'},b={...a,occurrence:'b',created_at:'2026-10-16',engine:'pydantic-v1',session_id:'new:id'};
-  assert.deepEqual(legacy.automationHistoryMerge([a],[a,b]),[b,a]);
+  assert.deepEqual(helpers.automationHistoryMerge([a],[a,b]),[b,a]);
   assert.equal(data.historySessionHash(a),'#run=old%3Aid');assert.equal(data.historySessionHash(b),'#new%3Aid');
   assert.equal(data.historySessionHash({...a,engine:'unknown'}),undefined);assert.equal(data.historySessionHash({...a,session_id:null}),undefined);
 });

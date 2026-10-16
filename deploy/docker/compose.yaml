@@ -9,7 +9,7 @@ services:
     extends:
       file: compose.common.yaml
       service: runtime
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "serve", "standalone"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "serve", "standalone"]
     environment:
       MOYAI_INSTALL_TOPOLOGY: standalone
     depends_on:

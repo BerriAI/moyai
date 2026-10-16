@@ -11,7 +11,7 @@ import { api, ApiError, csrfToken } from "./api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
-import logo from "../../app/static/moyai-logo.png"
+import logo from "./assets/moyai-logo.png"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }

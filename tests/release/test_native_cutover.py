@@ -300,7 +300,7 @@ def test_native_transport_uses_legacy_probe_and_never_retries(monkeypatch):
         SSHNativeMigration(Path('/synthetic/key'))(service, {'target': MANIFEST}, {})
     assert len(captured) == 1
     assert not captured[0][1].get('read_only', False)
-    assert '/app/native/.venv/bin/python' in captured[0][1]['source']
+    assert "native/.venv/bin/python" in captured[0][1]['source']
 
 
 def test_native_command_checks_both_schema_receipts_without_exposing_output(monkeypatch):
@@ -315,7 +315,7 @@ def test_native_command_checks_both_schema_receipts_without_exposing_output(monk
         return SimpleNamespace(returncode=0, stdout=json.dumps(response))
     monkeypatch.setattr(native_migration.subprocess, 'run', run)
     assert native_migration.native_command(['verify']) == response
-    assert calls[0][0] == ['/app/native/.venv/bin/python', '-m', 'moyai.product_start', 'verify']
+    assert calls[0][0] == ['/app/.venv/bin/python', '-m', 'moyai.product_start', 'verify']
     response['harness_schema'] = 'missing'
     with pytest.raises(ValueError, match='both receipts'):
         native_migration.native_command(['verify'])
@@ -494,3 +494,12 @@ def test_native_ci_checks_trusted_workflow_identity_and_exact_sha(change):
             github.native_ready(NEW)
     else:
         assert github.native_ready(NEW) is False
+
+
+def test_native_interpreter_supports_current_and_previous_images(tmp_path):
+    from scripts.release.native_migration import native_python
+    assert native_python(tmp_path) == str(tmp_path / ".venv/bin/python")
+    previous = tmp_path / "native/.venv/bin/python"
+    previous.parent.mkdir(parents=True)
+    previous.touch()
+    assert native_python(tmp_path) == str(previous)

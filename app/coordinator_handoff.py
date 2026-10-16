@@ -281,10 +281,4 @@ class CoordinatorIngressMiddleware:
         await self.app(scope, receive, send)
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS coordinator_hooks (
-            id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL,
-            status TEXT NOT NULL, response TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL,
-            retry_at REAL NOT NULL DEFAULT 0)''')
-        conn.execute('CREATE INDEX IF NOT EXISTS coordinator_hooks_pending ON coordinator_hooks(status,kind,created_at,id)')
+from .schema_initializers import initialize_coordinator_handoff as initialize_schema

@@ -125,11 +125,4 @@ class UserRoles:
         return router
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS user_roles (
-        email TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('admin','member')),
-        revision INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
-    store.execute('''CREATE TABLE IF NOT EXISTS user_role_audit (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL,
-        previous_role TEXT NOT NULL, role TEXT NOT NULL,
-        actor TEXT NOT NULL, created_at TEXT NOT NULL)''')
+from .schema_initializers import initialize_user_roles as initialize_schema

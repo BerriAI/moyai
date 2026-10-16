@@ -1,11 +1,11 @@
 # PostgreSQL migration rehearsal
 
-[Deployment](deployment.md) · [Architecture](architecture.md)
+[Deployment](production-deploy.md) · [Architecture](architecture.md)
 
-This is the first step toward overlapping Moyai deployments: a verified copy of
-the SQLite database into an isolated PostgreSQL schema. **SQLite remains the default. This command does not switch the application to Postgres or enable
-multiple web instances.** See [Postgres runtime](postgres-runtime.md) for the opt-in
-single-instance backend and the separately coordinated cutover. Keep the existing single-instance deployment.
+This maintenance tool copies a historical canonical SQLite database into an
+isolated PostgreSQL schema. It does not change the running application, provision
+native execution storage or finish legacy workflows. Current existing-product
+startup requires the separate preparation in [production deployment](production-deploy.md).
 
 ## What the command does
 
@@ -37,9 +37,8 @@ those separately; use the [object-storage migration](object-storage.md) for file
 
 ## Run a rehearsal
 
-Use Python 3.12+ and a disposable PostgreSQL 17 database. The optional dependency
-group keeps Postgres drivers and schema tooling out of the normal application
-image. Install it on the maintenance host, and run as the owner of `workspace.db`.
+Use Python 3.12+ and a disposable PostgreSQL 17 database. The `postgres-migration` extra adds SQL translation tooling; PostgreSQL drivers
+are already installed with the application. Install it on the maintenance host, and run as the owner of `workspace.db`.
 
 ```sh
 uv sync --frozen --extra postgres-migration
@@ -108,28 +107,12 @@ copy and independent verification, proves an existing destination is protected,
 and removes only its own randomly named Postgres schema afterward. Add
 `--output /path/to/report.json` to save its content-verification report.
 
-## Remaining work before overlapping deployments
+## Production transition
 
-1. **Rehearse and cut over the application database.** The [Postgres runtime](postgres-runtime.md)
-   supports normal application reads/writes and explicit transactions. Verify the
-   actual production copy and preserve single-instance operation for the first cutover.
-2. **Move durable files and establish ownership.** Finish object-storage migration;
-   make job claiming and recovery safe across processes. Current startup recovery
-   globally interrupts pending model requests and assumes the previous process
-   has stopped. Merely pointing two replicas at Postgres would be unsafe.
-3. **Separate deployment lifecycles.** Run the browser API, model/tool broker and
-   Temporal workers independently, with compatible workflow versions and schema
-   migrations while old and new code coexist.
-4. **Overlap and drain.** Warm replacement instances, route traffic only after
-   readiness, retain spare capacity, drain existing model streams, and reconnect
-   browser feeds from persisted event cursors.
-5. **Prove continuity under load.** Redeploy while real agents stream, call tools
-   and accept follow-ups. Measure response latency and verify no lost responses,
-   repeated tool actions or cross-instance recovery interference.
-
-For the eventual database cutover, quiesce every SQLite writer and take a final
-verified backup/copy; coordinate that one-time maintenance window separately.
-Preserve encryption/session keys and the original database/files. Once the new
-system accepts writes, reverting to the old SQLite copy would lose new work; a
-rollback then requires reconciling those writes. This PR provides rehearsal
-tooling, not that production cutover.
+Rehearse on a restored backup first. For the final transfer, stop all source
+writers and preserve local files, object destinations, keys and workflow histories.
+A rehearsal copy becomes stale as soon as the source accepts another write.
+Follow the [deployment contract](pydantic-deployment.md) for canonical/native schema
+provisioning, source-work drain and four-role activation. Verify old account access,
+historical downloads and a new task before reopening admission. Do not run an old
+executor from this image or infer migration readiness from row-copy success alone.

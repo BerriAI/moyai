@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 300s
     healthcheck:
-      test: ["CMD", "/app/native/.venv/bin/python", "/app/docker_healthcheck.py"]
+      test: ["CMD", "/app/.venv/bin/python", "/app/docker_healthcheck.py"]
       interval: 5s
       timeout: 5s
       retries: 24
@@ -22,7 +22,7 @@ services:
   setup:
     extends:
       service: runtime
-    command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "initialize"]
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "initialize"]
     restart: "no"
     healthcheck:
       disable: true

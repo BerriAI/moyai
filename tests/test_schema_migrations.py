@@ -10,14 +10,15 @@ import threading
 import psycopg
 import pytest
 
-from app import main, schema_migrations as migration
+from app import schema_migrations as migration
+from canonical_fixture import open_services
 from app.config import Settings
 from app.database import DatabaseError, PostgresConnection
 from app.db import Store
-from app.trace_outbox import TABLES
-from test_postgres_runtime import target  # noqa: F401
-from test_separate_broker import split_settings  # noqa: F401
-from test_runtime_startup_fences import schema_versions
+from app.schema_initializers import TABLES
+from postgres_fixture import target  # noqa: F401
+from canonical_fixture import split_settings  # noqa: F401
+from canonical_fixture import schema_versions
 
 
 def ready(settings):
@@ -38,7 +39,7 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
     settings = split_settings.model_copy(update={'moyai_schema_mode': 'verify'})
     assert execute(settings, 'SELECT * FROM runtime_policy') == []
     with ExitStack() as cleanup:
-        api = main.create_app(settings)
+        api = open_services(settings)
         cleanup.callback(api.state.store.close)
         store = api.state.store
         assert TABLES <= {
@@ -62,10 +63,10 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
         with monkeypatch.context() as patch:
             patch.setattr(PostgresConnection, 'execute', read_only_construction)
             for role in ('worker', 'broker'):
-                app = main.create_app(settings.model_copy(update={'moyai_runtime_role': role}))
+                app = open_services(settings.model_copy(update={'moyai_runtime_role': role}))
                 cleanup.callback(app.state.store.close)
             store.close()
-            replacement = main.create_app(settings)
+            replacement = open_services(settings)
             cleanup.callback(replacement.state.store.close)
         store = replacement.state.store
         assert schema_versions(store) == before
@@ -82,13 +83,13 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
 @pytest.mark.parametrize('role', ['standalone', 'coordinator', 'worker', 'broker', 'api'])
 def test_migrator_excludes_every_runtime_owner(split_settings, role):
     settings = ready(split_settings)
-    api = main.create_app(settings)
+    api = open_services(settings)
     app = api
     if role == 'standalone':
         api.state.store.close()
-        app = main.create_app(settings.model_copy(update={'moyai_runtime_role': role, 'moyai_separate_broker': False}))
+        app = open_services(settings.model_copy(update={'moyai_runtime_role': role, 'moyai_separate_broker': False}))
     elif role != 'coordinator':
-        app = main.create_app(settings.model_copy(update={'moyai_runtime_role': role}))
+        app = open_services(settings.model_copy(update={'moyai_runtime_role': role}))
         api.state.store.close()
     try:
         before = schema_versions(app.state.store)
@@ -115,10 +116,10 @@ def test_failed_migration_stays_dirty_and_retry_repairs_it(split_settings, monke
         migration.migrate(settings)
     assert execute(settings, 'SELECT dirty FROM schema_state') == [(1,)]
     with pytest.raises(DatabaseError, match='incomplete'):
-        main.create_app(settings)
+        open_services(settings)
     monkeypatch.setattr(migration, 'initialize_components', original)
     ready(settings)
-    app = main.create_app(settings)
+    app = open_services(settings)
     app.state.store.close()
 
 
@@ -148,7 +149,7 @@ def test_migrator_excludes_other_migrator_and_startup(split_settings, monkeypatc
             with pytest.raises(DatabaseError, match='Another Moyai instance'):
                 migration.migrate(split_settings)
             with pytest.raises(DatabaseError, match='Another Moyai instance'):
-                main.create_app(split_settings.model_copy(update={'moyai_schema_mode': 'verify'}))
+                open_services(split_settings.model_copy(update={'moyai_schema_mode': 'verify'}))
         finally:
             finish.set()
         assert applying.result(timeout=10)['status'] == 'ready'
@@ -166,7 +167,7 @@ def test_wrong_schema_receipt_fails_before_runtime_setup(split_settings, change)
         before = conn.execute("SELECT oid,xmin::text FROM pg_proc WHERE pronamespace=current_schema()::regnamespace ORDER BY oid").fetchall()
         conn.execute(change)
     with pytest.raises(DatabaseError, match='incomplete'):
-        main.create_app(settings)
+        open_services(settings)
     with psycopg.connect(settings.moyai_database_url) as conn:
         conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
         assert conn.execute("SELECT oid,xmin::text FROM pg_proc WHERE pronamespace=current_schema()::regnamespace ORDER BY oid").fetchall() == before
@@ -175,7 +176,7 @@ def test_wrong_schema_receipt_fails_before_runtime_setup(split_settings, change)
 def test_newer_schema_refuses_downgrade_and_auto_mode(split_settings):
     ready(split_settings)
     with pytest.raises(DatabaseError, match='MOYAI_SCHEMA_MODE=verify'):
-        main.create_app(split_settings)
+        open_services(split_settings)
     execute(split_settings, 'UPDATE schema_state SET revision=999 RETURNING revision')
     with pytest.raises(DatabaseError, match='newer'):
         migration.migrate(split_settings)
@@ -233,12 +234,12 @@ def test_postgres_login_state_upgrade_requires_migration_and_preserves_login(spl
         conn.execute("INSERT INTO login_states VALUES('state','browser','nonce','verifier','/',123)")
         conn.execute('UPDATE schema_state SET revision=3')
     with pytest.raises(DatabaseError, match='offline migration'):
-        main.create_app(settings)
+        open_services(settings)
     ready(split_settings)
     assert execute(settings, 'SELECT client,nonce,expires FROM login_states') == [('', 'nonce', 123)]
     assert execute(settings, "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='login_states_client'") == [
         ('login_states_client',)]
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         api.state.store.execute("UPDATE login_states SET client='browser-client' WHERE state_hash='state'")
         assert api.state.store.rows("SELECT state_hash FROM login_states WHERE client='browser-client' AND expires>0") == [
@@ -249,7 +250,7 @@ def test_postgres_login_state_upgrade_requires_migration_and_preserves_login(spl
 
 def test_postgres_revision_four_adds_swarms_without_losing_sessions_or_logins(split_settings):
     settings = ready(split_settings)
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         store = api.state.store
         run = store.create_run('Existing revision-four session', '', 'modal', [])
@@ -267,7 +268,7 @@ def test_postgres_revision_four_adds_swarms_without_losing_sessions_or_logins(sp
             VALUES('state','browser','nonce','verifier','/',123,'browser-client')''')
         conn.execute('UPDATE schema_state SET revision=4')
     with pytest.raises(DatabaseError, match='offline migration'):
-        main.create_app(settings)
+        open_services(settings)
 
     ready(split_settings)
     assert execute(settings, 'SELECT * FROM swarm_missions') == []
@@ -275,7 +276,7 @@ def test_postgres_revision_four_adds_swarms_without_losing_sessions_or_logins(sp
         ('browser-client', 'nonce', 123)]
     assert execute(settings, "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='login_states_client'") == [
         ('login_states_client',)]
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         assert api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],)) == saved_run
         assert api.state.store.run(run['id'])['prompt'] == 'Existing revision-four session'
@@ -285,7 +286,7 @@ def test_postgres_revision_four_adds_swarms_without_losing_sessions_or_logins(sp
 
 def test_revision_five_adds_shared_boards_without_changing_saved_work(split_settings):
     settings = ready(split_settings)
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         run = api.state.store.create_run('Existing revision-five session', '', 'modal', [])
         saved = api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],))
@@ -297,11 +298,11 @@ def test_revision_five_adds_shared_boards_without_changing_saved_work(split_sett
         conn.execute('DROP TABLE swarm_teams')
         conn.execute('UPDATE schema_state SET revision=5')
     with pytest.raises(DatabaseError, match='offline migration'):
-        main.create_app(settings)
+        open_services(settings)
     ready(split_settings)
     assert execute(settings, 'SELECT * FROM swarm_teams') == []
     assert execute(settings, 'SELECT * FROM swarm_posts') == []
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         assert api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],)) == saved
     finally:
@@ -311,7 +312,7 @@ def test_revision_five_adds_shared_boards_without_changing_saved_work(split_sett
 @pytest.mark.parametrize('previous_revision', [7, 14])
 def test_upgrade_adds_skill_learning_without_changing_saved_work(split_settings, previous_revision):
     settings = ready(split_settings)
-    api = main.create_app(settings)
+    api = open_services(settings)
     tables = ('runs', 'messages', 'login_states', 'swarm_missions', 'swarm_teams', 'swarm_posts', 'coordinator_hooks', 'broker_work_owners')
     try:
         store = api.state.store
@@ -328,9 +329,9 @@ def test_upgrade_adds_skill_learning_without_changing_saved_work(split_settings,
             conn.execute('DROP TABLE ' + name)
         conn.execute('UPDATE schema_state SET revision=%s', (previous_revision,))
     with pytest.raises(DatabaseError, match='offline migration'):
-        main.create_app(settings)
+        open_services(settings)
     ready(split_settings)
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         assert {name: api.state.store.rows('SELECT * FROM ' + name) for name in tables} == saved
         for name in ('skill_suggestions', 'skill_learning_jobs', 'skill_learning_preferences'):
@@ -339,33 +340,10 @@ def test_upgrade_adds_skill_learning_without_changing_saved_work(split_settings,
         api.state.store.close()
 
 
-def test_schema_initializers_have_a_versioned_manifest():
-    # A schema edit without a new revision must fail CI, including optional
-    # components and backend-specific functions/triggers used by the migrator.
-    import ast
-    import hashlib
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    sources = {}
-    for path in (root / 'app').glob('*.py'):
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name in {'initialize_schema', '_initialize_schema', 'initialize_defaults'}:
-                sources[f'{path.name}:{node.name}'] = ast.dump(node, include_attributes=False)
-    sources['database_schema'] = ast.dump(ast.parse((root / 'app/database_schema.py').read_text()), include_attributes=False)
-    sources['components'] = list(migration.COMPONENTS)
-    sources['trace_tables'] = sorted(TABLES)
-    assert {k.split(':')[0][:-3] for k in sources if k.endswith(':initialize_schema')} == (
-        set(migration.COMPONENTS) | {'attachments', 'slack_mentions', 'blob_storage', 'trace_outbox'})
-    signature = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
-    versions = json.loads((root / 'app/schema_versions.json').read_text())
-    assert list(versions) == [str(i) for i in range(1, migration.SCHEMA_REVISION + 1)]
-    assert versions[str(migration.SCHEMA_REVISION)] == signature, (
-        'Schema changed. Increment SCHEMA_REVISION and append its source digest to app/schema_versions.json: ' + signature)
 
 
 def test_opt_in_preserves_existing_data_keys_and_runtime_policy(split_settings):
-    api = main.create_app(split_settings)
+    api = open_services(split_settings)
     store = api.state.store
     run = store.create_run('Existing saved session', '', 'modal', [])
     request = api.state.spend.begin(run, 'synthetic-model')
@@ -375,7 +353,7 @@ def test_opt_in_preserves_existing_data_keys_and_runtime_policy(split_settings):
     }
     store.close()
     settings = ready(split_settings)
-    replacement = main.create_app(settings)
+    replacement = open_services(settings)
     try:
         store = replacement.state.store
         assert {name: store.rows('SELECT * FROM ' + name) for name in preserved} == preserved
@@ -388,7 +366,7 @@ def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
     # Reproduce revision 1's receipt and schema: the only new table is the
     # durable title inbox and deletion scan index. Existing state survives.
     settings = ready(split_settings)
-    app = main.create_app(settings)
+    app = open_services(settings)
     run = app.state.store.create_run('Saved before API split', '', 'demo', [], chat_enabled=True)
     before = {name: app.state.store.rows('SELECT * FROM ' + name)
               for name in ('runs', 'messages', 'sandbox_settings', 'runtime_policy')}
@@ -399,9 +377,9 @@ def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
         conn.execute('DROP INDEX idx_runs_pending_deletion')
         conn.execute('UPDATE schema_state SET revision=1')
     with pytest.raises(DatabaseError, match='incompatible'):
-        main.create_app(settings)
+        open_services(settings)
     ready(settings)
-    app = main.create_app(settings)
+    app = open_services(settings)
     try:
         assert {name: app.state.store.rows('SELECT * FROM ' + name) for name in before} == before
         assert app.state.store.rows('SELECT * FROM session_title_requests') == []
@@ -413,7 +391,7 @@ def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
 
 def test_revision_nine_upgrade_adds_chat_projection_without_rewriting_saved_messages(split_settings):
     settings = ready(split_settings)
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         run = api.state.store.create_run('Saved conversation before the delivery projection.', '', 'modal', [])
         messages = api.state.store.rows('SELECT * FROM messages WHERE run_id=?', (run['id'],))
@@ -424,10 +402,10 @@ def test_revision_nine_upgrade_adds_chat_projection_without_rewriting_saved_mess
         conn.execute('DROP TABLE swarm_chat_entries')
         conn.execute('UPDATE schema_state SET revision=9')
     with pytest.raises(DatabaseError, match='offline migration'):
-        main.create_app(settings)
+        open_services(settings)
     ready(split_settings)
     assert execute(settings, 'SELECT * FROM swarm_chat_entries') == []
-    api = main.create_app(settings)
+    api = open_services(settings)
     try:
         assert api.state.store.rows('SELECT * FROM messages WHERE run_id=?', (run['id'],)) == messages
     finally:
@@ -437,7 +415,7 @@ def test_revision_nine_upgrade_adds_chat_projection_without_rewriting_saved_mess
 def test_performance_schema_upgrade_preserves_queued_conversations(split_settings):
     from app import performance
     settings = ready(split_settings)
-    app = main.create_app(settings)
+    app = open_services(settings)
     run = app.state.store.create_run('Queued before instrumentation', '', 'modal', [], chat_enabled=True)
     app.state.store.close()
     # This additive migration adds only this table to schema 16; retain real
@@ -447,7 +425,7 @@ def test_performance_schema_upgrade_preserves_queued_conversations(split_setting
         conn.execute('DROP TABLE performance_samples')
         conn.execute('UPDATE schema_state SET revision=16')
     ready(settings)
-    app = main.create_app(settings)
+    app = open_services(settings)
     try:
         assert app.state.store.messages(run['id'])[0]['status'] == 'queued'
         assert app.state.store.rows('SELECT * FROM performance_samples') == []

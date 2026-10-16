@@ -15,7 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import psycopg
 from app.config import Settings
-from app.main import create_app
+from app.db import Store
+from app.security import Security
+from app.schema_migrations import initialize_components, initialize_defaults
+from cryptography.fernet import Fernet
 from app import postgres_migration as migration
 
 
@@ -30,8 +33,11 @@ def main():
     created = False
     with tempfile.TemporaryDirectory(prefix='moyai-migration-demo-') as temporary:
         directory = Path(temporary)
-        app = create_app(Settings(_env_file=None, data_dir=directory, session_titles_enabled=False))
-        store = app.state.store
+        settings = Settings(_env_file=None, data_dir=directory, encryption_key=Fernet.generate_key().decode())
+        store = Store(directory)
+        security = Security(settings)
+        initialize_components(store)
+        initialize_defaults(store, settings)
         try:
             for i in range(25):
                 run = store.create_run(f'Synthetic session {i + 1} — 日本語 🗿', '', 'demo', [], chat_enabled=True)
@@ -39,7 +45,7 @@ def main():
                     store.event(run['id'], 'status', f'Step {step + 1}', {'synthetic': True})
             store.attachments.save(uuid4().hex, 'demo', 'binary.bin', bytes(range(256)),
                                    ('application/octet-stream', b'', ''), 1024)
-            ciphertext = app.state.security.fernet.encrypt(b'synthetic-token').decode()
+            ciphertext = security.fernet.encrypt(b'synthetic-token').decode()
             store.execute('INSERT INTO connections VALUES(?,?,?,?)', ('github', ciphertext, 'Demo only', '2026-10-09'))
             print('SQLite source: 25 synthetic chats, Unicode history, encrypted connection, binary attachment.', flush=True)
             before = migration.plan(directory)

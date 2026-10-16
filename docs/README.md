@@ -1,46 +1,27 @@
 # Documentation
 
-[Back to Moyai](../README.md)
+[Project overview and local installation](../README.md)
 
-Follow the [installation walkthrough](getting-started.md) to deploy Moyai on Modal and run your first task. Choose your model and harness using the [compatibility guide](harnesses.md). For a shorter setup, use the [README](../README.md#getting-started).
-
-## Use Moyai
-
-| Guide | What you'll find |
+| Guide | Purpose |
 | --- | --- |
-| [Using Moyai](usage.md) | Chat, follow-ups, model switching, and workspace tabs |
-| [Slack](slack.md) | Channel threads, direct messages, commands, and installation |
-| [Files, audio, and browser](files-and-browser.md) | Uploads, downloads, dictation, browser control, and captures |
-| [Skills](skills.md) | Reusable personal and organization workflows |
-| [Memory](memory.md) | Saved preferences, recall, and privacy controls |
-| [Goal mode](goals.md) | Continue working toward an objective across responses |
-| [Automations](automations.md) | Scheduled work, event triggers, and recovery |
+| [Using Moyai](usage.md) | Chat, computer, files, Settings, connections and Slack |
+| [Architecture](architecture.md) | Execution ownership, service roles and storage boundaries |
+| [Docker installation](../deploy/docker/README.md) | Versioned standalone or split services and upgrades |
+| [Production deployment](production-deploy.md) | Prepare and upgrade the existing four-role product |
+| [Deployment contract](pydantic-deployment.md) | Configuration, schema receipts, drain and release ordering |
+| [Authentication](authentication.md) | Local accounts and existing Google/Cloudflare identity |
+| [Cloudflare Access](cloudflare-access.md) | Preserve the existing edge and origin identity boundary |
+| [Automations](pydantic-automations.md) | Canonical definitions, adoption and admission fences |
+| [Workspace recovery](pydantic-workspace-recovery.md) | Checkpoint, cold restore and uncertain effects |
+| [Runtime performance](pydantic-performance.md) | Activity queues, capacity and computer startup |
+| [PostgreSQL runtime](postgres-runtime.md) | Canonical and native schema ownership |
+| [Schema migrations](schema-migrations.md) | Receipts, offline migration and compatibility |
+| [PostgreSQL migration](postgres-migration.md) | Verified historical SQLite transfer |
+| [Object storage](object-storage.md) | Historical payload migration and backup requirements |
+| [UI components](shadcn-ui.md) | Shared controls, frontend build and browser checks |
+| [Verification](verification.md) | Local and CI checks and their limits |
+| [CI execution](ci-execution.md) | Isolated native test shards and required release checks |
+| [Consolidation scope](consolidation.md) | Preserved functionality and removed runtime families |
 
-## Set up and operate
-
-| Guide | What you'll find |
-| --- | --- |
-| [Install and run a real task](getting-started.md) | Account setup, credentials, Modal deployment, first task, GitHub, and troubleshooting |
-| [Cloud setup and deployment](deployment.md) | Modal or Substrate sandboxes, Render, Docker, migration, and backups |
-| [PostgreSQL migration rehearsal](postgres-migration.md) | Verified database copies and the path toward overlapping deployments |
-| [Postgres runtime](postgres-runtime.md) | Application storage, ownership, verification, and cutover prerequisites |
-| [Independent agent runtime](independent-runtime.md) | Opt-in responses before computer acquisition, qualification and recovery |
-| [AWS Lambda MicroVMs](aws-lambda-microvms.md) | AWS sandbox setup, durable S3 checkpoints, rotation, and conformance tests |
-| [Sign-in and user roles](authentication.md) | Google Workspace SSO and administrators |
-| [App connections](integrations.md) | Linear, Slack, Notion, GitHub, and repository rulesets |
-| [Secure access and 1Password](credentials.md) | Credential requests, ownership, and vault access |
-| [Project environments](environments.md) | Repository setup, build recipes, and snapshots |
-| [Model and infrastructure costs](costs.md) | Spend attribution, provider imports, and bills |
-| [Tracing](observability.md) | Trace configuration, redaction, delivery, and verification |
-| [Tracing comparison](tracing-comparison.md) | Backend comparison and rollout findings |
-| [Usage analytics](adoption.md) | Usage metrics and coverage limits |
-
-## Understand and contribute
-
-- [Architecture and execution](architecture.md): runtime, recovery, Temporal, and parallel agents.
-- [Testing and historical verification](verification.md): local checks, acceptance checklist, and past rollout evidence.
-- [Security, scope, and references](security-and-scope.md): boundaries, limitations, and upstream projects.
-- [GitHub recovery design](github-recovery-design.md): publication recovery design.
-- [Session titles](session-titles.md): automatic naming behavior.
-
-Dated rollout notes and acceptance reports are historical evidence, not promises about the current deployment. References to older screenshots or archives that were never committed are labeled as unavailable rather than linked as repository files.
+Older designs and rollout reports remain in Git history. They describe their
+recorded revision and are not instructions for starting the current runtime.

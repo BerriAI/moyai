@@ -79,7 +79,7 @@ repeat the same pre-wait check.
 Use a disposable PostgreSQL destination:
 
 ```sh
-uv sync --project native --frozen --extra product
+uv sync --frozen
 cd native
 MOYAI_TEST_POSTGRES=postgresql://... uv run pytest -q \
   tests/test_pool_budget.py tests/test_product_read_contention.py \

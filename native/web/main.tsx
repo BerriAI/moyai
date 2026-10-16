@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
-import logo from "../../app/static/moyai-logo.png"
+import logo from "./assets/moyai-logo.png"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { ComputerPanel } from "./computer"

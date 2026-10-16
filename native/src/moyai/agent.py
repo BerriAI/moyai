@@ -268,6 +268,21 @@ def inference_models(settings: Settings) -> dict[str, Model]:
     return {name: OpenAIResponsesModel(name, provider=provider) for name in settings.models}
 
 
+
+def workspace_image() -> modal.Image:
+    """The same image definition for lazy startup and deployment prewarming."""
+    return (
+        modal.Image.debian_slim(python_version="3.13")
+        .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm",
+                     "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
+                     "x11-xserver-utils", "fonts-dejavu-core")
+        .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
+        .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)
+        .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
+        .add_local_file(PACKAGE_ROOT / "browser_guest.py", "/opt/moyai/browser_guest.py", copy=True)
+    )
+
+
 def make_agent(
     settings: Settings, database: Database, stores: NativeStores, objects: ObjectStore,
     *, models: dict[str, Model] | None = None,
@@ -278,18 +293,8 @@ def make_agent(
 ) -> tuple[Agent[RunScope, str | DeferredToolRequests], TemporalDurability[RunScope]]:
     models = models or inference_models(settings)
     if workspace is None:
-        image = (
-            modal.Image.debian_slim(python_version="3.13")
-            .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm",
-                         "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
-                         "x11-xserver-utils", "fonts-dejavu-core")
-            .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
-            .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)
-            .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
-            .add_local_file(PACKAGE_ROOT / "browser_guest.py", "/opt/moyai/browser_guest.py", copy=True)
-        )
         workspace = ModalSandbox(
-            image=image, app_name=settings.modal_app, working_dir="/workspace",
+            image=workspace_image(), app_name=settings.modal_app, working_dir="/workspace",
             sandbox_timeout=settings.computer_lifetime, idle_timeout=settings.computer_idle_timeout,
         )
     durability: TemporalDurability[RunScope] = OnDemandDurability(
