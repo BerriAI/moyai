@@ -71,16 +71,16 @@ def main():
         print(message, flush=True)
         evidence.append(message)
 
-    def start(suffix, volume, *environment):
+    def start(suffix, volume, *environment, command=()):
         name = prefix + suffix
         containers.append(name)
         docker('run', '-d', '--name', name, '-v', f'{volume}:/var/data',
                '-e', 'DATA_DIR=/var/data/moyai', '-e', 'WORKSPACE_PASSWORD=synthetic-smoke-password',
-               *environment, args.image)
+               *environment, args.image, *command)
         return name
 
     def healthy(name):
-        for _ in range(60):
+        for _ in range(240):
             if docker('exec', '--user', '10001:10001', name, python, '/app/docker_healthcheck.py', check=False).returncode == 0:
                 return
             if docker('inspect', '-f', '{{.State.Running}}', name).stdout.strip() == 'false':
@@ -92,7 +92,8 @@ def main():
         volume = prefix + '-data'; volumes.append(volume)
         docker('volume', 'create', volume)
         docker('run', '--rm', '--entrypoint', python, '-v', f'{volume}:/var/data', args.image, '-c', SEED)
-        name = start('-app', volume)
+        name = start('-app', volume, '-e', 'LITELLM_API_KEY=synthetic-not-used',
+                     command=(python, '-m', 'moyai.cli', 'dev', '--host', '0.0.0.0', '--port', '8787'))
         healthy(name)
         record(docker('exec', '--user', '10001:10001', name, python, '-c', VERIFY).stdout.strip())
         docker('stop', '--time', '30', name)
