@@ -234,7 +234,7 @@ async def prepare_repository(
                 raise ValueError("GitHub did not confirm a valid repository commit.")
             return name, branch, commit
 
-        name, branch, commit = await service.source_call(inspect)
+        name, branch, commit = await service.execution.call(inspect)
         state = {**descriptor, "repository": name, "branch": branch, "commit_sha": commit, "prepared": True}
         state["marker"] = service.database.security.seal({"fingerprint": fingerprint, "commit_sha": commit})
         async with service.database.sessions.begin() as db:

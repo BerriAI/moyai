@@ -33,6 +33,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 
 from .contracts import Grant, RunScope
+from .product_connector_execution import CanonicalConnectorExecution
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +59,7 @@ class ProductConnections:
             lambda owner, actor: same_requester(self.store, owner, actor),
         )
         cast(Any, self.connectors).slack_identities = self.identities
+        self.execution = CanonicalConnectorExecution(self)
         self._public_repositories: dict[int, tuple[float, dict[str, Any]]] = {}
         self._public_repository_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
         if getattr(database, "execution_schema", None):
@@ -217,27 +219,6 @@ class ProductConnections:
         await self.database.authorize_scope(scope)
         await self.require_scope(scope)
 
-    async def source_call(self, operation: Any) -> Any:
-        """Run mixed async/sync canonical helpers away from the ASGI loop.
-
-        Helpers retain their existing sync Store API. Each invocation owns its
-        asyncio locks; cross-process refresh safety comes from SQL CAS, not those
-        locks. database() drains cancellation before returning to its caller.
-        """
-        def execute():
-            bound: Any = copy.copy(self.connectors)
-            bound.locks = {provider: asyncio.Lock() for provider in PROVIDERS}
-            bound.personal_slack = copy.copy(bound.personal_slack)
-            bound.personal_slack.connectors, bound.personal_slack.locks = bound, {}
-            bound.github = copy.copy(bound.github)
-            bound.github.connectors = bound
-            for key, value in vars(bound.github).items():
-                if isinstance(value, asyncio.Lock):
-                    setattr(bound.github, key, asyncio.Lock())
-            return asyncio.run(operation(bound))
-
-        return await source_database(execute)
-
     async def credentials(self, scope: RunScope, grant: Grant, *, write: bool = False) -> dict[str, Any]:
         await self.check(scope, grant)
         if write and grant.read_only:
@@ -250,13 +231,13 @@ class ProductConnections:
     async def _credentials(self, grant: Grant, *, write: bool) -> dict[str, Any]:
         reference = grant.policy["product"]
         if reference.get("access") == "bot":
-            value = {"access_token": await self.source_call(lambda connectors: connectors.slack_bot_token())}
+            value = {"access_token": await self.execution.call(lambda connectors: connectors.slack_bot_token())}
         elif reference["personal_owner"]:
-            value, _ = await self.source_call(
+            value, _ = await self.execution.call(
                 lambda connectors: connectors.personal_slack.credentials(reference["personal_owner"]),
             )
         elif grant.kind == "github":
-            token = await self.source_call(
+            token = await self.execution.call(
                 lambda connectors: connectors.github.installation_token(
                     credentials=connectors.github.saved_credentials(),
                     repository=reference["repository_id"], write=write,
@@ -264,13 +245,13 @@ class ProductConnections:
             )
             value = {"access_token": token}
         else:
-            value = await self.source_call(lambda connectors: connectors.credentials(grant.kind))
+            value = await self.execution.call(lambda connectors: connectors.credentials(grant.kind))
         return value
 
     async def bot_token(self, scope: RunScope, grant: Grant) -> str:
         await self.check(scope, grant)
         async with self.connectors.locks["slack"]:
-            token = await self.source_call(lambda connectors: connectors.slack_bot_token())
+            token = await self.execution.call(lambda connectors: connectors.slack_bot_token())
         await self.check(scope, grant)
         return token
 
@@ -331,7 +312,7 @@ class ProductConnections:
         saved = await source_database(self.connectors.github.saved_credentials)
         if saved and "repository_ids" not in saved:
             try:
-                await self.source_call(lambda connectors: connectors.github.ensure_connection())
+                await self.execution.call(lambda connectors: connectors.github.ensure_connection())
             except ConnectorError:
                 await source_database(self.connectors.record_check, "github", "needs_attention")
         return await source_database(self.connectors.list)
@@ -366,21 +347,15 @@ class ProductConnections:
             original = next((item for item in before if item.policy["product"]["repository_id"] == target), None)
             if original is None:
                 raise HTTPException(403, "This repository is not among the requester's selected GitHub grants.")
-            main_loop = asyncio.get_running_loop()
             async def current_selection():
                 await self.product.identity.require_current(grant)
                 current = await self.resolve_grants(principal.id, [original.id], shared_session=True, surface="automation")
                 if original not in current:
                     raise HTTPException(409, "The selected GitHub authority changed during repository lookup.")
             async def resolve(bound):
-                source_request = bound.github.request
-                async def guarded(*args, **kwargs):
-                    await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(current_selection(), main_loop))
-                    return await source_request(*args, **kwargs)
-                bound.github.request = guarded
                 identity = await bound.github.selected_target({}, repository=repository, repository_id=target)
                 return identity, bound.github.repository_name(identity)
-            target, name = await self.source_call(resolve)
+            target, name = await self.execution.call(resolve, authorize=current_selection)
             await current_selection()
             result = {"repository_id": target, "repository": name, "repo_url": "https://github.com/" + name,
                       "connection_id": original.id, "public": False}
@@ -401,7 +376,7 @@ class ProductConnections:
         never borrow an organization token or serve expired state.
         """
         if repository_id is None:
-            value = await self.source_call(lambda bound: bound.github.public_repository(repository))
+            value = await self.execution.call(lambda bound: bound.github.public_repository(repository))
             self._cache_public_repository(value)
             return copy.deepcopy(value)
         entry = self._public_repositories.get(repository_id)
@@ -413,7 +388,7 @@ class ProductConnections:
             if not refresh and entry and time.monotonic() - entry[0] < 300:
                 return copy.deepcopy(entry[1])
             try:
-                value = await self.source_call(lambda bound: bound.github.public_repository(repository, repository_id))
+                value = await self.execution.call(lambda bound: bound.github.public_repository(repository, repository_id))
                 if value.get("id") != repository_id:
                     raise HTTPException(403, "GitHub did not confirm the requested permanent repository ID.")
                 self._cache_public_repository(value)
@@ -450,100 +425,13 @@ class ProductConnections:
             if grant.policy["product"].get("access") == "bot" and name == "slack_search":
                 continue
 
-            def build(tool_name: str, model: Any, is_write: bool):
+            def build(tool_name: str):
                 async def invoke(**arguments: Any) -> Any:
-                    from app.connector_errors import ConnectorError
-                    from app.personal_slack import Selection
-
-                    args = model.model_validate(arguments).model_dump()
-                    if grant.policy["product"].get("access") == "bot" and tool_name in {"slack_channel", "slack_thread"}:
-                        args["as_bot"] = True
-                    bot_only = grant.kind == "slack" and (
-                        tool_name in {"slack_me", "slack_send"} or args.get("as_bot") is True
-                    )
-                    if bot_only:
-                        await self.check(scope, grant)
-                        if grant.policy["product"]["personal_owner"]:
-                            raise ToolFailed("Bot access requires the organization Slack account selection.")
-                        if tool_name in {"slack_thread", "slack_channel"}:
-                            await self.require_bot_dm(scope, args["channel"])
-                        credentials = {}
-                        bot_token = await self.bot_token(scope, grant)
-                    else:
-                        credentials = await self.credentials(scope, grant, write=is_write)
-                        bot_token = None
-                    main_loop = asyncio.get_running_loop()
-
-                    async def check_current():
-                        # Native SQL resources remain on their owning event loop.
-                        future = asyncio.run_coroutine_threadsafe(self.check(scope, grant), main_loop)
-                        return await asyncio.wrap_future(future)
-
-                    async def operate(bound: Any):
-                        source_request = bound.request
-
-                        async def guarded_request(*request_args: Any, **kwargs: Any):
-                            await check_current()
-                            value = await source_request(*request_args, **kwargs)
-                            if not is_write:
-                                await check_current()
-                            return value
-
-                        async def selected_credentials(_provider: str):
-                            await check_current()
-                            return credentials
-
-                        async def selected_slack(*_args: Any, **_kwargs: Any):
-                            return Selection(grant.policy["product"]["personal_owner"], None, None, tool_name, credentials)
-
-                        async def selected_bot_token():
-                            await check_current()
-                            if bot_token is None:
-                                raise ToolFailed("The bot account was not selected for this operation.")
-                            return bot_token
-
-                        # Native current-scope checks execute before every provider
-                        # await; no fabricated legacy run or source execution row.
-                        bound.request = guarded_request
-                        bound.credentials = selected_credentials
-                        if bot_only:
-                            bound.slack_bot_token = selected_bot_token
-                        bound.allowed = lambda selected_name, **_kwargs: (
-                            selected_name in TOOLS and TOOLS[selected_name][0] == grant.kind
-                            and (not TOOLS[selected_name][1] or not grant.read_only)
-                        )
-                        bound.check_execution = lambda _run: None
-                        bound.guard = lambda *_args, **_kwargs: None
-                        bound.personal_slack = copy.copy(bound.personal_slack)
-                        bound.personal_slack.select = selected_slack
-                        bound.personal_slack.recheck = lambda _selection: None
-                        bound.slack_identities = copy.copy(self.identities)
-                        bound.slack_identities.connectors = bound
-                        bound.slack_identities.check_requester = lambda *_args, **_kwargs: None
-                        try:
-                            if tool_name == "linear_my_issues":
-                                return await bound.my_linear_issues({"active_user_id": scope.actor_id}, args)
-                            if grant.kind == "slack" and args.get("as_bot"):
-                                # Bot reads use the independently refreshed bot token.
-                                await check_current()
-                            result = await bound.call(
-                                tool_name, args, run={"id": scope.session_id, "active_user_id": scope.actor_id}
-                                if tool_name in {"slack_me", "slack_send"} else None,
-                            )
-                        except ConnectorError as error:
-                            # Raising preserves EffectReceipts' uncertainty barrier.
-                            # Provider text is safe; credential payloads are not returned.
-                            raise ToolFailed(str(error)) from None
-                        if is_write and isinstance(result, dict) and (
-                            result.get("outcome_uncertain") or result.get("error") or result.get("complete") is False
-                        ):
-                            raise ToolFailed("The provider did not confirm the complete action. Verify before retrying.")
-                        return result
-                    return await self.source_call(operate)
+                    return await self.execution.tool(scope, grant, tool_name, arguments)
                 return invoke
 
             tool = Tool.from_schema(
-                build(name, schema, write), name=name.removeprefix(provider + "_"),
+                build(name), name=name.removeprefix(provider + "_"),
                 description=description, json_schema=schema.model_json_schema(),
             )
             tool.metadata = {"annotations": {"readOnlyHint": not write}}
@@ -703,7 +591,7 @@ def routes(service: ProductConnections) -> APIRouter:
             # Preserve the source service's process-local setup serialization;
             # database CAS/source authority remain the cross-process fences.
             async with connectors.github.setup_lock:
-                return await service.source_call(invoke)
+                return await service.execution.call(invoke)
         return endpoint
 
     for route in canonical_github.routes:
@@ -761,12 +649,12 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(security.require, request, mutation=True, admin=True)
         try:
             if provider == "github":
-                await service.source_call(lambda bound: bound.github.refresh_connection())
+                await service.execution.call(lambda bound: bound.github.refresh_connection())
                 label = ", ".join(await source_database(connectors.github.targets))
             else:
                 async def verify(bound: Any):
                     return await bound.verify(provider, await bound.credentials(provider))
-                label = await service.source_call(verify)
+                label = await service.execution.call(verify)
         except ConnectorError:
             await source_database(connectors.record_check, provider, "needs_attention")
             raise
