@@ -147,6 +147,7 @@ class ProductHistoryAdapter:
             EXISTS(SELECT 1 FROM {t('session_pins')} p WHERE p.owner_id=:actor AND p.run_id=v.root_id) AS pinned,
             EXISTS(SELECT 1 FROM {t('session_archives')} a WHERE a.owner_id=:actor
                 AND a.run_id=v.root_id) AS archived,
+            (r.owner_id IN (SELECT id FROM identities)) AS created_by_me,
             (v.root_id IN (SELECT id FROM mine) AND r.owner_id NOT IN (SELECT id FROM identities)) AS participated,
             (EXISTS(SELECT 1 FROM {t('slack_threads')} s WHERE s.run_id=v.root_id)
                 OR EXISTS(SELECT 1 FROM {t('slack_events')} s WHERE s.run_id=v.root_id)) AS slack_connected,
@@ -175,6 +176,7 @@ class ProductHistoryAdapter:
             "deleting": bool(row["deletion_requested_at"]), "deleted_at": row["deleted_at"] or None,
             "pinned": bool(row["pinned"]), "folder": row["folder"] or "",
             "folder_id": row["folder_id"], "participated": bool(row["participated"]),
+            "created_by_me": bool(row["created_by_me"]),
             "parent_session_id": row["parent_run_id"] or None, "root_session_id": row["root_id"],
             "side_chat_of": row["side_chat_of"] or None, "url": "/#run=" + row["id"],
             "source_format": SOURCE_FORMAT, "execution_engine": "legacy:" + row["harness"],
@@ -219,11 +221,13 @@ class ProductHistoryAdapter:
             await self.allowed(conn, current, run_id)
         return current
 
-    def navigation_scope(self, principal: Principal, *, archived: bool | None = None) -> str:
-        if principal.role == "admin":
+    def navigation_scope(
+        self, principal: Principal, *, archived: bool | None = None, personal: bool = False,
+    ) -> str:
+        if principal.role == "admin" and not personal:
             return "1=1"
         t = self.table
-        if archived is True:
+        if archived is True and not personal:
             return f"EXISTS(SELECT 1 FROM {t('session_archives')} a WHERE a.owner_id=:actor AND a.run_id=v.root_id)"
         return f"""(v.root_id IN (SELECT id FROM mine)
             OR EXISTS(SELECT 1 FROM {t('session_pins')} p WHERE p.owner_id=:actor AND p.run_id=v.root_id)
@@ -235,6 +239,7 @@ class ProductHistoryAdapter:
     async def sessions(
         self, principal: Principal, *, limit: int = 50, offset: int = 0,
         archived: bool = False, deleted: bool = False, exclude_continued: bool = False,
+        personal: bool = False,
     ) -> dict[str, Any]:
         bounded(limit, offset)
         current = await self.identity.require_current(principal.grant)
@@ -243,7 +248,7 @@ class ProductHistoryAdapter:
         if deleted:
             where += "r.deleted_at!='' AND (:is_admin=1 OR r.owner_id=:actor)"
         else:
-            where += self.navigation_scope(current, archived=archived)
+            where += self.navigation_scope(current, archived=archived, personal=personal)
             where += f" AND {' ' if archived else 'NOT '}EXISTS(SELECT 1 FROM {t('session_archives')} a " \
                      "WHERE a.owner_id=:actor AND a.run_id=r.id)"
         if exclude_continued and self.continuation_schema:
