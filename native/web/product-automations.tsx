@@ -7,8 +7,8 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { automationDefaultSchedule, automationEventFields, automationSetupNotes, automationSources, automationTriggers } from "../../app/static/automation-triggers.js?native-automation"
-import { automationHistoryMerge, automationRunStatus, automationTiming } from "../../app/static/automations.js?native-automation"
+import { automationDefaultSchedule, automationEventFields, automationSetupNotes, automationSources, automationTriggers } from "./automation-helpers.js"
+import { automationHistoryMerge, automationRunStatus, automationTiming } from "./automation-helpers.js"
 import { api, ApiError, csrfToken } from "./api"
 import {
   AutomationRequestKeys, automationActions, automationBlocker, automationMetadata, automationSamplePayload, automationStatus, calendarFrequencies, changeAutomationEvent, changeAutomationEventField, changeAutomationRepository, eventFieldVisible, historySessionHash,

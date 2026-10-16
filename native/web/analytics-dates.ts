@@ -1,4 +1,4 @@
-import { analyticsDate, analyticsPreset } from "../../app/static/analytics.js?native-analytics"
+import { analyticsDate, analyticsPreset } from "./analytics-render.js"
 
 export type AnalyticsPreset = "24h" | "7d" | "30d" | "custom"
 export type AnalyticsRange = { preset: AnalyticsPreset; start: string; end: string }
