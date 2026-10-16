@@ -17,6 +17,7 @@ from sqlalchemy import delete, select, text, update
 from moyai.models import Effect, Message, Turn
 from moyai.product_automation_models import ProductAutomationOperation as Operation
 from moyai.product_automation_tools import GrantRequest, WebhookRequest
+from moyai.worker_capacity import ActivityCapacity
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.",
@@ -252,6 +253,7 @@ async def test_secure_request_resume_and_receiver_mutation_use_real_temporal_act
                 histories.append(await second.fetch_history())
             for history in histories:
                 await Replayer(
+                    interceptors=[ActivityCapacity()],
                     workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
                 ).replay_workflow(history)
         assert calls == 3

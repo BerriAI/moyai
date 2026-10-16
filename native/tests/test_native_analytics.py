@@ -37,6 +37,7 @@ from moyai.pr_publications import PRPublication, creation_receipt, verified_stat
 from moyai.pull_requests import PullRequestService
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 START, END = "2026-10-01T00:00:00+00:00", "2026-10-04T00:00:00+00:00"
@@ -549,6 +550,7 @@ async def test_confirmed_native_pr_receipt_and_pre_projection_history_replay(run
         runtime.agent = build(False)
         TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent]
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
     assert calls == 1

@@ -39,6 +39,7 @@ class ProductResources:
         self.engine = create_async_engine(
             "postgresql+asyncpg://" + url.split("://", 1)[1],
             pool_pre_ping=True,
+            pool_size=settings.moyai_database_pool_size, max_overflow=0, pool_timeout=10,
             connect_args={"server_settings": {"statement_timeout": "5000"}},
         )
         from app.blob_storage import ObjectStorage

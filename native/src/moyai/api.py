@@ -158,8 +158,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             principal = await runtime.product_identity.authenticate(
                 request, mutation=request.method not in {"GET", "HEAD", "OPTIONS"},
             )
-            async with runtime.database.sessions.begin() as db:
-                user = await runtime.product_identity.project_native_user(db, principal)
+            user: User | None = None
+            if request.method in {"GET", "HEAD", "OPTIONS"}:
+                async with runtime.database.sessions() as db:
+                    user = await runtime.product_identity.read_native_user(db, principal)
+            if user is None:
+                async with runtime.database.sessions.begin() as db:
+                    user = await runtime.product_identity.project_native_user(db, principal)
             request.state.product_principal = principal
             return user
         token = request.cookies.get(COOKIE, "")

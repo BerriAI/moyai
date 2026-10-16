@@ -46,7 +46,8 @@ CREDENTIAL_REQUEST_SCHEMA_VERSION = "2026-10-15-product-credential-requests-v10"
 MEMORY_REVIEW_SCHEMA_VERSION = "2026-10-15-product-memory-review-v11"
 DRAIN_SCHEMA_VERSION = "2026-10-15-product-drain-v12"
 GIT_OPERATION_SCHEMA_VERSION = "2026-10-15-product-git-operations-v13"
-PRODUCT_SCHEMA_VERSION = GIT_OPERATION_SCHEMA_VERSION
+EXECUTION_COMPATIBILITY_SCHEMA_VERSION = "2026-10-16-product-execution-v14"
+PRODUCT_SCHEMA_VERSION = EXECUTION_COMPATIBILITY_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -108,6 +109,8 @@ MIGRATIONS = (
     (MEMORY_REVIEW_SCHEMA_VERSION, MEMORY_REVIEW_TABLES),
     (DRAIN_SCHEMA_VERSION, DRAIN_TABLES),
     (GIT_OPERATION_SCHEMA_VERSION, GIT_OPERATION_TABLES),
+    # A durable release barrier: v13 candidates cannot resume the new workflow commands.
+    (EXECUTION_COMPATIBILITY_SCHEMA_VERSION, frozenset()),
 )
 
 
@@ -344,9 +347,10 @@ async def migrate_product_schema(
             ), {"version": revision})).scalar_one_or_none()
             if not existing:
                 # Add only this version's tables. Never re-stamp an earlier receipt.
-                await connection.run_sync(lambda conn, inventory=metadata, selected=tables: inventory.create_all(
-                    conn, tables=[table for table in inventory.sorted_tables if table.name in selected],
-                ))
+                if tables:
+                    await connection.run_sync(lambda conn, inventory=metadata, selected=tables: inventory.create_all(
+                        conn, tables=[table for table in inventory.sorted_tables if table.name in selected],
+                    ))
                 if revision == AUTOMATION_CONTEXT_SCHEMA_VERSION:
                     await connection.execute(text(
                         f'CREATE TRIGGER "{AUTOMATION_CONTEXT_TRIGGER}" BEFORE UPDATE '

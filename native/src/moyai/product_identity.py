@@ -8,8 +8,8 @@ Integration contract (the caller owns activation and reviewed schema migrations)
   No Store, login enrollment, schema initialization or agent runtime is imported.
 * API actor dependency:
     principal = await identity.authenticate(request, mutation=is_mutation)
-    async with database.sessions.begin() as db:
-        user = await identity.project_native_user(db, principal)
+    Read requests first use read_native_user in a read session. Missing native
+    users and mutations use project_native_user in a write transaction.
     return user
   Return principal.csrf_token from /me. The browser can send the same verified
   token as both x-csrf-token and X-Moyai-CSRF. Exact legacy Origin remains required.
@@ -78,6 +78,10 @@ if TYPE_CHECKING:
 class ProductGrant:
     user_id: str
     authority_version: str
+
+
+class _GrantedUser(Protocol):
+    product_grant: ProductGrant
 
 
 @dataclass(frozen=True)
@@ -462,6 +466,23 @@ class ProductIdentityAdapter:
             raise HTTPException(401, "Product authority changed before admission.")
         return principal
 
+    async def read_native_user(self, db: AsyncSession, principal: ProductPrincipal) -> User | None:
+        """Use authenticated authority without updating the native profile cache."""
+        user = await db.get(User, principal.id)
+        if user is None:
+            return None
+        username = "product:" + hashlib.sha256(principal.id.encode()).hexdigest()
+        if user.username != username:
+            raise HTTPException(409, "Product identity conflicts with an existing native account.")
+        if not user.enabled or user.auth_version != principal.native_auth_version:
+            raise HTTPException(401, "Your access changed. Sign in again.")
+        # Request-only values must never flush over a concurrent profile/revocation
+        # write. The response middleware rechecks this original grant after awaits.
+        db.expunge(user)
+        user.display_name, user.role = principal.name[:200], principal.role
+        cast(_GrantedUser, user).product_grant = principal.grant
+        return user
+
     async def project_native_user(self, db: AsyncSession, principal: ProductPrincipal) -> User:
         """A native FK/profile cache, never the source of product authority."""
         backend = db.get_bind().dialect.name
@@ -497,5 +518,5 @@ class ProductIdentityAdapter:
             user.display_name, user.role = fresh.name[:200], fresh.role
         # No preference, Slack identity, local disable or local epoch is reset.
         # This server-authored request context is intentionally not an ORM field.
-        cast(Any, user).product_grant = fresh.grant
+        cast(_GrantedUser, user).product_grant = fresh.grant
         return user

@@ -9,7 +9,8 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-NATIVE_PROTOCOL_REVISION = 1
+# Split activity queues and lazy workspace startup change recorded workflow commands.
+NATIVE_PROTOCOL_REVISION = 2
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

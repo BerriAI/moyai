@@ -81,3 +81,33 @@ async def test_cancelled_consumer_closes_waiting_sdk_reader():
     with pytest.raises(asyncio.CancelledError):
         await consumer
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_stream_checks_each_delivery_once_and_still_checks_idle_revocation():
+    checks = 0
+    revoked = False
+
+    async def source():
+        for index in range(3):
+            yield str(index)
+        await asyncio.Event().wait()
+
+    async def authorize():
+        nonlocal checks
+        checks += 1
+        if revoked:
+            raise HTTPException(401)
+
+    async def disconnected():
+        return False
+
+    stream = authorized_events(source(), authorize, disconnected, interval=0.01)
+    assert [await anext(stream) for _ in range(3)] == ["0", "1", "2"]
+    assert checks == 4  # Admission plus one fresh check for each delivered event.
+    assert await anext(stream) == ": keepalive\n\n"
+    assert checks == 5
+    revoked = True
+    assert "access_revoked" in await anext(stream)
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
