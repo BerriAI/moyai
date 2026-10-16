@@ -4,6 +4,7 @@ import asyncio
 import shutil
 from pathlib import Path
 
+import product_database_fixtures as database_fixtures
 import pytest_asyncio
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -14,6 +15,9 @@ from moyai.contracts import NewMessage, NewSession
 from moyai.models import User
 from moyai.runtime import Runtime
 from moyai.settings import Settings
+
+prepared_product_database = database_fixtures.prepared_product_database
+product_database_template = database_fixtures.product_database_template
 
 
 @pytest_asyncio.fixture
