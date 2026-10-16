@@ -45,6 +45,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 from .artifacts import artifact_capability
 from .browser import browser_capability
 from .bundled_skills import bundled_skill_catalog
+from .commentary import Commentary
 from .computer_startup import OnDemandDurability, on_demand_coder
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
@@ -325,6 +326,7 @@ def make_agent(
         capabilities=[
             workspace,
             authority,
+            Commentary(database),
             EffectReceipts(database),
             *product_capabilities,
             connection_tools(database.security),

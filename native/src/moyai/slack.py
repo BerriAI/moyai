@@ -267,6 +267,8 @@ async def pump(runtime: Runtime) -> None:
         ).order_by(SlackInbox.created_at).limit(10))).all())
     for item in inbox:
         await admit_one(runtime, item)
+    from .slack_progress import stage_progress, standalone_allowed, sync_progress
+    await stage_progress(runtime)
     await stage_deliveries(runtime)
     async with runtime.database.sessions() as db:
         deliveries = list((await db.scalars(select(Delivery).where(
@@ -284,6 +286,9 @@ async def pump(runtime: Runtime) -> None:
                     await reconcile_one(runtime, client, delivery)
             except httpx.HTTPError:
                 logger.warning("Slack read reconciliation is unavailable; the delivery remains claimed.")
+        await sync_progress(
+            runtime, client, allowed=lambda delivery: standalone_allowed(runtime, delivery),
+        )
 
 
 async def dispatcher(runtime: Runtime) -> None:

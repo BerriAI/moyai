@@ -852,6 +852,14 @@ class ProductSlack:
                 await reconcile_one(
                     self.runtime, client, delivery, headers={"Authorization": "Bearer " + token},
                 )
+        from .slack_progress import sync_progress
+
+        async def progress_headers():
+            return {"Authorization": "Bearer " + await self.connectors.slack_bot_token()}
+
+        await sync_progress(
+            self.runtime, client, product=True, allowed=self.delivery_allowed, headers=progress_headers,
+        )
         return channels
 
     async def source_notices(self, client: httpx.AsyncClient, channels: set[str]):
