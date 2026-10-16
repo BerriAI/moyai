@@ -41,6 +41,7 @@ async function handle(req,res,next) {
     return json({sessions:rows,has_more:false});
   }
   if(url.pathname===`/api/history/sessions/${legacyId}`)return json({session:{...session(legacyId),source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',status:'completed',execution_engine:'legacy',read_only:true}});
+  if(url.pathname===`/api/history/sessions/${sessionId}`)return json({session:{...session(),source:'native',url:'/#'+sessionId,read_only:false}});
   if(url.pathname.startsWith(`/api/product/sessions/${legacyId}/`)) {
     if(url.pathname.endsWith('/messages'))return json({messages:[{id:8,role:'assistant',content:'Historical saved answer'}],has_more:false,next_offset:null});
     if(url.pathname.endsWith('/children'))return json({sessions:[],has_more:false,next_offset:null});
