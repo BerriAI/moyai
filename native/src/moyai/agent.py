@@ -29,7 +29,6 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness import (
     AskUser,
-    Coder,
     ConversationSearch,
     Memory,
     ModalSandbox,
@@ -45,6 +44,8 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 from .artifacts import artifact_capability
 from .browser import browser_capability
+from .bundled_skills import bundled_skill_catalog
+from .computer_startup import OnDemandDurability, on_demand_coder
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
@@ -134,9 +135,17 @@ class DurableConversationSearch(ConversationSearch[RunScope]):
 
 
 class StartupSkills(Skills[RunScope]):
-    """Let bounded native workspace reads settle after a sibling startup fails."""
+    """Load packaged skills without a computer, retaining old workflow reads."""
+
+    def __init__(self, directory: str, *, catalog: Skills[RunScope] | None = None) -> None:
+        super().__init__(directory)
+        self.catalog = catalog
 
     async def for_run(self, ctx: RunContext[RunScope]) -> AbstractCapability[RunScope]:
+        if self.catalog is not None and (
+            not workflow.in_workflow() or workflow.patched("moyai-bundled-skill-catalog-v1")
+        ):
+            return await self.catalog.for_run(ctx)
         if not workflow.in_workflow():
             return await super().for_run(ctx)
         # AnyIO level cancellation can repeatedly cancel Temporal's activity
@@ -283,7 +292,7 @@ def make_agent(
             image=image, app_name=settings.modal_app, working_dir="/workspace",
             sandbox_timeout=settings.computer_lifetime, idle_timeout=settings.computer_idle_timeout,
         )
-    durability: TemporalDurability[RunScope] = TemporalDurability(
+    durability: TemporalDurability[RunScope] = OnDemandDurability(
         models=models,
         run_context_type=HarnessActivityContext,
         activity_config={
@@ -300,6 +309,7 @@ def make_agent(
         },
         event_stream_handler=root_event_stream,
     )
+    authority = Authority(database)
     agent = Agent(
         models[settings.default_model],
         name="moyai",
@@ -309,14 +319,14 @@ def make_agent(
         instructions=(PACKAGE_ROOT / "instructions.md").read_text(),
         capabilities=[
             workspace,
-            Authority(database),
+            authority,
             EffectReceipts(database),
             *product_capabilities,
             connection_tools(database.security),
             artifact_capability(database, objects),
             attachment_capability(database, objects),
             browser_capability(database),
-            Coder(),
+            on_demand_coder(authority.save_workspace),
             WorkflowPlanning(
                 store_resolver=lambda ctx: stores.plan(
                     ctx.deps.session_id if ctx.run_id == ctx.deps.turn_id
@@ -324,7 +334,11 @@ def make_agent(
                 ),
                 enable_subtasks=True,
             ),
-            StartupSkills(skills_directory),
+            StartupSkills(
+                skills_directory,
+                catalog=bundled_skill_catalog(PACKAGE_ROOT / "skills", skills_directory)
+                if skills_directory == "/opt/moyai/skills" else None,
+            ),
             settings_capability(database),
             memory or Memory(
                 store=stores.memory, namespace=lambda ctx: ctx.deps.memory_namespace, injection_errors="raise",

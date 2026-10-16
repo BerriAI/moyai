@@ -80,6 +80,14 @@ edits policy rows directly. Native releases currently use maintenance, including
 same-core upgrades; API-only, coordinated and rolling release paths reject a
 native source until their native migration/drain semantics are qualified.
 
+Native execution protocol 2 records split activity queues, bundled skill startup,
+and on-demand workspace acquisition. It retains the `pydantic-v1` core identity
+but changes every native role fingerprint. The v14 application migration
+(`2026-10-16-product-execution-v14`) adds only an execution-compatibility receipt;
+it performs no physical DDL and preserves the v1–v13 receipts and application data.
+Apply it through the existing maintenance release: all source owners must retire
+before native provisioning, and all candidate roles must verify before resume.
+
 Legacy raw objects (`s3:<destination-id>:<sha256>`) remain readable through the
 product adapter. Native encrypted/HMAC-addressed objects use their separate
 prefix and explicit key. These formats are not interchangeable. Changing a
@@ -343,6 +351,17 @@ rejects a partially staged baseline. Reconcile the receipt and actual processes
 before recovery; do not retry a failed provisioning call just because the staged
 HTTP listener is healthy. The source and native receipts remain separate, so a
 partially provisioned Harness cannot hide behind a successful application receipt.
+
+After the v14 receipt is applied, use roll-forward recovery with a candidate that
+understands protocol 2. The maintenance controller inventories every native
+receipt and rejects a v13-only candidate during preflight, before any pause or
+deployment transition, including a same-core forward revert. Do not remove the
+v14 receipt or re-stamp earlier receipts to permit old workers. Protocol 2's role
+fingerprints also prevent protocol 1 roles from joining the published contract.
+Replaying old histories on new code establishes forward compatibility only; it
+does not qualify new histories on the v13 worker. This boundary depends on the
+supported release controller: the old runtime verifier checks its expected
+receipts individually, so bypassing the controller is not a qualified rollback.
 
 Before native work is admitted, the current dual-runtime image can select
 `legacy` again while retaining original keys, cookies, source schema and object

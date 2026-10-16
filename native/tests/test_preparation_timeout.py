@@ -14,6 +14,7 @@ from moyai.models import Turn
 from moyai.product_continuation_errors import MESSAGES, PREPARATION_BLOCKED_TYPE
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import PREPARE_VERSION, TurnWorkflow
 
 
@@ -50,6 +51,7 @@ async def test_preparation_policy_and_old_history_replay(runtime, active, monkey
         assert recorded.retry_policy.maximum_attempts == 3
         monkeypatch.setattr(workflow, "patched", original_patched)
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
 
@@ -98,5 +100,6 @@ async def test_preparation_notice_is_allowlisted_and_replay_compatible(runtime, 
         assert not any("model_request" in name for name in scheduled)
         monkeypatch.setattr(workflow, "patched", original_patched)
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)

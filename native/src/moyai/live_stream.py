@@ -23,11 +23,14 @@ async def authorized_events(
         return await anext(source)
 
     try:
+        await authorize()
         while not await disconnected():
-            await authorize()
             if pending is None:
                 pending = asyncio.create_task(pull())
             done, _ = await asyncio.wait({pending}, timeout=interval)
+            # Recheck after every wait, including idle intervals, and immediately
+            # before delivery. The preceding event's check need not be repeated.
+            await authorize()
             if not done:
                 yield ": keepalive\n\n"
                 continue
@@ -36,9 +39,6 @@ async def authorized_events(
             except StopAsyncIteration:
                 return
             pending = None
-            # The wait may include a tool/model request. Authority at stream
-            # admission does not authorize later delivery of its result.
-            await authorize()
             yield item
     except HTTPException as error:
         if error.status_code in {401, 403, 404}:

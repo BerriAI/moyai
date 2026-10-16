@@ -4,61 +4,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 
-from temporalio.client import WorkflowExecutionStatus, WorkflowHistory
+from pydantic_ai.durable_exec.temporal import AgentPlugin
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     Interceptor,
-    Plugin,
-    Replayer,
-    ReplayerConfig,
     Worker,
-    WorkerConfig,
-    WorkflowReplayResult,
 )
 
 from .activities import ACTIVITIES
+from .dispatch_wakeups import DispatchWakeups
 from .execution import ExecutionAuthority
-from .product_drain import ProductDrainError, ProductDrainService, drain_checkpoint
+from .models import Turn
+from .product_drain import ProductDrainError, drain_checkpoint
 from .runtime import Runtime, configure
 from .settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
+from .worker_capacity import ActivityCapacity, WorkerPools
 from .workflow import TurnWorkflow
 
 logger = logging.getLogger(__name__)
 
 
-class ProductDrainPlugin(Plugin):
-    """Register the existing canonical owner before SDK polling; never replace it."""
-
-    def __init__(self, service: ProductDrainService):
-        self.service = service
-
-    def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
-        return config
-
-    async def run_worker(self, worker: Worker, next: Callable[[Worker], Awaitable[None]]) -> None:
-        await self.service.register_worker()
-        await next(worker)
-        # Exact canonical backend absence retires this record. No TTL, reconnect,
-        # early release or cancellation-prone cleanup can authorize resume.
-
-    def configure_replayer(self, config: ReplayerConfig) -> ReplayerConfig:
-        return config
-
-    def run_replayer(
-        self, replayer: Replayer, histories: AsyncIterator[WorkflowHistory],
-        next: Callable[
-            [Replayer, AsyncIterator[WorkflowHistory]],
-            AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]],
-        ],
-    ) -> AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]]:
-        return next(replayer, histories)
-
-
-def make_worker(runtime: Runtime) -> Worker:
+def make_worker(runtime: Runtime) -> WorkerPools:
     if runtime.client is None:
         raise RuntimeError("Connect to Temporal before creating the worker.")
     configure(runtime)
@@ -69,7 +40,8 @@ def make_worker(runtime: Runtime) -> Worker:
         from .product_automations import PRODUCT_AUTOMATION_ACTIVITIES, PRODUCT_AUTOMATION_WORKFLOWS
         product_workflows.extend(PRODUCT_AUTOMATION_WORKFLOWS)
         product_activities.extend(PRODUCT_AUTOMATION_ACTIVITIES)
-    interceptors: list[Interceptor] = [ExecutionAuthority(runtime.database)]
+    interceptors: list[Interceptor] = [ExecutionAuthority(runtime.database), ActivityCapacity()]
+    agent_plugins = [AgentPlugin(runtime.agent)]
     identity = settings_worker_identity()
     review = getattr(runtime, "product_memory_review", None)
     if review is not None:
@@ -83,46 +55,92 @@ def make_worker(runtime: Runtime) -> Worker:
         product_workflows.extend(MEMORY_REVIEW_WORKFLOWS)
         product_activities.extend(MEMORY_REVIEW_ACTIVITIES)
         interceptors.append(ReviewAuthority(review))
+        agent_plugins.append(AgentPlugin(review.agent))
         identity += "-memory-review-v1-"
     drain = getattr(runtime, "product_drain", None)
-    plugins = [ProductDrainPlugin(drain)] if drain is not None else []
-    return Worker(
+    activities = [*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities]
+    legacy = Worker(
         runtime.client,
         identity=identity,
         task_queue=runtime.settings.temporal_queue,
         workflows=[TurnWorkflow, *SETTINGS_WORKFLOWS, *product_workflows],
-        activities=[*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities],
-        plugins=plugins,
+        activities=activities,
         interceptors=interceptors,
-        max_concurrent_activities=32,
-        max_concurrent_workflow_tasks=16,
+        max_concurrent_activities=runtime.settings.temporal_worker_activities,
+        max_cached_workflows=runtime.settings.temporal_workflow_cache_size,
     )
+    pools = tuple(Worker(
+        runtime.client, identity=identity,
+        task_queue=f"{runtime.settings.temporal_queue}-{pool}",
+        activities=activities, plugins=agent_plugins, interceptors=interceptors,
+        max_concurrent_activities=runtime.settings.temporal_worker_activities,
+        max_cached_workflows=runtime.settings.temporal_workflow_cache_size,
+    ) for pool in ("control", "model", "tools"))
+    # All pollers belong to the same canonical process owner. Register once,
+    # before any poller can execute; retirement still follows owner disappearance.
+    return WorkerPools((legacy, *pools), register=drain.register_worker if drain is not None else None)
 
 
-async def dispatch_once(runtime: Runtime) -> int:
+@dataclass
+class DispatchState:
+    starting_after: tuple[str, str] | None = None
+    starting_through: tuple[str, str] | None = None
+    backlog: bool = False
+
+
+async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) -> int:
+    state = state if state is not None else DispatchState()
+    state.backlog = False
     client = await runtime.connect()
     drain = getattr(runtime, "product_drain", None)
     if drain is not None:
         if getattr(runtime.database, "product_drain", None) is not drain:
             raise ProductDrainError("Maintenance admission is not bound to this runtime.")
         await drain.notify(runtime)
-    await runtime.database.claim_next()
-    dispatched = 0
-    for turn in await runtime.database.starting_turns():
-        try:
-            await client.start_workflow(
-                TurnWorkflow.run,
-                turn.id,
-                id=turn.workflow_id,
-                task_queue=runtime.settings.temporal_queue,
-            )
-        except WorkflowAlreadyStartedError:
-            # Temporal remains the execution authority after dispatch acknowledgment loss.
-            pass
-        except RPCError:
-            logger.warning("Temporal did not acknowledge dispatch; the saved request will be reconciled.")
-            continue
-        dispatched += 1
+    batch_size = runtime.settings.temporal_dispatch_batch_size
+    if state.starting_through is None:
+        # Freeze each scan round before claiming more work. Later arrivals
+        # cannot extend it indefinitely and starve retries near the beginning.
+        state.starting_through = await runtime.database.dispatch_boundary()
+    claimed = await runtime.database.claim_batch(batch_size)
+    starting = await runtime.database.starting_turns(
+        limit=batch_size, after=state.starting_after, through=state.starting_through,
+    )
+    slots = asyncio.Semaphore(runtime.settings.temporal_dispatch_concurrency)
+
+    async def start(turn: Turn) -> bool:
+        async with slots:
+            try:
+                async with asyncio.timeout(10):
+                    await client.start_workflow(
+                        TurnWorkflow.run, turn.id, id=turn.workflow_id,
+                        task_queue=runtime.settings.temporal_queue,
+                        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                    )
+            except WorkflowAlreadyStartedError:
+                # The deterministic ID also reconciles a lost acknowledgment.
+                pass
+            except (RPCError, TimeoutError):
+                logger.warning("Temporal did not acknowledge dispatch; the saved request will be reconciled.")
+                return False
+            return True
+
+    results = await asyncio.gather(*(start(turn) for turn in starting))
+    dispatched = sum(results)
+    full_page = len(starting) == batch_size
+    later = (
+        bool(await runtime.database.starting_turns(limit=1, after=state.starting_through))
+        if not full_page and state.starting_through is not None else False
+    )
+    selected = {turn.id for turn in starting}
+    newly_claimed_outside_page = any(turn.id not in selected for turn in claimed)
+    if full_page:
+        state.starting_after = starting[-1].created_at, starting[-1].id
+    else:
+        state.starting_after = state.starting_through = None
+    state.backlog = all(results) and (
+        len(claimed) == batch_size or full_page or later or newly_claimed_outside_page
+    )
     for turn, parent in await runtime.database.pending_steering():
         if parent.status not in {"starting", "running"}:
             if turn.status == "steering":
@@ -172,15 +190,24 @@ async def dispatch_once(runtime: Runtime) -> int:
     return dispatched
 
 
-async def dispatcher(runtime: Runtime) -> None:
-    while True:
-        try:
-            await dispatch_once(runtime)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Dispatch is temporarily unavailable; saved inputs remain queued.")
-        await asyncio.sleep(0.5)
+async def dispatcher(runtime: Runtime, *, wakeups: DispatchWakeups | None = None) -> None:
+    state = DispatchState()
+    async with wakeups or DispatchWakeups(runtime.settings) as listener:
+        while True:
+            # Clear before reading durable rows, so a commit during/after the
+            # scan cannot be lost between deciding to wait and actually waiting.
+            listener.event.clear()
+            try:
+                await dispatch_once(runtime, state)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                state.backlog = False
+                logger.exception("Dispatch is temporarily unavailable; saved inputs remain queued.")
+            if state.backlog:
+                await asyncio.sleep(0)  # Yield to HTTP/owner monitoring, without a polling delay.
+            else:
+                await listener.wait()
 
 
 async def reconcile_workflows(runtime: Runtime) -> None:

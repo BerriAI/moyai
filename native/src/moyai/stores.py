@@ -39,7 +39,7 @@ class NativeStores:
             if schema and not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema):
                 raise ValueError("Invalid native schema.")
             self.pool = await asyncpg.create_pool(
-                self.settings.postgres_url, min_size=1, max_size=10,
+                self.settings.postgres_url, min_size=1, max_size=self.settings.database_pool_size,
                 server_settings={"search_path": f'"{schema}",pg_catalog'} if schema else {},
             )
             assert self.pool is not None

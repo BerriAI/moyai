@@ -35,6 +35,7 @@ from moyai.product_memory_review import (
 )
 from moyai.product_memory_review_models import ProductMemoryReview
 from moyai.storage import ObjectStore, encrypted_converter
+from moyai.worker_capacity import ActivityCapacity
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Set a disposable local PostgreSQL URL.")
 product_database = memory_fixtures.product_database
@@ -307,6 +308,7 @@ async def test_native_review_agent_temporal_execution_and_history_replay(review_
             assert await asyncio.wait_for(handle.result(), 45) == {"status": "completed", "saved_count": 1}
             history = await handle.fetch_history()
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=MEMORY_REVIEW_WORKFLOWS, plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
     assert len(calls) == 1
