@@ -823,10 +823,13 @@ class Database:
             return
         turn.status = "completed"
         if session is not None and session.active_turn == turn.id:
-            if snapshot:
+            stopped = session.deleted or session.status == "stopped"
+            if snapshot and not stopped:
                 session.snapshot = snapshot
             session.save_warning = warning
-            session.status = "idle"
+            # The accepted answer stays completed, but its bookkeeping cannot
+            # clear a later Stop/deletion or publish a late computer image.
+            session.status = "stopped" if stopped else "idle"
             session.active_turn = None
 
     async def fail(self, turn_id: str, message: str, *, only_unsettled: bool = False) -> None:

@@ -216,8 +216,9 @@ print(json.dumps(results))
 
 
 @pytest.fixture
-def guard(native_db, monkeypatch):
+def guard(native_db, target, monkeypatch):
     connection, schema = native_db
+    url, _ = target
     # Independent canonical schema with just the existing ownership contract
     # needed by check_locked; this is a guard test, not an app migration test.
     source = 'release_source_' + uuid4().hex
@@ -253,7 +254,9 @@ def guard(native_db, monkeypatch):
     options = {'service': service, 'expected': expected, 'plan': plan}
     monkeypatch.setenv('MOYAI_CORE', 'pydantic')
     monkeypatch.setattr('app.config.Settings', lambda **kwargs: SimpleNamespace(
-        moyai_database_url=connection.info.dsn, moyai_database_schema=source))
+        # Connection.info.dsn omits passwords; reconnect with the fixture's
+        # original credentials on password-authenticated PostgreSQL, as in CI.
+        moyai_database_url=url, moyai_database_schema=source))
     calls = []
     def command(args):
         assert connection.execute('SELECT pg_try_advisory_lock_shared(726940,%s::regnamespace::oid::int)',

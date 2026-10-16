@@ -114,6 +114,34 @@ async def test_personal_slack_is_private_and_never_falls_back(bridge):
     assert (await scope_for(bridge, "slack")).grants[0].policy["product"]["personal_owner"] is None
 
 
+@pytest.mark.parametrize("legacy_token", [False, True])
+async def test_personal_metadata_refresh_preserves_inflight_native_grant(bridge, legacy_token):
+    from app.connection_authority import AUTHORITY
+
+    save(bridge, "slack")
+    personal = bridge.connectors.personal_slack
+    owner = "google:owner"
+    personal.save(owner, {"access_token": "synthetic-personal"}, "Personal", personal.revision(owner))
+    if legacy_token:
+        row = personal.row(owner)
+        credentials = json.loads(personal.security.decrypt(row["encrypted"]))
+        credentials.pop(AUTHORITY)
+        bridge.store.execute(
+            "UPDATE personal_slack_grants SET encrypted=? WHERE owner_id=?",
+            (personal.security.encrypt(json.dumps(credentials)), owner),
+        )
+    scope = await scope_for(bridge, "slack")
+    row = personal.row(owner)
+    credentials = json.loads(personal.security.decrypt(row["encrypted"]))
+    personal.save(owner, credentials, "Verified personal account", row["revision"], refresh=True)
+    assert personal.row(owner)["revision"] != row["revision"]
+    await bridge.require_scope(scope)
+    assert await bridge.resolve_grants(owner, [grant.id for grant in scope.grants]) == scope.grants
+    personal.save(owner, credentials, "Reconnected account", personal.row(owner)["revision"])
+    with pytest.raises((HTTPException, PermissionError)):
+        await bridge.require_scope(scope)
+
+
 async def test_canonical_notion_helpers_run_as_native_toolset_and_recheck_after_preflight(bridge, monkeypatch):
     save(bridge, "notion")
     scope = await scope_for(bridge, "notion")

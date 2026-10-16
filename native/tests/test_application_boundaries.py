@@ -82,7 +82,8 @@ async def test_snapshot_cleanup_preserves_published_answer_and_releases_queue(ru
         current = await db.get(Session, session.id)
         assert saved.status == "completed" and saved.error is None
         assert runtime.security.unseal(saved.result).decode() == "The committed answer."
-        assert current.active_turn is None and current.status == "idle" and current.save_warning
+        assert current.active_turn is None and current.save_warning
+        assert current.status == ("stopped" if cleanup == "stop" else "idle")
         assert await db.scalar(select(func.count()).select_from(Message).where(
             Message.identity == f"answer:{turn.id}"
         )) == 1
@@ -90,6 +91,34 @@ async def test_snapshot_cleanup_preserves_published_answer_and_releases_queue(ru
         actor, session.id, NewMessage(prompt="Continue.", request_key="after-snapshot-failure"),
     )
     assert (await runtime.database.claim_next()).id == following.id
+
+
+@pytest.mark.parametrize("cleanup", ["snapshot", "fail", "stopped"])
+async def test_completed_answer_settlement_preserves_stop_and_cancelled_queue(runtime, active, actor, cleanup):
+    session, turn, prepared = active
+    queued = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Queued work must stay cancelled.", request_key="queued-before-stop",
+    ))
+    await runtime.database.save_result(
+        prepared.scope, conversation="{}", output="Already received.",
+        workspace=None, usage={"requests": 1},
+    )
+    await runtime.database.stop(actor, session.id)
+    if cleanup == "snapshot":
+        await runtime.database.settle(turn.id, snapshot="late-image")
+    elif cleanup == "fail":
+        await runtime.database.fail(turn.id, "Snapshot cleanup failed.")
+    else:
+        await runtime.database.stopped(turn.id)
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        accepted = await db.get(Turn, turn.id)
+        assert current.status == "stopped" and current.active_turn is None
+        assert current.snapshot is None
+        assert accepted.status == "completed" and accepted.result_accepted
+        assert runtime.security.unseal(accepted.result).decode() == "Already received."
+        assert (await db.get(Turn, queued.id)).status == "stopped"
+    assert await runtime.database.claim_next() is None
 
 
 async def test_pin_preference_round_trips_through_session_snapshot(runtime, actor):

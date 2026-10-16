@@ -284,7 +284,7 @@ class PersonalSlack:
                 credentials, revision = await self.credentials(owner)
                 label = await self.verify(credentials)
                 await database(actor, request)
-                await database(self.save, owner, credentials, label, revision)
+                await database(self.save, owner, credentials, label, revision, refresh=True)
             except Exception:
                 if revision:
                     await database(self.record_error, owner, revision)
