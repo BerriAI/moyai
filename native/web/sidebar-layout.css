@@ -96,6 +96,10 @@
   border-radius: 8px;
 }
 
+.sidebar .session-row > a[href]:focus-visible {
+  outline: none; /* The stretched link below draws the full-row focus ring. */
+}
+
 .sidebar .session-row > a[href]:focus-visible::after {
   outline: 2px solid var(--ui-primary);
   outline-offset: -2px;
