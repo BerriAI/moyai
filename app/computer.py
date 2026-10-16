@@ -454,5 +454,4 @@ class Computer:
         return router
 
 
-def initialize_schema(store):
-    store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')
+from .schema_initializers import initialize_computer as initialize_schema

@@ -21,31 +21,7 @@ def web_request(received_at):
         request_received.reset(token)
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS performance_samples (
-                message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-                kind TEXT NOT NULL, received_at TEXT, persisted_at TEXT NOT NULL,
-                send_now_at TEXT, send_now_kind TEXT,
-                picked_up_at TEXT, pickup_kind TEXT, first_model_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_performance_received ON performance_samples(received_at);
-            CREATE INDEX IF NOT EXISTS idx_performance_send_now ON performance_samples(send_now_at);
-            CREATE INDEX IF NOT EXISTS idx_performance_run ON performance_samples(run_id);
-        ''')
-        # Nullable additions preserve old writers and never reinterpret their
-        # admission timestamps as outbound dispatch observations.
-        columns = conn.column_names('performance_samples')
-        for name, kind in {
-            'timing_version': 'INTEGER', 'dispatch_at': 'TEXT',
-            'dispatch_broker_at': 'TEXT', 'dispatch_request_id': 'TEXT',
-            'computer_requested_at': 'TEXT', 'computer_ready_at': 'TEXT',
-            'computer_start_kind': 'TEXT',
-        }.items():
-            if name not in columns:
-                conn.execute(f'ALTER TABLE performance_samples ADD COLUMN {name} {kind}')
+from .schema_initializers import initialize_performance as initialize_schema
 
 
 def submitted_in(conn, run_id, message_id, kind, persisted_at, *, received_at=None,

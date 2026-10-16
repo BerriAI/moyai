@@ -601,16 +601,4 @@ class AgentCoordinator:
                 'missing_costs': sum(c['missing_costs'] for c in costs.values())}
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS agent_groups (
-        id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES runs(id),
-        message_id INTEGER NOT NULL, request_key TEXT NOT NULL, payload TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'preparing', snapshot_id TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL, UNIQUE(parent_id,message_id,request_key))''')
-    store.execute('''CREATE TABLE IF NOT EXISTS agent_retries (
-        group_id TEXT NOT NULL REFERENCES agent_groups(id), request_key TEXT NOT NULL,
-        payload TEXT NOT NULL, PRIMARY KEY(group_id,request_key))''')
-    if 'result_snapshot' not in store.column_names('agent_groups'):
-        store.execute("ALTER TABLE agent_groups ADD COLUMN result_snapshot TEXT NOT NULL DEFAULT ''")
-    if 'runtime_assignments' not in store.column_names('agent_groups'):
-        store.execute("ALTER TABLE agent_groups ADD COLUMN runtime_assignments TEXT NOT NULL DEFAULT ''")
+from .schema_initializers import initialize_agents as initialize_schema

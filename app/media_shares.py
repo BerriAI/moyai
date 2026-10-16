@@ -301,13 +301,4 @@ class MediaShares:
         return router
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.executescript('''CREATE TABLE IF NOT EXISTS media_shares (
-            id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
-            request_key TEXT NOT NULL, source TEXT NOT NULL, revision TEXT NOT NULL,
-            token_hash TEXT NOT NULL, token_ciphertext TEXT NOT NULL, origin TEXT NOT NULL,
-            reference TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
-            mime TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
-            UNIQUE(run_id, request_key));
-            CREATE INDEX IF NOT EXISTS idx_media_shares_run ON media_shares(run_id);''')
+from .schema_initializers import initialize_media_shares as initialize_schema

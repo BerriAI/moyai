@@ -43,24 +43,7 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS session_journals (
-        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-        epoch TEXT NOT NULL, imported INTEGER NOT NULL DEFAULT 0,
-        import_id TEXT NOT NULL DEFAULT '', import_count INTEGER NOT NULL DEFAULT 0)''')
-    store.execute('''CREATE TABLE IF NOT EXISTS session_items (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        seq INTEGER NOT NULL, item_id TEXT NOT NULL, message TEXT NOT NULL,
-        reference TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL, digest TEXT NOT NULL,
-        PRIMARY KEY(run_id,seq), UNIQUE(run_id,item_id))''')
-    store.execute('''CREATE TABLE IF NOT EXISTS session_uploads (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        upload_id TEXT NOT NULL, part INTEGER NOT NULL, data TEXT NOT NULL,
-        PRIMARY KEY(run_id,upload_id,part))''')
-    store.execute('''CREATE TABLE IF NOT EXISTS session_upload_receipts (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        upload_id TEXT NOT NULL, digest TEXT NOT NULL, response TEXT NOT NULL,
-        PRIMARY KEY(run_id,upload_id))''')
+from .schema_initializers import initialize_session_journal as initialize_schema
 
 
 @dataclass(frozen=True)

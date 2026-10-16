@@ -441,10 +441,4 @@ class AgentTracing:
             await asyncio.to_thread(self.processor.shutdown)
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
-            run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
-            trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
-            session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
-            PRIMARY KEY(run_id,message_id))''')
+from .schema_initializers import initialize_tracing as initialize_schema

@@ -455,8 +455,4 @@ class AutomationTools:
         return result
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS automation_operations (
-        owner_id TEXT NOT NULL, run_id TEXT NOT NULL, request_key TEXT NOT NULL,
-        fingerprint TEXT NOT NULL, automation_id TEXT NOT NULL, revision INTEGER NOT NULL,
-        PRIMARY KEY(owner_id,run_id,request_key))''')
+from .schema_initializers import initialize_automation_tools as initialize_schema

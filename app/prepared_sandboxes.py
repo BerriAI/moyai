@@ -184,8 +184,4 @@ class PreparedSandboxes:
             await asyncio.sleep(5)
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS prepared_sandboxes (
-        name TEXT PRIMARY KEY, build TEXT NOT NULL, status TEXT NOT NULL,
-        sandbox_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
-        expires_at REAL NOT NULL)''')
+from .schema_initializers import initialize_prepared_sandboxes as initialize_schema

@@ -81,17 +81,4 @@ class UserPreferences:
                 self.notifications.preferences_changed_in(conn, user_id)
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS user_preferences (
-            user_id TEXT PRIMARY KEY REFERENCES users(id),
-            send_immediately INTEGER NOT NULL DEFAULT 0 CHECK(send_immediately IN (0,1))
-        )''')
-        if 'omit_private_tool_payloads' not in conn.column_names('user_preferences'):
-            conn.execute('''ALTER TABLE user_preferences ADD COLUMN omit_private_tool_payloads
-                INTEGER NOT NULL DEFAULT 0 CHECK(omit_private_tool_payloads IN (0,1))''')
-        if 'slack_notifications' not in conn.column_names('user_preferences'):
-            conn.execute('''ALTER TABLE user_preferences ADD COLUMN slack_notifications
-                INTEGER NOT NULL DEFAULT 1 CHECK(slack_notifications IN (0,1))''')
-        if 'slack_notifications_since' not in conn.column_names('user_preferences'):
-            conn.execute("ALTER TABLE user_preferences ADD COLUMN slack_notifications_since TEXT NOT NULL DEFAULT ''")
+from .schema_initializers import initialize_user_preferences as initialize_schema

@@ -541,17 +541,4 @@ class SkillLearning:
         return router
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS skill_learning_preferences (
-        owner_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0,
-        after_message_id INTEGER NOT NULL DEFAULT 0)''')
-    store.execute('''CREATE TABLE IF NOT EXISTS skill_learning_jobs (
-        message_id INTEGER PRIMARY KEY REFERENCES messages(id), owner_id TEXT NOT NULL,
-        preferences_revision INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-        attempts INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL)''')
-    store.execute('CREATE INDEX IF NOT EXISTS skill_learning_queue ON skill_learning_jobs(status,available_at,message_id)')
-    store.execute('''CREATE TABLE IF NOT EXISTS skill_suggestions (
-        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, workflow_key TEXT NOT NULL,
-        message_id INTEGER NOT NULL REFERENCES messages(id), preferences_revision INTEGER NOT NULL,
-        encrypted TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-        skill_id TEXT NOT NULL DEFAULT '', accept_digest TEXT NOT NULL DEFAULT '', UNIQUE(owner_id,workflow_key))''')
+from .schema_initializers import initialize_skill_learning as initialize_schema

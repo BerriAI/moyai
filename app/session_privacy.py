@@ -72,19 +72,4 @@ class SessionPrivacy:
             self.require_request(request, run_id)
 
 
-def initialize_schema(store):
-    """Privacy is immutable on both databases, including direct SQL writers.
-
-    The compatibility revision fences older APIs/workers before these sessions
-    can exist. This is a coordinated migration, not an additive rolling change.
-    """
-    with store.connect() as conn:
-        if 'private_owner_id' not in conn.column_names('runs'):
-            conn.execute("ALTER TABLE runs ADD COLUMN private_owner_id TEXT NOT NULL DEFAULT ''")
-        from .database_schema import PRIVATE_TRIGGERS, PRIVATE_FUNCTION, PRIVATE_POSTGRES
-        if store.database:
-            conn.execute(PRIVATE_FUNCTION)
-            conn.execute(PRIVATE_POSTGRES)
-        else:
-            for statement in PRIVATE_TRIGGERS.values():
-                conn.execute(statement.replace('CREATE TRIGGER ', 'CREATE TRIGGER IF NOT EXISTS ', 1))
+from .schema_initializers import initialize_session_privacy as initialize_schema

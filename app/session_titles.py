@@ -250,6 +250,4 @@ class SessionTitles:
         self.agent = None
 
 
-def initialize_schema(store):
-    store.execute('CREATE TABLE IF NOT EXISTS session_title_settings (id INTEGER PRIMARY KEY CHECK(id=1), model TEXT NOT NULL)')
-    store.execute('CREATE TABLE IF NOT EXISTS session_title_requests (run_id TEXT PRIMARY KEY REFERENCES runs(id))')
+from .schema_initializers import initialize_session_titles as initialize_schema

@@ -14,12 +14,7 @@ from fastapi import HTTPException
 ROUTES = frozenset({'/agent-runtime', '/context/native', '/tools/call'})
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS broker_payload_parts (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        scope TEXT NOT NULL, route TEXT NOT NULL, digest TEXT NOT NULL,
-        part INTEGER NOT NULL, encrypted TEXT NOT NULL,
-        PRIMARY KEY(run_id,scope,route,digest,part))''')
+from .schema_initializers import initialize_broker_payloads as initialize_schema
 
 
 class BrokerPayloads:

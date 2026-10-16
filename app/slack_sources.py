@@ -36,21 +36,7 @@ def current_version(versions):
     return current
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS slack_source_events (
-        team_id TEXT NOT NULL, event_id TEXT NOT NULL, channel TEXT NOT NULL,
-        thread_ts TEXT NOT NULL, message_ts TEXT NOT NULL, payload TEXT NOT NULL,
-        created_at TEXT NOT NULL, PRIMARY KEY(team_id,event_id))''')
-    store.execute('''CREATE TABLE IF NOT EXISTS slack_source_versions (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT, team_id TEXT NOT NULL,
-        channel TEXT NOT NULL, thread_ts TEXT NOT NULL, message_ts TEXT NOT NULL,
-        version TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL,
-        UNIQUE(team_id,channel,message_ts,version))''')
-    store.execute('CREATE INDEX IF NOT EXISTS idx_slack_source_thread ON slack_source_versions(team_id,channel,thread_ts,seq)')
-    store.execute('''CREATE TABLE IF NOT EXISTS slack_source_coverage (
-        team_id TEXT NOT NULL, channel TEXT NOT NULL, thread_ts TEXT NOT NULL,
-        status TEXT NOT NULL, cursor TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
-        PRIMARY KEY(team_id,channel,thread_ts))''')
+from .schema_initializers import initialize_slack_sources as initialize_schema
 
 
 class ReadSource(BaseModel):

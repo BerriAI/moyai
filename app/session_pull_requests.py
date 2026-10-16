@@ -354,8 +354,4 @@ class SessionPullRequests:
         self.pending.clear()
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS github_pr_snapshots (
-        connection_version TEXT NOT NULL, repository_id INTEGER NOT NULL, number INTEGER NOT NULL,
-        snapshot TEXT NOT NULL, observed_at TEXT NOT NULL,
-        PRIMARY KEY(connection_version,repository_id,number))''')
+from .schema_initializers import initialize_session_pull_requests as initialize_schema

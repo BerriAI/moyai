@@ -75,9 +75,4 @@ class AutomationPermissions:
             (automation_id, run['id'], run['active_message_id'], actor, json.dumps(sorted(set(permissions))), now()))
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS automation_grants (
-        automation_id TEXT NOT NULL REFERENCES automations(id),
-        run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL REFERENCES messages(id),
-        owner_id TEXT NOT NULL, permissions TEXT NOT NULL, created_at TEXT NOT NULL,
-        PRIMARY KEY(automation_id,run_id))''')
+from .schema_initializers import initialize_automation_permissions as initialize_schema

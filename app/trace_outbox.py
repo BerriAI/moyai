@@ -17,8 +17,7 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 log = logging.getLogger(__name__)
 
 
-TABLES = frozenset({'trace_outbox', 'trace_outbox_raindrop', 'trace_outbox_langfuse',
-                   'trace_outbox_langsmith', 'trace_outbox_braintrust', 'trace_outbox_raindrop_events'})
+from .schema_initializers import TABLES as TABLES
 MAX_BATCH_BYTES = 8 * 1024 * 1024
 
 
@@ -234,19 +233,4 @@ class RaindropEventOutbox(TraceOutbox):
         return '' if response.status_code in {200, 204} else 'HTTP ' + str(response.status_code)
 
 
-def initialize_schema(store, table):
-    if table not in TABLES:
-        raise ValueError('Unknown trace outbox')
-    with store.connect() as conn:
-        conn.executescript(f'''
-            CREATE TABLE IF NOT EXISTS {table} (
-                trace_id TEXT NOT NULL, span_id TEXT NOT NULL, payload BLOB,
-                created_at REAL NOT NULL, delivered_at REAL,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                next_attempt_at REAL NOT NULL DEFAULT 0,
-                last_error TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY(trace_id,span_id)
-            );
-            CREATE INDEX IF NOT EXISTS {table}_pending
-                ON {table}(next_attempt_at,created_at) WHERE delivered_at IS NULL;
-        ''')
+from .schema_initializers import initialize_trace_outbox as initialize_schema

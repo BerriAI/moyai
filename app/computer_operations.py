@@ -19,16 +19,7 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS computer_operations (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        request_id TEXT NOT NULL, turn_id INTEGER NOT NULL, actor_id TEXT,
-        capability TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'queued', machine_id TEXT NOT NULL DEFAULT '',
-        result TEXT NOT NULL DEFAULT '{}', UNIQUE(run_id,request_id))''')
-    store.execute('''CREATE INDEX IF NOT EXISTS idx_computer_operations_pending
-        ON computer_operations(run_id,seq) WHERE status IN ('queued','dispatched')''')
+from .schema_initializers import initialize_computer_operations as initialize_schema
 
 
 READ_TOOL = {'name': 'computer_operation_read',

@@ -366,16 +366,4 @@ class RepositoryContext:
             self.worker = None
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS repository_context_snapshots (
-        version TEXT NOT NULL, repository_id INTEGER NOT NULL, commit_sha TEXT NOT NULL,
-        repository TEXT NOT NULL, branch TEXT NOT NULL, indexed_at TEXT NOT NULL,
-        guide TEXT NOT NULL, catalog TEXT NOT NULL, documents TEXT NOT NULL,
-        PRIMARY KEY(version,repository_id,commit_sha))''')
-    store.execute('''CREATE TABLE IF NOT EXISTS repository_context_heads (
-        version TEXT NOT NULL, repository_id INTEGER NOT NULL, commit_sha TEXT NOT NULL DEFAULT '',
-        checked_at REAL NOT NULL, PRIMARY KEY(version,repository_id))''')
-    store.execute('''CREATE TABLE IF NOT EXISTS repository_context_turns (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, message_id INTEGER NOT NULL,
-        version TEXT NOT NULL, repository_id INTEGER NOT NULL, commit_sha TEXT NOT NULL,
-        PRIMARY KEY(run_id,message_id,version,repository_id))''')
+from .schema_initializers import initialize_repository_context as initialize_schema

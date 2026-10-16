@@ -363,19 +363,4 @@ class PublishedArtifacts:
         return router
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS artifact_uploads (
-                run_id TEXT NOT NULL, upload_id TEXT NOT NULL, actor_id TEXT NOT NULL, turn_id INTEGER,
-                capability TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
-                created_at TEXT NOT NULL, PRIMARY KEY(run_id,upload_id));
-            CREATE TABLE IF NOT EXISTS artifact_parts (
-                run_id TEXT NOT NULL, upload_id TEXT NOT NULL, part INTEGER NOT NULL, data BLOB NOT NULL,
-                reference TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
-                PRIMARY KEY(run_id,upload_id,part));
-            CREATE TABLE IF NOT EXISTS published_artifacts (
-                run_id TEXT NOT NULL, path TEXT NOT NULL, revision TEXT NOT NULL, upload_id TEXT NOT NULL,
-                size INTEGER NOT NULL, media_type TEXT NOT NULL, created_at TEXT NOT NULL, source_turn INTEGER,
-                PRIMARY KEY(run_id,path,revision));
-        ''')
+from .schema_initializers import initialize_published_artifacts as initialize_schema

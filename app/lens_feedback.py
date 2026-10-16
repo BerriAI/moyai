@@ -224,27 +224,4 @@ class LensFeedback:
               row['run_id'], row['message_id'], row['author'], row['updated_at']))
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS lens_feedback (
-                run_id TEXT NOT NULL,
-                message_id INTEGER NOT NULL,
-                author TEXT NOT NULL,
-                score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 10),
-                comment TEXT NOT NULL,
-                source TEXT NOT NULL CHECK(source IN ('web','slack')),
-                trace_id TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                delivered_at REAL,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                next_attempt_at REAL NOT NULL DEFAULT 0,
-                last_error TEXT NOT NULL DEFAULT '',
-                failed INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(run_id,message_id,author)
-            );
-            CREATE INDEX IF NOT EXISTS lens_feedback_pending
-                ON lens_feedback(next_attempt_at,created_at)
-                WHERE delivered_at IS NULL AND failed=0;
-        ''')
+from .schema_initializers import initialize_lens_feedback as initialize_schema

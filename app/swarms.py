@@ -25,15 +25,7 @@ from .swarm_collaboration import create_team_in
 INITIAL_TEAM_KEY = 'host-swarm-initial-team'
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS swarm_missions (
-        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-        status TEXT NOT NULL DEFAULT 'active', budget_seconds INTEGER NOT NULL,
-        ends_at TEXT NOT NULL, round INTEGER NOT NULL DEFAULT 1,
-        reason TEXT NOT NULL DEFAULT '', next_at REAL NOT NULL DEFAULT 0,
-        settled_message_id INTEGER NOT NULL DEFAULT 0,
-        answer_digest TEXT NOT NULL DEFAULT '', no_progress INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+from .schema_initializers import initialize_swarms as initialize_schema
 
 
 def public_mission(row):

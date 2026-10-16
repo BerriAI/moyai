@@ -350,6 +350,11 @@ def test_schema_initializers_have_a_versioned_manifest():
     for path in (root / 'app').glob('*.py'):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
+            if path.name == 'schema_initializers.py' and isinstance(node, ast.FunctionDef) and node.name.startswith('initialize_'):
+                component = node.name.removeprefix('initialize_')
+                node.name = 'initialize_schema'
+                sources[f'{component}.py:initialize_schema'] = ast.dump(node, include_attributes=False)
+                continue
             if isinstance(node, ast.FunctionDef) and node.name in {'initialize_schema', '_initialize_schema', 'initialize_defaults'}:
                 sources[f'{path.name}:{node.name}'] = ast.dump(node, include_attributes=False)
     sources['database_schema'] = ast.dump(ast.parse((root / 'app/database_schema.py').read_text()), include_attributes=False)

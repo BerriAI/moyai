@@ -185,25 +185,4 @@ class GitHubWriteAccess:
         return pr
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS github_write_access (
-        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, actor_id TEXT NOT NULL,
-        connection_version TEXT NOT NULL, repository_id INTEGER NOT NULL,
-        number INTEGER NOT NULL, head_repository_id INTEGER NOT NULL,
-        branch TEXT NOT NULL, base_branch TEXT NOT NULL, title TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending','approved','denied','revoked')),
-        created_at TEXT NOT NULL)''')
-    store.execute('''CREATE INDEX IF NOT EXISTS github_write_access_scope
-        ON github_write_access(run_id,connection_version,repository_id,number)''')
-    if store.database:
-        from .database_schema import REVOKE_FUNCTION, REVOKE_POSTGRES
-        with store.connect() as conn:
-            conn.begin_write()
-            conn.execute(REVOKE_FUNCTION.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'))
-            conn.execute(REVOKE_POSTGRES.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER'))
-    else:
-        store.execute('''CREATE TRIGGER IF NOT EXISTS revoke_github_write_access
-            AFTER UPDATE OF status,deleted_at ON runs
-            WHEN NEW.status IN ('stopping','cancelled') OR NEW.deleted_at!=''
-            BEGIN UPDATE github_write_access SET status='revoked'
-            WHERE run_id=NEW.id AND status IN ('pending','approved'); END''')
+from .schema_initializers import initialize_github_write_access as initialize_schema

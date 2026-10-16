@@ -31,16 +31,7 @@ class TestEvent(BaseModel):
     payload: dict
 
 
-def sources(row):
-    # Load old single-trigger drafts without discarding them during the upgrade.
-    definition = json.loads(row['definition'])
-    if 'triggers' in definition:
-        return [(t['id'], EventTrigger.model_validate(t['event'])) for t in definition['triggers'] if t.get('event')]
-    event = definition.get('event')
-    if not event:
-        return []
-    event = {k:v for k,v in event.items() if k != 'max_runs_per_hour'}
-    return [('default', EventTrigger.model_validate(event))]
+from .automation_sources import sources as sources
 
 
 class AutomationEvents:
@@ -325,25 +316,4 @@ class AutomationEvents:
         return router
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.begin_write()
-        columns = conn.column_names('automation_webhooks')
-        if columns and 'provider' not in columns:
-            conn.execute('ALTER TABLE automation_webhooks RENAME TO automation_webhooks_legacy')
-        conn.execute("""CREATE TABLE IF NOT EXISTS automation_webhooks (
-            automation_id TEXT NOT NULL REFERENCES automations(id), provider TEXT NOT NULL,
-            encrypted TEXT NOT NULL, PRIMARY KEY(automation_id,provider))""")
-        if columns and 'provider' not in columns:
-            for key in conn.execute('SELECT k.*,a.definition FROM automation_webhooks_legacy k JOIN automations a ON a.id=k.automation_id').fetchall():
-                providers = {t.provider for _, t in sources(key) if t.provider != 'slack'}
-                if len(providers) == 1:
-                    conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?)', (key['automation_id'], providers.pop(), key['encrypted']))
-            conn.execute('DROP TABLE automation_webhooks_legacy')
-    store.execute("""CREATE TABLE IF NOT EXISTS automation_events (
-        occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
-        revision INTEGER NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-        detail TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
-    store.execute('CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(status,received_at)')
-    store.execute('''CREATE TABLE IF NOT EXISTS automation_session_cursors (
-        automation_id TEXT PRIMARY KEY REFERENCES automations(id), message_id INTEGER NOT NULL)''')
+from .schema_initializers import initialize_automation_events as initialize_schema

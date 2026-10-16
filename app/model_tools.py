@@ -93,7 +93,4 @@ class ModelTools:
                     'instruction': 'Continue the user’s remaining task. The next inference uses the selected model with the existing conversation and workspace. Already queued messages keep their assigned models.'}
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS model_switch_operations (
-        run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, request_key TEXT NOT NULL,
-        model TEXT NOT NULL, PRIMARY KEY(run_id,turn_id,request_key))''')
+from .schema_initializers import initialize_model_tools as initialize_schema

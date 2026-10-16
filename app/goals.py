@@ -55,13 +55,7 @@ Return JSON only: {"verdict":"continue|complete|step_back|needs_input|read", "re
 Use read to inspect original journal records or ranges when needed; the supplied index includes every saved record. Never assume omitted evidence agrees with the claims. Complete requires source-backed proof of every requirement. On a checkpoint/block review do not declare completion. Use step_back for looping or premature blockers. needs_input is only for a persistent blocker needing a human decision/access after other approaches; phrase the exact question. Provider failures are not human blockers.'''
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS session_goals (
-        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-        state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1)''')
-    store.execute('''CREATE TABLE IF NOT EXISTS goal_clock_receipts (
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        segment TEXT NOT NULL, elapsed REAL NOT NULL, PRIMARY KEY(run_id,segment))''')
+from .schema_initializers import initialize_goals as initialize_schema
 
 
 class Goals:

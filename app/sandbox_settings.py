@@ -133,5 +133,4 @@ class SandboxSettings:
         return router
 
 
-def initialize_schema(store):
-    store.execute('CREATE TABLE IF NOT EXISTS sandbox_settings (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, encrypted TEXT NOT NULL)')
+from .schema_initializers import initialize_sandbox_settings as initialize_schema

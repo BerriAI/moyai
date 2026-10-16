@@ -248,22 +248,4 @@ class SlackNotifications:
             await asyncio.gather(self.worker, return_exceptions=True)
 
 
-def initialize_schema(store):
-    with store.connect() as conn:
-        conn.executescript('''CREATE TABLE IF NOT EXISTS slack_notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id TEXT NOT NULL REFERENCES runs(id), event_key TEXT NOT NULL,
-            target_run_id TEXT NOT NULL, user_id TEXT NOT NULL, owner_id TEXT NOT NULL,
-            team_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-            attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
-            slack_ts TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
-            UNIQUE(run_id,event_key)
-        );
-        CREATE INDEX IF NOT EXISTS idx_slack_notifications_pending ON slack_notifications(status,retry_at,id);''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS slack_notification_state (
-            id INTEGER PRIMARY KEY CHECK(id=1), enabled_since TEXT NOT NULL)''')
-        # Persist once at rollout, including when no one has saved preferences.
-        # Restarts must still deliver new events created while the worker was down.
-        conn.execute('INSERT INTO slack_notification_state VALUES(1,?) ON CONFLICT(id) DO NOTHING', (now(),))
-        from .session_events import SessionEvents
-        SessionEvents.subscribe_in(conn, 'slack_notifications')
+from .schema_initializers import initialize_slack_notifications as initialize_schema

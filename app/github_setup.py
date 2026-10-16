@@ -235,5 +235,4 @@ def routes(connectors, security, store, settings):
     return router
 
 
-def initialize_schema(store):
-    store.execute('CREATE TABLE IF NOT EXISTS github_registration (state_hash TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, owner_login TEXT NOT NULL)')
+from .schema_initializers import initialize_github_setup as initialize_schema

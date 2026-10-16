@@ -37,18 +37,7 @@ TOOLS = {
 }
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS swarm_teams (
-        group_id TEXT PRIMARY KEY REFERENCES agent_groups(id) ON DELETE CASCADE,
-        task TEXT NOT NULL, leader_id TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL)''')
-    store.execute('''CREATE TABLE IF NOT EXISTS swarm_posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        group_id TEXT NOT NULL REFERENCES swarm_teams(group_id) ON DELETE CASCADE,
-        member_id TEXT NOT NULL, kind TEXT NOT NULL,
-        target_id TEXT NOT NULL DEFAULT '', content TEXT NOT NULL,
-        dedupe_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)''')
-    store.execute('CREATE INDEX IF NOT EXISTS idx_swarm_posts_group_id_id ON swarm_posts(group_id,id)')
+from .schema_initializers import initialize_swarm_collaboration as initialize_schema
 
 
 def create_team_in(conn, group_id, task):

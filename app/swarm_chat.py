@@ -49,16 +49,7 @@ _DELIVERY_TIMELINE = _TIMELINE + ''', delivered AS (
 )'''
 
 
-def initialize_schema(store):
-    store.execute('''CREATE TABLE IF NOT EXISTS swarm_chat_entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        root_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        source TEXT NOT NULL CHECK(source IN ('message','board')),
-        source_id INTEGER NOT NULL, created_at TEXT NOT NULL,
-        UNIQUE(root_id,source,source_id))''')
-    store.execute('CREATE INDEX IF NOT EXISTS idx_swarm_chat_delivery ON swarm_chat_entries(root_id,id)')
-    store.execute('CREATE INDEX IF NOT EXISTS idx_swarm_chat_history ON swarm_chat_entries(root_id,created_at,source,source_id)')
+from .schema_initializers import initialize_swarm_chat as initialize_schema
 
 
 def _require_root(conn, root: str):

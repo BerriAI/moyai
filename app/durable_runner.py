@@ -1270,16 +1270,4 @@ class DurableRunner(RunManager):
         state.pop('sandbox_name', None)
 
 
-def initialize_schema(store):
-    # Auto-mode workers may initialize together. Hold the schema write lock
-    # through replacement so a predicate upgrade has no committed index gap.
-    with store.connect() as conn:
-        conn.begin_write()
-        conn.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
-            run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
-            revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
-        conn.execute('DROP INDEX IF EXISTS idx_durable_sessions_occupied')
-        conn.execute(f"""CREATE INDEX idx_durable_sessions_occupied
-            ON durable_sessions(run_id) WHERE {(POSTGRES_OCCUPIED_SESSION if store.database else OCCUPIED_SESSION)}""")
-        conn.execute('''CREATE INDEX IF NOT EXISTS idx_durable_sessions_wake
-            ON durable_sessions(run_id) WHERE revision>delivered''')
+from .schema_initializers import initialize_durable_runner as initialize_schema
