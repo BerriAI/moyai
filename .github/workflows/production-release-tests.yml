@@ -26,7 +26,12 @@ jobs:
       MOYAI_TEST_POSTGRES_URL: postgresql://postgres:synthetic-release-test@127.0.0.1:5432/moyai_test
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - uses: astral-sh/setup-uv@v6
+      - name: Install the locked native environment for release contract checks
+        run: uv sync --project native --frozen --python 3.13 --extra product
       - name: Verify release ordering, failures and real PostgreSQL drain guards
         run: uv run --frozen --python 3.13 pytest -q tests/release tests/test_render.py tests/test_online_migrations.py
       - name: Keep old and new readers working through a real additive migration

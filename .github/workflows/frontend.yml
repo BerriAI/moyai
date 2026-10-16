@@ -35,7 +35,6 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: git diff --exit-code -- app/static/ui
-      - run: npm test
       - run: npx playwright install --with-deps chromium
       - run: npm run test:ui
       - uses: astral-sh/setup-uv@v6

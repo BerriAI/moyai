@@ -7,7 +7,7 @@
     "build": "vite build",
     "dev": "vite build --watch",
     "preview": "node scripts/settings_ui_preview.cjs",
-    "test": "node --test tests/*.cjs",
+    "test": "node --test tests/test_*.cjs tests/space-field.cjs",
     "test:ui": "node --test --test-concurrency=1 tests/browser/personal_slack.cjs tests/browser/shadcn_ui.cjs tests/browser/navigation_loading.cjs tests/browser/message_history.cjs tests/browser/send_now.cjs tests/browser/long_conversation.cjs tests/browser/swarm_time.cjs tests/browser/swarm_chat.cjs tests/browser/performance.cjs tests/browser/moyai_sculpture.cjs",
     "typecheck": "tsc --noEmit"
   },

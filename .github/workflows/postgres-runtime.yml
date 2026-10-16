@@ -250,10 +250,9 @@ jobs:
         run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe --replicated-api
       - name: Verify compatible API source builds overlap and incompatible contracts fail closed
         run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe --mixed-build-api --drain-api
-      - name: Verify context recovery on both backends
-        run: |
-          uv run --frozen --python 3.13 pytest -q --tb=short tests/test_context_gateway.py tests/test_context_recovery.py
-          uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_context_gateway.py tests/test_context_recovery.py
+      - name: Verify context recovery on PostgreSQL
+        # The default SQLite variant runs in docker.yml's agent group.
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_context_gateway.py tests/test_context_recovery.py
 
   rolling:
     runs-on: ubuntu-latest
