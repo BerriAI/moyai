@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 def routes(runtime: Runtime) -> APIRouter:
+    product = getattr(runtime, "product_slack", None)
+    if product is not None:
+        return product.routes()
     router = APIRouter()
 
     @router.post("/hooks/slack")
@@ -219,7 +222,10 @@ async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Del
         ))
 
 
-async def reconcile_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery) -> None:
+async def reconcile_one(
+    runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery, *,
+    headers: dict[str, str] | None = None,
+) -> None:
     async with runtime.database.sessions.begin() as db:
         # Ownership stays "sending": this timestamp only throttles read checks.
         cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
@@ -229,7 +235,7 @@ async def reconcile_one(runtime: Runtime, client: httpx.AsyncClient, delivery: D
     if claimed is None:
         return
     destination = json.loads(delivery.destination)
-    response = await client.get("conversations.replies", params={
+    response = await client.get("conversations.replies", headers=headers, params={
         "channel": destination["channel"], "ts": destination["thread_ts"],
         "limit": 100, "include_all_metadata": "true",
     })
@@ -249,6 +255,10 @@ async def reconcile_one(runtime: Runtime, client: httpx.AsyncClient, delivery: D
 
 
 async def pump(runtime: Runtime) -> None:
+    product = getattr(runtime, "product_slack", None)
+    if product is not None:
+        await product.pump()
+        return
     if not runtime.settings.slack_bot_token.get_secret_value():
         return
     async with runtime.database.sessions() as db:

@@ -20,9 +20,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from temporalio.testing import WorkflowEnvironment
 
 from moyai.api import create_app
-from moyai.computer import lease
+from moyai.computer import DESKTOP_VERSION, lease
+from moyai.computer_stream import bind, release, validate
 from moyai.contracts import NewMessage, NewSession
-from moyai.models import Artifact, Delivery, Session, User, new_id
+from moyai.models import Artifact, ComputerDesktop, Delivery, Session, User, new_id
 from moyai.runtime import Runtime
 from moyai.settings import Settings
 from moyai.slack import deliver_one
@@ -90,6 +91,17 @@ async def test_native_postgres_stores_in_temporal(tmp_path, monkeypatch):
         assert (await runtime.database.claim_next()).id == following.id
         await lease(runtime, session.id, actor, "release")
         assert await runtime.database.claim_next() is None
+        async with runtime.database.sessions.begin() as db:
+            desktop = await db.get(ComputerDesktop, session.id)
+            desktop.workspace_id = "policy-only"
+            desktop.version = DESKTOP_VERSION
+        client_id = new_id()
+        await lease(runtime, session.id, actor, "claim", client_id)
+        previous = await bind(runtime, session.id, actor, client_id, controlling=True)
+        current = await bind(runtime, session.id, actor, client_id, controlling=True)
+        await release(runtime, previous)
+        await validate(runtime, current)
+        await release(runtime, current)
     finally:
         await runtime.close()
         await admin.execute(f"DROP DATABASE {name} WITH (FORCE)")

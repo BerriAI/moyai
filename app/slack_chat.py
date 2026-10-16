@@ -36,60 +36,7 @@ def explicit_control(text):
             is_session_id_request(text))
 
 
-def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
-    """Format replies without letting model text trigger Slack mentions/unfurls.
-
-    Only user IDs in ``mentions`` (already mentioned by people in the thread)
-    may render as mentions; broadcasts and every other ID stay literal text.
-    """
-    text = html.escape(text, quote=False)
-    def mention(match):
-        return f'<@{match[1]}>' if match[1] in mentions else match[0]
-    def link(match):
-        label, url = match.groups()
-        if not url.startswith(('https://', 'http://')):
-            url = file_link(public_url, run_id, html.unescape(url))
-            if not url:
-                return match[0]
-            url = html.escape(url, quote=False)
-        if len(url) > 1500:
-            return label
-        return '<' + url + '|' + label.replace('|', '¦') + '>'
-    # Preserve fenced examples; standalone inline Markdown filenames are links.
-    pieces = re.split(r'(```[\s\S]*?```|`[^`\n]+`)', text)
-    for i in range(0, len(pieces), 2):
-        value = re.sub(r'!?\[([^\]\n]+)\]\(([^\s)<>]+)\)', link, pieces[i])
-        value = re.sub(r'&lt;@([UW][A-Z0-9]{7,30})&gt;', mention, value)
-        value = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', value, flags=re.M)
-        pieces[i] = re.sub(r'\*\*(.+?)\*\*', r'*\1*', value)
-    for i in range(1, len(pieces), 2):
-        if pieces[i].startswith('```'):
-            continue
-        label = pieces[i][1:-1]
-        url = file_link(public_url, run_id, html.unescape(label))
-        if url:
-            pieces[i] = '<' + html.escape(url, quote=False) + '|' + label.replace('|', '¦') + '>'
-    return ''.join(pieces)
-
-
-def split_reply(text, limit=2600):
-    chunks, opened = [], False
-    while text:
-        end = len(text) if len(text) <= limit else text.rfind('\n', 0, limit)
-        if end < limit // 2 and len(text) > limit:
-            end = limit
-        # A generated file URL may occupy most of a chunk. Keep Slack's link
-        # token intact when a long paragraph would otherwise split it in two.
-        for match in re.finditer(r'<https?://[^>]+>', text):
-            if match.start() < end < match.end() and match.end() - match.start() <= limit:
-                end = match.start() or match.end()
-                break
-        part, text = text[:end], text[end:].lstrip('\n')
-        in_fence = opened ^ (part.count('```') % 2 == 1)
-        chunks.append(('```\n' if opened else '') + part + ('\n```' if in_fence else ''))
-        opened = in_fence
-    return chunks or ['No response text was returned.']
-
+from .slack_format import slack_text, split_reply
 
 class SlackChat:
     def __init__(self, owner):

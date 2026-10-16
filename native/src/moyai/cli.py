@@ -15,6 +15,9 @@ from temporalio.testing import WorkflowEnvironment
 
 from .api import create_app
 from .models import User
+from .product_config import ProductConfigurationError, load_product_config
+from .product_deployment import ProductDeploymentError, require_startable
+from .product_start import _check_listener
 from .runtime import Runtime
 from .security import password_hash
 from .settings import Settings
@@ -29,7 +32,25 @@ async def run(args: argparse.Namespace) -> None:
     settings = Settings()
     if args.data_dir:
         settings.data_dir = Path(args.data_dir)
-    runtime = Runtime(settings)
+    product_config = None
+    if settings.product_mode == "existing":
+        product_config = load_product_config()
+        if product_config is None or product_config.product_mode != "existing":
+            raise ProductConfigurationError("Existing mode requires MOYAI_CORE=pydantic.")
+        if args.command == "user":
+            raise ProductDeploymentError("Existing product identities must be managed through product administration.")
+        require_startable(product_config)
+        if args.command in {"serve", "worker"}:
+            raise ProductDeploymentError("Use python -m moyai.product_start serve for the selected product role.")
+        if (
+            args.command != "dev" or not product_config.local_rehearsal
+            or product_config.role != "standalone"
+        ):
+            raise ProductDeploymentError("Existing-mode dev requires standalone local product rehearsal.")
+        _check_listener(product_config, args.host)
+    runtime = Runtime(settings, product_config=product_config)
+    # Runtime applies the explicit core key, queue and separate native data path.
+    settings = runtime.settings
     await runtime.start()
     try:
         if args.command == "user":
@@ -53,8 +74,10 @@ async def run(args: argparse.Namespace) -> None:
             return
         if args.command == "dev":
             settings.validate_worker()
+            settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             environment = await WorkflowEnvironment.start_local(
                 ip="127.0.0.1",
+                namespace=settings.temporal_namespace,
                 dev_server_database_filename=str(settings.data_dir.resolve() / "temporal.db"),
                 plugins=[PydanticAIPlugin()],
                 data_converter=encrypted_converter(runtime.security, runtime.objects),
@@ -88,7 +111,10 @@ def main() -> None:
     user.add_argument("--name")
     user.add_argument("--admin", action="store_true")
     user.add_argument("--slack-user", help="Verified Slack member ID for this user")
-    asyncio.run(run(parser.parse_args()))
+    try:
+        asyncio.run(run(parser.parse_args()))
+    except (ProductConfigurationError, ProductDeploymentError) as error:
+        parser.exit(1, f"{error}\n")
 
 
 if __name__ == "__main__":

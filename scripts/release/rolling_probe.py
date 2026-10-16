@@ -42,24 +42,62 @@ def require(condition):
         raise ValueError('Runtime check failed')
 
 
+def ownership(connection, schema, *, exclude_current=False):
+    """Observe process owners and explicitly bound native transaction fences."""
+    # pg_stat_activity may be cached inside a caller's existing transaction.
+    # Refresh it, and never drop a lock holder merely because its stats row is
+    # unavailable or appeared between the two catalog observations.
+    connection.execute('SELECT pg_stat_clear_snapshot()')
+    rows = connection.execute('''WITH held AS MATERIALIZED (
+        SELECT classid,objid,objsubid,pid,mode,granted FROM pg_locks
+        WHERE locktype='advisory' AND classid IN (726940,726943,726944,726946,726948)
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))
+        SELECT l.classid::bigint,l.pid,a.backend_start,l.mode,
+            COALESCE((SELECT jsonb_agg(jsonb_build_array(m.objid::bigint,m.mode,m.objsubid,m.granted))
+                FROM held m WHERE m.classid=726948 AND m.pid=l.pid), '[]'::jsonb),
+            EXISTS(SELECT 1 FROM held r WHERE r.pid=l.pid AND r.classid IN (726943,726944,726946))
+        FROM held l LEFT JOIN pg_stat_activity a ON a.pid=l.pid
+        WHERE l.classid IN (726940,726943,726944,726946)
+        AND l.objid=%s::regnamespace::oid AND l.objsubid=2 AND l.granted
+        AND (NOT %s OR l.pid<>pg_backend_pid())''', (schema, exclude_current)).fetchall()
+    kinds = {726940: ('owners', 'ShareLock'), 726943: ('coordinators', 'ExclusiveLock'),
+             726944: ('brokers', 'ShareLock'), 726946: ('broker_leaders', 'ExclusiveLock')}
+    owners = {name: [] for name, _ in kinds.values()}
+    runtime = {pid: (start, markers) for kind, pid, start, _, markers, _ in rows if kind == 726940}
+    subordinates = {}
+    for kind, pid, start, mode, markers, has_role in rows:
+        if not markers:
+            continue
+        # 726948 identifies a subordinate connection's canonical parent PID.
+        # Never hide an unmarked, orphaned, ambiguous, chained or role-owning
+        # holder. The full 726940 locks remain visible to migration admission.
+        require(kind == 726940 and len(markers) == 1
+                and markers[0][1:] == ['ShareLock', 2, True] and not has_role)
+        parent = markers[0][0]
+        require(type(parent) is int and parent > 0 and parent != pid
+                and parent in runtime and not runtime[parent][1] and runtime[parent][0] is not None)
+        require(not any(other_pid == pid and other_kind != 726940
+                        for other_kind, other_pid, *_ in rows))
+        subordinates[pid] = f'{parent}@{runtime[parent][0].isoformat()}'
+    fences = []
+    for kind, pid, start, mode, _, _ in rows:
+        name, expected = kinds[kind]
+        if start is None or mode != expected:
+            raise ValueError('Unexpected rolling ownership mode')
+        if pid in subordinates:
+            fences.append({'connection': f'{pid}@{start.isoformat()}', 'owner': subordinates[pid]})
+            continue
+        owners[name].append(f'{pid}@{start.isoformat()}')
+    return {**{key: sorted(value) for key, value in owners.items()},
+            **({'native_transaction_fences': sorted(fences, key=lambda value: value['connection'])} if fences else {})}
+
+
 def snapshot(connection, schema):
     from psycopg import sql
     connection.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
     connection.execute("SET LOCAL statement_timeout = '5s'")
     connection.execute(sql.SQL('SET LOCAL search_path TO {},pg_catalog').format(sql.Identifier(schema)))
-    rows = connection.execute('''SELECT l.classid::bigint,l.pid,a.backend_start,l.mode
-        FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid
-        WHERE l.locktype='advisory' AND l.classid IN (726940,726943,726944,726946)
-        AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
-        AND l.objid=%s::regnamespace::oid AND l.objsubid=2 AND l.granted''', (schema,)).fetchall()
-    kinds = {726940: ('owners', 'ShareLock'), 726943: ('coordinators', 'ExclusiveLock'),
-             726944: ('brokers', 'ShareLock'), 726946: ('broker_leaders', 'ExclusiveLock')}
-    owners = {name: [] for name, _ in kinds.values()}
-    for kind, pid, start, mode in rows:
-        name, expected = kinds[kind]
-        if start is None or mode != expected:
-            raise ValueError('Unexpected rolling ownership mode')
-        owners[name].append(f'{pid}@{start.isoformat()}')
+    owners = ownership(connection, schema)
     policy = connection.execute('SELECT fingerprint FROM runtime_policy WHERE id=1').fetchone()
     schema_state = connection.execute('SELECT revision,dirty FROM schema_state WHERE id=1').fetchone()
     if not policy or not schema_state or schema_state[1]:
@@ -71,8 +109,7 @@ def snapshot(connection, schema):
         if not row or row[0] != policy[0]:
             raise ValueError('Missing or stale role contract')
         contracts[role] = row[1]
-    return {**{key: sorted(value) for key, value in owners.items()},
-            'policy': policy[0], 'schema': schema_state[0], 'contracts': contracts}
+    return {**owners, 'policy': policy[0], 'schema': schema_state[0], 'contracts': contracts}
 
 
 def health_identity(response, options, state):

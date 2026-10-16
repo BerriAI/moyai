@@ -23,7 +23,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "moyai_users"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    id: Mapped[str] = mapped_column(String(512), primary_key=True, default=new_id)
     username: Mapped[str] = mapped_column(String(200), unique=True)
     display_name: Mapped[str] = mapped_column(String(200))
     password: Mapped[str] = mapped_column(Text)
@@ -51,7 +51,7 @@ class Session(Base):
     model: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(30), default="idle")
     active_turn: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    last_actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_actor_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     last_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_grants: Mapped[str | None] = mapped_column(String(64), nullable=True)
     conversation: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -122,6 +122,16 @@ class Turn(Base):
     finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
+class ProductTurnAuthority(Base):
+    """Immutable authority admitted for one native turn; never a fresh user lookup."""
+
+    __tablename__ = "moyai_product_turn_authority"
+    turn_id: Mapped[str] = mapped_column(ForeignKey("moyai_turns.id"), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
+    authority_version: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
 class Message(Base):
     __tablename__ = "moyai_messages"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -176,6 +186,17 @@ class ComputerOperation(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), primary_key=True)
     identity: Mapped[str] = mapped_column(String(36))
     expires_at: Mapped[int] = mapped_column(Integer)
+
+
+class ComputerDesktop(Base):
+    """Installed desktop version and the current browser's control generation."""
+
+    __tablename__ = "moyai_computer_desktops"
+    session_id: Mapped[str] = mapped_column(ForeignKey("moyai_sessions.id"), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(200))
+    version: Mapped[str] = mapped_column(String(64), default="")
+    control_client: Mapped[str] = mapped_column(String(36), default="")
+    control_epoch: Mapped[str] = mapped_column(String(36), default=new_id)
 
 
 class Connection(Base):

@@ -18,10 +18,18 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.run import AgentRunResultEvent
 
+from .live_events import ResponseStart
+
 PRIVATE_TOOLS = {"read_memory", "search_memory", "write_memory", "delete_memory", "load_capability"}
 
 
+def private_tool(name: str | None) -> bool:
+    return name in PRIVATE_TOOLS or bool(name and name.startswith("credentials_"))
+
+
 def public_event(event: Any) -> dict[str, Any] | None:
+    if isinstance(event, ResponseStart):
+        return {"type": "response_start", "run_id": event.run_id, "step": event.step}
     if isinstance(event, PartStartEvent):
         if event.part.part_kind == "text":
             return {"type": "text_start", "index": event.index, "text": event.part.content}
@@ -34,7 +42,7 @@ def public_event(event: Any) -> dict[str, Any] | None:
         part = event.part
         return {
             "type": "tool_call", "id": part.tool_call_id, "name": part.tool_name,
-            "arguments": None if part.tool_name in PRIVATE_TOOLS else part.args,
+            "arguments": None if private_tool(part.tool_name) else part.args,
         }
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
@@ -42,11 +50,11 @@ def public_event(event: Any) -> dict[str, Any] | None:
         return {
             "type": "tool_result", "id": part.tool_call_id,
             "name": part.tool_name,
-            "content": None if part.tool_name in PRIVATE_TOOLS else content[:30_000],
-            "failed": part.part_kind == "retry-prompt",
+            "content": None if private_tool(part.tool_name) else content[:30_000],
+            "failed": part.part_kind == "retry-prompt" or getattr(part, "outcome", None) == "failed",
         }
     if isinstance(event, AgentRunResultEvent):
-        return {"type": "agent_finished"}
+        return {"type": "agent_finished", "run_id": event.result.run_id}
     name = type(event).__name__
     if (
         name.startswith(("Plan", "Delegation", "AskUser", "EnqueuedMessages"))

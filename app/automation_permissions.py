@@ -8,21 +8,11 @@ import json
 from typing import Literal
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict
 
+from .automation_definitions import SelfManagement
 from .db import now
 
-
 Permission = Literal['instructions', 'schedule']
-
-
-class SelfManagement(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    instructions: bool = False
-    schedule: bool = False
-
-    def allowed(self):
-        return [key for key, value in self.model_dump().items() if value]
 
 
 class AutomationPermissions:

@@ -34,13 +34,23 @@ with workflow.unsafe.imports_passed_through():
 
     from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
     from .images import prompt_content
+    from .product_continuation_errors import public_preparation_message
+    from .product_drain import DRAIN_VERSION, DrainDecision
     from .runtime import current
+    from .workspace_recovery import VERSION as WORKSPACE_CHECKPOINT_VERSION
 
 
 CONTROL = {
     "start_to_close_timeout": timedelta(seconds=60),
     "schedule_to_close_timeout": timedelta(minutes=3),
     "retry_policy": RetryPolicy(maximum_attempts=3),
+}
+PREPARE_VERSION = "moyai-turn-preparation-timeout-v1"
+PREPARE = {
+    **CONTROL,
+    "start_to_close_timeout": timedelta(minutes=20),
+    "schedule_to_close_timeout": timedelta(minutes=20),
+    "heartbeat_timeout": timedelta(seconds=30),
 }
 
 
@@ -55,6 +65,25 @@ class TurnWorkflow(PydanticAIWorkflow):
         self.agent_run: AgentRun[RunScope, str | DeferredToolRequests] | None = None
         self.finished = False
         self.steered: set[str] = set()
+        self.maintenance_notice = 0
+
+    @workflow.signal
+    def maintenance_changed(self, generation: int) -> None:
+        # A signal is only a wake-up hint; the activity rechecks persisted CAS
+        # intent. Duplicate, delayed or future hints never authorize execution.
+        if type(generation) is int and generation >= 0:
+            self.maintenance_notice += 1
+
+    async def maintenance_checkpoint(self, turn_id: str, boundary: str) -> None:
+        while True:
+            notice = self.maintenance_notice
+            decision = await workflow.execute_activity(
+                "moyai_product_drain_checkpoint_v1", args=[turn_id, boundary],
+                result_type=DrainDecision, **CONTROL,
+            )
+            if not decision.paused:
+                return
+            await workflow.wait_condition(lambda notice=notice: self.maintenance_notice != notice)
 
     @workflow.signal
     async def steer(self, turn_id: str) -> None:
@@ -93,8 +122,14 @@ class TurnWorkflow(PydanticAIWorkflow):
     async def run(self, turn_id: str) -> dict:
         prepared: PreparedTurn | None = None
         try:
+            checkpoint_workspace = workflow.patched(WORKSPACE_CHECKPOINT_VERSION)
+            maintenance = workflow.patched(DRAIN_VERSION)
+            if maintenance:
+                await self.maintenance_checkpoint(turn_id, "before_prepare")
             prepared = await workflow.execute_activity(
-                "moyai_prepare_turn_v1", turn_id, result_type=PreparedTurn, **CONTROL
+                "moyai_prepare_turn_v1",
+                args=[turn_id, True] if checkpoint_workspace else [turn_id], result_type=PreparedTurn,
+                **(PREPARE if workflow.patched(PREPARE_VERSION) else CONTROL),
             )
             if prepared is None:
                 raise ValueError("Turn preparation returned no authorized input.")
@@ -123,8 +158,14 @@ class TurnWorkflow(PydanticAIWorkflow):
             ) as agent_run:
                 self.agent_run = agent_run
                 # This is the public SDK iterator, not another model/tool dispatch loop.
+                boundary = 0
                 async for _ in agent_run:
-                    pass
+                    # This is an SDK graph boundary, not another agent loop.
+                    # A running delegation batch settles before this returns.
+                    # Completed answers/deferrals still finish their bookkeeping.
+                    if maintenance and agent_run.result is None:
+                        await self.maintenance_checkpoint(turn_id, f"native_node:{boundary}")
+                        boundary += 1
                 result = agent_run.result
                 if result is None:
                     raise RuntimeError("The SDK ended without a run result.")
@@ -144,6 +185,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                     workspace=reference,
                     usage=asdict(result.usage),
                     deferred=waiting,
+                    checkpoint_workspace=checkpoint_workspace,
                 ),
                 result_type=bool,
                 **CONTROL,
@@ -155,7 +197,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                     **CONTROL,
                 )
                 return {"turn_id": turn_id, "status": "stopped"}
-            if accepted and not waiting:
+            if accepted and (not waiting or checkpoint_workspace):
                 try:
                     await workflow.execute_activity(
                         "moyai_save_computer_v1", args=[turn_id, reference],
@@ -202,6 +244,8 @@ class TurnWorkflow(PydanticAIWorkflow):
                 "The agent could not complete this turn. "
                 "Inspect the saved activity before repeating a possibly completed action."
             )
+            if prepared is None and workflow.patched("moyai-public-preparation-errors-v1"):
+                message = public_preparation_message(error) or message
             await workflow.execute_activity(
                 "moyai_fail_turn_v1",
                 args=[turn_id, message],

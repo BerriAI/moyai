@@ -2,10 +2,10 @@ name: Native Pydantic runtime
 
 on:
   pull_request:
-    paths: ['native/**', 'frontend/**', 'package*.json', 'tests/test_native_desktop_input.cjs', '.github/workflows/pydantic-native.yml']
+    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', 'docker_start.py', 'render_start.py', '.github/workflows/pydantic-native.yml']
   push:
     branches: [main]
-    paths: ['native/**', 'frontend/**', 'package*.json', 'tests/test_native_desktop_input.cjs', '.github/workflows/pydantic-native.yml']
+    paths: ['native/**', 'app/**', 'frontend/**', 'package*.json', 'tests/test_native_*.cjs', 'Dockerfile', 'docker_start.py', 'render_start.py', '.github/workflows/pydantic-native.yml']
 
 permissions:
   contents: read
@@ -17,7 +17,9 @@ concurrency:
 jobs:
   runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The full suite alone took 11m18s in qualification; allow cold install,
+    # typecheck and sdist/wheel builds on a smaller shared runner.
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18-alpine
@@ -55,6 +57,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck:native
-      - run: node --test tests/test_native_desktop_input.cjs
+      - run: node --test tests/test_native_*.cjs
       - run: npm run build:native
       - run: git diff --exit-code -- native/src/moyai/static

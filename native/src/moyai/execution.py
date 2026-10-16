@@ -11,6 +11,7 @@ from temporalio.worker import ActivityInboundInterceptor, ExecuteActivityInput, 
 
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
+from .inference_usage import INFERENCE_ACTIVITY, InferenceActivity
 
 
 class AuthorizedActivity(ActivityInboundInterceptor):
@@ -19,13 +20,20 @@ class AuthorizedActivity(ActivityInboundInterceptor):
         self.database = database
 
     async def execute_activity(self, input: ExecuteActivityInput) -> Any:
-        name = activity.info().activity_type
+        info = activity.info()
+        name = info.activity_type
         # These are SDK-persisted activity names, fixed by our pinned agent/capability IDs.
         # Evidence must still settle after Stop; business operations must recheck authority.
         evidence = (
             "__capability__step_persistence__" in name
-            or name == "agent__moyai__capability__moyai_effects__confirm"
+            or name in {
+                "agent__moyai__capability__moyai_effects__confirm",
+                "agent__moyai__capability__moyai_effects__record_pr_publication",
+                "agent__moyai__capability__moyai_effects__not_dispatched",
+                "agent__moyai__capability__moyai_effects__browser_state",
+            }
         )
+        scope = None
         if name.startswith("agent__moyai__") and not evidence:
             scope = next((arg for arg in input.args if isinstance(arg, RunScope)), None)
             if scope is None:
@@ -45,6 +53,28 @@ class AuthorizedActivity(ActivityInboundInterceptor):
                     type="MoyaiGuidanceChanged" if isinstance(error, GuidanceChanged) else "MoyaiPermissionDenied",
                     non_retryable=True,
                 ) from error
+        if scope is not None and name.endswith(("__model_request", "__model_request_stream")):
+            usage = InferenceActivity(
+                self.database, scope,
+                f"{info.workflow_namespace}/{info.workflow_id}/{info.workflow_run_id}/{info.activity_id}/{info.attempt}",
+                # A workflow retry/reset changes run_id, but does not authorize
+                # paying again for this activity of the same admitted turn.
+                logical_identity=f"{info.workflow_namespace}/{info.workflow_id}/{scope.turn_id}/{info.activity_id}",
+            )
+            token = INFERENCE_ACTIVITY.set(usage)
+            try:
+                result = await self.next.execute_activity(input)
+                await usage.result(result)
+                return result
+            except Exception as error:
+                if usage.admission_error is not None:
+                    raise ApplicationError(
+                        "Product inference admission refused; no new model request was dispatched.",
+                        type="MoyaiInferenceAdmissionDenied", non_retryable=True,
+                    ) from error
+                raise
+            finally:
+                INFERENCE_ACTIVITY.reset(token)
         return await self.next.execute_activity(input)
 
 

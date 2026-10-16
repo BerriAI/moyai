@@ -107,7 +107,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         repository_context_search repository_context_read'''.split())
     writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel agents_send agents_wait automation_webhook_setup automation_create
         automation_update automation_enable automation_pause automation_grant automation_self_update automation_claim_item credentials_resolve
-        credentials_request credentials_run credentials_report_failure credentials_http_request
+        credentials_request credentials_run credentials_report_failure credentials_http_request credentials_aws_login
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request
         github_update_pull_request github_comment_pull_request github_close_pull_request
         github_create_issue github_update_issue github_comment_issue github_edit_issue_comment github_comment_review
@@ -314,7 +314,7 @@ def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
     builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics", "bundled_skill_read", "history_read", "goal", "computer_handoff", "artifact_publish", "artifact_fetch", "artifact_read", "artifacts_list"}
-    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | builtins
+    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues", "linear_options"} | builtins
     denied = client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).json()
     assert denied['code'] == 'access_denied' and denied['dispatched'] is False

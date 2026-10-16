@@ -169,6 +169,19 @@ class PostgresModelSlots(ModelSlots):
         except psycopg.Error:
             raise DatabaseError('Shared model capacity ownership was lost.') from None
 
+    def ownership(self):
+        """Exact backend lifetime for durable external-request ownership.
+
+        Consumers must not use a PID alone, or elapsed time, to reclaim work.
+        This exposes no database credentials and does not create execution rows.
+        """
+        with self._guard:
+            self.check()
+            row = self._connection.execute(
+                "SELECT pid,backend_start FROM pg_stat_activity WHERE pid=pg_backend_pid()"
+            ).fetchone()
+            return row[0], row[1].isoformat()
+
     def _shared_count(self):
         with self._guard:
             self.check()

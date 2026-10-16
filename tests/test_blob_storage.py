@@ -119,7 +119,7 @@ def test_upload_publication_failure_shadowing_and_snapshots(tmp_path):
     store.artifacts.save('latest.zip', b'new')
     revision = store.artifacts.info('latest.zip')['revision']
     with store.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.begin_write()
         store.artifacts.snapshot_in(conn, 'latest.zip', 'frozen.zip')
     store.artifacts.save('latest.zip', b'newer')
     assert store.artifacts.read('frozen.zip', 100) == b'new'
@@ -219,6 +219,7 @@ def test_batched_inventory_preserves_legacy_files_shadowing_and_validation(tmp_p
         store.artifacts.listing(prefix)
 
 
+@pytest.mark.sqlite_only
 async def test_checkpoint_restores_remote_manifest_without_copying_payload(tmp_path):
     backend = MemoryObjects()
     settings = Settings(_env_file=None, data_dir=tmp_path / 'original', checkpoint_dir=tmp_path / 'checkpoint')

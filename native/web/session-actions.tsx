@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useRef, useState } from "react"
-import { Archive, Check, ChevronRight, Copy, Folder, FolderPlus, Mail, Monitor, MoreHorizontal, Pencil, Pin, Plus, RotateCcw, Trash2, X } from "lucide-react"
+import { Archive, Check, ChevronRight, Copy, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -10,8 +10,12 @@ export type SidebarSession = {
   id: string; title: string; owner_id: string; status: string; archived: boolean; deleted?: boolean
   pinned?: boolean; folder?: string; participated?: boolean; unread?: boolean; updated_at?: string
   surface?: string
+  source?: "native" | "legacy"; key?: string; url?: string; read_only?: boolean; deleting?: boolean; folder_id?: string | null
   pull_requests?: { url: string; title: string; repository: string; number: number; state: "open" | "closed" | "merged" | "unknown"; draft: boolean; accessible: boolean; error?: string }[]
 }
+export const sessionIsReadOnly = (row: SidebarSession) => row.source === "legacy" || row.read_only === true
+export const sessionKey = (row: SidebarSession) => row.key ?? `${row.source ?? "native"}:${row.id}`
+export const sessionHash = (row: SidebarSession) => `${row.source === "legacy" ? "run=" : ""}${encodeURIComponent(row.id)}`
 export type SessionFolder = { id: string; name: string }
 type Action = "rename" | "move" | "archive" | "delete" | "restore" | "folder-create" | "folder-rename" | "folder-remove"
 type Editor = { action: Action; session?: SidebarSession; folder?: SessionFolder }
@@ -53,10 +57,12 @@ export function SessionMenu({ session: row, header = false }: { session: Sidebar
   const actions = useSessionActions()
   const owner = row.owner_id === actions.userId
   return <ActionMenu header={header} label={header ? "Session actions" : `Session actions for ${row.title}`}>{close => {
+    if (sessionIsReadOnly(row)) return <>
+      <ActionItem disabled={row.deleted || row.deleting} onClick={() => { close(); location.hash = sessionHash(row) }}><History />Open history</ActionItem>
+      <ActionItem onClick={() => { close(); actions.copy(row) }}><Copy />Copy session link</ActionItem>
+    </>
     const editor = (action: Action) => { close(); actions.openEditor({ action, session: row }) }
     return <>
-      <ActionItem onClick={() => { close(); actions.newSession() }}><Plus />New session</ActionItem>
-      <hr />
       {row.deleted ? <ActionItem disabled={!owner || actions.busy} onClick={() => editor("restore")}><RotateCcw />Restore session</ActionItem> : <>
         <ActionItem disabled={actions.busy} onClick={() => editor("move")}><Folder />Folder<ChevronRight className="trailing" /></ActionItem>
         <ActionItem disabled={!owner || actions.busy} onClick={() => editor("rename")}><Pencil />Rename</ActionItem>
@@ -83,7 +89,7 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
   const busyRef = useRef(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
-  const openEditor = (value: Editor) => { if (busyRef.current) return; setError(""); setName(value.action === "folder-create" ? "" : value.folder?.name ?? value.session?.title ?? ""); setEditor(value) }
+  const openEditor = (value: Editor) => { if (busyRef.current || (value.session && sessionIsReadOnly(value.session))) return; setError(""); setName(value.action === "folder-create" ? "" : value.folder?.name ?? value.session?.title ?? ""); setEditor(value) }
   async function mutate(action: () => Promise<unknown>, message: string) {
     if (busyRef.current) return
     busyRef.current = true
@@ -92,7 +98,9 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
     catch (error) { setError(String(error)) }
     finally { busyRef.current = false; setBusy(false) }
   }
-  const edit = (row: SidebarSession, body: object, message: string) => mutate(() => api(`/sessions/${row.id}`, "PATCH", body), message)
+  const edit = (row: SidebarSession, body: object, message: string) => sessionIsReadOnly(row)
+    ? Promise.resolve()
+    : mutate(() => api(`/sessions/${row.id}`, "PATCH", body), message)
   const title = editor ? ({
     rename: "Rename session", move: "Move session", archive: editor.session?.archived ? "Restore session?" : "Archive session?",
     delete: "Delete session?", restore: "Restore deleted session?", "folder-create": "New folder",
@@ -101,7 +109,7 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
   const named = editor && ["rename", "folder-create", "folder-rename"].includes(editor.action)
   return <ActionsContext.Provider value={{
     userId, busy, openEditor, edit, openComputer: onOpenComputer, newSession: onNewSession,
-    copy: row => { void navigator.clipboard.writeText(`${location.origin}/#${row.id}`).then(
+    copy: row => { void navigator.clipboard.writeText(`${location.origin}/#${sessionHash(row)}`).then(
       () => setNotice("Session link copied."),
       () => setError("Could not copy the link. Open the session and copy its address."),
     ) },

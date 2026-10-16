@@ -1,0 +1,73 @@
+/* Native-scoped counterparts of the established settings-system.css report primitives. */
+.native-analytics {
+  --chart-blue: var(--ui-primary);
+  --chart-teal: #8fd9e5;
+  --chart-green: var(--ui-success);
+  --chart-amber: var(--ui-warning);
+  --chart-violet: #c4b8ee;
+  min-width: 0;
+}
+.native-analytics .analytics-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 24px; margin: 0 0 24px; }
+.native-analytics .analytics-metrics > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.native-analytics .analytics-metrics span { color: var(--ui-muted); font-size: 13px; }
+.native-analytics .analytics-metrics strong { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.native-analytics .analytics-metrics small { color: var(--ui-muted); font-size: 11px; }
+.native-analytics .analytics-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0; color: var(--ui-muted); font-size: 11px; }
+.native-analytics .analytics-legend > span { display: flex; align-items: center; gap: 6px; }
+.native-analytics .analytics-legend i { width: 8px; height: 8px; display: inline-block; border-radius: 2px; }
+.native-analytics .analytics-color-0 { fill: var(--chart-blue); background: var(--chart-blue); }
+.native-analytics .analytics-color-1 { fill: var(--chart-teal); background: var(--chart-teal); }
+.native-analytics .analytics-color-2 { fill: var(--chart-green); background: var(--chart-green); }
+.native-analytics .analytics-color-3 { fill: var(--chart-amber); background: var(--chart-amber); }
+.native-analytics .analytics-color-4 { fill: var(--chart-violet); background: var(--chart-violet); }
+.native-analytics .analytics-chart { width: 100%; overflow-x: auto; }
+.native-analytics .analytics-chart svg { display: block; width: 100%; min-width: 540px; height: auto; }
+.native-analytics .analytics-chart text { fill: var(--ui-muted); font-size: 11px; font-family: inherit; }
+.native-analytics .analytics-grid { stroke: var(--ui-border); stroke-dasharray: 3 4; stroke-width: 1; }
+.native-analytics .analytics-area { fill: var(--chart-blue); opacity: .07; }
+.native-analytics .analytics-trend { fill: none; stroke: var(--chart-blue); stroke-width: 2; stroke-linejoin: round; }
+.native-analytics .analytics-point { fill: var(--chart-blue); }
+.native-analytics .analytics-cumulative { fill: none; stroke: var(--ui-foreground); stroke-width: 2; stroke-linejoin: round; }
+.native-analytics .analytics-cumulative-point { fill: var(--ui-foreground); }
+.native-analytics .analytics-cumulative-partial { stroke-dasharray: 5 4; }
+.native-analytics .analytics-average { fill: none; stroke: var(--chart-amber); stroke-width: 2; stroke-linejoin: round; }
+.native-analytics .analytics-average-point { fill: var(--chart-amber); }
+.native-analytics .analytics-legend .analytics-line-key { width: 12px; height: 0; border-top: 2px solid var(--ui-foreground); }
+.native-analytics .analytics-legend .analytics-average-key { width: 12px; height: 0; border-top: 2px solid var(--chart-amber); }
+.native-analytics .analytics-partial { opacity: .5; }
+.native-analytics .analytics-footnote { margin: 10px 0 0; color: var(--ui-muted); font-size: 11px; line-height: 1.6; }
+.native-analytics .analytics-empty-chart { padding: 24px 0; color: var(--ui-muted); font-size: 13px; }
+.native-analytics .analytics-breakdown { margin-block: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--ui-border); }
+.native-analytics .analytics-table-frame { max-width: 100%; overflow-x: auto; border: 1px solid var(--ui-border); border-radius: 10px; }
+.native-analytics .analytics-table-frame > [data-slot="table-container"] { overflow: visible; }
+.native-analytics .analytics-table-frame table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.native-analytics .analytics-table-frame :is(th, td) { padding: 12px 16px; border-bottom: 1px solid var(--ui-border); font-variant-numeric: tabular-nums; text-align: end; vertical-align: top; white-space: normal; }
+.native-analytics .analytics-table-frame th { color: var(--ui-muted); font-size: 12px; font-weight: 500; background: var(--ui-subtle); }
+.native-analytics .analytics-table-frame :is(th, td):first-child { text-align: start; }
+.native-analytics .analytics-table-frame tr:last-child td { border-bottom: 0; }
+.native-analytics .analytics-table-frame small { display: block; color: var(--ui-muted); font-size: 11px; margin-top: 4px; }
+.native-analytics-date-trigger { gap: 10px; font-weight: 400; max-width: 100%; }
+.native-analytics-date-trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.native-analytics-range[data-slot="popover-content"] { width: min(320px, calc(100vw - 24px)); max-height: min(620px, var(--radix-popover-content-available-height)); overflow-y: auto; padding: 12px; border-radius: 12px; }
+.native-analytics-presets { display: grid; gap: 2px; }
+.native-analytics-presets > button { display: flex; width: 100%; justify-content: space-between; font-weight: 400; }
+.native-analytics-presets > button[aria-pressed="true"] { background: var(--ui-secondary); color: var(--ui-foreground); }
+.native-analytics-custom-dates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; border-top: 1px solid var(--ui-border); padding-top: 16px; margin-top: 12px; }
+.native-analytics-custom-dates label { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.native-analytics-custom-dates input { width: 100%; min-width: 0; }
+.native-analytics-custom-dates > p, .native-analytics-custom-dates > button { grid-column: 1 / -1; }
+.native-analytics-custom-dates > p, .native-analytics-date-note { font-size: 11px; color: var(--ui-muted); line-height: 1.6; }
+.native-analytics-date-note { margin: 12px 8px 4px; }
+.native-analytics-custom-dates .native-analytics-range-error { color: var(--ui-danger); }
+.native-analytics :is(button, a, summary, [tabindex="0"]):focus-visible,
+.native-analytics-range :is(button, input):focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; }
+@media (max-width: 600px) {
+  .native-analytics .analytics-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 16px; }
+  .native-analytics .analytics-table-frame table { min-width: 540px; }
+  .native-analytics-custom-dates { grid-template-columns: minmax(0, 1fr); }
+  .native-analytics-range [data-slot="button"] { min-height: 44px; }
+  .native-analytics-range input { font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .native-analytics *, .native-analytics-range * { transition: none; animation: none; scroll-behavior: auto; }
+}

@@ -8,7 +8,18 @@ RUN uv sync --frozen --no-dev
 COPY app ./app
 COPY sandbox ./sandbox
 COPY agent ./agent
+# Keep the transition locks separate: legacy OpenAI 2/Agents dependencies never
+# enter the Pydantic runtime's environment. Copy only package inputs, not a host
+# virtualenv, development data, or untracked frontend dependency trees.
+COPY native/pyproject.toml native/uv.lock ./native/
+RUN uv sync --project native --frozen --no-dev --extra product --no-install-project
+COPY native/src ./native/src
+COPY native/skills ./native/skills
+COPY native/instructions.md native/desktop.py native/browser_guest.py native/hatch_build.py ./native/
+RUN uv sync --project native --frozen --no-dev --extra product --no-editable
 COPY render_start.py build_workspace_image.py docker_start.py docker_healthcheck.py ./
+ENV PYTHONPATH=/app
+RUN /app/native/.venv/bin/python -c "from moyai.product_deployment import check_runtime_dependencies; check_runtime_dependencies()"
 RUN useradd --uid 10001 --create-home workspace && mkdir /data && chown workspace:workspace /data
 # The entrypoint adopts the mounted data tree, then drops to workspace before
 # importing application code. A build-time chown cannot fix a mounted disk.

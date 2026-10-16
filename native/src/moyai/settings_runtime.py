@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
+import anyio
 from temporalio import activity, workflow
 from temporalio.api.enums.v1 import TaskQueueType
 from temporalio.api.taskqueue.v1 import TaskQueue
@@ -53,6 +54,12 @@ def settings_worker_identity() -> str:
 
 async def automation_readiness(runtime: Any) -> dict[str, Any]:
     """Use Temporal pollers to distinguish registered workers from a stored row."""
+    if getattr(runtime, "product_identity", None) is not None:
+        return {
+            "create": False, "update": True, "delete": True, "run": False,
+            "runtime_available": False, "execution_backend": "temporal",
+            "reason": "Existing-product automations require explicit canonical migration; the interval prototype is not compatible.",
+        }
     try:
         async with asyncio.timeout(3):
             client = await runtime.connect()
@@ -128,13 +135,23 @@ class SettingsSkills(AbstractCapability[RunScope]):
             # Histories admitted before Settings existed have no catalog
             # activity; replay must retain their original capability set.
             return self
-        rows = await workflow.execute_activity(
-            "moyai_settings_skill_catalog", ctx.deps,
-            result_type=list[dict[str, Any]],
-            start_to_close_timeout=timedelta(seconds=30),
-            schedule_to_close_timeout=timedelta(minutes=2),
-            retry_policy=RetryPolicy(maximum_attempts=3),
-        ) if workflow.in_workflow() else await self.catalog(ctx.deps)
+        rows: list[dict[str, Any]] | None = None
+        if workflow.in_workflow():
+            # Only this bounded, authority-checked read is shielded. AnyIO's
+            # repeated sibling cancellation otherwise spins on Temporal's
+            # pending activity handle instead of letting its result settle.
+            with anyio.CancelScope(shield=True):
+                rows = await workflow.execute_activity(
+                    "moyai_settings_skill_catalog", ctx.deps,
+                    result_type=list[dict[str, Any]],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    schedule_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+        else:
+            rows = await self.catalog(ctx.deps)
+        if rows is None:
+            raise RuntimeError("Saved skill preparation did not settle.")
         return CombinedCapability([SavedSkill(row) for row in rows]) if rows else self
 
 
@@ -160,6 +177,8 @@ async def reconcile_schedule(runtime: Any, automation_id: str, *, attempts: int 
         revision, deleted = row.revision, row.state == "deleted"
         paused = row.paused
         interval = row.interval_minutes
+    if getattr(runtime, "product_identity", None) is not None and not deleted and not paused:
+        raise HTTPException(409, "Use canonical product automation migration before enabling scheduled work.")
     client = await runtime.connect()
     handle = client.get_schedule_handle(schedule_id(automation_id))
     if deleted:

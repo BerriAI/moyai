@@ -1,14 +1,10 @@
 """Authenticated event delivery into a bounded, persistent automation inbox."""
 from .private_sinks import deny_export, private_run
 import asyncio
-import base64
-import binascii
 import hashlib
-import hmac
 import json
 import re
 import secrets
-import time
 from datetime import datetime, timedelta, timezone
 from contextlib import nullcontext
 
@@ -18,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .db import now
 
 from .automation_sources import EVENT_CHOICES, EventTrigger, IDENTIFIER, normalize, example
+from .automation_webhook_auth import fresh, verify_webhook
 
 
 class WebhookSetup(BaseModel):
@@ -258,72 +255,14 @@ class AutomationEvents:
             if len(body) > 262144:
                 raise HTTPException(413, 'Webhook payload is too large.')
         secret = self.security.decrypt(keys[0]['encrypted']).encode()
-        headers = request.headers
-        digest = hmac.new(secret, body, hashlib.sha256).hexdigest()
-        def equals(expected, actual):
-            return hmac.compare_digest(expected.encode(), actual.encode())
-        signed_id = ''
-        if provider == 'github':
-            valid = equals('sha256=' + digest, headers.get('x-hub-signature-256', ''))
-        elif provider == 'linear':
-            valid = equals(digest, headers.get('linear-signature', ''))
-        elif provider == 'jira':
-            valid = equals('sha256=' + digest, headers.get('x-hub-signature', ''))
-        elif provider == 'pagerduty':
-            valid = any(equals('v1=' + digest, sig.strip()) for sig in headers.get('x-pagerduty-signature', '').split(','))
-        elif provider == 'gitlab':
-            if secret.startswith(b'whsec_'):
-                timestamp, signed_id = headers.get('webhook-timestamp', ''), headers.get('webhook-id', '')
-                self.fresh(timestamp)
-                try:
-                    key = base64.b64decode(secret[6:], validate=True)
-                except (ValueError, binascii.Error):
-                    raise HTTPException(401, 'Invalid signing configuration.') from None
-                expected = 'v1,' + base64.b64encode(hmac.new(key, signed_id.encode() + b'.' + timestamp.encode() + b'.' + body, hashlib.sha256).digest()).decode()
-                valid = any(equals(expected, sig) for sig in headers.get('webhook-signature', '').split())
-                if not re.fullmatch(IDENTIFIER, signed_id):
-                    valid = False
-            else:
-                valid = hmac.compare_digest(secret, headers.get('x-gitlab-token', '').encode())
-        elif headers.get('x-moyai-signature'):
-            timestamp, signed_id = headers.get('x-moyai-timestamp', ''), headers.get('x-moyai-event-id', '')
-            self.fresh(timestamp)
-            expected = 'sha256=' + hmac.new(secret, timestamp.encode() + b'.' + signed_id.encode() + b'.' + body, hashlib.sha256).hexdigest()
-            valid = equals(expected, headers.get('x-moyai-signature', '')) and bool(re.fullmatch(IDENTIFIER, signed_id))
-        else:
-            supplied = headers.get('x-webhook-secret', '') or headers.get('authorization', '').removeprefix('Bearer ')
-            valid = hmac.compare_digest(secret, supplied.encode())
-            signed_id = headers.get('x-moyai-event-id', '')  # Authenticated sender controls this ID.
-            if signed_id and not re.fullmatch(IDENTIFIER, signed_id):
-                raise HTTPException(400, 'Invalid event identifier.')
-        if not valid:
-            raise HTTPException(401, 'Invalid webhook signature or secret.')
-        try:
-            payload = json.loads(body)
-        except (ValueError, UnicodeDecodeError):
-            raise HTTPException(400, 'Invalid webhook JSON.') from None
-        if not isinstance(payload, dict):
-            raise HTTPException(400, 'Webhook must be a JSON object.')
-        if provider == 'linear':
-            self.fresh(payload.get('webhookTimestamp'), milliseconds=True)
-        # Body-only signatures do not authenticate delivery headers. Hash the
-        # signed event itself so changing an unsigned ID cannot bypass dedup.
-        stable = {k:v for k,v in payload.items() if provider != 'linear' or k != 'webhookTimestamp'}
-        delivery = provider + ':' + (signed_id or hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest())
+        delivery, payload, event_header = verify_webhook(provider, secret, body, request.headers)
         if provider == 'github':
             await self.automations.connectors.github.ensure_connection()
             row = self.automations.row(automation_id)
-        context = self.match(row, provider, payload, headers.get('x-github-event', ''))
+        context = self.match(row, provider, payload, event_header)
         return await self.accept(row, delivery, context)
 
-    @staticmethod
-    def fresh(value, *, milliseconds=False):
-        try:
-            valid = abs(time.time() - int(value) / (1000 if milliseconds else 1)) <= (60 if milliseconds else 300)
-        except (ValueError, TypeError, OverflowError):
-            valid = False
-        if not valid:
-            raise HTTPException(401, 'Webhook timestamp has expired.')
+    fresh = staticmethod(fresh)
 
     def configure(self, automation_id, body, owner_id, *, connection=None):
         """One transactional owner for web and broker receiver configuration."""

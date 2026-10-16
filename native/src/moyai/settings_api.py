@@ -7,17 +7,13 @@ dependency must enforce the native session/CSRF policy, as in api.create_app.
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import json
-import math
 import re
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
@@ -27,8 +23,10 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from temporalio.service import RPCError
 
+from .analytics_service import report as analytics_report
 from .contracts import PreparedTurn, RunScope
 from .models import Connection, Turn, User, now
+from .pull_requests import PullRequestService
 from .security import password_hash
 from .settings_models import SettingAutomation, SettingAutomationRun, SettingSecret, SettingSkill
 from .settings_runtime import automation_readiness, reconcile_schedule
@@ -264,130 +262,15 @@ async def change_user(runtime: Any, caller: User, identity: str, changes: UserEd
         return user_view(row)
 
 
-def timestamp(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        result = datetime.fromisoformat(value)
-        return result.replace(tzinfo=UTC) if result.tzinfo is None else result.astimezone(UTC)
-    except ValueError:
-        return None
-
-
-def token_count(usage: dict[str, Any], key: str) -> int:
-    value = usage.get(key, 0)
-    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10**15 else 0
-
-
-def percentile(values: list[float], fraction: float) -> float | None:
-    return sorted(values)[max(0, math.ceil(len(values) * fraction) - 1)] if values else None
-
-
-def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    latency = [row["latency_ms"] for row in rows if row["latency_ms"] is not None]
-    return {
-        "turns": len(rows), "completed": sum(row["status"] == "completed" for row in rows),
-        "failed": sum(row["status"] == "failed" for row in rows),
-        "input_tokens": sum(row["input_tokens"] for row in rows),
-        "output_tokens": sum(row["output_tokens"] for row in rows),
-        "total_tokens": sum(row["total_tokens"] for row in rows),
-        "requests": sum(row["requests"] for row in rows),
-        "cost_usd": None, "priced_turns": 0, "unpriced_turns": len(rows),
-        "cost_coverage": 0.0 if rows else None,
-        "latency_samples": len(latency),
-        "mean_latency_ms": sum(latency) / len(latency) if latency else None,
-        "p50_latency_ms": percentile(latency, 0.50), "p95_latency_ms": percentile(latency, 0.95),
-    }
-
-
 async def analytics(
     runtime: Any, user: User, start: str | None, end: str | None, model: str | None,
     status: str | None, user_id: str | None, limit: int, offset: int, format: str,
+    *, preset: str = "7d", export: str = "turns", service: PullRequestService | None = None,
 ) -> Any:
-    admin(user)
-    end_at = timestamp(end) if end else datetime.now(UTC)
-    start_at = timestamp(start) if start else (end_at - timedelta(days=30) if end_at else None)
-    if not start_at or not end_at or start_at >= end_at or end_at - start_at > timedelta(days=366):
-        raise HTTPException(422, "Choose a valid start/end range of at most 366 days (end is exclusive).")
-    query = select(
-        Turn.id, Turn.actor_id, Turn.session_id, Turn.model, Turn.status, Turn.usage,
-        Turn.created_at, Turn.accepted_at, Turn.finished_at,
-    ).where(Turn.created_at >= start_at.isoformat(), Turn.created_at < end_at.isoformat())
-    if model:
-        query = query.where(Turn.model == model)
-    if status:
-        query = query.where(Turn.status == status)
-    if user_id:
-        query = query.where(Turn.actor_id == user_id)
-    async with runtime.database.sessions() as db:
-        records = (await db.execute(query.order_by(Turn.created_at.desc(), Turn.id).limit(10001))).all()
-        users = [user_view(row) for row in await db.scalars(select(User).order_by(User.username))]
-    if len(records) > 10000:
-        raise HTTPException(422, "More than 10,000 turns match. Narrow the date range or filters.")
-    rows = []
-    for row in records:
-        try:
-            usage = json.loads(row.usage)
-        except (ValueError, TypeError):
-            usage = {}
-        usage = usage if isinstance(usage, dict) else {}
-        created, accepted, finished = timestamp(row.created_at), timestamp(row.accepted_at), timestamp(row.finished_at)
-        def elapsed(first: datetime | None, last: datetime | None) -> float | None:
-            return (last - first).total_seconds() * 1000 if first and last and last >= first else None
-        inputs, outputs = token_count(usage, "input_tokens"), token_count(usage, "output_tokens")
-        rows.append({
-            "id": row.id, "user_id": row.actor_id, "model": row.model, "status": row.status,
-            "created_at": row.created_at, "accepted_at": row.accepted_at, "finished_at": row.finished_at,
-            "input_tokens": inputs, "output_tokens": outputs, "total_tokens": inputs + outputs,
-            "requests": token_count(usage, "requests"), "tool_calls": token_count(usage, "tool_calls"),
-            "cache_read_tokens": token_count(usage, "cache_read_tokens"),
-            "cache_write_tokens": token_count(usage, "cache_write_tokens"),
-            "queue_ms": elapsed(created, accepted), "latency_ms": elapsed(accepted, finished),
-            "total_ms": elapsed(created, finished), "cost_usd": None, "pricing_status": "unpriced",
-        })
-    if format == "csv":
-        stream = io.StringIO(newline="")
-        fields = list(rows[0]) if rows else [
-            "id", "user_id", "model", "status", "created_at", "input_tokens", "output_tokens",
-            "total_tokens", "latency_ms", "cost_usd", "pricing_status",
-        ]
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        for row in rows:
-            # Spreadsheet formula injection is possible even in model names.
-            writer.writerow({
-                key: "'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
-                else value for key, value in row.items()
-            })
-        return Response(
-            stream.getvalue(), media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="moyai-analytics.csv"'},
-        )
-    daily: dict[str, list[dict[str, Any]]] = {}
-    per_user: dict[str, list[dict[str, Any]]] = {}
-    user_sessions: dict[str, set[str]] = {}
-    daily_sessions: dict[str, set[str]] = {}
-    sessions = set()
-    for record in records:
-        sessions.add(record.session_id)
-        user_sessions.setdefault(record.actor_id, set()).add(record.session_id)
-        daily_sessions.setdefault(record.created_at[:10], set()).add(record.session_id)
-    for row in rows:
-        daily.setdefault(row["created_at"][:10], []).append(row)
-        per_user.setdefault(row["user_id"], []).append(row)
-    return {
-        "rows": rows[offset:offset + limit], "summary": {**summarize(rows), "sessions": len(sessions)},
-        "series": [{"date": day, **summarize(items), "sessions": len(daily_sessions[day])}
-                   for day, items in sorted(daily.items())],
-        "by_user": [{
-            "user_id": identity, **summarize(items), "sessions": len(user_sessions[identity]),
-        } for identity, items in sorted(per_user.items(), key=lambda item: (-len(item[1]), item[0]))],
-        "models": sorted({row["model"] for row in rows}), "users": users,
-        "total": len(rows), "limit": limit, "offset": offset,
-        "start": start_at.isoformat(), "end": end_at.isoformat(),
-        "cost_note": "Native turn records do not contain authoritative billed cost. All costs are unpriced.",
-        "latency_note": "Latency is accepted-to-finished wall time, including tools and waits; it is not model TTFT.",
-    }
+    return await analytics_report(
+        runtime, user, start, end, model, status, user_id, limit, offset, format,
+        preset=preset, export=export, service=service,
+    )
 
 
 class SettingsRoute(APIRoute):
@@ -408,6 +291,7 @@ class SettingsRoute(APIRoute):
 
 def routes(runtime: Any, actor: Any) -> APIRouter:
     original_actor = actor
+    analytics_pr_service = PullRequestService(runtime)
 
     async def checked_actor(request: Request, user: User = Depends(original_actor)):
         request.state.settings_actor = user
@@ -749,10 +633,15 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         start: str | None = None, end: str | None = None,
         model: str | None = Query(default=None, max_length=200),
         status: str | None = Query(default=None, max_length=30),
-        user_id: str | None = Query(default=None, max_length=36),
+        user_id: str | None = Query(default=None, max_length=512),
         limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0),
-        format: Literal["json", "csv"] = "json", user: User = Depends(actor),
+        format: Literal["json", "csv"] = "json",
+        preset: Literal["24h", "7d", "30d", "custom"] = "7d",
+        export: Literal["turns", "users", "daily", "models"] = "turns", user: User = Depends(actor),
     ):
-        return await analytics(runtime, user, start, end, model, status, user_id, limit, offset, format)
+        return await analytics(
+            runtime, user, start, end, model, status, user_id, limit, offset, format,
+            preset=preset, export=export, service=analytics_pr_service,
+        )
 
     return router

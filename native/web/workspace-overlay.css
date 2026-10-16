@@ -1,0 +1,92 @@
+/* Absolute grid placement follows column 1 even while the panel ratio changes.
+   It neither participates in track sizing nor reaches across the separator. */
+.workspace-overlay-host {
+  position: absolute;
+  grid-column: 1 / 2;
+  grid-row: 2 / 3;
+  inset: 0;
+  z-index: 40;
+  min-inline-size: 0;
+  min-block-size: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.workspace-overlay-content {
+  --workspace-overlay-edge: 8px;
+  --workspace-overlay-offscreen: calc(100% + var(--workspace-overlay-edge));
+  position: absolute;
+  inset-block-start: var(--workspace-overlay-edge);
+  inset-inline-end: var(--workspace-overlay-edge);
+  box-sizing: border-box;
+  inline-size: min(360px, calc(100% - 2 * var(--workspace-overlay-edge)));
+  max-block-size: min(720px, calc(100% - 2 * var(--workspace-overlay-edge)));
+  min-inline-size: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ui-control-border) transparent;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-subtle);
+  color: var(--ui-foreground);
+  box-shadow: 0 12px 36px rgb(0 0 0 / 28%);
+  pointer-events: auto;
+}
+
+.workspace-overlay-content:dir(rtl) {
+  --workspace-overlay-offscreen: calc(-100% - var(--workspace-overlay-edge));
+}
+
+.workspace-overlay-content:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: -2px;
+}
+
+.workspace-overlay-content[data-state="open"] {
+  animation: workspace-overlay-enter 180ms cubic-bezier(.16, 1, .3, 1) both;
+}
+
+.workspace-overlay-content[data-state="closed"] {
+  animation: workspace-overlay-leave 140ms ease-in both;
+  pointer-events: none;
+}
+
+.workspace-overlay-label {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* One scroll owner, sized by chat rather than the old Popover viewport limit. */
+.workspace-overlay-content > .workspace-overview.workspace-picker {
+  max-height: none;
+  overflow: visible;
+}
+
+/* Do not paint even an exit frame over a panel that has replaced main chat. */
+.workspace.panel-expanded > .workspace-overlay-host { visibility: hidden; }
+@media (max-width: 1000px) {
+  .workspace.with-panel > .workspace-overlay-host { visibility: hidden; }
+}
+
+@keyframes workspace-overlay-enter {
+  from { transform: translateX(var(--workspace-overlay-offscreen)); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes workspace-overlay-leave {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(var(--workspace-overlay-offscreen)); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-overlay-content[data-state] { animation: none; }
+}

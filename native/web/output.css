@@ -1,0 +1,64 @@
+.output-view, .files-view { min-width: 0; width: 100%; color: var(--ui-foreground); background: var(--ui-canvas); overflow-wrap: anywhere; }
+.output-view .output-header { padding: 16px; display: grid; gap: 12px; border-bottom: 1px solid var(--ui-border); }
+.output-view .output-title { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+.output-view .output-title > svg { flex: none; margin-top: 3px; color: var(--ui-muted); }
+.output-view h1 { font-size: 20px; line-height: 1.3; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.output-view h1:focus { outline: none; }
+.output-view .output-meta, .output-view .output-actions { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.output-view .output-meta { font-size: 13px; color: var(--ui-muted); }
+.output-view .output-body { padding: 16px; display: grid; gap: 16px; min-width: 0; }
+.output-view .output-muted, .files-view .output-muted { color: var(--ui-muted); font-size: 13px; }
+.output-view .output-notice, .files-view .output-notice, .files-source-dialog .output-notice { display: block; padding: 12px; background: var(--ui-subtle); border: 1px solid var(--ui-border); color: var(--ui-muted); font-size: 13px; line-height: 1.55; }
+.output-view .output-notice [data-slot="alert-description"], .files-view .output-notice [data-slot="alert-description"], .files-source-dialog .output-notice [data-slot="alert-description"] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: inherit; color: inherit; }
+.output-view .output-error, .files-view .output-error, .files-source-dialog .output-error { color: var(--ui-danger); background: var(--ui-danger-bg); border-color: var(--ui-danger-border); }
+.output-view .output-source { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.65 "Geist Mono", monospace; tab-size: 4; }
+.output-view .output-source code { white-space: inherit; overflow-wrap: inherit; font: inherit; }
+.output-view .output-switch { display: flex; gap: 4px; }
+.output-view .output-markdown { min-width: 0; max-width: 75ch; line-height: 1.65; overflow-wrap: anywhere; }
+.output-view .output-markdown > * + * { margin-top: 12px; }
+.output-view .output-markdown h1 { font-size: 22px; }
+.output-view .output-markdown h2 { font-size: 18px; }
+.output-view .output-markdown h3 { font-size: 16px; }
+.output-view .output-markdown ul { list-style: disc; padding-inline-start: 24px; }
+.output-view .output-markdown ol { list-style: decimal; padding-inline-start: 24px; }
+.output-view .output-markdown blockquote { border-left: 2px solid var(--ui-control-border); padding-inline-start: 12px; color: var(--ui-muted); }
+.output-view .output-markdown pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border-radius: 8px; background: var(--ui-subtle); font-size: 12px; }
+.output-view .output-markdown a { color: var(--ui-primary); text-decoration: underline; text-underline-offset: 3px; }
+.output-view .output-table { max-width: 100%; overflow-x: auto; }
+.output-view .output-table table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.output-view .output-table th, .output-view .output-table td { border: 1px solid var(--ui-border); padding: 8px; text-align: left; }
+.output-view .output-image, .output-view .output-video { display: block; width: 100%; max-width: 100%; max-height: 65dvh; object-fit: contain; border-radius: 8px; background: var(--ui-subtle); }
+.output-view .output-audio { display: block; width: 100%; min-width: 0; }
+.output-view .output-unavailable { display: grid; justify-items: start; gap: 12px; color: var(--ui-muted); padding-block: 12px; }
+.output-view .output-card { padding: 16px; background: var(--ui-subtle); box-shadow: none; }
+.output-view .output-card [data-slot="card-content"] { padding: 0; display: grid; gap: 16px; justify-items: start; min-width: 0; }
+.output-view .output-card h2 { font-size: 16px; }
+.output-view .output-url { font: 12px/1.6 "Geist Mono", monospace; overflow-wrap: anywhere; color: var(--ui-muted); }
+.output-view .output-source:focus-visible, .output-view .output-table:focus-visible, .output-view a:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 3px; }
+.files-view { padding: 16px; display: grid; gap: 16px; }
+.files-view .files-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.files-view h2 { font-size: 16px; line-height: 1.4; font-weight: 600; }
+.files-view .files-search { position: relative; min-width: 0; }
+.files-view .files-search > svg { position: absolute; inset-inline-start: 12px; top: 12px; color: var(--ui-muted); pointer-events: none; }
+.files-view .files-search input { width: 100%; padding-inline-start: 36px; }
+.files-view .files-list { display: grid; gap: 4px; min-width: 0; }
+.files-view .files-group { display: grid; gap: 8px; min-width: 0; }
+.files-view .files-group-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.files-view .files-group-heading h3 { font-size: 14px; font-weight: 600; }
+.files-view .files-group-heading > span { color: var(--ui-muted); font-size: 12px; }
+.files-view .files-group-heading > button { margin-inline-start: auto; }
+.files-view .files-resource-row { display: flex; align-items: center; min-width: 0; gap: 4px; }
+.files-view .files-resource-row > .files-item { flex: 1; min-width: 0; }
+.files-view .files-item { height: auto; min-height: 52px; padding: 10px 8px; gap: 10px; justify-content: flex-start; align-items: flex-start; white-space: normal; text-align: start; min-width: 0; }
+.files-view .files-item > svg { flex: none; margin-top: 2px; color: var(--ui-muted); }
+.files-view .files-item > span { min-width: 0; flex: 1; }
+.files-view .files-item strong { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.files-view .files-item small { font-size: 12px; margin-top: 4px; }
+.files-view .files-empty { display: grid; gap: 8px; justify-items: start; }
+.files-source-dialog .files-source-form { display: grid; gap: 16px; margin-top: 20px; }
+.files-source-dialog .files-source-form label { display: grid; gap: 8px; }
+.files-source-dialog .files-source-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+@media (max-width: 600px) {
+  .output-view [data-slot="button"], .files-view [data-slot="button"] { min-height: 44px; }
+  .files-view input { font-size: 16px; }
+}

@@ -313,6 +313,8 @@ async def test_analytics_uses_actual_rows_and_never_private_content_or_fabricate
     first = await runtime.database.submit(other, session.id, NewMessage(
         prompt="Never disclose this private prompt", request_key="analytics-first",
     ))
+    await runtime.database.claim_next()
+    await runtime.database.prepare(first.id)
     second = await runtime.database.submit(other, session.id, NewMessage(prompt="Secret second", request_key="analytics-second"))
     start = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
     async with runtime.database.sessions.begin() as db:

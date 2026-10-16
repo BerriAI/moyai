@@ -45,8 +45,13 @@ SHARED_KEYS = ('MOYAI_DATABASE_URL', 'MOYAI_DATABASE_SCHEMA', 'SESSION_SECRET', 
                'OBJECT_STORAGE_BUCKET', 'OBJECT_STORAGE_ENDPOINT', 'OBJECT_STORAGE_PREFIX',
                'MOYAI_PUBLIC_URL', 'TEMPORAL_ADDRESS', 'TEMPORAL_NAMESPACE', 'TEMPORAL_TASK_QUEUE',
                'MAX_CONCURRENT_RUNS', 'MAX_PENDING_RUNS', 'MAX_CONCURRENT_MODEL_REQUESTS',
-               'SANDBOX_PREPARED_POOL_SIZE', 'SANDBOX_PREPARED_IDLE_SECONDS')
-SHARED_DEFAULTS = {'SANDBOX_PREPARED_POOL_SIZE': '0', 'SANDBOX_PREPARED_IDLE_SECONDS': '300'}
+               'SANDBOX_PREPARED_POOL_SIZE', 'SANDBOX_PREPARED_IDLE_SECONDS',
+               'MOYAI_CORE', 'MOYAI_PRODUCT_MODE', 'MOYAI_NATIVE_SCHEMA', 'MOYAI_NATIVE_SCHEMA_MODE',
+               'MOYAI_NATIVE_ENCRYPTION_KEY', 'MOYAI_NATIVE_KEY_FORMAT', 'MOYAI_NATIVE_OBJECT_PREFIX',
+               'MOYAI_NATIVE_OBJECT_FORMAT', 'MOYAI_NATIVE_TASK_QUEUE', 'MOYAI_PRODUCT_LOCAL_REHEARSAL')
+SHARED_DEFAULTS = {'SANDBOX_PREPARED_POOL_SIZE': '0', 'SANDBOX_PREPARED_IDLE_SECONDS': '300',
+                   'MOYAI_CORE': 'legacy', 'MOYAI_NATIVE_SCHEMA_MODE': 'verify',
+                   'MOYAI_PRODUCT_LOCAL_REHEARSAL': 'false'}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -181,6 +186,20 @@ class GitHub:
                 return False
             if latest['conclusion'] != 'success':
                 raise ReleaseError('Required rolling runtime or release-controller CI failed for the selected commit.')
+        return True
+
+    def native_ready(self, sha: str) -> bool:
+        """First adoption needs the actual native workflow on this exact SHA."""
+        workflow = 'pydantic-native.yml'
+        runs = self.api.call('GET', self.prefix + '/actions/workflows/' + workflow + '/runs?' +
+            urllib.parse.urlencode({'head_sha': sha, 'event': 'push', 'per_page': 100}))['workflow_runs']
+        matching = [run for run in runs if run.get('head_sha') == sha and run.get('head_branch') == 'main'
+                    and run.get('event') == 'push' and run.get('path') == '.github/workflows/' + workflow]
+        latest = max(matching, key=lambda run: run['id'], default=None)
+        if latest is None or latest['status'] != 'completed':
+            return False
+        if latest.get('conclusion') != 'success':
+            raise ReleaseError('Native runtime CI did not pass on the selected main commit; no changes made.')
         return True
 
 
@@ -324,6 +343,9 @@ class Release:
         if len(live) != 1:
             raise ReleaseError('Expected exactly one live deployment per service.')
         env = self.environment(service_id)
+        if (env.get('MOYAI_CORE', 'legacy') not in {'legacy', 'pydantic'}
+                or (env.get('MOYAI_CORE') == 'pydantic' and not getattr(self, 'native_release', False))):
+            raise ReleaseError('Native services require the maintenance release with native receipt and drain checks.')
         sha = live[0]['commit']['id']
         if (not re.fullmatch('[0-9a-f]{40}', sha) or env.get('MOYAI_BUILD_SHA') != sha
                 or env.get('MOYAI_RUNTIME_ROLE') != role or env.get('MAINTENANCE_DRAIN') != 'false'
@@ -504,9 +526,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, default=Path('release-receipt.json'))
     parser.add_argument('--release-type', choices=['coordinated', 'api', 'rolling', 'maintenance'], default='coordinated')
+    parser.add_argument('--core', choices=['preserve', 'legacy', 'pydantic'], default='preserve',
+                        help='Explicit candidate core. A core switch requires maintenance; preserve keeps the running selection.')
     parser.add_argument('--preflight', action='store_true', default=os.environ.get('PREFLIGHT_ONLY') == 'true',
                         help='Check CI, credentials and the current topology without changing production.')
     args = parser.parse_args()
+    if args.core != 'preserve' and args.release_type != 'maintenance':
+        raise ReleaseError('Explicit core selection requires a maintenance release; no changes made.')
     if os.environ.get('GITHUB_REPOSITORY') != REPOSITORY or os.environ.get('GITHUB_REF') != 'refs/heads/main':
         raise ReleaseError('Production deployment may only run from main in BerriAI/moyai.')
     if args.release_type == 'coordinated' and os.environ.get('MOYAI_API_SERVICE_ID'):
@@ -529,10 +555,16 @@ def main():
             from scripts.release.maintenance_deploy import MaintenanceRelease
             from scripts.release.maintenance_probe import SSHMaintenanceProbe
             from scripts.release.maintenance_migration import SSHMaintenanceMigration
+            from scripts.release.native_migration import SSHNativeMigration
+            from scripts.release.native_control import SSHNativeControl
+            from scripts.release.automation_probe import SSHAutomationProbe
             from scripts.release.online_migration import SSHMigration
             release = MaintenanceRelease(render, github, SSHMaintenanceProbe(key_path, connections=connections),
                                          args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
                                          migrate=SSHMigration(key_path), offline_migrate=SSHMaintenanceMigration(key_path),
+                                         target_core=args.core, native_migrate=SSHNativeMigration(key_path),
+                                         native_control=SSHNativeControl(key_path, connections=connections),
+                                         automation_probe=SSHAutomationProbe(key_path, connections=connections),
                                          preflight_only=args.preflight)
         elif args.release_type == 'rolling':
             from scripts.release.rolling_deploy import RollingRelease

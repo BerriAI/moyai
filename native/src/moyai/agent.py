@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import replace
 from datetime import timedelta
@@ -9,8 +10,9 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+import anyio
 import modal
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from opentelemetry.trace import get_tracer
 from pydantic import TypeAdapter
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
@@ -37,14 +39,19 @@ from pydantic_ai_harness import (
     SummarizingCompaction,
 )
 from pydantic_ai_harness.conversation_search import SnapshotHistorySource
+from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
 from .artifacts import artifact_capability
+from .browser import browser_capability
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
 from .effects import EffectReceipts
+from .inference_usage import InferenceUsageTransport
+from .input_attachments import attachment_capability
+from .live_events import root_event_stream
 from .settings import Settings
 from .settings_runtime import settings_capability
 from .storage import ObjectStore
@@ -124,6 +131,24 @@ class DurableConversationSearch(ConversationSearch[RunScope]):
 
     def get_toolset(self) -> AbstractToolset[RunScope]:
         return self.registered_toolset
+
+
+class StartupSkills(Skills[RunScope]):
+    """Let bounded native workspace reads settle after a sibling startup fails."""
+
+    async def for_run(self, ctx: RunContext[RunScope]) -> AbstractCapability[RunScope]:
+        if not workflow.in_workflow():
+            return await super().for_run(ctx)
+        # AnyIO level cancellation can repeatedly cancel Temporal's activity
+        # handle before its cancellation command can leave the workflow task.
+        # Shield only catalog preparation, never model/tool execution. Native
+        # workspace activities retain their current authority checks and bounds.
+        prepared: AbstractCapability[RunScope] | None = None
+        with anyio.CancelScope(shield=True):
+            prepared = await super().for_run(ctx)
+        if prepared is None:
+            raise RuntimeError("Native skill preparation did not settle.")
+        return prepared
 
 
 class WorkflowPlanning(Planning[RunScope]):
@@ -225,6 +250,10 @@ def inference_models(settings: Settings) -> dict[str, Model]:
     client = AsyncOpenAI(
         base_url=settings.gateway_url, api_key=settings.gateway_key.get_secret_value() or "not-configured",
         max_retries=0, timeout=float(settings.model_timeout_seconds),
+        http_client=DefaultAsyncHttpxClient(
+            transport=InferenceUsageTransport(require_admission=settings.product_mode == "existing"),
+            headers={"Accept-Encoding": "identity"}, follow_redirects=False,
+        ),
     )
     provider = LiteLLMProvider(openai_client=client)
     return {name: OpenAIResponsesModel(name, provider=provider) for name in settings.models}
@@ -235,17 +264,20 @@ def make_agent(
     *, models: dict[str, Model] | None = None,
     workspace: AbstractCapability[RunScope] | None = None,
     skills_directory: str = "/opt/moyai/skills",
+    product_capabilities: Sequence[AbstractCapability[RunScope]] = (),
+    memory: AbstractCapability[RunScope] | None = None,
 ) -> tuple[Agent[RunScope, str | DeferredToolRequests], TemporalDurability[RunScope]]:
     models = models or inference_models(settings)
     if workspace is None:
         image = (
             modal.Image.debian_slim(python_version="3.13")
             .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm",
-                         "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2",
+                         "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
                          "x11-xserver-utils", "fonts-dejavu-core")
-            .pip_install("uv", "pytest", "pillow==12.3.0")
+            .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
             .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)
             .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
+            .add_local_file(PACKAGE_ROOT / "browser_guest.py", "/opt/moyai/browser_guest.py", copy=True)
         )
         workspace = ModalSandbox(
             image=image, app_name=settings.modal_app, working_dir="/workspace",
@@ -256,6 +288,7 @@ def make_agent(
         run_context_type=HarnessActivityContext,
         activity_config={
             "start_to_close_timeout": timedelta(minutes=10),
+            "schedule_to_close_timeout": timedelta(minutes=10),
             "heartbeat_timeout": timedelta(seconds=30),
             "retry_policy": RetryPolicy(maximum_attempts=1),
         },
@@ -265,7 +298,7 @@ def make_agent(
             "heartbeat_timeout": timedelta(seconds=30),
             "retry_policy": RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
         },
-        event_stream_topic="moyai-events",
+        event_stream_handler=root_event_stream,
     )
     agent = Agent(
         models[settings.default_model],
@@ -278,8 +311,11 @@ def make_agent(
             workspace,
             Authority(database),
             EffectReceipts(database),
+            *product_capabilities,
             connection_tools(database.security),
             artifact_capability(database, objects),
+            attachment_capability(database, objects),
+            browser_capability(database),
             Coder(),
             WorkflowPlanning(
                 store_resolver=lambda ctx: stores.plan(
@@ -288,9 +324,11 @@ def make_agent(
                 ),
                 enable_subtasks=True,
             ),
-            Skills(skills_directory),
+            StartupSkills(skills_directory),
             settings_capability(database),
-            Memory(store=stores.memory, namespace=lambda ctx: ctx.deps.memory_namespace, injection_errors="raise"),
+            memory or Memory(
+                store=stores.memory, namespace=lambda ctx: ctx.deps.memory_namespace, injection_errors="raise",
+            ),
             StepPersistence(store=stores.steps, capture_frontier=True),
             DurableConversationSearch(SnapshotHistorySource(stores.steps), scope="conversation"),
             SummarizingCompaction(max_fraction=0.75, keep_messages=20, receipts=True),

@@ -12,6 +12,17 @@ import sys
 INVENTORIES = ('owners', 'coordinators', 'brokers', 'broker_leaders')
 COUNTS = ('unsafe_sessions', 'executing_sessions', 'legacy_active_sessions',
           'model_requests', 'live_leases')
+NATIVE_COUNTS = ('native_runs', 'native_effects', 'native_requests')
+
+
+def drained(counts, expected):
+    keys = COUNTS + (NATIVE_COUNTS if expected.get('native_required') else ())
+    if expected.get('core_switch'):
+        keys += ('legacy_core_runs', 'legacy_automations', 'legacy_events')
+        if expected.get('native_required'):
+            keys += ('native_queued', 'native_parked', 'native_automations', 'native_events',
+                     'native_automation_history')
+    return all(type(counts.get(key)) is int and counts[key] == 0 for key in keys)
 
 
 def require(condition):
@@ -25,7 +36,7 @@ def check_snapshot(state, expected, revision):
     require(state.get('schema') == revision and type(state.get('schema')) is int)
     require(all(state.get(key) == expected[key] for key in ('policy', 'contracts')))
     require(all(state.get(key) == [] for key in INVENTORIES))
-    require(all(type(state.get(key)) is int and state[key] == 0 for key in COUNTS))
+    require(drained(state, expected))
     require(state.get('source_schema') == expected['source_schema'])
 
 
@@ -49,7 +60,7 @@ def check_locked(connection, schema, expected, *, drain_counts):
             AND objid=%s::regnamespace::oid AND objsubid=2 AND granted''', (schema,)).fetchall()
         require(locks == [(726940, connection.info.backend_pid, 'ExclusiveLock')])
         counts = drain_counts(connection)
-        require(all(type(counts.get(key)) is int and counts[key] == 0 for key in COUNTS))
+        require(drained(counts, expected))
 
 
 def execute(options, *, probe_fn):

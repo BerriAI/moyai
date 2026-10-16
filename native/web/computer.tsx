@@ -1,138 +1,276 @@
 import React, { useCallback, useEffect, useRef, useState } from "react"
-import { Camera, Globe, Maximize2, Monitor, MousePointer2, Terminal } from "lucide-react"
+import RFB from "@novnc/novnc"
+import { Monitor, MousePointer2, RefreshCw, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { api } from "./api"
-import { DesktopInputQueue } from "./desktop-input"
+import { api, csrfToken } from "./api"
+import { DesktopLifetime, HeldKey, pasteRemote, pauseRemote, releaseRemoteKeys } from "./desktop-session"
 
-type DesktopState = { available: boolean; has_workspace: boolean; controlled: boolean; busy: boolean; controller?: string | null; frame?: string; width?: number; height?: number }
+type DesktopState = { available: boolean; has_workspace: boolean; controlled: boolean; busy: boolean; controller?: string | null }
+const CONTROL = 0xffe3
+type PanelProps = { id: string; hasWorkspace: boolean; active?: boolean }
 
-export function ComputerPanel({ id, shared, hasWorkspace, expanded, onExpand }: { id: string; shared: boolean; hasWorkspace: boolean; expanded: boolean; onExpand: () => void }) {
+export function ComputerPanel(props: PanelProps) {
+  // A different conversation gets an independent browser identity and cleanup.
+  return <ComputerSession key={props.id} {...props} />
+}
+
+function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
   const [view, setView] = useState<DesktopState>({ available: false, has_workspace: hasWorkspace, controlled: false, busy: false })
   const [error, setError] = useState("")
   const [working, setWorking] = useState(false)
-  const [halted, setHalted] = useState(false)
-  const [url, setUrl] = useState("")
-  const stage = useRef<HTMLDivElement>(null)
-  const keyboard = useRef<HTMLTextAreaElement>(null)
-  const image = useRef<HTMLImageElement>(null)
-  const queue = useRef<DesktopInputQueue | null>(null)
-  const stopped = useRef(false)
-  const controlling = useRef(false)
-  const ownsControl = useRef(false)
-  ownsControl.current = view.controlled && !halted
-  controlling.current = ownsControl.current && !working
-  if (!queue.current) queue.current = new DesktopInputQueue(
-    body => api(`/sessions/${id}/computer`, "POST", body),
-    () => ownsControl.current && !stopped.current,
-    error => {
-      stopped.current = true; setHalted(true)
-      setError(`${String(error)} Check the screen, then resume control. Input was not retried.`)
-    },
-  )
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    const next = await api<DesktopState>(`/sessions/${id}/computer`, "GET", undefined, signal)
-    if (!signal?.aborted) setView(previous => ({ ...previous, ...next, frame: next.frame ?? previous.frame }))
-  }, [id])
-  useEffect(() => { stopped.current = false; return () => { stopped.current = true } }, [])
-  useEffect(() => {
-    const element = stage.current
-    if (!element) return
-    const wheel = (event: WheelEvent) => {
-      if (!controlling.current || stopped.current) return
-      event.preventDefault()
-      const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? element.clientHeight : 1)
-      queue.current?.wheel(pixels)
+  const [connected, setConnected] = useState(false)
+  const [connecting, setConnecting] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const [visible, setVisible] = useState(!document.hidden)
+  const foreground = active && visible
+  const lifetime = useRef(new DesktopLifetime(foreground))
+  lifetime.current.setVisible(foreground)
+  const host = useRef<HTMLDivElement>(null)
+  const pasteReceiver = useRef<HTMLTextAreaElement>(null)
+  const remote = useRef<RFB | null>(null)
+  const clientId = useRef(crypto.randomUUID())
+  const changingControl = useRef(false)
+  const heldModifiers = useRef(new Set<string>())
+  const heldKeys = useRef(new Map<string, HeldKey>())
+  const pointer = useRef({ buttons: new Set<number>(), x: 0, y: 0 })
+  const mounted = useRef(true)
+  const owned = useRef(false)
+  const commandPending = useRef(false)
+  const pauseInput = useCallback(() => {
+    if (remote.current) {
+      // Release pointer buttons through noVNC's existing event path before
+      // disabling input. Disconnecting mid-drag must not leave a button down.
+      const canvas = host.current?.querySelector("canvas")
+      const { buttons, x: clientX, y: clientY } = pointer.current
+      for (const button of buttons) canvas?.dispatchEvent(new MouseEvent("mouseup", { button, clientX, clientY, bubbles: true }))
+      buttons.clear()
+      pauseRemote(remote.current, heldKeys.current, key => {
+        canvas?.dispatchEvent(new KeyboardEvent("keyup", { ...key, bubbles: true }))
+      })
     }
-    element.addEventListener("wheel", wheel, { passive: false })
-    return () => element.removeEventListener("wheel", wheel)
+    heldModifiers.current.clear()
   }, [])
+  const releaseOwned = useCallback(() => {
+    if (!owned.current) return
+    owned.current = false
+    void fetch(`/api/sessions/${id}/computer`, {
+      method: "POST", keepalive: true,
+      headers: {
+        "Content-Type": "application/json", "X-Moyai-CSRF": csrfToken(), "X-CSRF-Token": csrfToken(),
+      },
+      body: JSON.stringify({ action: "release", client_id: clientId.current }),
+    }).catch(() => {}) // A lost request retains the bounded lease until expiry.
+  }, [id])
+  const refresh = useCallback(async (signal?: AbortSignal) => {
+    if (!lifetime.current.visible || commandPending.current) return
+    const version = lifetime.current.invalidate()
+    const next = await api<DesktopState>(`/sessions/${id}/computer?client_id=${clientId.current}`, "GET", undefined, signal)
+    if (!signal?.aborted && lifetime.current.accepts(version) && !commandPending.current) {
+      owned.current = next.controlled
+      setView(next)
+    }
+  }, [id])
   useEffect(() => {
+    mounted.current = true
+    lifetime.current.alive = true
+    const leavePage = () => { pauseInput(); releaseOwned() }
+    window.addEventListener("pagehide", leavePage)
+    return () => {
+      window.removeEventListener("pagehide", leavePage)
+      mounted.current = false; lifetime.current.dispose(); pauseInput()
+      releaseOwned()
+    }
+  }, [pauseInput, releaseOwned])
+
+  useEffect(() => {
+    const change = () => {
+      if (document.hidden) { lifetime.current.setVisible(false); pauseInput() }
+      setVisible(!document.hidden)
+    }
+    document.addEventListener("visibilitychange", change)
+    return () => document.removeEventListener("visibilitychange", change)
+  }, [pauseInput])
+
+  useEffect(() => {
+    if (!foreground) {
+      pauseInput(); setConnected(false); setConnecting(false)
+    }
+  }, [foreground, pauseInput])
+
+  useEffect(() => {
+    if (!foreground) return
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
-      try { if (!working) await refresh(controller.signal) }
-      catch (error) { if (!controller.signal.aborted) { setError(String(error)); setView(previous => ({ ...previous, frame: undefined, available: false, controlled: false, controller: null })) } }
-      if (!controller.signal.aborted) timer = setTimeout(poll, 1200)
+      try { await refresh(controller.signal) }
+      catch (error) {
+        if (!controller.signal.aborted && !commandPending.current) {
+          pauseInput()
+          setError(String(error))
+          setView(previous => ({ ...previous, available: false, controlled: false }))
+        }
+      }
+      if (!controller.signal.aborted) timer = setTimeout(poll, 5000)
     }
     void poll()
     return () => { controller.abort(); clearTimeout(timer) }
-  }, [refresh, working])
+  }, [refresh, foreground, pauseInput])
+
   useEffect(() => {
-    if (!view.controlled || working) return
+    const element = host.current
+    if (!foreground || !view.available || !element) return
+    let live = true
+    setConnected(false); setConnecting(true); setError("")
+    const query = new URLSearchParams({ client_id: clientId.current, control: String(view.controlled) })
+    const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/sessions/${id}/computer/stream?${query}`)
+    const rfb = new RFB(element, socket, { shared: true })
+    remote.current = rfb
+    rfb.scaleViewport = true
+    rfb.resizeSession = false
+    rfb.background = "transparent"
+    rfb.viewOnly = !view.controlled || changingControl.current || commandPending.current
+    const open = () => {
+      if (!live || !lifetime.current.visible) return
+      setConnected(true); setConnecting(false); setError("")
+      if (view.controlled && !commandPending.current) rfb.focus({ preventScroll: true })
+    }
+    const close = (event: CloseEvent) => {
+      if (!live) return
+      setConnected(false); setConnecting(false)
+      element.replaceChildren()
+      if (!changingControl.current) setError(event.reason || "The computer disconnected. Reconnect to continue.")
+      // Reflect released control without replaying input or automatically
+      // retrying a failed control connection.
+      // Keep ownership known for explicit cleanup, but require Take control
+      // or a fresh metadata check before reconnecting a controller.
+      void refresh().catch(() => {})
+    }
+    rfb.addEventListener("connect", open)
+    socket.addEventListener("close", close)
+    return () => {
+      live = false
+      rfb.removeEventListener("connect", open)
+      socket.removeEventListener("close", close)
+      if (remote.current === rfb) pauseInput()
+      if (socket.readyState !== WebSocket.CLOSED) rfb.disconnect()
+      if (remote.current === rfb) remote.current = null
+      element.replaceChildren()
+    }
+  }, [id, view.available, view.controlled, attempt, refresh, foreground, pauseInput])
+
+  useEffect(() => {
+    if (remote.current) remote.current.viewOnly = !foreground || !view.controlled || working
+  }, [view.controlled, working, foreground])
+
+  useEffect(() => {
+    // Deliberately independent of foreground: switching panels does not hand
+    // browser writes back to the agent. Unmount and explicit release do.
+    if (!view.controlled) return
     const timer = setInterval(() => {
-      void api(`/sessions/${id}/computer`, "POST", { action: "heartbeat" }).catch(error => {
-        stopped.current = true; setHalted(true); setError(String(error))
+      void api(`/sessions/${id}/computer`, "POST", { action: "heartbeat", client_id: clientId.current }).catch(error => {
+        if (!mounted.current) return
+        pauseInput(); owned.current = false
+        setView(previous => ({ ...previous, controlled: false, available: false }))
+        setError(String(error))
       })
     }, 30000)
     return () => clearInterval(timer)
-  }, [id, view.controlled, working])
+  }, [id, view.controlled, pauseInput])
 
-  async function command(action: string, values: object = {}) {
+  async function command(action: "claim" | "start" | "release") {
+    if (commandPending.current || !lifetime.current.visible) return
+    commandPending.current = true
+    changingControl.current = true
+    pauseInput()
     setWorking(true); setError("")
-    if (action === "release") stopped.current = true
+    lifetime.current.invalidate()
     try {
-      await queue.current?.drain()
-      const next = await api<Partial<DesktopState>>(`/sessions/${id}/computer`, "POST", { action, ...values })
-      setView(previous => ({ ...previous, ...next }))
-      if (action === "claim" || action === "start") { stopped.current = false; setHalted(false); keyboard.current?.focus({ preventScroll: true }) }
-      await refresh()
-    } catch (error) { setError(String(error)) } finally { setWorking(false) }
-  }
-
-  function input(action: string, values: Record<string, string | number | boolean>) {
-    if (controlling.current) queue.current?.enqueue(action, values)
-  }
-
-  function key(event: React.KeyboardEvent) {
-    if (!controlling.current || event.nativeEvent.isComposing) return
-    if (event.ctrlKey && event.shiftKey && event.key === "Escape") {
-      event.preventDefault(); void command("release"); return
+      await api(`/sessions/${id}/computer`, "POST", { action, client_id: clientId.current })
+      owned.current = action !== "release"
+      if (!mounted.current) {
+        // Setup may have completed after unmount's first release attempt.
+        owned.current = action !== "release"; releaseOwned()
+        return
+      }
+      setView(previous => ({ ...previous, controlled: owned.current }))
+    } catch (error) {
+      if (mounted.current) setError(String(error))
+    } finally {
+      changingControl.current = false; commandPending.current = false
+      if (mounted.current) {
+        setWorking(false)
+        void refresh().catch(() => {})
+      }
     }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") return
-    if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead", "Process", "Unidentified"].includes(event.key)) return
-    event.preventDefault()
-    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) input("type", { text: event.key })
-    else input("key", { key: event.key, ctrl: event.ctrlKey || event.metaKey, alt: event.altKey, shift: event.shiftKey })
   }
 
-  return <div className={`computer-panel ${expanded ? "expanded" : ""}`}>
-    <div className="computer-toolbar"><span><strong>Computer</strong><small>{working ? "Preparing desktop…" : view.controlled ? "You have control" : view.controller ? `${view.controller} has control` : view.available ? "Live workspace" : hasWorkspace ? "Ready to open" : "Starts with your first task"}</small></span>
-      <div><Button variant="outline" size="sm" disabled={working || (!view.available && !view.controlled) || Boolean(view.controller && !view.controlled)} onClick={() => void command(view.controlled && !halted ? "release" : "claim")}><MousePointer2 size={14} />{halted ? "Resume control" : view.controlled ? "Release control" : "Take control"}</Button>
-        <Button variant="ghost" size="icon-sm" aria-label={expanded ? "Restore panel size" : "Expand computer"} onClick={onExpand}><Maximize2 size={16} /></Button></div>
-    </div>
-    {shared && <p className="computer-hint">Shared computer · Workspace members can see files and browser sign-ins. One person controls it at a time.</p>}
-    {error && <p className="error" role="alert">{error}</p>}
-    <div className={`desktop-stage ${controlling.current ? "controlled" : ""}`} ref={stage} tabIndex={view.controlled ? 0 : -1} role="application" aria-label="Sandbox desktop. Take control to click and type."
-      onFocus={event => { if (event.target === stage.current && controlling.current) keyboard.current?.focus({ preventScroll: true }) }}
-      onKeyDown={key} onCompositionEnd={event => input("type", { text: event.data })}
-      onPaste={event => {
-        if (!controlling.current) return
-        event.preventDefault()
-        const text = event.clipboardData.getData("text/plain")
-        if (text.length > 2000) { setError("Paste up to 2,000 characters at a time into the desktop."); return }
-        input("type", { text })
+  function paste(text: string, target = remote.current) {
+    if (!target || target !== remote.current) return
+    try { pasteRemote(target, text, lifetime.current.visible && view.controlled && connected && !commandPending.current) }
+    catch (error) { setError(String(error)) }
+  }
+
+  function key(event: React.KeyboardEvent, down: boolean) {
+    if (!lifetime.current.visible || !view.controlled || !connected || commandPending.current) return
+    if (down) heldKeys.current.set(event.code, { key: event.key, code: event.code, location: event.location })
+    if (!down) heldKeys.current.delete(event.code)
+    if (event.key === "Control" || event.key === "Meta") {
+      if (down) heldModifiers.current.add(event.code)
+      else heldModifiers.current.delete(event.code)
+      if (!down && !heldModifiers.current.size) remote.current?.sendKey(CONTROL, "ControlLeft", false)
+    }
+    if (down && event.ctrlKey && event.shiftKey && event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); void command("release"); return
+    }
+    // The remote desktop runs Linux. Map Mac Command to Control before noVNC
+    // handles the remaining key, keeping browser shortcuts useful.
+    if (event.key === "Meta") {
+      event.preventDefault(); event.stopPropagation()
+      remote.current?.sendKey(CONTROL, "ControlLeft", down || heldModifiers.current.size > 0)
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+      // Let the browser deliver its ordinary paste event. noVNC must not send
+      // Ctrl+V before that event has supplied the user's clipboard contents.
+      event.stopPropagation()
+      if (down && !event.repeat) pasteReceiver.current?.focus({ preventScroll: true })
+    }
+  }
+
+  const canInput = foreground && view.controlled && connected && !working
+  const occupied = Boolean(view.controller && !view.controlled)
+  return <div className="computer-panel">
+    <div className={`desktop-stage ${canInput ? "controlled" : ""}`} role="application" aria-label="Sandbox desktop"
+      onMouseDownCapture={event => {
+        if (!canInput) return
+        pointer.current.buttons.add(event.button); pointer.current.x = event.clientX; pointer.current.y = event.clientY
       }}
-      onClick={event => {
-        if (!image.current || !controlling.current) return
-        const bounds = image.current.getBoundingClientRect()
-        const x = Math.floor((event.clientX - bounds.left) * (view.width ?? 1280) / bounds.width)
-        const y = Math.floor((event.clientY - bounds.top) * (view.height ?? 800) / bounds.height)
-        if (x >= 0 && y >= 0 && x < (view.width ?? 1280) && y < (view.height ?? 800)) {
-          keyboard.current?.focus({ preventScroll: true }); input("click", { x, y })
-        }
+      onMouseMoveCapture={event => { pointer.current.x = event.clientX; pointer.current.y = event.clientY }}
+      onMouseUpCapture={event => { pointer.current.buttons.delete(event.button) }}
+      onKeyDownCapture={event => key(event, true)} onKeyUpCapture={event => key(event, false)}
+      onPasteCapture={event => {
+        if (!canInput) return
+        event.preventDefault(); event.stopPropagation(); paste(event.clipboardData.getData("text/plain"))
+      }}
+      onBlurCapture={event => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+        if (remote.current) releaseRemoteKeys(remote.current, heldKeys.current, key => {
+          host.current?.querySelector("canvas")?.dispatchEvent(new KeyboardEvent("keyup", { ...key, bubbles: true }))
+        })
+        heldModifiers.current.clear()
       }}>
-      <textarea ref={keyboard} className="desktop-keyboard" aria-label="Desktop keyboard" tabIndex={-1} readOnly={!view.controlled} autoComplete="off" autoCapitalize="off" spellCheck={false} />
-      {view.available && view.frame ? <img ref={image} src={`data:image/jpeg;base64,${view.frame}`} alt="Live Modal desktop" draggable={false} />
-        : <div className="desktop-empty"><Monitor size={40} /><h3>Your computer in the cloud</h3><p>{working ? "Preparing your desktop. Your existing files stay in this workspace." : hasWorkspace ? "Open Chromium and a desktop in the same computer Moyai uses for your work." : "Send Moyai a task. Its computer will appear here, ready for you to open and control."}</p>
-          {hasWorkspace && <Button disabled={working || Boolean(view.controller && !view.controlled)} onClick={() => void command("start")}>{working ? "Preparing desktop…" : "Open computer"}</Button>}</div>}
+      <div className="desktop-stream" ref={host} />
+      <textarea ref={pasteReceiver} className="desktop-keyboard" aria-hidden="true" tabIndex={-1} autoComplete="off" />
+      {connected && !view.controlled && <Button variant="ghost" className="desktop-take-control" disabled={!foreground || working || occupied}
+        onClick={() => void command("claim")} aria-label={occupied ? `${view.controller} has control` : "Take control of computer"}>
+        <span className="desktop-control-prompt"><MousePointer2 size={32} /><strong>{working ? "Taking control…" : occupied ? `${view.controller} has control` : "Take control"}</strong>
+          {!occupied && <span>Click anywhere to use the computer</span>}</span>
+      </Button>}
+      {canInput && <Button variant="secondary" size="sm" className="desktop-release-control"
+        title="Release control (Ctrl+Shift+Escape)" onClick={() => void command("release")}><MousePointer2 size={14} />Release control</Button>}
+      {!connected && <div className="desktop-empty"><Monitor size={32} />
+        <p role="status">{working ? "Opening computer…" : connecting ? "Connecting…" : hasWorkspace ? "Your sandbox desktop" : "Send Moyai a task to start its computer."}</p>
+        {hasWorkspace && <Button disabled={!foreground || working || connecting || Boolean(view.controller && !view.available && !view.controlled)} onClick={() => view.available ? setAttempt(value => value + 1) : void command("start")}>{working ? "Preparing desktop…" : view.available ? <><RefreshCw size={15} />Reconnect</> : "Open computer"}</Button>}
+      </div>}
+      {error && <div className="desktop-notice" role="alert"><span>{error}</span><Button variant="ghost" size="icon-sm" aria-label="Dismiss computer error" onClick={() => setError("")}><X size={14} /></Button></div>}
     </div>
-    {view.busy && <p className="computer-hint">Moyai is working. Chat and coding continue while you use this desktop.</p>}
-    {view.controlled && <p className="computer-hint">Click the desktop to type. Ctrl+Shift+Escape releases control. Chat and coding continue while you have control.</p>}
-    <form className="browser-address" onSubmit={event => { event.preventDefault(); void command("open", { url }) }}>
-      <Globe size={16} /><Input aria-label="Computer browser address" placeholder="https://example.com" value={url} onChange={event => setUrl(event.target.value)} disabled={!view.controlled || working} />
-      <Button type="submit" variant="outline" size="sm" disabled={!view.controlled || working}>Open browser</Button>
-    </form>
-    <div className="computer-footer"><Button variant="outline" size="sm" disabled={!view.controlled || working} onClick={() => void command("terminal")}><Terminal size={15} />Terminal</Button><Button variant="outline" size="sm" disabled={!view.frame} onClick={() => { if (!view.frame) return; const link = document.createElement("a"); link.href = `data:image/jpeg;base64,${view.frame}`; link.download = "moyai-computer.jpg"; link.click() }}><Camera size={15} />Screenshot</Button><span>Watch Moyai work here. Take control to use the desktop.</span></div>
   </div>
 }

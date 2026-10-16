@@ -1,7 +1,54 @@
-/* Extend only the scrolling list through the sidebar's 16px inline padding.
+/* Keep a readable two-line rail while giving the session list more room. */
+.app > .sidebar {
+  gap: 8px;
+  padding: 12px 12px 8px;
+}
+
+.sidebar > .brand {
+  min-height: 40px;
+  gap: 8px;
+  padding-inline: 6px;
+  font-size: 18px;
+  line-height: 1.25;
+}
+.sidebar > .brand img { width: 32px; height: 32px; }
+.sidebar > .brand small { margin-top: 0; line-height: 16px; }
+
+.sidebar > .new-chat,
+.sidebar > .rail-button {
+  height: 36px;
+  min-height: 36px;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.sidebar > .rail-caption {
+  flex: none;
+  min-height: 36px;
+  gap: 4px;
+  padding: 4px 2px 0 8px;
+  margin-bottom: 0;
+}
+.sidebar > .rail-caption > span { gap: 8px; }
+.sidebar .session-group { margin-bottom: 8px; }
+.sidebar .session-group-toggle { height: 28px; min-height: 28px; gap: 6px; padding: 4px 6px; }
+.sidebar .session-group-heading > button:not(.session-group-toggle) {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+.sidebar .folder-empty { padding: 2px 10px 6px 25px; font-size: 12px; line-height: 18px; }
+
+.sidebar > .account { gap: 4px; padding: 8px 4px 0; }
+.sidebar > .account > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar > .account > button { flex: none; width: 32px; height: 32px; min-height: 32px; padding: 0; }
+.sidebar :is(a, button, input):focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
+
+/* Extend only the scrolling list through the sidebar's 12px inline padding.
    Classic gutters stay outside the rows; the row padding also clears overlay thumbs. */
 .sidebar .session-list {
-  margin-inline: -14px;
+  margin-inline: -10px;
   padding: 0 6px 8px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -24,27 +71,44 @@
   align-items: center;
   gap: 0 4px;
   min-width: 0;
-  min-height: 58px;
-  padding: 4px;
+  min-height: 48px;
+  padding: 2px 4px;
   margin-block: 2px;
 }
 
 .sidebar .session-row > a {
   grid-column: 1;
   grid-row: 1;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
-  padding: 4px 6px;
-  min-height: 30px;
+  padding: 0 6px;
+  min-height: 26px;
+  line-height: 20px;
 }
 
 .sidebar .session-row .session-indicator {
-  margin: 8px 0 0;
+  margin: 0;
   width: 5px;
   height: 5px;
 }
 
 .sidebar .session-row .session-title { min-width: 0; }
+.sidebar .session-row[draggable="true"] > a { cursor: grab; }
+.sidebar .session-row.session-dragging { opacity: .55; }
+.sidebar .session-group.session-drop-target,
+.sidebar .session-list.session-drop-target {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: -2px;
+  border-radius: 8px;
+  background: var(--ui-secondary);
+}
+.sidebar .sidebar-drop-notice {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ui-muted);
+}
 
 .sidebar .session-row-actions {
   grid-column: 2;
@@ -66,9 +130,9 @@
 }
 
 .sidebar .session-row-actions > button {
-  width: 32px;
-  height: 32px;
-  min-height: 32px;
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
   padding: 0;
   flex: none;
 }
@@ -89,9 +153,9 @@
   flex-wrap: wrap;
   gap: 2px 8px;
   min-width: 0;
-  padding: 0 6px 2px 19px;
-  font-size: 11px;
-  line-height: 1.5;
+  padding: 0 6px 0 19px;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--ui-muted);
 }
 
@@ -108,10 +172,10 @@
   min-width: 0;
   max-width: 100%;
   height: auto;
-  min-height: 24px;
+  min-height: 20px;
   padding: 0 2px;
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 18px;
   font-weight: 400;
   white-space: normal;
   text-align: start;
@@ -144,6 +208,12 @@
 .native-session-menu.sidebar-pr-menu button:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
 
 @media (hover: none), (pointer: coarse), (max-width: 600px) {
+  .sidebar > .brand,
+  .sidebar > .new-chat,
+  .sidebar > .rail-button { height: 44px; min-height: 44px; }
+  .sidebar > .account > button,
+  .sidebar .rail-caption button,
+  .sidebar .session-group-heading > button:not(.session-group-toggle) { width: 44px; height: 44px; min-height: 44px; }
   .sidebar .session-row > a { grid-column: 1 / -1; min-height: 44px; align-items: center; }
   .sidebar .session-row .session-indicator { margin-top: 0; }
   .sidebar .session-row-actions {
@@ -159,6 +229,6 @@
   .sidebar button.session-pr-indicator { min-height: 44px; }
   .sidebar .session-group-toggle,
   .sidebar .session-group-heading > button,
-  .sidebar .rail-caption button { min-height: 44px; }
+  .sidebar .rail-caption button { min-height: 44px; height: 44px; }
   .native-session-menu.sidebar-pr-menu > button { min-height: 44px; }
 }

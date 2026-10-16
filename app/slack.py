@@ -21,25 +21,7 @@ from .slack_references import attachment_reference
 from .slack_origin import is_self
 
 
-# Literal examples are context, not recipients. Preserve them in the prompt.
-# re.M anchors quote prefixes; \Z keeps fences open across line endings.
-QUOTED_TEXT = re.compile(r'```[\s\S]*?(?:```|\Z)|`[^`\n]*(?:`|$)|^[ \t]*>>>[\s\S]*|^[ \t]*>[^\n]*', re.M)
-
-
-def routing_text(text: str, mention: str) -> tuple[str, str]:
-    parts, visible = [], []
-    end = 0
-    for match in QUOTED_TEXT.finditer(text):
-        plain = text[end:match.start()]
-        visible.append(plain)
-        parts.extend((plain.replace(mention, ''), match[0]))
-        visible.append('\n')
-        end = match.end()
-    plain = text[end:]
-    visible.append(plain)
-    parts.append(plain.replace(mention, ''))
-    return ''.join(visible), ''.join(parts).strip()
-
+from .slack_format import routing_text
 
 class SlackSessions:
     def __init__(self, store, connectors, manager, checkpoints, settings, lens_feedback=None):

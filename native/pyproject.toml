@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
     "httpx>=0.28,<1",
+    "websockets>=15,<17",
     "pydantic-settings>=2.8,<3",
     "python-dotenv>=1,<2",
     "sqlalchemy[asyncio]>=2.0,<3",
@@ -20,6 +21,12 @@ dependencies = [
     "pillow>=12.3,<13",
 ]
 
+[project.optional-dependencies]
+product = [
+    "PyJWT[crypto]>=2.10,<3",
+    "psycopg[binary,pool]>=3.2,<4",
+]
+
 [dependency-groups]
 dev = [
     "httpx>=0.28",
@@ -27,6 +34,9 @@ dev = [
     "pytest-asyncio>=1",
     "ruff>=0.14",
     "pyright>=1.1",
+    # Product-adapter tests run in the normal native CI suite.
+    "PyJWT[crypto]>=2.10,<3",
+    "psycopg[binary,pool]>=3.2,<4",
 ]
 
 [project.scripts]
@@ -43,11 +53,15 @@ packages = ["src/moyai"]
 "skills" = "moyai/resources/skills"
 "instructions.md" = "moyai/resources/instructions.md"
 "desktop.py" = "moyai/resources/desktop.py"
+"browser_guest.py" = "moyai/resources/browser_guest.py"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", ".."]
 
 [tool.ruff]
 target-version = "py312"
@@ -58,5 +72,6 @@ extend-immutable-calls = ["fastapi.Depends"]
 
 [tool.pyright]
 include = ["src"]
+extraPaths = [".."]
 typeCheckingMode = "standard"
 

@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 
-from temporalio.client import WorkflowExecutionStatus
+from temporalio.client import WorkflowExecutionStatus, WorkflowHistory
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.worker import Worker
+from temporalio.worker import (
+    Interceptor,
+    Plugin,
+    Replayer,
+    ReplayerConfig,
+    Worker,
+    WorkerConfig,
+    WorkflowReplayResult,
+)
 
 from .activities import ACTIVITIES
 from .execution import ExecutionAuthority
+from .product_drain import ProductDrainError, ProductDrainService, drain_checkpoint
 from .runtime import Runtime, configure
 from .settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
 from .workflow import TurnWorkflow
@@ -19,18 +30,70 @@ from .workflow import TurnWorkflow
 logger = logging.getLogger(__name__)
 
 
+class ProductDrainPlugin(Plugin):
+    """Register the existing canonical owner before SDK polling; never replace it."""
+
+    def __init__(self, service: ProductDrainService):
+        self.service = service
+
+    def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
+        return config
+
+    async def run_worker(self, worker: Worker, next: Callable[[Worker], Awaitable[None]]) -> None:
+        await self.service.register_worker()
+        await next(worker)
+        # Exact canonical backend absence retires this record. No TTL, reconnect,
+        # early release or cancellation-prone cleanup can authorize resume.
+
+    def configure_replayer(self, config: ReplayerConfig) -> ReplayerConfig:
+        return config
+
+    def run_replayer(
+        self, replayer: Replayer, histories: AsyncIterator[WorkflowHistory],
+        next: Callable[
+            [Replayer, AsyncIterator[WorkflowHistory]],
+            AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]],
+        ],
+    ) -> AbstractAsyncContextManager[AsyncIterator[WorkflowReplayResult]]:
+        return next(replayer, histories)
+
+
 def make_worker(runtime: Runtime) -> Worker:
     if runtime.client is None:
         raise RuntimeError("Connect to Temporal before creating the worker.")
     configure(runtime)
     TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent]
+    product_workflows = []
+    product_activities = []
+    if runtime.product_automations is not None:
+        from .product_automations import PRODUCT_AUTOMATION_ACTIVITIES, PRODUCT_AUTOMATION_WORKFLOWS
+        product_workflows.extend(PRODUCT_AUTOMATION_WORKFLOWS)
+        product_activities.extend(PRODUCT_AUTOMATION_ACTIVITIES)
+    interceptors: list[Interceptor] = [ExecutionAuthority(runtime.database)]
+    identity = settings_worker_identity()
+    review = getattr(runtime, "product_memory_review", None)
+    if review is not None:
+        from .product_memory_review import (
+            MEMORY_REVIEW_ACTIVITIES,
+            MEMORY_REVIEW_WORKFLOWS,
+            MemoryReviewWorkflow,
+            ReviewAuthority,
+        )
+        MemoryReviewWorkflow.__pydantic_ai_agents__ = [review.agent]
+        product_workflows.extend(MEMORY_REVIEW_WORKFLOWS)
+        product_activities.extend(MEMORY_REVIEW_ACTIVITIES)
+        interceptors.append(ReviewAuthority(review))
+        identity += "-memory-review-v1-"
+    drain = getattr(runtime, "product_drain", None)
+    plugins = [ProductDrainPlugin(drain)] if drain is not None else []
     return Worker(
         runtime.client,
-        identity=settings_worker_identity(),
+        identity=identity,
         task_queue=runtime.settings.temporal_queue,
-        workflows=[TurnWorkflow, *SETTINGS_WORKFLOWS],
-        activities=[*ACTIVITIES, *SETTINGS_ACTIVITIES],
-        interceptors=[ExecutionAuthority(runtime.database)],
+        workflows=[TurnWorkflow, *SETTINGS_WORKFLOWS, *product_workflows],
+        activities=[*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities],
+        plugins=plugins,
+        interceptors=interceptors,
         max_concurrent_activities=32,
         max_concurrent_workflow_tasks=16,
     )
@@ -38,6 +101,11 @@ def make_worker(runtime: Runtime) -> Worker:
 
 async def dispatch_once(runtime: Runtime) -> int:
     client = await runtime.connect()
+    drain = getattr(runtime, "product_drain", None)
+    if drain is not None:
+        if getattr(runtime.database, "product_drain", None) is not drain:
+            raise ProductDrainError("Maintenance admission is not bound to this runtime.")
+        await drain.notify(runtime)
     await runtime.database.claim_next()
     dispatched = 0
     for turn in await runtime.database.starting_turns():
@@ -81,6 +149,26 @@ async def dispatch_once(runtime: Runtime) -> int:
             if error.status == RPCStatusCode.NOT_FOUND:
                 # A Stop admitted before workflow creation never needs to start the run.
                 await runtime.database.stopped(turn.id)
+    if runtime.product_automations is not None:
+        try:
+            # Keep automation RPC outages from delaying manual input/Stop.
+            # The persisted pending intent and deterministic workflow ID make
+            # another dispatcher pass safe after an unacknowledged RPC.
+            async with asyncio.timeout(2):
+                await runtime.product_automations.dispatch_pending(limit=5)
+        except TimeoutError:
+            logger.warning("Automation synchronization remains pending.")
+    review = getattr(runtime, "product_memory_review", None)
+    if review is not None:
+        try:
+            # Dispatch only durable intent. Temporal owns review execution and
+            # deduplicates the workflow if an acknowledgment is lost.
+            async with asyncio.timeout(2):
+                await review.dispatch_pending(runtime, limit=5)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - background review cannot fail manual dispatch
+            logger.warning("Memory-review synchronization remains pending.")
     return dispatched
 
 

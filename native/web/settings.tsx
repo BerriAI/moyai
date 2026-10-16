@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react"
-import { Activity, ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Download, KeyRound, LayoutGrid, Link2, Menu, Pencil, Plus, RefreshCw, Search, Shield, Sparkles, Trash2, Users, X } from "lucide-react"
+import { Activity, ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, Sparkles, Trash2, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -7,30 +7,72 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { api, ApiError } from "./api"
+import { api, ApiError, csrfToken } from "./api"
+import { AnalyticsPage } from "./analytics"
+import { ProductAutomationsPage } from "./product-automations"
+import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
 import logo from "../../app/static/moyai-logo.png"
 import "./settings.css"
 
-type SettingsUser = { id: string; name: string; role: string }
-type SettingsPageProps = { user: SettingsUser; page: string; onNavigate: (page: string) => void; onBack: () => void }
-type Capabilities = { create?: boolean; update?: boolean; delete?: boolean; reason?: string; runtime_available?: boolean; shared?: boolean; run?: boolean; agent_access?: boolean }
+type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
+type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void }
+type Capabilities = { read?: boolean; create?: boolean; update?: boolean; delete?: boolean; roles?: boolean; preferences?: boolean; review?: boolean; reason?: string; runtime_available?: boolean; shared?: boolean; run?: boolean; agent_access?: boolean }
 type Collection = { capabilities?: Capabilities; reason?: string }
 type Skill = { id: string; name: string; description: string; content: string; scope: string; enabled: boolean; editable: boolean; updated_at?: string }
 type Secret = { id: string; name: string; description: string; scope: string; editable?: boolean; updated_at?: string }
+type ProductSecret = {
+  id: string; provider: string; label: string; name: string; format: string; env_var?: string; scope: string; lifetime?: string
+  root_id?: string; created_at?: string; expires_at?: string; revision: number; status: string; can_manage: boolean
+}
+type ProductCredentialInventory = {
+  secrets: ProductSecret[]; providers: { id: string; name: string; setup_url?: string }[]; root_id?: string; note?: string
+  capabilities?: { create: boolean; update: boolean; delete: boolean; scopes: string[]; lifetimes: string[]; native_execution: boolean }
+}
+type CredentialDraft = {
+  provider: string; label: string; name: string; format: "env" | "file"; env_var: string
+  scope: string; lifetime: string; root_id: string; expires_at: string; value: string
+}
 type Memory = { namespace: string; path: string; content: string; version?: string; truncated?: boolean }
+type ProductMemoryNote = {
+  id: string; key: string; title: string; content: string; kind: string; repo_url: string; repository_id?: number | null
+  revision: number; created_at?: string; updated_at?: string; expires_at?: string | null; truncated?: boolean
+  source?: { type?: string; quote?: string; evidence?: string; scope?: string; run_id?: string; session_id?: string; engine?: string; url?: string }
+}
+type ProductMemoryData = {
+  source: "canonical"; scope: { kind: "personal"; owner_id: string } | null; note?: string; capabilities: Capabilities
+  preferences: { enabled: boolean; auto_save: boolean; revision: number } | null; memories: ProductMemoryNote[]
+  review?: { enabled?: boolean; configured?: boolean; pending?: number; latest?: { status: string; updated_at?: string; saved_count?: number } | null } | null
+  runtime?: { recall: boolean; auto_save: boolean; background_review: boolean; note?: string }
+}
+type ProductSkill = {
+  id: string; name: string; description: string; scope: string; icon?: string; revision: number; archived: boolean
+  reference: string; created_at?: string; updated_at?: string; can_manage: boolean
+}
+type ProductSkillDetail = ProductSkill & { instructions: string; files: { path: string; size: number; characters?: number; sha256?: string }[] }
+type ProductSkillLibrary = Collection & { source: string; skills: ProductSkill[]; can_publish: boolean; note?: string; has_more: boolean; next_offset: number | null }
 type Automation = { id: string; name: string; prompt: string; session_id: string; model: string; interval_minutes: number; paused: boolean; state: string; updated_at?: string }
-type Account = { id: string; username: string; display_name: string; role: string; enabled: boolean }
+type Account = { id: string; username: string; display_name: string; role: string; enabled: boolean; email?: string; revision?: number }
 type Connection = { id: string; name: string; kind: string; owner_id: string; shared: boolean; read_only: boolean; enabled: boolean; policy?: { allowed_tools?: string[] | null; require_approval?: boolean } }
+type ProductConnection = {
+  id: string; connected: boolean; scope: string; oauth_configured: boolean; label: string; identity: string
+  enabled: boolean; read_only: boolean; checked_at?: string; check_status?: string; app_registered?: boolean
+  tools: { name?: string; description: string }[]; repositories?: { id: number; full_name: string }[]
+}
+type PersonalSlack = {
+  available: boolean; connected: boolean; oauth_configured: boolean; label?: string; health?: string
+  effective_source?: string; limitation?: string; description?: string
+}
 type Option = { value: string; label: string }
 type Resource<T> = { data: T | undefined; loading: boolean; error: string; refresh: () => void }
 type FormValues = Record<string, string | number | boolean>
-type Field = { name: string; label: string; type?: "text" | "password" | "textarea" | "select" | "checkbox" | "number"; required?: boolean; hint?: string; options?: Option[]; disabled?: boolean; min?: number; max?: number; minLength?: number; maxLength?: number; pattern?: string }
+type Field = { name: string; label: string; type?: "text" | "password" | "textarea" | "select" | "checkbox" | "number" | "url"; required?: boolean; hint?: string; options?: Option[]; disabled?: boolean; min?: number; max?: number; minLength?: number; maxLength?: number; pattern?: string }
 
 const destinations = [
   { id: "skills", title: "Skills", description: "Save instructions for yourself or your team.", group: "Workflows", Icon: Sparkles },
   { id: "automations", title: "Automations", description: "Schedule recurring work and review past runs.", group: "Workflows", Icon: CalendarClock },
   { id: "memory", title: "Memory", description: "Review the context available to your future sessions.", group: "Workflows", Icon: BookOpen },
   { id: "connections", title: "Connections", description: "Choose the accounts Moyai can use in your sessions.", group: "Integrations", Icon: Link2 },
+  { id: "personal-slack", title: "Personal Slack", description: "Connect your own Slack account for private web sessions.", group: "Integrations", Icon: LockKeyhole, productOnly: true },
   { id: "secrets", title: "Secrets", description: "Manage personal and shared service credentials.", group: "Integrations", Icon: KeyRound },
   { id: "users", title: "Users", description: "Manage workspace members, roles, and access.", group: "Administration", Icon: Users, admin: true },
   { id: "performance", title: "Performance", description: "Review recorded turn timings across the workspace.", group: "Administration", Icon: Activity, admin: true },
@@ -46,10 +88,11 @@ const errorText = (error: unknown) => error instanceof ApiError && error.status 
   ? "This settings endpoint is not available on this server."
   : error instanceof Error ? error.message : "The request could not be completed."
 
-function useResource<T>(path: string): Resource<T> {
+function useResource<T>(path: string | null): Resource<T> {
   const [revision, setRevision] = useState(0)
-  const [state, setState] = useState<{ path: string; data?: T; loading: boolean; error: string }>({ path, loading: true, error: "" })
+  const [state, setState] = useState<{ path: string | null; data?: T; loading: boolean; error: string }>({ path, loading: Boolean(path), error: "" })
   useEffect(() => {
+    if (!path) { setState({ path, loading: false, error: "" }); return }
     const controller = new AbortController()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true, error: "" }))
     void api<T>(path, "GET", undefined, controller.signal).then(
@@ -70,10 +113,16 @@ function useMutation() {
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   const run = async (action: () => Promise<unknown>, done: () => void) => {
     if (pending.current) return
+    const requestAuth = csrfToken()
     pending.current = true; setBusy(true); setError("")
-    try { await action(); if (alive.current) done() }
-    catch (error) { if (alive.current) setError(errorText(error)) }
-    finally { pending.current = false; if (alive.current) setBusy(false) }
+    try { await action(); if (alive.current && csrfToken() === requestAuth) done() }
+    catch (error) {
+      if (alive.current && csrfToken() === requestAuth) {
+        setError(errorText(error))
+        if (error instanceof ApiError && error.status === 403) window.dispatchEvent(new Event("moyai:access-changed"))
+      }
+    }
+    finally { pending.current = false; if (alive.current && csrfToken() === requestAuth) setBusy(false) }
   }
   return { busy, error, run }
 }
@@ -97,7 +146,7 @@ function Toolbar({ search, setSearch, count: total, resource, filter, action }: 
 }) {
   return <div className="ns-toolbar">
     <div className="ns-search"><Search size={16} aria-hidden="true" /><Input type="search" aria-label="Search this list" placeholder="Search…" value={search} onChange={event => setSearch(event.target.value)} />
-      {search && <Button variant="ghost" size="icon-sm" aria-label="Clear search" onClick={() => setSearch("")}><X /></Button>}</div>
+      {search && <Button type="button" variant="ghost" size="icon-sm" aria-label="Clear search" onClick={() => setSearch("")}><X /></Button>}</div>
     {filter}{total !== undefined && <span className="ns-count">{count(total)}</span>}
     <Button type="button" variant="outline" disabled={resource.loading} onClick={resource.refresh} aria-label="Refresh settings"><RefreshCw size={16} /><span>Refresh</span></Button>
     {action}
@@ -217,6 +266,151 @@ function SecretsPage({ user }: { user: SettingsUser }) {
   }}</LoadState>
 }
 
+export function ProductSecretRows({ secrets, providers, capabilities, onEdit, onRevoke }: {
+  secrets: ProductSecret[]; providers: { id: string; name: string }[]; capabilities?: ProductCredentialInventory["capabilities"]
+  onEdit?: (secret: ProductSecret) => void; onRevoke?: (secret: ProductSecret) => void
+}) {
+  return <RecordTable label="Original saved credentials" headings={["Credential", "Scope", "Lifetime", "Status", "Value", "Actions"]}>{secrets.map(secret => <TableRow key={secret.id}>
+    <TableCell><strong>{secret.label}</strong><small>{secret.provider === "generic" ? secret.name : providers.find(provider => provider.id === secret.provider)?.name || secret.provider}</small>
+      <small>{secret.format === "aws-sso" ? "AWS SSO login" : secret.format === "file" ? "Credential file" : secret.provider === "generic" ? "Environment variables" : "Provider access"} · Added {dateTime(secret.created_at)}</small>
+    </TableCell><TableCell>{secret.scope === "organization" ? "Organization" : "Personal"}</TableCell>
+    <TableCell>{secret.lifetime === "session" || secret.scope === "session" ? "This session only" : "Future sessions"}{secret.expires_at && <small>Expires {dateTime(secret.expires_at)}</small>}</TableCell>
+    <TableCell>{({ active: "Active", expired: "Expired", invalid: "Needs updating", revoked: "Revoked" } as Record<string, string>)[secret.status] || secret.status}</TableCell>
+    <TableCell><span aria-label="Value hidden">••••••••</span></TableCell>
+    <TableCell><div className="ns-row-actions">
+      {capabilities?.update && secret.can_manage && secret.format !== "aws-sso" && onEdit && <Button variant="outline" size="sm" onClick={() => onEdit(secret)}>Edit<span className="visually-hidden"> {secret.label}</span></Button>}
+      {capabilities?.delete && secret.can_manage && onRevoke && <Button variant="ghost" size="sm" onClick={() => onRevoke(secret)}>Revoke access<span className="visually-hidden"> for {secret.label}</span></Button>}
+    </div>{secret.format === "aws-sso" && <small>AWS SSO access is renewed through its sign-in flow.</small>}</TableCell>
+  </TableRow>)}</RecordTable>
+}
+export function productCredentialRoot(session: { id: string; source: string }): string {
+  if (session.source === "legacy" && /^[0-9a-f]{32}$/.test(session.id)) return session.id
+  if (session.source === "native" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(session.id)) return `native:${session.id}`
+  throw new Error("Choose an available session from the list.")
+}
+export function productCredentialBody(draft: CredentialDraft, existing: ProductSecret | undefined, clientId: string) {
+  if (!["personal", "organization"].includes(draft.scope)) throw new Error("Choose who can use this credential.")
+  if (!["persistent", "session"].includes(draft.lifetime)) throw new Error("Choose this session or future sessions.")
+  if (draft.lifetime === "session" && !/^(?:[0-9a-f]{32}|native:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.test(draft.root_id)) throw new Error("Choose a session for session-only access.")
+  if (!draft.label.trim() || draft.label.trim().length > 80) throw new Error("Use a credential name between 1 and 80 characters.")
+  const fields = { label: draft.label.trim(), scope: draft.scope, lifetime: draft.lifetime, root_id: draft.lifetime === "session" ? draft.root_id : "", expires_at: draft.expires_at }
+  if (existing) {
+    if (existing.format === "aws-sso") throw new Error("Renew AWS SSO access through its sign-in flow.")
+    return { revision: existing.revision, ...fields, ...(draft.value ? { value: draft.value } : {}) }
+  }
+  if (!draft.value) throw new Error("Provide the credential value.")
+  return { provider: draft.provider, ...fields, value: draft.value, client_id: clientId, ...(draft.provider === "generic" ? { name: draft.name.trim(), format: draft.format, env_var: draft.format === "file" ? draft.env_var.trim() : "" } : {}) }
+}
+function ProductSecretsPage({ user }: { user: SettingsUser }) {
+  const resource = useResource<ProductCredentialInventory>("/credentials")
+  const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
+  const [editor, setEditor] = useState<{ secret?: ProductSecret; onePassword?: boolean } | null>(null), [revoke, setRevoke] = useState<ProductSecret | null>(null)
+  return <LoadState resource={resource}>{data => {
+    const rows = data.secrets.filter(secret => contains(search, secret.label, secret.name, secret.provider) && (scope === "all" || (secret.scope === "organization" ? "organization" : "personal") === scope))
+    return <><p className="ns-notice"><Shield size={16} />This is the original credential inventory. Saved values are never returned to this page.</p>
+      {data.note && <p className="ns-notice">{data.note}</p>}
+      {!data.capabilities && <p className="ns-notice">Credential management is not available on this server yet. The original saved entries remain visible below.</p>}
+      {data.capabilities?.native_execution === false && <p className="ns-notice">Saved access is retained, but this runtime cannot yet supply these credentials to tasks.</p>}
+      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Credential scope" value={scope} onChange={setScope} options={[{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "organization", label: "Organization" }]} />}
+        action={data.capabilities?.create && <><Button variant="outline" onClick={() => {
+          const saved = data.secrets.filter(secret => secret.provider === "generic" && secret.name === "1password-shared" && secret.format === "env")
+          if (saved.length === 1 && saved[0].can_manage) setEditor({ secret: saved[0], onePassword: true })
+          else if (!saved.length) setEditor({ onePassword: true })
+          else { setSearch("1password-shared"); setScope("all") }
+        }}>Connect 1Password</Button><Button onClick={() => setEditor({})}><Plus />Add credential</Button></>} />
+      {rows.length ? <ProductSecretRows secrets={rows} providers={data.providers} capabilities={data.capabilities} onEdit={secret => setEditor({ secret, onePassword: secret.name === "1password-shared" && secret.format === "env" })} onRevoke={setRevoke} /> : <Empty filtered={Boolean(search) || scope !== "all"} noun="saved credentials" onClear={() => { setSearch(""); setScope("all") }} />}
+      {editor && (editor.secret ? data.capabilities?.update && editor.secret.can_manage : data.capabilities?.create) && <ProductCredentialEditor key={editor.secret?.id || (editor.onePassword ? "1password" : "new")} user={user} inventory={data} existing={editor.secret} onePassword={editor.onePassword} onClose={() => setEditor(null)} onSaved={resource.refresh} />}
+      {revoke && data.capabilities?.delete && revoke.can_manage && <Confirm title={`Revoke ${revoke.label}?`} description="Future tasks cannot use this saved access. The credential is not revoked at its provider, and existing conversations are retained." label="Revoke access"
+        onConfirm={async () => { await api(`/credentials/secrets/${encodeURIComponent(revoke.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRevoke(null)} />}
+    </>
+  }}</LoadState>
+}
+
+function ProductCredentialEditor({ user, inventory, existing, onePassword, onClose, onSaved }: {
+  user: SettingsUser; inventory: ProductCredentialInventory; existing?: ProductSecret; onePassword?: boolean; onClose: () => void; onSaved: () => void
+}) {
+  const mutation = useMutation(), id = useId(), clientId = useRef(crypto.randomUUID())
+  const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  const [draft, setDraft] = useState<CredentialDraft>({
+    provider: existing?.provider || (onePassword ? "generic" : inventory.providers[0]?.id || "generic"),
+    label: existing?.label || (onePassword ? "1Password Shared" : ""), name: existing?.name || (onePassword ? "1password-shared" : ""),
+    format: existing?.format === "file" ? "file" : "env", env_var: existing?.env_var || "", scope: existing ? existing.scope === "session" ? "personal" : existing.scope : "",
+    lifetime: existing?.lifetime || (existing ? existing.scope === "session" ? "session" : "persistent" : ""), root_id: existing?.root_id || "", expires_at: existing?.expires_at || "", value: "",
+  })
+  const [expiry, setExpiry] = useState(onceUtcInput(existing?.expires_at || null))
+  const [variables, setVariables] = useState<{ key: string; value: string; id: string }[]>([{ key: onePassword ? "OP_SERVICE_ACCOUNT_TOKEN" : "", value: "", id: crypto.randomUUID() }])
+  const file = useRef<HTMLInputElement>(null)
+  const [cursor, setCursor] = useState<string | null>(null), [savedRoots, setSavedRoots] = useState<{ id: string; source: string; title: string; parent_session_id?: string | null; deleted?: boolean; deleting?: boolean }[]>([])
+  const roots = useResource<{ sessions: typeof savedRoots; next_cursor?: string | null }>(draft.lifetime === "session" ? `/history/sessions?source=all&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}` : null)
+  useEffect(() => { if (roots.error) setSavedRoots([]) }, [roots.error])
+  const rootRows = roots.error ? [] : [...new Map([...savedRoots, ...roots.data?.sessions ?? []].map(row => [`${row.source}:${row.id}`, row])).values()]
+  const rootOptions = rootRows.filter(row => !row.parent_session_id && !row.deleted && !row.deleting).flatMap(row => {
+    try { return [{ value: productCredentialRoot(row), label: `${row.title} · ${row.source === "legacy" ? "Saved history" : "Current session"}` }] } catch { return [] }
+  })
+  if (existing?.root_id && !rootOptions.some(option => option.value === existing.root_id)) rootOptions.unshift({ value: existing.root_id, label: "Previously saved session" })
+  const change = (patch: Partial<CredentialDraft>) => setDraft(previous => ({ ...previous, ...patch }))
+  const generic = draft.provider === "generic", supportedScopes = inventory.capabilities?.scopes ?? []
+  const provider = inventory.providers.find(item => item.id === draft.provider)
+  let setup: string | undefined
+  try { if (provider?.setup_url?.startsWith("https://")) setup = productRedirect(provider.setup_url, location.origin) } catch {}
+  return <Dialog open onOpenChange={open => { if (!open && !mutation.busy) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus() }}>
+    <DialogHeader><DialogTitle>{existing ? "Edit saved access" : onePassword ? "Connect 1Password Shared" : "Save a credential"}</DialogTitle><DialogDescription>Secret values are encrypted on the server and never returned. Sharing and session lifetime are separate choices.</DialogDescription></DialogHeader>
+    <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(async () => {
+      let value = draft.value
+      if (generic && draft.format === "env") {
+        const used = variables.filter(variable => variable.key || variable.value)
+        if (used.some(variable => variable.value)) {
+          if (used.some(variable => !/^[A-Z_][A-Z0-9_]{0,127}$/.test(variable.key) || !variable.value)) throw new Error("Give every environment variable a valid name and value.")
+          if (new Set(used.map(variable => variable.key)).size !== used.length) throw new Error("Use each environment variable name only once.")
+          value = JSON.stringify(Object.fromEntries(used.map(variable => [variable.key, variable.value])))
+        } else value = ""
+      }
+      if (generic && draft.format === "file") {
+        const selected = file.current?.files?.[0]
+        if (selected && selected.size > 131072) throw new Error("Choose a UTF-8 credential file of at most 128 KB.")
+        value = selected ? await selected.text() : ""
+        if (value.includes("\0")) throw new Error("Choose a UTF-8 text credential file without NUL characters.")
+      }
+      const body = productCredentialBody({ ...draft, value, expires_at: expiry ? onceUtcInstant(expiry) : "" }, existing, clientId.current)
+      if (!supportedScopes.includes(draft.scope) || (draft.scope === "organization" && user.role !== "admin")) throw new Error("This sign-in cannot save credentials in the selected scope.")
+      if (!inventory.capabilities?.lifetimes.includes(draft.lifetime)) throw new Error("This credential lifetime is not supported.")
+      await api(`/credentials/secrets${existing ? `/${encodeURIComponent(existing.id)}` : ""}`, existing ? "PATCH" : "POST", body)
+    }, () => { setDraft(previous => ({ ...previous, value: "" })); setVariables([]); if (file.current) file.current.value = ""; onSaved(); onClose() }) }}>
+      {onePassword && <p className="ns-notice">Use a dedicated 1Password service account scoped to the Shared vault. Vault permissions are enforced by 1Password. Choose Organization only when teammates should use this access.</p>}
+      <div className="ns-field"><label htmlFor={`${id}-provider`}>Service</label><Choice id={`${id}-provider`} label="Credential service" value={draft.provider} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} options={inventory.providers.map(item => ({ value: item.id, label: item.name }))} onChange={value => { change({ provider: value, value: "", name: "", format: "env", env_var: "" }); setVariables([{ key: "", value: "", id: crypto.randomUUID() }]) }} /></div>
+      {setup && <a className="ns-link" href={setup} target="_blank" rel="noreferrer">Provider setup guide</a>}
+      <div className="ns-field"><label htmlFor={`${id}-label`}>Display name</label><Input id={`${id}-label`} autoFocus required maxLength={80} disabled={mutation.busy} value={draft.label} onChange={event => change({ label: event.target.value })} /></div>
+      {generic && <>
+        <div className="ns-field"><label htmlFor={`${id}-name`}>Service or capability name</label><Input id={`${id}-name`} required maxLength={80} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} value={draft.name} onChange={event => change({ name: event.target.value })} /></div>
+        <div className="ns-field"><label htmlFor={`${id}-format`}>Credential format</label><Choice id={`${id}-format`} label="Credential format" value={draft.format} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} onChange={value => { change({ format: value as "env" | "file", value: "" }); setVariables([{ key: "", value: "", id: crypto.randomUUID() }]) }} options={[{ value: "env", label: "Environment variables" }, { value: "file", label: "Credential file" }]} /></div>
+        {draft.format === "file" ? <>
+          <div className="ns-field"><label htmlFor={`${id}-envvar`}>Environment variable for the file path</label><Input id={`${id}-envvar`} required maxLength={128} pattern="[A-Z_][A-Z0-9_]*" disabled={mutation.busy || Boolean(existing)} value={draft.env_var} onChange={event => change({ env_var: event.target.value })} /></div>
+          <div className="ns-field"><label htmlFor={`${id}-file`}>{existing ? "Replacement credential file" : "Credential file"}</label><Input id={`${id}-file`} ref={file} type="file" required={!existing} disabled={mutation.busy} /><p className="ns-field-hint">UTF-8 text, up to 128 KB. Its contents are never displayed here.</p></div>
+        </> : <fieldset className="ns-fields"><legend>{existing ? "Replacement environment variables" : "Environment variables"}</legend>
+          {variables.map((variable, index) => <div className="ns-credential-variable" key={variable.id}>
+            <div className="ns-field"><label htmlFor={`${id}-key-${index}`}>Variable name</label><Input id={`${id}-key-${index}`} value={variable.key} maxLength={128} autoComplete="off" disabled={mutation.busy || Boolean(onePassword)} onChange={event => setVariables(previous => previous.map(item => item.id === variable.id ? { ...item, key: event.target.value } : item))} /></div>
+            <div className="ns-field"><label htmlFor={`${id}-value-${index}`}>{onePassword ? "Service account token" : "Secret value"}</label><Input id={`${id}-value-${index}`} type="password" autoComplete="off" value={variable.value} disabled={mutation.busy} onChange={event => setVariables(previous => previous.map(item => item.id === variable.id ? { ...item, value: event.target.value } : item))} /></div>
+            {!onePassword && <Button type="button" variant="ghost" size="icon-sm" disabled={mutation.busy || variables.length === 1} aria-label={`Remove variable ${index + 1}`} onClick={() => setVariables(previous => previous.filter(item => item.id !== variable.id))}><Trash2 size={16} /></Button>}
+          </div>)}
+          {!onePassword && <Button type="button" variant="outline" disabled={mutation.busy} onClick={() => setVariables(previous => [...previous, { key: "", value: "", id: crypto.randomUUID() }])}>Add environment variable</Button>}
+        </fieldset>}
+      </>}
+      {!generic && <div className="ns-field"><label htmlFor={`${id}-token`}>{existing ? "Replacement API key" : "API key"}</label><Input id={`${id}-token`} type="password" autoComplete="off" required={!existing} disabled={mutation.busy} value={draft.value} onChange={event => change({ value: event.target.value })} /></div>}
+      {existing && <p className="ns-field-hint">Leave replacement values blank to keep the saved value. A supplied environment map replaces the complete saved map.</p>}
+      <div className="ns-field"><label htmlFor={`${id}-scope`}>Who can use this credential?</label><Choice id={`${id}-scope`} label="Credential sharing" value={draft.scope} disabled={mutation.busy} options={supportedScopes.filter(scope => scope !== "organization" || user.role === "admin").map(scope => ({ value: scope, label: scope === "organization" ? "Organization · Everyone" : "Personal · My requests" }))} onChange={value => change({ scope: value })} /></div>
+      {!supportedScopes.includes("personal") && <p className="ns-field-hint">Personal credentials require an individual sign-in. Available sharing choices are determined by the server.</p>}
+      <div className="ns-field"><label htmlFor={`${id}-lifetime`}>When can it be used?</label><Choice id={`${id}-lifetime`} label="Credential lifetime" value={draft.lifetime} disabled={mutation.busy} options={(inventory.capabilities?.lifetimes || []).map(value => ({ value, label: value === "session" ? "This session only" : "Across future sessions" }))} onChange={value => change({ lifetime: value })} /></div>
+      {draft.lifetime === "session" && <div className="ns-field"><label htmlFor={`${id}-root`}>Session</label><Choice id={`${id}-root`} label="Credential session" value={draft.root_id} disabled={mutation.busy || roots.loading} options={rootOptions} onChange={value => change({ root_id: value })} /><p className="ns-field-hint">Personal access requires your own current session/request. The server rechecks access when saving.</p>
+        {roots.loading && <p role="status">Loading sessions…</p>}{roots.error && <p className="ns-error" role="alert">{roots.error}<Button type="button" variant="outline" onClick={roots.refresh}>Retry sessions</Button></p>}
+        {roots.data?.next_cursor && <Button type="button" variant="outline" disabled={roots.loading || mutation.busy} onClick={() => { setSavedRoots(rootRows); setCursor(roots.data!.next_cursor!) }}>Load more sessions</Button>}
+      </div>}
+      <div className="ns-field"><label htmlFor={`${id}-expiry`}>Provider expiry (optional, UTC)</label><Input id={`${id}-expiry`} type="datetime-local" step={1} disabled={mutation.busy} value={expiry} onChange={event => setExpiry(event.target.value)} /><p className="ns-field-hint">Leave blank if the provider expiry is unknown. Session-only access does not change the provider’s expiry.</p></div>
+      {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+      <div className="ns-dialog-actions"><Button type="button" variant="outline" disabled={mutation.busy} onClick={onClose}>Cancel</Button><Button type="submit" disabled={mutation.busy}>{mutation.busy ? "Saving…" : "Save credential"}</Button></div>
+    </form>
+  </DialogContent></Dialog>
+}
+
 function MemoryPage() {
   const [namespace, setNamespace] = useState("")
   const resource = useResource<Collection & { namespaces: { id: string; label: string }[]; default_namespace: string; namespace: string; memories: Memory[]; truncated?: boolean }>(`/settings/memory${namespace ? `?${new URLSearchParams({ namespace })}` : ""}`)
@@ -245,6 +439,322 @@ function MemoryPage() {
       </>
     }}</LoadState>
   </>
+}
+
+const productMemoryKinds = [{ value: "preference", label: "Preference" }, { value: "feedback", label: "Correction" }, { value: "project", label: "Project context" }, { value: "reference", label: "Reference" }]
+export function productMemorySourceLink(source: ProductMemoryNote["source"]): string | undefined {
+  if (!source?.session_id || !source.url) return
+  const hash = source.engine === "legacy" && /^[0-9a-f]{32}$/.test(source.session_id) ? `#run=${source.session_id}`
+    : source.engine === "native" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(source.session_id) ? `#${source.session_id}` : undefined
+  return hash && (source.url === hash || source.url === `/${hash}`) ? hash : undefined
+}
+/** Render canonical personal notes without flattening them into Harness filenames. */
+export function ProductMemoryNotes({ notes, capabilities, onEdit, onRemove }: {
+  notes: ProductMemoryNote[]; capabilities?: Capabilities; onEdit: (note: ProductMemoryNote) => void; onRemove: (note: ProductMemoryNote) => void
+}) {
+  return <div className="ns-records">{notes.map(note => {
+    const expires = note.expires_at ? Date.parse(note.expires_at) : NaN
+    const sourceLink = productMemorySourceLink(note.source)
+    return <article className="ns-record" key={note.id}><div className="ns-record-copy">
+      <div className="ns-record-title"><h2>{note.title}</h2><span className="ns-badge">{productMemoryKinds.find(kind => kind.value === note.kind)?.label ?? note.kind}</span>
+        {Number.isFinite(expires) && expires <= Date.now() && <span className="ns-badge">Expired</span>}</div>
+      <details><summary>View memory</summary><pre>{note.content}</pre></details>
+      <p>{note.repo_url || "Across your sessions"}</p><small>Updated {dateTime(note.updated_at)}{note.expires_at ? ` · Expires ${dateTime(note.expires_at)}` : ""}</small>
+      {(note.source?.quote || note.source?.evidence || sourceLink) && <details><summary>Why this was saved</summary>{(note.source?.quote || note.source?.evidence) && <pre>{note.source.quote || note.source.evidence}</pre>}{note.source?.scope && <p>{note.source.scope}</p>}{sourceLink && <a className="ns-link" href={sourceLink}>Open original session</a>}</details>}
+      {note.truncated && <p className="ns-muted">The preview is incomplete. Editing is unavailable to protect unseen content.</p>}
+    </div><div className="ns-row-actions">
+      {capabilities?.update && !note.truncated && <Button variant="outline" size="sm" onClick={() => onEdit(note)}>Review & edit<span className="visually-hidden"> {note.title}</span></Button>}
+      {capabilities?.delete && <Button variant="ghost" size="sm" onClick={() => onRemove(note)}>Delete<span className="visually-hidden"> {note.title}</span></Button>}
+    </div></article>
+  })}</div>
+}
+
+export function productMemoryWrite(note: ProductMemoryNote | undefined, values: FormValues, requestId: string) {
+  const normalizeRepository = (value: string) => value.trim().replace(/\/$/, "").replace(/\.git$/, "").toLowerCase()
+  const sameRepository = note && normalizeRepository(note.repo_url) === normalizeRepository(String(values.repo_url || ""))
+  return {
+    key: note?.key || `note-${requestId.toLowerCase()}`, title: String(values.title), content: String(values.content),
+    kind: String(values.kind), repo_url: String(values.repo_url || ""), revision: note?.revision ?? 0, request_id: requestId,
+    ...(note?.repository_id && sameRepository ? { repository_id: note.repository_id } : {}),
+  }
+}
+function ProductMemoryPage() {
+  const resource = useResource<ProductMemoryData>("/product/memory")
+  const [search, setSearch] = useState("")
+  const [editor, setEditor] = useState<{ note?: ProductMemoryNote; requestId: string } | null>(null)
+  const [remove, setRemove] = useState<ProductMemoryNote | null>(null)
+  const mutation = useMutation()
+  const request = async (path: string, method: string, body: unknown) => {
+    try { return await api(path, method, body) }
+    catch (reason) {
+      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) { setEditor(null); setRemove(null); resource.refresh() }
+      throw reason
+    }
+  }
+  return <LoadState resource={resource}>{data => {
+    if (data.source !== "canonical") return <p className="ns-error" role="alert">The server did not return the original memory library.</p>
+    if (data.capabilities.read !== true) return <div className="ns-empty"><Shield /><h2>Personal memory is unavailable for this sign-in</h2><p>{data.note || "Use an individual sign-in to view your personal memory."}</p><Button variant="outline" onClick={resource.refresh}>Check access again</Button></div>
+    if (!data.preferences || data.scope?.kind !== "personal") return <p className="ns-error" role="alert">The server did not confirm your personal memory scope and preferences.</p>
+    const prefs = data.preferences, rows = data.memories.filter(row => contains(search, row.title, row.content, row.repo_url))
+    return <><p className="ns-notice"><Shield size={16} />These are your original personal notes. No other user’s private memory is requested.</p>
+      {data.note && <p className="ns-notice">{data.note}</p>}
+      <div className="ns-notice" role="status">{data.runtime ? <>
+        <span>Runtime recall: {data.runtime.recall ? "available" : "unavailable"} · Automatic saving: {data.runtime.auto_save ? "available" : "unavailable"} · Background review: {data.runtime.background_review ? "available" : "unavailable"}</span>
+        {data.runtime.note && <span>{data.runtime.note}</span>}
+      </> : "This server has not reported native memory readiness."}</div>
+      <section className="ns-record"><div className="ns-record-copy"><h2>Memory preferences</h2><p>Saved setting: {prefs.enabled ? "enabled" : "paused"}. Pausing keeps your notes and stops future recall and automatic saving.</p>
+        <Choice label="How new memories are saved" value={prefs.auto_save ? "auto" : "manual"} disabled={!data.capabilities.preferences || mutation.busy || !prefs.enabled}
+          options={[{ value: "auto", label: "Save useful context automatically" }, { value: "manual", label: "Only save manually" }]}
+          onChange={value => void mutation.run(() => request("/product/memory/preferences", "PUT", { enabled: prefs.enabled, auto_save: value === "auto", revision: prefs.revision }), resource.refresh)} />
+        {data.review?.latest && <small>Recorded review: {data.review.latest.status} · {dateTime(data.review.latest.updated_at)}</small>}
+      </div>{data.capabilities.preferences && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => request("/product/memory/preferences", "PUT", { enabled: !prefs.enabled, auto_save: prefs.auto_save, revision: prefs.revision }), resource.refresh)}>{prefs.enabled ? "Pause memory" : "Resume memory"}</Button>}</section>
+      {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} action={data.capabilities.create && <Button onClick={() => setEditor({ requestId: crypto.randomUUID() })}><Plus />Add memory</Button>} />
+      {rows.length ? <ProductMemoryNotes notes={rows} capabilities={data.capabilities} onEdit={note => setEditor({ note, requestId: crypto.randomUUID() })} onRemove={setRemove} /> : <Empty filtered={Boolean(search)} noun="memories" onClear={() => setSearch("")} />}
+      {editor && (editor.note ? data.capabilities.update && !editor.note.truncated : data.capabilities.create) && <Editor title={editor.note ? "Edit memory" : "Add memory"} description="Keep one useful idea per note. Updates preserve the saved identity and check its revision."
+        initial={{ title: editor.note?.title ?? "", content: editor.note?.content ?? "", kind: editor.note?.kind ?? "preference", repo_url: editor.note?.repo_url ?? "" }}
+        fields={[{ name: "title", label: "Title", required: true, minLength: 3, maxLength: 120 }, { name: "kind", label: "Type", type: "select", options: productMemoryKinds },
+          { name: "content", label: "What should Moyai remember?", type: "textarea", required: true, minLength: 3 },
+          { name: "repo_url", label: "Repository (optional)", type: "url", maxLength: 240, hint: "Use a GitHub repository URL, or leave blank for context across your sessions. Editing project context or a reference refreshes its expiry." }]}
+        onSave={async values => { await request(`/product/memory${editor.note ? `/${encodeURIComponent(editor.note.id)}` : ""}`, editor.note ? "PUT" : "POST", productMemoryWrite(editor.note, values, editor.requestId)); resource.refresh() }} onClose={() => setEditor(null)} />}
+      {remove && data.capabilities.delete && <Confirm title={`Delete ${remove.title}?`} description="This stops future recall of the note. Existing conversations and backups are retained." label="Delete memory"
+        onConfirm={async () => { await request(`/product/memory/${encodeURIComponent(remove.id)}`, "DELETE", { revision: remove.revision }); resource.refresh() }} onClose={() => setRemove(null)} />}
+    </>
+  }}</LoadState>
+}
+
+export function productSkillFileUrl(id: string, path: string, revision: number): string | undefined {
+  if (!/^[0-9a-f]{32}$/.test(id) || !path || /[\\\u0000-\u001f\u007f]/.test(path) || !Number.isSafeInteger(revision) || revision < 1) return
+  const parts = path.split("/")
+  if (parts.some(part => !part || part === "." || part === "..")) return
+  return `/api/product/skills/${encodeURIComponent(id)}/files/${parts.map(encodeURIComponent).join("/")}?revision=${revision}`
+}
+export function ProductSkillRows({ skills, onView }: { skills: ProductSkill[]; onView: (skill: ProductSkill) => void }) {
+  return <div className="ns-records">{skills.map(skill => <article className="ns-record" key={skill.id}><Sparkles className="ns-record-icon" aria-hidden="true" />
+    <div className="ns-record-copy"><div className="ns-record-title"><h2>{skill.name}</h2><span className="ns-badge">{skill.scope === "organization" ? "Organization" : "Personal"}</span>{skill.archived && <span className="ns-badge">Archived</span>}</div>
+      <p>{skill.description}</p><small>Saved reference: /{skill.reference} · Updated {dateTime(skill.updated_at)}</small></div>
+    <Button size="sm" variant="outline" onClick={() => onView(skill)}>View instructions<span className="visually-hidden"> for {skill.name}</span></Button>
+  </article>)}</div>
+}
+function ProductSkillDialog({ skill, onClose }: { skill: ProductSkill; onClose: () => void }) {
+  const resource = useResource<ProductSkillDetail>(`/product/skills/${encodeURIComponent(skill.id)}`)
+  const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus() }}>
+    <DialogHeader><DialogTitle>{skill.name}</DialogTitle><DialogDescription>The original skill and supporting files are retained. Conversion to the new runtime is deferred.</DialogDescription></DialogHeader>
+    <LoadState resource={resource}>{detail => <><div className="ns-field"><label>Saved instructions<Textarea readOnly aria-label="Saved skill instructions" value={detail.instructions} rows={12} /></label></div>{detail.files.length > 0 && <section><h3>Supporting files</h3><ul className="ns-supporting-files">{detail.files.map(file => {
+      const href = productSkillFileUrl(detail.id, file.path, detail.revision)
+      return <li key={file.path}>{href ? <a className="ns-link" href={href} download>{file.path}</a> : <span>{file.path} · Download unavailable</span>}<small> · {file.size.toLocaleString()} bytes</small></li>
+    })}</ul></section>}</>}</LoadState>
+    <Button variant="outline" onClick={onClose}>Close</Button>
+  </DialogContent></Dialog>
+}
+function ProductSkillsPage() {
+  const [archived, setArchived] = useState(false), [search, setSearch] = useState(""), [scope, setScope] = useState("all")
+  const [pages, setPages] = useState(1), [revision, setRevision] = useState(0)
+  const [state, setState] = useState<{ archived: boolean; data?: ProductSkillLibrary; loading: boolean; error: string }>({ archived, loading: true, error: "" })
+  const [selected, setSelected] = useState<ProductSkill | null>(null)
+  useEffect(() => {
+    const controller = new AbortController()
+    setState(previous => ({ archived, data: previous.archived === archived ? previous.data : undefined, loading: true, error: "" }))
+    void (async () => {
+      try {
+        let offset = 0, result: ProductSkillLibrary | undefined
+        const rows = new Map<string, ProductSkill>()
+        for (let page = 0; page < pages; page++) {
+          const next = await api<ProductSkillLibrary>(`/product/skills?archived=${archived}&limit=100&offset=${offset}`, "GET", undefined, controller.signal)
+          if (controller.signal.aborted) return
+          if (next.source !== "canonical") throw new Error("The server did not return the original skill library.")
+          for (const skill of next.skills) rows.set(skill.id, skill)
+          result = { ...next, skills: [...rows.values()] }
+          if (!next.has_more || next.next_offset === null || next.next_offset <= offset) break
+          offset = next.next_offset
+        }
+        if (!controller.signal.aborted) setState({ archived, data: result, loading: false, error: "" })
+      } catch (reason) { if (!controller.signal.aborted) { setState({ archived, loading: false, error: errorText(reason) }); setSelected(null) } }
+    })()
+    return () => controller.abort()
+  }, [archived, pages, revision])
+  const resource: Resource<ProductSkillLibrary> = {
+    data: state.archived === archived ? state.data : undefined, loading: state.archived !== archived || state.loading,
+    error: state.archived === archived ? state.error : "", refresh: () => setRevision(value => value + 1),
+  }
+  return <LoadState resource={resource}>{data => {
+    if (data.capabilities?.read !== true) return <div className="ns-empty" role="status"><h2>Original skill library unavailable</h2><p>{data.note || "The server has not enabled access to the canonical skill library."}</p><Button variant="outline" onClick={resource.refresh}>Retry</Button></div>
+    const rows = data.skills.filter(row => contains(search, row.name, row.description, row.reference) && (scope === "all" || row.scope === scope))
+    return <><p className="ns-notice">{data.note || "Your original skill library is retained. Skill conversion is deferred; these records are read-only here."}</p>
+      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
+        filter={<Choice label="Skill scope" value={scope} onChange={setScope} options={[{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "organization", label: "Organization" }]} />} />
+      <label className="check-label"><Checkbox checked={archived} onCheckedChange={value => { setArchived(value === true); setPages(1); setSelected(null) }} />Include archived skills</label>
+      {rows.length ? <ProductSkillRows skills={rows} onView={setSelected} /> : <Empty filtered={Boolean(search) || scope !== "all"} noun="skills" onClear={() => { setSearch(""); setScope("all") }} />}
+      {data.has_more && <><p className="ns-muted">More saved skills are available. Search filters the loaded records.</p><Button variant="outline" disabled={resource.loading} onClick={() => setPages(value => value + 1)}>Load more skills</Button></>}
+      {selected && <ProductSkillDialog skill={selected} onClose={() => setSelected(null)} />}
+    </>
+  }}</LoadState>
+}
+
+const productProviders: Record<string, string> = { github: "GitHub", slack: "Slack", linear: "Linear", notion: "Notion" }
+export function productRedirect(value: string, origin: string): string {
+  if (typeof value !== "string" || !value) throw new Error("The connection service did not return a destination.")
+  const url = new URL(value, origin)
+  if (url.username || url.password || /[\\\u0000-\u0020\u007f]/.test(value) || (url.protocol !== "https:" && url.origin !== origin)) throw new Error("The connection service returned an invalid destination.")
+  return url.href
+}
+export function ProductConnectionRows({ connections, admin, onManage }: { connections: ProductConnection[]; admin: boolean; onManage: (connection: ProductConnection) => void }) {
+  return <div className="ns-records">{connections.map(connection => <article className="ns-record" key={connection.id}><Link2 className="ns-record-icon" aria-hidden="true" />
+    <div className="ns-record-copy"><div className="ns-record-title"><h2>{productProviders[connection.id] || connection.id}</h2><span className="ns-badge">{connection.connected ? connection.enabled ? "Connected" : "Paused" : "Not connected"}</span><span className="ns-badge">Organization</span></div>
+      <p>{connection.label || "No account connected"}</p><small>{connection.identity || "No provider identity"} · {connection.read_only ? "Read-only policy" : "Read and write policy"}</small>
+      <small>{connection.check_status === "healthy" ? `Last checked ${dateTime(connection.checked_at)}` : connection.check_status === "needs_attention" ? "Connection needs attention" : "Not checked"}</small>
+    </div><Button size="sm" variant="outline" onClick={() => onManage(connection)}>{admin ? "Manage" : "View access"}<span className="visually-hidden"> for {productProviders[connection.id] || connection.id}</span></Button>
+  </article>)}</div>
+}
+function ProductConnectionsPage({ user }: { user: SettingsUser }) {
+  const resource = useResource<ProductConnection[]>("/product/connections")
+  const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
+  const [selected, setSelected] = useState<{ connection: ProductConnection; mode: "manage" | "connect" | "repositories" } | null>(null)
+  const opener = useRef<HTMLElement | null>(null)
+  const open = (connection: ProductConnection) => { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setSelected({ connection, mode: "manage" }) }
+  return <>
+    <LoadState resource={resource}>{data => {
+      const rows = data.filter(row => contains(search, row.id, row.label, row.identity) && (filter === "all" || row.id === filter))
+      return <><p className="ns-notice">These are the original organization accounts. Each session selects its accounts; credentials stay on the server. Read-only and paused policies remain in force.</p>
+        <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Connected service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...Object.entries(productProviders).map(([value, label]) => ({ value, label }))]} />} />
+        {rows.length ? <ProductConnectionRows connections={rows} admin={user.role === "admin"} onManage={open} /> : <Empty filtered={Boolean(search) || filter !== "all"} noun="organization connections" onClear={() => { setSearch(""); setFilter("all") }} />}
+        {selected && <ProductConnectionDialog connection={selected.connection} mode={selected.mode} admin={user.role === "admin"} opener={opener}
+          onMode={mode => setSelected(current => current ? { ...current, mode } : null)} onClose={() => setSelected(null)}
+          onUpdated={() => { resource.refresh(); setSelected(null) }} />}
+      </>
+    }}</LoadState>
+    <p className="ns-muted">For your own Slack read identity, open <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
+  </>
+}
+function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onClose, onUpdated }: {
+  connection: ProductConnection; mode: "manage" | "connect" | "repositories"; admin: boolean
+  opener: React.MutableRefObject<HTMLElement | null>; onMode: (mode: "manage" | "connect" | "repositories") => void; onClose: () => void; onUpdated: () => void
+}) {
+  const mutation = useMutation()
+  const [nestedBusy, setNestedBusy] = useState(false)
+  const [enabled, setEnabled] = useState(connection.enabled), [readOnly, setReadOnly] = useState(connection.read_only)
+  const [disconnect, setDisconnect] = useState(false), [notice, setNotice] = useState("")
+  const name = productProviders[connection.id] || connection.id
+  return <Dialog open onOpenChange={open => { if (!open && !mutation.busy && !nestedBusy) onClose() }}><DialogContent className="native-settings-dialog"
+    onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus({ preventScroll: true }) }}>
+    <DialogHeader><DialogTitle>{name} · {mode === "repositories" ? "Repositories" : mode === "connect" ? "Connect account" : "Organization access"}</DialogTitle>
+      <DialogDescription>{mode === "manage" ? "This account and its policy apply to organization sessions. Provider permissions still bound every request." : "Use the existing provider setup flow. Secret values stay in this form and its authenticated submission."}</DialogDescription></DialogHeader>
+    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}{notice && <p className="ns-notice" role="status">{notice}</p>}
+    {mode === "manage" && <>
+      <p>{connection.connected ? `${connection.label} · ${connection.identity}` : "No organization account is connected."}</p>
+      {connection.tools.length > 0 && <details><summary>Provider operation descriptions</summary><ul className="ns-supporting-files">{connection.tools.map((tool, index) => <li key={tool.name || index}>{tool.name && <code>{tool.name} · </code>}{tool.description}</li>)}</ul></details>}
+      {admin ? <form onSubmit={event => { event.preventDefault(); void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}/policy`, "PATCH", { enabled, read_only: readOnly }), onUpdated) }}>
+        <div className="ns-fields"><label className="check-label"><Checkbox checked={enabled} disabled={mutation.busy} onCheckedChange={value => setEnabled(value === true)} />Available to organization sessions</label>
+          <div className="ns-field"><label>Allowed actions<Choice label="Allowed connection actions" value={readOnly ? "read" : "write"} onChange={value => setReadOnly(value === "read")} disabled={mutation.busy} options={[{ value: "read", label: "Read only" }, { value: "write", label: "Read and write" }]} /></label></div>
+          <p className="ns-field-hint">Pausing access or changing it to read only blocks new writes. Actions already sent cannot be recalled.</p></div>
+        <div className="ns-dialog-actions"><Button type="submit" disabled={mutation.busy}>{mutation.busy ? "Saving…" : "Save access"}</Button></div>
+      </form> : <p className="ns-muted">{connection.enabled ? "Available to sessions." : "Paused for organization sessions."} Ask an administrator to change this policy.</p>}
+      {admin && <div className="ns-row-actions">
+        <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("connect")}>{connection.connected ? "Reconnect" : "Connect"} {name}</Button>
+        {connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}/check`, "POST"), () => setNotice("The provider confirmed this connection."))}>Check connection</Button>}
+        {connection.id === "github" && connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("repositories")}>Choose repositories</Button>}
+        {connection.connected && <Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button>}
+      </div>}
+      {disconnect && admin && <div className="ns-empty"><h3>Disconnect {name} for the organization?</h3><p>Future tasks cannot use this account. Actions already sent and provider credentials are not recalled.</p><div className="ns-dialog-actions">
+        <Button autoFocus variant="outline" disabled={mutation.busy} onClick={() => setDisconnect(false)}>Cancel</Button>
+        <Button variant="destructive" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}`, "DELETE"), onUpdated)}>Disconnect for everyone</Button>
+      </div></div>}
+    </>}
+    {mode === "connect" && admin && <ProductConnectionSetup connection={connection} onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />}
+    {mode === "repositories" && admin && connection.id === "github" && <ProductRepositorySelection onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />}
+    <Button variant="outline" disabled={mutation.busy || nestedBusy} onClick={onClose}>Close</Button>
+  </DialogContent></Dialog>
+}
+function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { connection: ProductConnection; onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
+  const mutation = useMutation()
+  const [token, setToken] = useState(""), [organization, setOrganization] = useState(""), [appId, setAppId] = useState("")
+  const file = useRef<HTMLInputElement>(null)
+  useEffect(() => { onBusyChange(mutation.busy); return () => onBusyChange(false) }, [mutation.busy, onBusyChange])
+  const name = productProviders[connection.id] || connection.id
+  const redirect = (path: string, body?: object) => {
+    let result: { url?: string; connected?: boolean }
+    return mutation.run(async () => { result = await api(path, "POST", body) }, () => {
+      if (result.connected) onDone()
+      else if (result.url) window.location.assign(productRedirect(result.url, location.origin))
+    })
+  }
+  return <div className="ns-fields">
+    {connection.id === "github" ? <>
+      <p>Connect the organization’s GitHub App. Its installation controls which repositories can be selected.</p>
+      {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect("/connections/github/oauth")}>Continue with GitHub</Button> : <>
+        <form className="ns-fields" onSubmit={event => { event.preventDefault(); let destination: string; void mutation.run(async () => {
+          const selected = file.current?.files?.[0]
+          if (!selected || selected.size > 20_000) throw new Error("Choose a PEM private key file under 20 KB.")
+          const result = await api<{ url: string }>("/connections/github/app", "POST", { app_id: Number(appId), private_key: await selected.text() })
+          if (file.current) file.current.value = ""
+          destination = productRedirect(result.url, location.origin)
+        }, () => window.location.assign(destination)) }}>
+          <h3>Use an existing GitHub App</h3>
+          <div className="ns-field"><label>GitHub App ID<Input type="number" min={1} required disabled={mutation.busy} value={appId} onChange={event => setAppId(event.target.value)} /></label></div>
+          <div className="ns-field"><label>PEM private key<Input ref={file} type="file" accept=".pem" required disabled={mutation.busy} /></label><p className="ns-field-hint">Choose the key from GitHub App settings. It is never displayed here or placed in chat.</p></div>
+          <Button type="submit" disabled={mutation.busy}>Verify app and continue</Button>
+        </form>
+        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect("/connections/github/oauth", { organization: organization.trim() }) }}>
+          <h3>Register an organization App</h3><div className="ns-field"><label>GitHub organization<Input required maxLength={39} pattern="[A-Za-z0-9][A-Za-z0-9-]{0,38}" disabled={mutation.busy} value={organization} onChange={event => setOrganization(event.target.value)} /></label></div>
+          <Button type="submit" variant="outline" disabled={mutation.busy}>Continue to GitHub registration</Button>
+        </form>
+      </>}
+    </> : <>
+      {connection.oauth_configured ? <Button disabled={mutation.busy} onClick={() => void redirect(`/connections/${encodeURIComponent(connection.id)}/oauth`)}>Continue with {name}</Button>
+        : <p className="ns-muted">OAuth is not configured for this provider. An administrator can connect using a supported access token.</p>}
+      <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}`, "POST", { token }), () => { setToken(""); onDone() }) }}>
+        <div className="ns-field"><label>Access token<Input type="password" autoComplete="off" required minLength={1} maxLength={100000} disabled={mutation.busy} value={token} onChange={event => setToken(event.target.value)} /></label><p className="ns-field-hint">The provider validates the token. It is stored encrypted and is never returned to this page.</p></div>
+        <Button type="submit" disabled={mutation.busy}>Connect {name} using token</Button>
+      </form>
+    </>}
+    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+    <Button variant="outline" disabled={mutation.busy} onClick={onBack}>Back to account</Button>
+  </div>
+}
+function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
+  const resource = useResource<{ repositories: { id: number; full_name: string }[]; selected_ids: number[]; installation_url: string }>("/connections/github/repositories")
+  const mutation = useMutation(), initialized = useRef(false)
+  const [selected, setSelected] = useState<number[]>([]), [search, setSearch] = useState("")
+  useEffect(() => { onBusyChange(mutation.busy); return () => onBusyChange(false) }, [mutation.busy, onBusyChange])
+  useEffect(() => { if (resource.data && !initialized.current) { initialized.current = true; setSelected(resource.data.selected_ids) } }, [resource.data])
+  return <LoadState resource={resource}>{data => {
+    const rows = data.repositories.filter(row => contains(search, row.full_name))
+    let installation: string | undefined
+    try { installation = productRedirect(data.installation_url, location.origin) } catch {}
+    return <form onSubmit={event => { event.preventDefault(); void mutation.run(() => api("/connections/github/repositories", "POST", { repository_ids: selected }), onDone) }}>
+      <p>Choose repositories by their permanent GitHub IDs. Renaming a repository keeps the connection and saved work.</p>
+      <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} />
+      <div className="ns-fields">{rows.map(repo => <label className="check-label" key={repo.id}><Checkbox checked={selected.includes(repo.id)} disabled={mutation.busy} onCheckedChange={checked => setSelected(previous => checked ? [...new Set([...previous, repo.id])] : previous.filter(id => id !== repo.id))} />{repo.full_name}</label>)}</div>
+      {installation && <p className="ns-muted"><a className="ns-link" href={installation} target="_blank" rel="noreferrer">Manage the GitHub App’s repository access</a>, then refresh this list.</p>}
+      {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+      <div className="ns-dialog-actions"><Button type="button" variant="outline" disabled={mutation.busy} onClick={onBack}>Back</Button><Button type="submit" disabled={mutation.busy || !selected.length}>Save repositories</Button></div>
+    </form>
+  }}</LoadState>
+}
+const personalSlackSources: Record<string, string> = { personal: "your personal Slack account", organization: "organization Slack connection", none: "no Slack connection" }
+function ProductPersonalSlack({ individual, heading = "Personal Slack" }: { individual: boolean; heading?: string }) {
+  const resource = useResource<PersonalSlack>("/connections/slack/personal")
+  const mutation = useMutation(), [disconnect, setDisconnect] = useState(false)
+  return <section className="ns-section"><h2>{heading}</h2><LoadState resource={resource}>{data => <>
+    <p>{data.label || "No personal Slack account connected"} · {data.connected ? data.health === "healthy" ? "Connected" : "Needs attention" : "Not connected"}</p>
+    <p className="ns-muted">Effective read identity: {personalSlackSources[data.effective_source || ""] || "Unavailable"}. A configured personal account never silently falls back to organization credentials after a failure.</p>
+    <p className="ns-notice">Personal Slack reads require a private web session. They are unavailable in shared chats, Slack threads, and automations.</p>
+    {data.description && <p>{data.description}</p>}{data.limitation && <p className="ns-muted">{data.limitation}</p>}
+    {!data.available && <p className="ns-muted">Use an individual workspace sign-in to own a personal Slack connection.</p>}
+    {!data.oauth_configured && <p className="ns-muted">An administrator must configure Slack OAuth before connecting.</p>}
+    <div className="ns-row-actions">
+      <Button disabled={mutation.busy || !data.available || !data.oauth_configured} onClick={() => {
+        let result: { url: string }
+        void mutation.run(async () => { result = await api("/connections/slack/personal/oauth", "POST") }, () => window.location.assign(productRedirect(result.url, location.origin)))
+      }}>{data.connected ? "Reconnect Slack" : "Connect Slack"}</Button>
+      {data.connected && <><Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => api("/connections/slack/personal/check", "POST"), resource.refresh)}>Check connection</Button><Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button></>}
+      {data.available && individual && <Button variant="outline" disabled={mutation.busy} onClick={() => { location.hash = "" }}>Start private web session</Button>}
+    </div>
+    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+    {disconnect && <Confirm title="Disconnect personal Slack?" description="Future Slack reads can use the organization connection when available. Existing private sessions stay private. Only your personal connection is removed." label="Disconnect personal Slack"
+      onConfirm={async () => { await api("/connections/slack/personal", "DELETE"); resource.refresh() }} onClose={() => setDisconnect(false)} />}
+  </>}</LoadState></section>
 }
 
 function ConnectionsPage({ user }: { user: SettingsUser }) {
@@ -276,20 +786,28 @@ function ConnectionsPage({ user }: { user: SettingsUser }) {
 }
 
 function UsersPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { users: Account[] }>("/settings/users")
+  const resource = useResource<Collection & { users: Account[]; source?: string; note?: string }>("/settings/users")
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [editor, setEditor] = useState<Account | "new" | null>(null), [remove, setRemove] = useState<Account | null>(null)
   return <LoadState resource={resource}>{data => {
-    const rows = data.users.filter(row => contains(search, row.username, row.display_name) && (filter === "all" || (filter === "disabled" ? !row.enabled : row.role === filter)))
-    return <><CapabilityNote {...data} /><Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
-      filter={<Choice label="User role or access" value={filter} onChange={setFilter} options={[{ value: "all", label: "All members" }, { value: "admin", label: "Administrators" }, { value: "member", label: "Members" }, { value: "disabled", label: "Disabled" }]} />}
+    const product = data.source === "product"
+    const rows = data.users.filter(row => contains(search, row.username, row.display_name, row.email) && (filter === "all" || (filter === "disabled" ? !row.enabled : row.role === filter)))
+    return <><CapabilityNote {...data} />{data.note && <p className="ns-notice">{data.note}</p>}<Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
+      filter={<Choice label="User role or access" value={filter} onChange={setFilter} options={[{ value: "all", label: "All members" }, { value: "admin", label: "Administrators" }, { value: "member", label: "Members" }, ...product ? [] : [{ value: "disabled", label: "Disabled" }]]} />}
       action={data.capabilities?.create && <Button onClick={() => setEditor("new")}><Plus />Add user</Button>} />
       {rows.length ? <RecordTable label="Workspace users" headings={["User", "Role", "Access", "Actions"]}>{rows.map(row => <TableRow key={row.id}>
-        <TableCell><strong>{row.display_name || row.username}{row.id === user.id ? " (you)" : ""}</strong><small>{row.username}</small></TableCell><TableCell>{row.role === "admin" ? "Administrator" : "Member"}</TableCell><TableCell><span className={`ns-badge ${row.enabled ? "ns-success" : ""}`}>{row.enabled ? "Enabled" : "Disabled"}</span></TableCell>
-        <TableCell><div className="ns-row-actions">{data.capabilities?.update && <Button size="sm" variant="outline" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.username}</span></Button>}
+        <TableCell><strong>{row.display_name || row.username}{row.id === user.id ? " (you)" : ""}</strong><small>{row.email || row.username}</small></TableCell><TableCell>{row.role === "admin" ? "Administrator" : "Member"}</TableCell><TableCell>{product ? "Organization sign-in" : <span className={`ns-badge ${row.enabled ? "ns-success" : ""}`}>{row.enabled ? "Enabled" : "Disabled"}</span>}</TableCell>
+        <TableCell><div className="ns-row-actions">{product && data.capabilities?.roles && row.email && Number.isSafeInteger(row.revision) ? <Button size="sm" variant="outline" onClick={() => setEditor(row)}>Edit role<span className="visually-hidden"> for {row.email}</span></Button> : !product && data.capabilities?.update && <Button size="sm" variant="outline" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.username}</span></Button>}
           {data.capabilities?.delete && row.enabled && row.id !== user.id && <Button size="sm" variant="ghost" onClick={() => setRemove(row)}>Disable<span className="visually-hidden"> {row.username}</span></Button>}</div></TableCell>
       </TableRow>)}</RecordTable> : <Empty filtered={Boolean(search) || filter !== "all"} noun="users" onClear={() => { setSearch(""); setFilter("all") }} />}
-      {editor && <Editor title={editor === "new" ? "Add user" : "Edit user"} description={editor === "new" ? "Share new credentials through an approved channel." : "Saving changes revokes existing sign-ins and stops this user’s pending or running work. Saved history is retained."} initial={editor === "new" ? { username: "", display_name: "", password: "", role: "member", enabled: true } : { username: editor.username, display_name: editor.display_name, password: "", role: editor.role, enabled: editor.enabled }} fields={[
+      {product && data.capabilities?.roles && editor && editor !== "new" && <Editor title="Edit workspace role" description={`Change the role for ${editor.email}. Organization sign-in continues to manage this account. At least one administrator must remain.`}
+        initial={{ role: editor.role }} fields={[{ name: "role", label: "Role", type: "select", options: [{ value: "member", label: "Member" }, { value: "admin", label: "Administrator" }] }]}
+        onSave={async values => {
+          if (values.role === editor.role) return
+          await api("/settings/users/role", "PUT", { email: editor.email, role: values.role, revision: editor.revision })
+          resource.refresh(); window.dispatchEvent(new Event("moyai:access-changed"))
+        }} onClose={() => setEditor(null)} />}
+      {!product && editor && <Editor title={editor === "new" ? "Add user" : "Edit user"} description={editor === "new" ? "Share new credentials through an approved channel." : "Saving changes revokes existing sign-ins and stops this user’s pending or running work. Saved history is retained."} initial={editor === "new" ? { username: "", display_name: "", password: "", role: "member", enabled: true } : { username: editor.username, display_name: editor.display_name, password: "", role: editor.role, enabled: editor.enabled }} fields={[
         { name: "username", label: "Username", required: true, disabled: editor !== "new", maxLength: 200, pattern: "[A-Za-z0-9][A-Za-z0-9_.@+\\-]*" }, { name: "display_name", label: "Display name", required: true, maxLength: 200 },
         { name: "password", label: editor === "new" ? "Password" : "New password", type: "password", required: editor === "new", minLength: 12, maxLength: 4096, hint: editor === "new" ? "Use at least 12 characters and a unique password." : "Leave blank to keep the existing password; replacements need at least 12 characters." },
         { name: "role", label: "Role", type: "select", options: [{ value: "member", label: "Member" }, { value: "admin", label: "Administrator" }], disabled: editor !== "new" && editor.id === user.id },
@@ -367,158 +885,15 @@ function AutomationsPage({ user }: { user: SettingsUser }) {
   }}</LoadState>
 }
 
-type AnalyticsSummary = {
-  turns: number; sessions?: number; completed: number; failed: number; input_tokens: number; output_tokens: number; total_tokens: number; requests: number
-  cost_usd: number | null; priced_turns: number; unpriced_turns: number; cost_coverage: number | null
-  latency_samples: number; mean_latency_ms: number | null; p50_latency_ms: number | null; p95_latency_ms: number | null
-}
-type AnalyticsRow = {
-  id: string; user_id: string; model: string; status: string; created_at: string; accepted_at?: string; finished_at?: string
-  input_tokens: number; output_tokens: number; total_tokens: number; requests: number; tool_calls: number; cache_read_tokens: number; cache_write_tokens: number
-  queue_ms: number | null; latency_ms: number | null; total_ms: number | null; cost_usd: number | null; pricing_status: string
-}
-type Analytics = {
-  rows: AnalyticsRow[]; summary: AnalyticsSummary; series: (AnalyticsSummary & { date: string })[]
-  by_user?: (AnalyticsSummary & { user_id: string })[]
-  models: string[]; users: Account[]; total: number; limit: number; offset: number; start: string; end: string; cost_note: string; latency_note: string
-}
-type ReportFilters = { start: string; end: string; model: string; status: string; user_id: string }
-const duration = (value: number | null | undefined) => typeof value !== "number" || !Number.isFinite(value) ? "Unavailable" : value < 1000 ? `${Math.round(value)} ms` : value < 60000 ? `${(value / 1000).toFixed(1)} s` : `${(value / 60000).toFixed(1)} min`
-const money = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 }).format(value) : "Unavailable"
-function reportDefaults(): ReportFilters {
-  const now = new Date(), start = new Date(now)
-  start.setUTCDate(start.getUTCDate() - 6)
-  return { start: start.toISOString().slice(0, 10), end: now.toISOString().slice(0, 10), model: "all", status: "all", user_id: "all" }
-}
-function reportParams(filters: ReportFilters) {
-  const end = new Date(`${filters.end}T00:00:00Z`)
-  end.setUTCDate(end.getUTCDate() + 1)
-  return new URLSearchParams({
-    start: `${filters.start}T00:00:00Z`, end: end.toISOString(),
-    ...(filters.model !== "all" ? { model: filters.model } : {}),
-    ...(filters.status !== "all" ? { status: filters.status } : {}),
-    ...(filters.user_id !== "all" ? { user_id: filters.user_id } : {}),
-  })
-}
-
-function Metrics({ items }: { items: { label: string; value: string; note?: string }[] }) {
-  return <dl className="ns-metrics">{items.map(item => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd>{item.note && <p>{item.note}</p>}</div>)}</dl>
-}
-
-function Trend({ title, points, format }: { title: string; points: { date: string; value: number | null }[]; format: (value: number | null) => string }) {
-  const values = points.flatMap(point => point.value !== null && Number.isFinite(point.value) ? [point.value] : [])
-  const highest = Math.max(1, ...values), width = 720, height = 176, step = (width - 32) / Math.max(points.length, 1)
-  return <section className="ns-chart-section"><div className="ns-section-heading"><h2>{title}</h2><span className="ns-muted">Daily · UTC</span></div>
-    {values.length ? <><svg className="ns-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}. Exact values are available in the table below.`}>
-      <line className="ns-chart-axis" x1={16} x2={width - 16} y1={height - 20} y2={height - 20} />
-      {points.map((point, index) => {
-        if (point.value === null || !Number.isFinite(point.value)) return null
-        const barHeight = point.value / highest * (height - 40), barWidth = Math.min(48, Math.max(1, step * .7))
-        return <rect key={point.date} x={16 + index * step + (step - barWidth) / 2} y={height - 20 - barHeight} width={barWidth} height={barHeight} rx={Math.min(3, step / 6)}><title>{point.date}: {format(point.value)}</title></rect>
-      })}
-    </svg><div className="ns-chart-range"><span>{points[0]?.date}</span><span>Scale: 0–{format(highest)}</span><span>{points.at(-1)?.date}</span></div></>
-      : <p className="ns-chart-empty">No recorded values for this chart in the selected range. Missing measurements are not treated as zero.</p>}
-    <details className="ns-chart-values"><summary>View daily values</summary>
-      {points.length ? <RecordTable label={`${title}: daily values`} headings={["Date (UTC)", title]}>{points.map(point => <TableRow key={point.date}><TableCell>{point.date}</TableCell><TableCell>{format(point.value)}</TableCell></TableRow>)}</RecordTable> : <p className="ns-muted">No daily records in this range.</p>}
-    </details>
-  </section>
-}
-
-function AnalyticsPage({ kind }: { kind: "performance" | "usage" }) {
-  const [filters, setFilters] = useState(reportDefaults), [draft, setDraft] = useState(reportDefaults)
-  const [offset, setOffset] = useState(0), [filterError, setFilterError] = useState("")
-  const [models, setModels] = useState<string[]>([]), [users, setUsers] = useState<Account[]>([])
-  const [reportView, setReportView] = useState<"overall" | "users" | "history">("overall")
-  const [metric, setMetric] = useState<"requests" | "total_tokens" | "cost_usd" | "mean_latency_ms" | "p95_latency_ms">(kind === "performance" ? "mean_latency_ms" : "requests")
-  const params = reportParams(filters)
-  const resource = useResource<Analytics>(`/settings/${kind}?${params}&limit=50&offset=${offset}`)
-  useEffect(() => {
-    if (!resource.data) return
-    setModels(previous => [...new Set([...previous, ...resource.data!.models])].sort())
-    setUsers(resource.data.users)
-  }, [resource.data])
-  const updateDraft = (key: keyof ReportFilters, value: string) => setDraft(previous => ({ ...previous, [key]: value }))
-  const format = metric === "cost_usd" ? money : metric.endsWith("_ms") ? duration : count
-  const metricOptions = kind === "performance"
-    ? [{ value: "mean_latency_ms", label: "Mean turn latency" }, { value: "p95_latency_ms", label: "p95 turn latency" }] as const
-    : [{ value: "requests", label: "Model requests" }, { value: "total_tokens", label: "Tokens" }, { value: "cost_usd", label: "Recorded cost" }] as const
-  const reset = () => { const initial = reportDefaults(); setDraft(initial); setFilters(initial); setOffset(0); setFilterError("") }
-  const reportViews = [{ id: "overall", label: "Overall" }, { id: "users", label: "Users" }, { id: "history", label: "Usage history" }] as const
-  const metricControls = <div className="ns-chart-tabs" role="group" aria-label="Chart metric">{metricOptions.map(option => <Button key={option.value} type="button" variant={metric === option.value ? "secondary" : "ghost"} aria-pressed={metric === option.value} onClick={() => setMetric(option.value)}>{option.label}</Button>)}</div>
-  const csvLabel = kind === "usage" && reportView === "users" ? "Export turns CSV" : "Export CSV"
-  return <>
-    <form className="ns-report-filters" onSubmit={event => {
-      event.preventDefault()
-      const start = Date.parse(`${draft.start}T00:00:00Z`), end = Date.parse(`${draft.end}T00:00:00Z`)
-      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start || end - start >= 366 * 86400000) { setFilterError("Choose an ordered date range of at most 366 days."); return }
-      setFilterError(""); setFilters({ ...draft }); setOffset(0)
-    }}>
-      <label>Start date (UTC)<Input type="date" required value={draft.start} onChange={event => updateDraft("start", event.target.value)} /></label>
-      <label>End date (UTC)<Input type="date" required value={draft.end} min={draft.start} onChange={event => updateDraft("end", event.target.value)} /></label>
-      <label>Model<Choice label="Report model" value={draft.model} onChange={value => updateDraft("model", value)} options={[{ value: "all", label: "All models" }, ...models.map(value => ({ value, label: value }))]} /></label>
-      <label>User<Choice label="Report user" value={draft.user_id} onChange={value => updateDraft("user_id", value)} options={[{ value: "all", label: "All users" }, ...users.map(row => ({ value: row.id, label: row.display_name || row.username }))]} /></label>
-      <label>Status<Choice label="Report status" value={draft.status} onChange={value => updateDraft("status", value)} options={["all", "queued", "starting", "running", "waiting", "saving", "steering", "signal_sent", "accepted", "included", "unconfirmed", "resumed", "completed", "failed", "stopped"].map(value => ({ value, label: value === "all" ? "All statuses" : (value[0].toUpperCase() + value.slice(1)).replaceAll("_", " ") }))} /></label>
-      <div className="ns-filter-actions"><Button type="submit">Apply filters</Button><Button type="button" variant="ghost" onClick={reset}>Reset</Button></div>
-      <p className="ns-field-hint">Both dates are included. Reports use UTC days; row timestamps use your local time.</p>
-      {filterError && <p className="ns-error" role="alert">{filterError}</p>}
-    </form>
-    <div className="ns-report-actions">{kind === "usage" ? <div className="ns-report-tabs" role="tablist" aria-label="Spend and usage view">{reportViews.map((view, index) => <Button key={view.id} id={`ns-report-tab-${view.id}`} type="button" role="tab" aria-selected={reportView === view.id} aria-controls="ns-report-panel" tabIndex={reportView === view.id ? 0 : -1} variant={reportView === view.id ? "secondary" : "ghost"} onClick={() => setReportView(view.id)} onKeyDown={event => {
-      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return
-      event.preventDefault()
-      const next = event.key === "Home" ? 0 : event.key === "End" ? reportViews.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + reportViews.length) % reportViews.length
-      setReportView(reportViews[next].id)
-      event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
-    }}>{view.label}</Button>)}</div> : metricControls}
-      <div><Button variant="outline" disabled={resource.loading} onClick={resource.refresh}><RefreshCw />Refresh</Button>
-        {resource.data && !resource.loading && !resource.error ? <Button variant="outline" asChild><a href={`/api/settings/${kind}?${params}&format=csv`} download><Download />{csvLabel}</a></Button> : <Button variant="outline" disabled><Download />{csvLabel}</Button>}</div>
-    </div>
-    <div id="ns-report-panel" role={kind === "usage" ? "tabpanel" : undefined} aria-labelledby={kind === "usage" ? `ns-report-tab-${reportView}` : undefined}>
-    <LoadState resource={resource}>{data => <>
-      <p className="ns-notice">{kind === "performance" ? data.latency_note : data.cost_note}</p>
-      {kind === "usage" && reportView === "overall" && <Metrics items={[
-        { label: "Recorded cost", value: money(data.summary.cost_usd), note: data.summary.cost_usd === null ? "No authoritative cost recorded" : data.summary.unpriced_turns > 0 ? "Partial coverage" : "Recorded USD" },
-        { label: "Cost coverage", value: `${count(data.summary.priced_turns)} / ${count(data.summary.turns)} turns`, note: `${count(data.summary.unpriced_turns)} unpriced` },
-        { label: "Sessions", value: count(data.summary.sessions), note: "Distinct sessions in this range" },
-        { label: "Model requests", value: count(data.summary.requests) }, { label: "Tokens", value: count(data.summary.total_tokens), note: `${count(data.summary.input_tokens)} input · ${count(data.summary.output_tokens)} output` },
-      ]} />}
-      {kind === "performance" && <Metrics items={[
-        { label: "Mean turn latency", value: duration(data.summary.mean_latency_ms) }, { label: "Median (p50)", value: duration(data.summary.p50_latency_ms) },
-        { label: "p95", value: duration(data.summary.p95_latency_ms) }, { label: "Measured turns", value: `${count(data.summary.latency_samples)} / ${count(data.summary.turns)}`, note: "Missing timings are excluded" },
-      ]} />}
-      {(kind === "performance" || reportView === "overall") && <>{kind === "usage" && metricControls}<Trend title={metricOptions.find(option => option.value === metric)?.label ?? "Recorded values"} points={data.series.map(day => ({ date: day.date, value: day[metric] }))} format={format} /></>}
-      {kind === "usage" && reportView === "users" && <section><div className="ns-section-heading"><h2>Usage by user</h2><span className="ns-muted">Entire filtered range</span></div><p className="ns-muted ns-section-description">Totals include all matching turns, regardless of table pagination. Costs without an authoritative value remain unavailable.</p>
-        {!data.by_user ? <p className="ns-notice">User aggregates are not available from this server.</p> : data.by_user.length ? <RecordTable label="Usage by user" headings={["User", "Sessions", "Turns", "Requests", "Tokens", "Recorded cost"]}>
-          {data.by_user.map(row => { const user = data.users.find(user => user.id === row.user_id); return <TableRow key={row.user_id}>
-            <TableCell><strong>{user?.display_name || user?.username || row.user_id}</strong>{user?.username && <small>{user.username}</small>}</TableCell><TableCell>{count(row.sessions)}</TableCell><TableCell>{count(row.turns)}</TableCell><TableCell>{count(row.requests)}</TableCell><TableCell>{count(row.total_tokens)}<small>{count(row.input_tokens)} in · {count(row.output_tokens)} out</small></TableCell>
-            <TableCell>{money(row.cost_usd)}<small>{count(row.priced_turns)} priced · {count(row.unpriced_turns)} unpriced turns</small></TableCell>
-          </TableRow> })}
-        </RecordTable> : <Empty filtered noun="user totals" onClear={reset} />}
-      </section>}
-      {(kind === "performance" || reportView === "history") && <><div className="ns-section-heading"><h2>Recorded turns</h2><span className="ns-muted">{count(data.summary.completed)} completed · {count(data.summary.failed)} failed</span></div>
-      {data.rows.length ? <RecordTable label={`${kind === "performance" ? "Performance" : "Usage"} by turn`} headings={["Turn / created", "User", "Model / status", ...(kind === "performance" ? ["Queue wait", "Turn latency", "Total time"] : ["Requests", "Tokens", "Recorded cost"])]}>
-        {data.rows.map(row => <TableRow key={row.id}>
-          <TableCell><details><summary>{row.id.slice(0, 8)}</summary><code>{row.id}</code><small>Tool calls: {count(row.tool_calls)}</small><small>Cache read: {count(row.cache_read_tokens)} · write: {count(row.cache_write_tokens)}</small></details><small>{dateTime(row.created_at)}</small></TableCell>
-          <TableCell>{data.users.find(user => user.id === row.user_id)?.display_name || data.users.find(user => user.id === row.user_id)?.username || row.user_id}</TableCell>
-          <TableCell>{row.model}<small>{row.status}</small></TableCell>
-          {kind === "performance" ? <><TableCell>{duration(row.queue_ms)}</TableCell><TableCell>{duration(row.latency_ms)}</TableCell><TableCell>{duration(row.total_ms)}</TableCell></>
-            : <><TableCell>{count(row.requests)}</TableCell><TableCell>{count(row.total_tokens)}<small>{count(row.input_tokens)} in · {count(row.output_tokens)} out</small></TableCell><TableCell>{money(row.cost_usd)}<small>{row.pricing_status}</small></TableCell></>}
-        </TableRow>)}
-      </RecordTable> : <Empty filtered noun="turns" onClear={reset} />}
-      <div className="ns-pagination"><p className="ns-muted" role="status">{data.total ? `${count(data.offset + 1)}–${count(Math.min(data.offset + data.rows.length, data.total))} of ${count(data.total)} turns` : "No turns in this range"}</p>
-        <div><Button variant="outline" disabled={resource.loading || data.offset === 0} onClick={() => setOffset(Math.max(0, data.offset - data.limit))}>Previous</Button><Button variant="outline" disabled={resource.loading || data.offset + data.limit >= data.total} onClick={() => setOffset(data.offset + data.limit)}>Next</Button></div></div></>}
-      <details className="ns-method"><summary>About this data</summary><p>{data.cost_note}</p><p>{data.latency_note}</p><p>Charts, session counts, and user totals cover the entire filtered range. Usage history is paginated; the CSV includes all matching turns. Narrow the range if the server’s reporting limit is reached.</p><p>PR analytics, provider invoices, and leaderboard rankings are not instrumented in this report.</p></details>
-    </>}</LoadState>
-    </div>
-  </>
-}
-
-function OverviewPage({ user, navigate }: { user: SettingsUser; navigate: (page: string) => void }) {
-  const resource = useResource<{ counts: Record<string, number>; capabilities: Record<string, Capabilities | boolean> }>("/settings/overview")
+function OverviewPage({ user, navigate, productMode }: { user: SettingsUser; navigate: (page: string) => void; productMode: "standalone" | "existing" }) {
+  // Native-store totals do not describe canonical product data. Navigation
+  // remains available without publishing false zero counts during cutover.
+  const resource = useResource<{ counts: Record<string, number>; capabilities: Record<string, Capabilities | boolean> }>(productMode === "existing" ? null : "/settings/overview")
   return <>
     {resource.error && <p className="ns-notice" role="alert">Overview counts could not be loaded. {resource.error} <Button variant="ghost" onClick={resource.refresh}>Try again</Button></p>}
     {resource.loading && <p className="ns-muted" role="status">Loading overview counts…</p>}
     <div className="ns-overview-grid">{groups.filter(group => group !== "Administration" || user.role === "admin").map(group => <section key={group} className="ns-overview-group"><div className="ns-section-heading"><h2>{group}</h2>{group === "Administration" && <span className="ns-badge">Admin</span>}</div>
-      <div>{destinations.filter(item => item.group === group).map(item => <SettingsLink key={item.id} page={item.id} navigate={navigate} className="ns-overview-link"><item.Icon size={20} aria-hidden="true" /><span><strong>{item.title}</strong><span>{item.description}</span></span>
+      <div>{destinations.filter(item => item.group === group && (!item.productOnly || productMode === "existing")).map(item => <SettingsLink key={item.id} page={item.id} navigate={navigate} className="ns-overview-link"><item.Icon size={20} aria-hidden="true" /><span><strong>{item.title}</strong><span>{item.description}</span></span>
         {resource.data?.counts[item.id] !== undefined && <small>{count(resource.data.counts[item.id])}</small>}<ChevronRight size={18} aria-hidden="true" /></SettingsLink>)}</div>
     </section>)}</div>
   </>
@@ -531,13 +906,14 @@ function SettingsLink({ page, navigate, children, ...props }: { page: string; na
   }}>{children}</a>
 }
 
-export function SettingsPage({ user, page, onNavigate, onBack }: SettingsPageProps) {
+export function SettingsPage({ user, page, productMode = "standalone", onNavigate, onBack }: SettingsPageProps) {
   const current = !page || page === "settings" ? "overview" : page === "spend" ? "usage" : page
   const destination = destinations.find(item => item.id === current)
   const [navOpen, setNavOpen] = useState(false)
   const heading = useRef<HTMLHeadingElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const title = current === "overview" ? "Settings" : destination?.title ?? "Page not found"
+  const reportPage = user.role === "admin" && (current === "performance" || current === "usage")
   useEffect(() => {
     setNavOpen(false); heading.current?.focus(); content.current?.scrollTo({ top: 0 })
     const previous = document.title
@@ -553,21 +929,23 @@ export function SettingsPage({ user, page, onNavigate, onBack }: SettingsPagePro
       <Button className="ns-back" variant="ghost" onClick={onBack}><ArrowLeft size={16} />Back to workspace</Button>
       <nav id="native-settings-navigation" className={navOpen ? "ns-navigation open" : "ns-navigation"} aria-label="Settings">
         <p className="ns-nav-title">Settings</p>{navLink("overview", "Overview", <LayoutGrid size={17} aria-hidden="true" />)}
-        {groups.filter(group => group !== "Administration" || user.role === "admin").map(group => <section className="ns-nav-group" key={group}><h2>{group}</h2>{destinations.filter(item => item.group === group).map(item => <React.Fragment key={item.id}>{navLink(item.id, item.title, <item.Icon size={17} aria-hidden="true" />)}</React.Fragment>)}</section>)}
+        {groups.filter(group => group !== "Administration" || user.role === "admin").map(group => <section className="ns-nav-group" key={group}><h2>{group}</h2>{destinations.filter(item => item.group === group && (!item.productOnly || productMode === "existing")).map(item => <React.Fragment key={item.id}>{navLink(item.id, item.title, <item.Icon size={17} aria-hidden="true" />)}</React.Fragment>)}</section>)}
       </nav><div className="ns-account"><span>{user.name}</span><small>{user.role === "admin" ? "Administrator" : "Workspace member"}</small></div>
     </aside>
     <div className="ns-main"><div className="ns-breadcrumb" aria-label="Breadcrumb"><SettingsLink page="overview" navigate={navigate}>Settings</SettingsLink>{current !== "overview" && <><ChevronRight size={14} aria-hidden="true" /><span>{title}</span></>}</div>
-      <div className="ns-content" id="native-settings-content" ref={content}><header className="ns-page-heading"><h1 ref={heading} tabIndex={-1}>{title}</h1><p>{current === "overview" ? "Make Moyai work the way your team does." : destination?.description}</p></header>
+      <div className="ns-content" id="native-settings-content" ref={content}>{!reportPage && <header className="ns-page-heading"><h1 ref={heading} tabIndex={-1}>{title}</h1><p>{current === "overview" ? "Make Moyai work the way your team does." : destination?.description}</p></header>}
         <div key={`${user.id}:${current}`}>
-          {destination?.admin && user.role !== "admin" ? <div className="ns-empty" role="alert"><Shield size={24} /><h2>Administrator access required</h2><p>This page is available to workspace administrators.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview</Button></div>
-            : current === "overview" ? <OverviewPage user={user} navigate={navigate} />
-              : current === "skills" ? <SkillsPage user={user} />
-                : current === "automations" ? <AutomationsPage user={user} />
-                  : current === "memory" ? <MemoryPage />
-                    : current === "connections" ? <ConnectionsPage user={user} />
-                      : current === "secrets" ? <SecretsPage user={user} />
+          {destination?.productOnly && productMode !== "existing" ? <div className="ns-empty"><h2>Existing product accounts required</h2><p>This page is available when Moyai uses the existing product account service.</p></div>
+            : destination?.admin && user.role !== "admin" ? <div className="ns-empty" role="alert"><Shield size={24} /><h2>Administrator access required</h2><p>This page is available to workspace administrators.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview</Button></div>
+            : current === "overview" ? <OverviewPage user={user} navigate={navigate} productMode={productMode} />
+              : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
+                : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
+                  : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />
+                    : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} /> : <ConnectionsPage user={user} />
+                      : current === "personal-slack" ? <ProductPersonalSlack individual={user.individual !== false} heading="Your connection" />
+                      : current === "secrets" ? productMode === "existing" ? <ProductSecretsPage user={user} /> : <SecretsPage user={user} />
                         : current === "users" ? <UsersPage user={user} />
-                          : current === "performance" || current === "usage" ? <AnalyticsPage kind={current} />
+                          : current === "performance" || current === "usage" ? <AnalyticsPage kind={current} headingRef={heading} />
                             : <div className="ns-empty"><p>This settings page does not exist.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview<ArrowRight /></Button></div>}
         </div>
       </div>

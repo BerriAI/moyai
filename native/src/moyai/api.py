@@ -9,10 +9,11 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, TypeAdapter, field_validator
 from pydantic_ai import ConversationTypeAdapter, DeferredToolResults
@@ -24,7 +25,10 @@ from temporalio.service import RPCError
 from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
+from .file_preview import routes as file_preview_routes
 from .images import routes as image_routes
+from .live_events import PUBLIC_TOPIC
+from .live_stream import authorized_events
 from .models import (
     Artifact,
     Connection,
@@ -39,6 +43,7 @@ from .models import (
     now,
 )
 from .presentation import public_event, redact, saved_activity
+from .product_requester import answer_actor, can_answer
 from .pull_requests import routes as pull_request_routes
 from .runtime import Runtime
 from .security import check_password
@@ -57,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 
 class Login(BaseModel):
-    username: str = Field(min_length=1, max_length=200)
+    username: str = Field(default="", max_length=200)
     password: SecretStr = Field(max_length=4096)
 
 
@@ -121,7 +126,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             asyncio.create_task(dispatcher(runtime)),
             asyncio.create_task(reconcile_workflows(runtime)),
         ] if run_dispatcher else []
-        if run_dispatcher and runtime.settings.slack_bot_token.get_secret_value():
+        if run_dispatcher and runtime.product is None and runtime.settings.slack_bot_token.get_secret_value():
             tasks.append(asyncio.create_task(slack_dispatcher(runtime)))
         try:
             yield
@@ -135,9 +140,28 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     app = FastAPI(title="Moyai", lifespan=lifespan)
     app.state.runtime = runtime
-    app.include_router(slack_routes(runtime))
+    if runtime.product_slack is not None:
+        app.include_router(runtime.product_slack.routes())
+    else:
+        app.include_router(slack_routes(runtime))
+
+    @app.exception_handler(RequestValidationError)
+    async def safe_validation(_request: Request, error: RequestValidationError):
+        # Credentials and uploaded content must not be reflected into error
+        # responses consumed by clients, proxies, or diagnostic tooling.
+        return JSONResponse(status_code=422, content={"detail": [
+            {key: item[key] for key in ("type", "loc", "msg")} for item in error.errors()
+        ]})
 
     async def actor(request: Request) -> User:
+        if runtime.product_identity is not None:
+            principal = await runtime.product_identity.authenticate(
+                request, mutation=request.method not in {"GET", "HEAD", "OPTIONS"},
+            )
+            async with runtime.database.sessions.begin() as db:
+                user = await runtime.product_identity.project_native_user(db, principal)
+            request.state.product_principal = principal
+            return user
         token = request.cookies.get(COOKIE, "")
         identity = runtime.security.read_session(token)
         if not identity:
@@ -152,10 +176,39 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return user
 
     app.include_router(image_routes(runtime, actor))
-    app.include_router(computer_routes(runtime, actor))
+    app.include_router(computer_routes(runtime, actor, cookie_name=COOKIE))
     app.include_router(sidebar_routes(runtime, actor))
     app.include_router(workspace_routes(runtime, actor))
+    app.include_router(file_preview_routes(runtime, actor))
     app.include_router(pull_request_routes(runtime, actor))
+    if runtime.product is not None:
+        from .product_auth import routes as product_auth_routes
+        app.include_router(product_auth_routes(runtime, actor))
+    if runtime.product_connections is not None:
+        from .product_connections import routes as product_connection_routes
+        app.include_router(product_connection_routes(runtime.product_connections))
+    if runtime.product_secrets is not None:
+        app.include_router(runtime.product_secrets.routes())
+    if runtime.product_inference is not None:
+        from .product_inference_routes import product_inference_routes
+        app.include_router(product_inference_routes(runtime.product_inference))
+    if runtime.product_memory is not None:
+        from .product_memory import routes as product_memory_routes
+        app.include_router(product_memory_routes(runtime.product_memory))
+    if runtime.product_skill_catalog is not None:
+        from .product_skill_catalog import routes as product_skill_routes
+        app.include_router(product_skill_routes(runtime.product_skill_catalog))
+    if runtime.product_billing is not None:
+        from .product_billing_routes import routes as product_billing_routes
+        app.include_router(product_billing_routes(runtime.product_billing))
+    if runtime.product_automations is not None:
+        from .product_automations import routes as product_automation_routes
+        app.include_router(product_automation_routes(runtime.product_automations))
+    if runtime.product_automation_events is not None:
+        from .product_automation_events import routes as product_event_routes
+        app.include_router(product_event_routes(runtime.product_automation_events))
+    from .product_routes import routes as product_routes
+    app.include_router(product_routes(runtime, actor))
     app.include_router(settings_routes(runtime, actor))
 
     @app.middleware("http")
@@ -165,13 +218,49 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             expected = runtime.settings.public_url.rstrip("/") or str(request.base_url).rstrip("/")
             if origin and origin.rstrip("/") != expected:
                 return Response("Origin is not allowed.", status_code=403)
+        if runtime.product is not None and (
+            request.url.path not in {"/health", "/healthz"}
+            and not request.url.path.startswith(("/hooks/", "/broker/native/"))
+        ):
+            from .product_access import access_session
+            try:
+                access_cookie = await access_session(runtime.product, request)
+            except HTTPException as error:
+                return JSONResponse(
+                    {"detail": error.detail}, status_code=error.status_code,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if access_cookie is not None:
+                # Replay a read once with the newly issued, verified product
+                # cookie. Writes need a fresh CSRF token from /api/me first.
+                response = (
+                    RedirectResponse(
+                        request.url.path + ("?" + request.url.query if request.url.query else ""),
+                        status_code=303,
+                    ) if request.method in {"GET", "HEAD"} else
+                    JSONResponse({"detail": "Refresh your organization sign-in."}, status_code=401)
+                )
+                response.raw_headers.append((b"set-cookie", access_cookie))
+                response.headers["Cache-Control"] = "no-store"
+                return response
         response = await call_next(request)
+        if (
+            runtime.product_identity is not None
+            and getattr(request.state, "product_identity_grant", None) is not None
+            and response.status_code < 400
+        ):
+            try:
+                await runtime.product_identity.require_request_current(request)
+            except HTTPException as error:
+                response = JSONResponse({"detail": error.detail}, status_code=error.status_code)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "DENY"
+        origin_url = urlsplit(runtime.settings.public_url or str(request.base_url))
+        stream_origin = f"{'wss' if origin_url.scheme == 'https' else 'ws'}://{origin_url.netloc}"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; "
+            f"img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' {stream_origin}; font-src 'self'; "
             "frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
         )
         response.headers["Cache-Control"] = "no-store"
@@ -185,6 +274,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.post("/api/login")
     async def login(body: Login, request: Request, response: Response):
+        if runtime.product is not None:
+            from .product_auth import password_login
+            return await password_login(runtime, body.password.get_secret_value(), request, response)
         await runtime.database.limit_login(
             request.client.host if request.client else "unknown", body.username
         )
@@ -205,18 +297,45 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.post("/api/logout")
     async def logout(response: Response, user: User = Depends(actor)):
-        response.delete_cookie(COOKIE)
-        return {"signed_out": True}
+        response.delete_cookie("workspace_session" if runtime.product is not None else COOKIE)
+        result = {"signed_out": True}
+        if runtime.product is not None and runtime.product.settings.cloudflare_access_login:
+            return {**result, "logout_url": "/cdn-cgi/access/logout"}
+        return result
+
+    @app.get("/api/auth/config")
+    async def auth_config():
+        product = runtime.product
+        return {
+            "mode": "existing" if product is not None else "standalone",
+            "password_enabled": bool(
+                product.settings.password_login_enabled
+                and (product.settings.workspace_password or product.settings.workspace_member_password)
+                and not product.settings.cloudflare_access_login
+            ) if product is not None else True,
+            "google_enabled": bool(product and product.settings.google_enabled()
+                                   and not product.settings.cloudflare_access_login),
+            "access_enabled": bool(product and product.settings.cloudflare_access_login),
+        }
 
     @app.get("/api/me")
     async def me(request: Request, user: User = Depends(actor)):
-        identity = runtime.security.read_session(request.cookies[COOKIE])
-        if identity is None:
-            raise HTTPException(401, "Your session expired.")
+        principal = getattr(request.state, "product_principal", None)
+        if principal is not None:
+            csrf = principal.csrf_token
+        else:
+            identity = runtime.security.read_session(request.cookies[COOKIE])
+            if identity is None:
+                raise HTTPException(401, "Your session expired.")
+            csrf = identity["csrf"]
         return {
-            "user": {"id": user.id, "name": user.display_name, "role": user.role},
-            "csrf": identity["csrf"], "models": runtime.settings.models,
+            "user": {
+                "id": user.id, "name": user.display_name, "role": user.role,
+                "individual": principal.individual if principal is not None else True,
+            },
+            "csrf": csrf, "models": runtime.settings.models,
             "default_model": runtime.settings.default_model,
+            "product_mode": "existing" if runtime.product_identity is not None else "standalone",
         }
 
     @app.get("/api/sessions")
@@ -252,7 +371,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return session_view(await runtime.database.create_session(user, body))
 
     @app.get("/api/sessions/{session_id}")
-    async def session(session_id: str, user: User = Depends(actor)):
+    async def session(session_id: str, request: Request, user: User = Depends(actor)):
         row = await runtime.database.session(user, session_id)
         async with runtime.database.sessions() as db:
             turns = list((await db.scalars(select(Turn).where(
@@ -283,12 +402,20 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             snapshot = await runtime.stores.steps.latest_snapshot(run_id=turns[0].id)
             if snapshot is not None:
                 result["activity"] = saved_activity(snapshot.messages, turns[0].id)
-        if (
-            row.status == "waiting" and row.conversation
-            and active_turn is not None and active_turn.actor_id == user.id
-        ):
-            conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(row.conversation))
-            result["pending"] = TypeAdapter(Any).dump_python(conversation.deferred_tool_requests, mode="json")
+        if row.status == "waiting" and row.conversation and active_turn is not None:
+            # Requester-link checks take their own transaction. Do not hold a
+            # native connection while awaiting them (including one-slot pools).
+            result["can_answer"] = await can_answer(runtime, user, active_turn)
+            if result["can_answer"]:
+                conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(row.conversation))
+                result["pending"] = TypeAdapter(Any).dump_python(conversation.deferred_tool_requests, mode="json")
+            elif runtime.product_secrets is not None and user.role == "admin":
+                # Organization access assistance does not confer permission to
+                # answer another requester's questions or approve their tools.
+                requests = await runtime.product_secrets.execution.pending(request.state.product_principal, session_id)
+                result["credential_requests"] = [
+                    {"request_id": item["request_id"]} for item in requests["requests"]
+                ]
         return result
 
     @app.patch("/api/sessions/{session_id}")
@@ -397,14 +524,18 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             turn = await db.get(Turn, body.turn_id)
             if not turn or turn.session_id != session_id or not turn.conversation:
                 raise HTTPException(409, "This conversation is not waiting for an answer.")
-            if turn.actor_id != user.id:
-                raise HTTPException(403, "Only the original requester may answer this request.")
             conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(turn.conversation))
             pending = conversation.deferred_tool_requests
             if pending is None:
                 raise HTTPException(409, "There are no pending requests.")
+        resumed_actor = await answer_actor(runtime, user, turn)
+        async with runtime.database.sessions() as db:
+            calls, approvals = {}, {}
+            if runtime.product_secrets is not None:
+                from .product_slack_controls import stored_replies
+                calls, approvals = await stored_replies(runtime, db, turn)
+                calls.update(await runtime.product_secrets.execution.resolved_calls(db, turn, resumed_actor))
             questions = {call.tool_call_id: call for call in pending.calls}
-            calls = {}
             for identity, value in body.answers.items():
                 call = questions.get(identity)
                 if call is None or call.tool_name != "ask_user_question":
@@ -416,11 +547,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 except ValueError as error:
                     raise HTTPException(422, "Provide a valid response to each question.") from error
             try:
-                results = pending.build_results(approvals=body.approvals, calls=calls)
+                results = pending.build_results(approvals={**approvals, **body.approvals}, calls=calls)
+                if pending.remaining(results) is not None:
+                    raise ValueError("Deferred requests are incomplete.")
             except (ValueError, KeyError) as error:
-                raise HTTPException(422, "Answer every current question or approval.") from error
+                raise HTTPException(422, "Complete every current question, approval, and secure access request.") from error
         resumed = await runtime.database.resume(
-            user, session_id, turn.id, body.request_key,
+            resumed_actor, session_id, turn.id, body.request_key,
             TypeAdapter(DeferredToolResults).dump_python(results, mode="json"),
         )
         return turn_view(resumed)
@@ -446,7 +579,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if turn.preparation:
             preparation = json.loads(runtime.security.unseal(turn.preparation))
             for grant in preparation["scope"]["grants"]:
-                secret_values.append(runtime.security.unseal(grant["credential"]).decode())
+                if grant.get("credential") and not grant.get("policy", {}).get("product"):
+                    secret_values.append(runtime.security.unseal(grant["credential"]).decode())
 
         async def stream():
             yield "event: connected\ndata: {}\n\n"
@@ -457,7 +591,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 while not finished and not await request.is_disconnected():
                     previous_offset = next_offset
                     async with runtime.durability.stream_agent_events(
-                        client, handle, from_offset=next_offset
+                        client, handle, from_offset=next_offset, topic=PUBLIC_TOPIC,
                     ) as native:
                         async for event in native:
                             next_offset = native.offset + 1
@@ -478,10 +612,31 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 yield 'event: refresh\ndata: {}\n\n'
             yield 'event: finished\ndata: {}\n\n'
 
-        return StreamingResponse(stream(), media_type="text/event-stream")
+        async def authorize_viewer():
+            fresh = await runtime.database.user(user.id)
+            if fresh.auth_version != user.auth_version:
+                raise HTTPException(401, "Your access changed.")
+            if runtime.product_identity is not None:
+                await runtime.product_identity.require_request_current(request)
+            await runtime.database.session(fresh, session_id)
+
+        return StreamingResponse(
+            authorized_events(stream(), authorize_viewer, request.is_disconnected),
+            media_type="text/event-stream",
+        )
 
     @app.get("/api/connections")
-    async def connections(user: User = Depends(actor)):
+    async def connections(
+        user: User = Depends(actor), session_id: str | None = None, shared: bool = False,
+    ):
+        if runtime.product_connections is not None:
+            surface = "web"
+            if session_id is not None:
+                session = await runtime.database.session(user, session_id)
+                shared, surface = session.visibility == "shared", session.surface
+            return await runtime.product_connections.catalog(
+                user.id, shared_session=shared, surface=surface,
+            )
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(Connection).where(
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
@@ -490,6 +645,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.post("/api/connections")
     async def create_connection(body: ConnectionInput, user: User = Depends(actor)):
+        if runtime.product_connections is not None:
+            raise HTTPException(409, "Manage the existing product accounts in Connections.")
         if body.shared and user.role != "admin":
             raise HTTPException(403, "Only administrators can publish a shared connection.")
         if not body.credential.get_secret_value():
@@ -506,6 +663,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.put("/api/connections/{connection_id}")
     async def edit_connection(connection_id: str, body: ConnectionInput, user: User = Depends(actor)):
+        if runtime.product_connections is not None:
+            raise HTTPException(409, "Manage the existing product accounts in Connections.")
         async with runtime.database.sessions.begin() as db:
             row = await db.get(Connection, connection_id)
             if row is None or row.owner_id != user.id:

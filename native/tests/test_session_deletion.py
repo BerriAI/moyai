@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from pydantic_ai import Conversation, ConversationTypeAdapter
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.testing import WorkflowEnvironment
 from test_application_boundaries import sign_in
 from test_images_and_computer import image_bytes
@@ -453,3 +454,124 @@ async def test_delete_during_preparation_cannot_reanimate_stopped_turn(
             assert saved.deleted and saved.status == "stopped"
             assert (await db.get(Turn, turn.id)).status == "stopped"
         assert [row.id for row in await deleting.pending_stops()] == [turn.id]
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+@pytest.mark.parametrize("winner", ["stop", "delete", "saved_answer"])
+async def test_failure_rechecks_turn_after_concurrent_terminal_decision(
+    runtime, actor, tmp_path, monkeypatch, backend, winner,
+):
+    async with independent_databases(runtime, tmp_path, backend) as (failing, deciding):
+        if backend == "postgres":
+            async with failing.sessions() as db:
+                actor = await db.scalar(select(User).where(User.username == "admin"))
+        session = await failing.create_session(actor, NewSession())
+        turn = await failing.submit(actor, session.id, NewMessage(prompt="Race", request_key="failure-race"))
+        assert (await failing.claim_next()).id == turn.id
+        prepared = await failing.prepare(turn.id)
+        read, release = asyncio.Event(), asyncio.Event()
+        original_get, original_scalar = AsyncSession.get, AsyncSession.scalar
+
+        async def pause(db):
+            if db.bind is failing.engine and not read.is_set():
+                read.set()
+                await release.wait()
+
+        async def delayed_get(db, entity, key, **kwargs):
+            row = await original_get(db, entity, key, **kwargs)
+            if entity is Turn and key == turn.id:
+                await pause(db)
+            return row
+
+        async def delayed_scalar(db, statement, *args, **kwargs):
+            value = await original_scalar(db, statement, *args, **kwargs)
+            # The fixed path reads only the session ID before acquiring the
+            # fence. The old path instead cached the entire Turn via get().
+            if getattr(statement, "is_select", False) and value == session.id:
+                await pause(db)
+            return value
+
+        monkeypatch.setattr(AsyncSession, "get", delayed_get)
+        monkeypatch.setattr(AsyncSession, "scalar", delayed_scalar)
+        failure = asyncio.create_task(failing.fail(turn.id, "Late worker exception"))
+        try:
+            await asyncio.wait_for(read.wait(), 5)
+            if winner == "stop":
+                await asyncio.wait_for(deciding.stop(actor, session.id), 5)
+            elif winner == "delete":
+                await asyncio.wait_for(deciding.delete_session(actor, session.id), 5)
+            else:
+                assert await asyncio.wait_for(deciding.save_result(
+                    prepared.scope, conversation="{}", output="Already confirmed",
+                    workspace=None, usage={},
+                ), 5)
+            release.set()
+            await asyncio.wait_for(failure, 5)
+        finally:
+            release.set()
+            await asyncio.gather(failure, return_exceptions=True)
+        async with deciding.sessions() as db:
+            saved = await db.get(Turn, turn.id)
+            current = await db.get(Session, session.id)
+            assert saved.error is None
+            if winner == "saved_answer":
+                assert saved.status == "completed" and saved.result_accepted
+                assert current.status == "idle" and current.active_turn is None
+                assert deciding.security.unseal(saved.result).decode() == "Already confirmed"
+                assert await db.scalar(select(func.count()).select_from(Message).where(
+                    Message.identity == f"answer:{turn.id}",
+                )) == 1
+            else:
+                assert saved.status == current.status == "stopped"
+                assert current.active_turn == turn.id  # Existing dispatcher must still acknowledge Stop.
+                assert current.deleted is (winner == "delete")
+        if winner != "saved_answer":
+            assert [row.id for row in await deciding.pending_stops()] == [turn.id]
+            await deciding.stopped(turn.id)
+            assert await deciding.claim_next() is None
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_failure_holds_session_fence_before_turn_settlement_without_stop_deadlock(
+    runtime, actor, tmp_path, monkeypatch, backend,
+):
+    async with independent_databases(runtime, tmp_path, backend) as (failing, stopping):
+        if backend == "postgres":
+            async with failing.sessions() as db:
+                actor = await db.scalar(select(User).where(User.username == "admin"))
+        session = await failing.create_session(actor, NewSession())
+        turn = await failing.submit(actor, session.id, NewMessage(prompt="Race", request_key="failure-first"))
+        assert (await failing.claim_next()).id == turn.id
+        await failing.prepare(turn.id)
+        locked, release, stop_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_get = AsyncSession.get
+
+        async def delayed_get(db, entity, key, **kwargs):
+            row = await original_get(db, entity, key, **kwargs)
+            if db.bind is failing.engine and entity is Turn and key == turn.id:
+                locked.set()
+                await release.wait()
+            return row
+
+        async def stop():
+            stop_started.set()
+            return await stopping.stop(actor, session.id)
+
+        monkeypatch.setattr(AsyncSession, "get", delayed_get)
+        failure = asyncio.create_task(failing.fail(turn.id, "Failure won the fence"))
+        cancellation = None
+        try:
+            await asyncio.wait_for(locked.wait(), 5)
+            cancellation = asyncio.create_task(stop())
+            await asyncio.wait_for(stop_started.wait(), 5)
+            done, _ = await asyncio.wait({cancellation}, timeout=0.1)
+            assert not done  # Stop cannot commit while failure owns the session fence.
+            release.set()
+            await asyncio.wait_for(asyncio.gather(failure, cancellation), 5)
+        finally:
+            release.set()
+            await asyncio.gather(failure, *([cancellation] if cancellation else []), return_exceptions=True)
+        async with stopping.sessions() as db:
+            saved = await db.get(Turn, turn.id)
+            assert saved.status == "failed" and saved.error == "Failure won the fence"
+            assert (await db.get(Session, session.id)).active_turn is None

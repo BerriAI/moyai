@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from temporalio.api.common.v1 import Payload
 from temporalio.converter import DataConverter, DefaultFailureConverterWithEncodedAttributes, PayloadCodec
@@ -28,6 +29,17 @@ class ObjectStore:
             self.client = boto3.client(
                 "s3", region_name=settings.artifact_region,
                 endpoint_url=settings.artifact_endpoint or None,
+                aws_access_key_id=settings.artifact_access_key_id.get_secret_value() or None,
+                aws_secret_access_key=settings.artifact_secret_access_key.get_secret_value() or None,
+                aws_session_token=settings.artifact_session_token.get_secret_value() or None,
+                # Payload codecs run while Temporal is handling a workflow
+                # task. Let its durable retry policy recover storage outages,
+                # rather than holding that task through SDK transport retries.
+                config=Config(
+                    connect_timeout=3, read_timeout=5,
+                    retries={"mode": "standard", "total_max_attempts": 1},
+                    s3={"addressing_style": "path"},
+                ),
             )
 
     async def put(self, data: bytes) -> str:
@@ -38,7 +50,7 @@ class ObjectStore:
                 await asyncio.to_thread(
                     self.client.put_object,
                     Bucket=self.settings.artifact_bucket,
-                    Key=f"moyai/{digest[:2]}/{digest}",
+                    Key=f"{self.settings.artifact_prefix}/{digest[:2]}/{digest}",
                     Body=encoded,
                     ContentType="application/octet-stream",
                     IfNoneMatch="*",
@@ -74,7 +86,7 @@ class ObjectStore:
             response = await asyncio.to_thread(
                 self.client.get_object,
                 Bucket=self.settings.artifact_bucket,
-                Key=f"moyai/{digest[:2]}/{digest}",
+                Key=f"{self.settings.artifact_prefix}/{digest[:2]}/{digest}",
             )
             try:
                 encoded = await asyncio.to_thread(response["Body"].read)

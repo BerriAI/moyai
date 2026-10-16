@@ -9,6 +9,7 @@ import secrets
 import tempfile
 from functools import cached_property
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr
@@ -16,10 +17,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True, hide_input_in_errors=True,
+    )
 
     data_dir: Path = Field(default=Path(".data"), validation_alias="DATA_DIR")
     database_url: str = Field(default="", validation_alias="MOYAI_DATABASE_URL")
+    product_mode: Literal["standalone", "existing"] = Field(
+        default="standalone", validation_alias="MOYAI_PRODUCT_MODE",
+    )
+    database_schema: str = Field(
+        default="", pattern=r"^(?:[a-z][a-z0-9_]{0,62})?$",
+        validation_alias="MOYAI_NATIVE_DATABASE_SCHEMA",
+    )
+    native_schema_mode: Literal["auto", "bootstrap", "verify"] = Field(
+        default="auto", validation_alias="MOYAI_NATIVE_SCHEMA_MODE",
+    )
     encryption_key: SecretStr = Field(default=SecretStr(""), validation_alias="ENCRYPTION_KEY")
     workspace_password: SecretStr = Field(default=SecretStr(""), validation_alias="WORKSPACE_PASSWORD")
     administrator: str = Field(default="admin", validation_alias="MOYAI_ADMIN_USER")
@@ -54,6 +67,16 @@ class Settings(BaseSettings):
     artifact_bucket: str = Field(default="", validation_alias="MOYAI_ARTIFACT_BUCKET")
     artifact_endpoint: str = Field(default="", validation_alias="MOYAI_ARTIFACT_ENDPOINT")
     artifact_region: str = Field(default="us-east-1", validation_alias="MOYAI_ARTIFACT_REGION")
+    artifact_prefix: str = Field(default="moyai", validation_alias="MOYAI_NATIVE_ARTIFACT_PREFIX")
+    artifact_access_key_id: SecretStr = Field(
+        default=SecretStr(""), validation_alias="OBJECT_STORAGE_ACCESS_KEY_ID",
+    )
+    artifact_secret_access_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="OBJECT_STORAGE_SECRET_ACCESS_KEY",
+    )
+    artifact_session_token: SecretStr = Field(
+        default=SecretStr(""), validation_alias="OBJECT_STORAGE_SESSION_TOKEN",
+    )
 
     @property
     def models(self) -> list[str]:
@@ -107,8 +130,10 @@ class Settings(BaseSettings):
             raise ValueError("Invalid local master key.")
         return value
 
-    def validate_worker(self) -> None:
-        if not self.gateway_key.get_secret_value():
+    def validate_worker(self, *, brokered: bool = False) -> None:
+        if not self.gateway_key.get_secret_value() and not (
+            self.product_mode == "existing" and brokered
+        ):
             raise ValueError("Set LITELLM_API_KEY before starting an execution worker.")
         origin = urlsplit(self.gateway_url)
         if origin.username or origin.password or not (

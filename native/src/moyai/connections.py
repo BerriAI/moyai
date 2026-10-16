@@ -33,6 +33,7 @@ class ConnectionPolicy(BaseModel):
 
     allowed_tools: list[str] | None = Field(default=None, max_length=200)
     require_approval: bool = True
+    product: dict[str, object] | None = None
 
 
 def read_only_tool(tool: ToolDefinition) -> bool:
@@ -52,15 +53,22 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
                 raise ValueError("Selected account tool prefixes collide.")
             prefixes.add(prefix)
             policy = ConnectionPolicy.model_validate(grant.policy)
-            credential = security.unseal(grant.credential).decode()
-            if credential.strip().lower() == "oauth":
-                raise ValueError("Server connections require a token; interactive OAuth is not supported here.")
-            native = service(
-                id=f"connection_{grant.id}",
-                auth=credential,
-                read_only=grant.read_only,
-                include_instructions=False,
-            ).get_toolset()
+            if policy.product is not None:
+                from .runtime import current
+                product = getattr(current(), "product_connections", None)
+                if product is None:
+                    raise PermissionError("Canonical product connections are not configured.")
+                native = product.toolset(ctx.deps, grant)
+            else:
+                credential = security.unseal(grant.credential).decode()
+                if credential.strip().lower() == "oauth":
+                    raise ValueError("Server connections require a token; interactive OAuth is not supported here.")
+                native = service(
+                    id=f"connection_{grant.id}",
+                    auth=credential,
+                    read_only=grant.read_only,
+                    include_instructions=False,
+                ).get_toolset()
 
             def allowed(
                 _ctx: RunContext[RunScope], tool: ToolDefinition,

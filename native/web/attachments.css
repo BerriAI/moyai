@@ -1,0 +1,17 @@
+.file-drop-zone { position: relative; }
+.file-drop-overlay { position: absolute; inset: 12px; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; pointer-events: none; border: 2px dashed var(--ui-primary); border-radius: 12px; background: var(--ui-canvas); color: var(--ui-foreground); text-align: center; }
+.file-drop-overlay > svg { color: var(--ui-primary); }
+.file-drop-overlay > span { color: var(--ui-muted); font-size: 13px; }
+.image-preview.file-preview { width: 170px; }
+.file-preview > a, .file-preview > div { display: block; padding: 12px; color: var(--ui-foreground); text-decoration: none; }
+.file-preview svg { color: var(--ui-muted); }
+.file-preview span { padding: 8px 0 0; font-size: 12px; color: var(--ui-foreground); }
+.file-preview small { display: block; margin-top: 4px; color: var(--ui-muted); font-size: 11px; }
+.image-preview > a:focus-visible { display: block; outline: 2px solid var(--ui-primary); outline-offset: -2px; }
+.image-preview .attachment-upload-status { display: flex; align-items: center; gap: 6px; padding: 4px 10px 10px; color: var(--ui-muted); font-size: 11px; }
+.image-preview .attachment-upload-error { padding: 4px 10px 10px; color: var(--ui-danger); }
+.image-preview .attachment-upload-error > span { padding: 0; font-size: 11px; color: inherit; white-space: normal; overflow-wrap: anywhere; }
+.image-preview.upload-failed { border-color: var(--ui-danger-border); }
+.upload-spinner { flex: none; animation: upload-spin 1s linear infinite; }
+@keyframes upload-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .upload-spinner { animation: none; } }

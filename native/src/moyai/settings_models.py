@@ -15,7 +15,7 @@ class SettingSkill(Base):
     __table_args__ = (UniqueConstraint("scope_key", "name"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
-    scope_key: Mapped[str] = mapped_column(String(40), index=True)
+    scope_key: Mapped[str] = mapped_column(String(512), index=True)
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(String(1024))
     content: Mapped[str] = mapped_column(Text)  # encrypted Markdown
@@ -28,7 +28,7 @@ class SettingSecret(Base):
     __table_args__ = (UniqueConstraint("scope_key", "name"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
-    scope_key: Mapped[str] = mapped_column(String(40), index=True)
+    scope_key: Mapped[str] = mapped_column(String(512), index=True)
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(String(1000), default="")
     value: Mapped[str] = mapped_column(Text)  # encrypted, never returned by the API

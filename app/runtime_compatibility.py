@@ -9,6 +9,7 @@ import hashlib
 import json
 
 from .database import RUNTIME_SETTINGS
+from .native_contract import core_contract
 from .schema_migrations import SCHEMA_COMPATIBILITY_REVISION
 
 # Unlimited swarms persist budget_seconds=0 and ends_at=''. Older roles parse
@@ -38,11 +39,15 @@ COORDINATOR_PROTOCOL_REVISION = 18
 
 
 def api_fingerprint(settings):
-    return hashlib.sha256(json.dumps({
+    values = {
         'protocol': API_PROTOCOL_REVISION,
         'schema': SCHEMA_COMPATIBILITY_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
-    }, sort_keys=True).encode()).hexdigest()
+    }
+    native = core_contract(settings)
+    if native is not None:
+        values["execution_core"] = native
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 def worker_fingerprint(settings):
@@ -55,7 +60,7 @@ def broker_fingerprint(settings):
 
 def background_fingerprint(settings, role):
     """Conservative shared declaration for mutually dependent background roles."""
-    return hashlib.sha256(json.dumps({
+    values = {
         'role': role,
         'worker_protocol': WORKER_PROTOCOL_REVISION,
         'broker_protocol': BROKER_PROTOCOL_REVISION,
@@ -63,7 +68,11 @@ def background_fingerprint(settings, role):
         'api_protocol': API_PROTOCOL_REVISION,
         'schema': SCHEMA_COMPATIBILITY_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
-    }, sort_keys=True).encode()).hexdigest()
+    }
+    native = core_contract(settings)
+    if native is not None:
+        values["execution_core"] = native
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 def coordinator_fingerprint(settings):
