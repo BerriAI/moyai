@@ -31,7 +31,9 @@ def image_request(*, region, name, bucket, key, role):
         'buildRoleArn': role, 'codeArtifact': {'uri': f's3://{bucket}/{key}'},
         'cpuConfigurations': [{'architecture': 'ARM_64'}], 'resources': [{'minimumMemoryInMiB': 8192}],
         'egressNetworkConnectors': [f'arn:aws:lambda:{region}:aws:network-connector:aws-network-connector:INTERNET_EGRESS'],
-        'hooks': {'port': 80, 'microvmImageHooks': {'ready': 'ENABLED', 'readyTimeoutInSeconds': 60}}}
+        # The immutable baseline is hashed once before image readiness. This is
+        # image-build time, not the deadline for every user checkpoint.
+        'hooks': {'port': 80, 'microvmImageHooks': {'ready': 'ENABLED', 'readyTimeoutInSeconds': 900}}}
 
 
 if __name__ == '__main__':

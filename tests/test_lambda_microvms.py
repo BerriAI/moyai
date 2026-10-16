@@ -665,6 +665,7 @@ def test_image_package_contains_no_server_secrets_and_uses_real_sdk_shape(tmp_pa
     client = boto3.client('lambda-microvms', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test')
     request = image_request(region='us-east-1', name='moyai', bucket='artifacts', key='image.zip',
                             role='arn:aws:iam::123456789012:role/build')
+    assert request['hooks']['microvmImageHooks']['readyTimeoutInSeconds'] == 900
     validate_parameters(request, client.meta.service_model.operation_model('CreateMicrovmImage').input_shape)
 
 
