@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -217,6 +217,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     app.include_router(settings_routes(runtime, actor))
     from .swarm_routes import routes as swarm_routes
     app.include_router(swarm_routes(runtime, actor))
+
+    @app.get("/api/skills")
+    async def invocable_skills(
+        shared: bool = False, offset: int = Query(0, ge=0, le=10000),
+        limit: int = Query(100, ge=1, le=100), user: User = Depends(actor),
+    ):
+        return await runtime.skill_invocations.listing(user, shared=shared, offset=offset, limit=limit)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -480,6 +487,11 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
+        from .skill_invocations import has_invocations
+        if has_invocations(body.prompt):
+            async with runtime.database.sessions() as db:
+                session = await runtime.database.allowed_session(db, session_id, user)
+            body = body.model_copy(update={"prompt": await runtime.skill_invocations.normalize(body.prompt, user, session)})
         return turn_view(await runtime.database.submit(
             user, session_id, body, received_at=request.state.moyai_received_at,
         ))
@@ -490,16 +502,17 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             turn = await db.get(Turn, turn_id)
             if turn is None or turn.actor_id != user.id:
                 raise HTTPException(404, "Message not found.")
-            await runtime.database.allowed_session(db, turn.session_id, user)
+            session = await runtime.database.allowed_session(db, turn.session_id, user)
             await runtime.database.swarms.editable_input(db, turn)
+            prompt = await runtime.skill_invocations.normalize(body.prompt, user, session)
             changed = await db.scalar(update(Turn).where(
                 Turn.id == turn.id, Turn.status == "queued"
-            ).values(prompt=runtime.security.seal(body.prompt)).returning(Turn.id))
+            ).values(prompt=runtime.security.seal(prompt)).returning(Turn.id))
             if changed is None:
                 raise HTTPException(409, "The message was already admitted. Send a correction instead.")
             await db.execute(update(Message).where(
                 Message.turn_id == turn.id, Message.role == "user"
-            ).values(content=runtime.security.seal(body.prompt)))
+            ).values(content=runtime.security.seal(prompt)))
         return {"updated": True}
 
     @app.post("/api/turns/{turn_id}/steer", status_code=202)

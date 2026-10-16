@@ -119,7 +119,7 @@ class CompletedTurn:
 
 class NewSession(BaseModel):
     title: str = Field(default="New conversation", max_length=300)
-    visibility: Literal["private", "shared"] = "private"
+    visibility: Literal["private", "shared"] = "shared"
     model: str | None = None
 
 

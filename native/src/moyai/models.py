@@ -46,7 +46,7 @@ class Session(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("moyai_users.id"), index=True)
     title: Mapped[str] = mapped_column(String(300), default="New conversation")
-    visibility: Mapped[str] = mapped_column(String(20), default="private")
+    visibility: Mapped[str] = mapped_column(String(20), default="shared")
     surface: Mapped[str] = mapped_column(String(20), default="web")
     model: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(30), default="idle")

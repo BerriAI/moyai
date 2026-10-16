@@ -247,7 +247,7 @@ async def test_computer_access_rechecks_revoked_connection_grants(runtime, actor
             credential=runtime.security.seal("test-token"),
         )
         db.add(account)
-    session = await runtime.database.create_session(actor, NewSession())
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="Prepare", connections=[account.id], request_key="scoped-computer",
     ))

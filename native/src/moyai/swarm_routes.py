@@ -1,5 +1,7 @@
 """Authenticated product entrypoints for native swarm missions."""
 
+from types import SimpleNamespace
+
 from fastapi import APIRouter, Depends, Query, Request
 
 from .models import User
@@ -14,6 +16,12 @@ def routes(runtime: Runtime, actor) -> APIRouter:
 
     @router.post("/api/swarms")
     async def start(body: NewSwarm, request: Request, user: User = Depends(actor)):
+        from .skill_invocations import has_invocations
+        if has_invocations(body.prompt):
+            admission = SimpleNamespace(visibility=body.visibility, surface="web")
+            body = body.model_copy(update={
+                "prompt": await runtime.skill_invocations.normalize(body.prompt, user, admission),
+            })
         session, turn = await service.start(user, body, received_at=request.state.moyai_received_at)
         return {"session": {**session_view(session), "swarm_id": session.id}, "turn": turn_view(turn)}
 

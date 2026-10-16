@@ -34,6 +34,8 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
     runtime, actor, monkeypatch, product, read_only,
 ):
     constructions: list[str] = []
+    discovery_activities: set[str] = set()
+    dispatched_connections: list[str] = []
     calls: list[str] = []
     replaying = False
 
@@ -42,6 +44,8 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         assert not workflow.in_workflow(), "Provider construction cannot run in the workflow sandbox."
         assert activity.in_activity(), "Resolve connectors in the SDK's durable activities."
         constructions.append(activity.info().activity_type)
+        if activity.info().activity_type.endswith("__get_tools"):
+            discovery_activities.add(activity.info().activity_id)
 
     def provider_tools():
         tools = FunctionToolset(id="provider")
@@ -61,12 +65,16 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
 
         service = SimpleNamespace(
             database=runtime.database,
-            connectors=SimpleNamespace(github=SimpleNamespace(target=lambda name: 7)),
+            connectors=SimpleNamespace(github=SimpleNamespace(
+                target=lambda name: 7, repository_name=lambda identity: "test/selected",
+            )),
             check=check,
         )
 
         def resolve(scope, grant):
             require_activity()
+            if activity.info().activity_type.endswith("__call_tool"):
+                dispatched_connections.append(grant.id)
             # Exercise the real canonical publication adapter's lazy import and schemas.
             return ProductGitHubToolset(service, scope, grant)
 
@@ -82,6 +90,8 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             def __init__(self, **kwargs):
                 require_activity()
                 assert kwargs["auth"] == "synthetic-account-token"
+                if activity.info().activity_type.endswith("__call_tool"):
+                    dispatched_connections.append(kwargs["id"].removeprefix("connection_"))
 
             def get_toolset(self):
                 return provider_tools()
@@ -104,33 +114,48 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             policy=json.dumps({"product": {"repository_id": 7}} if product else {}),
         )
         db.add(connection)
+        unrelated = Connection(
+            id=new_id(), owner_id=actor.id, kind="github", name="Another selected repository",
+            credential=credential, read_only=read_only, policy=connection.policy,
+        )
+        db.add(unrelated)
 
     tool_name = f"github_{connection.id[:8]}_read_repository"
 
     async def stream(messages, info):
         names = {tool.name for tool in info.function_tools}
-        assert tool_name in names
+        if tool_name not in names:
+            assert "search_tools" in names
+            yield {0: DeltaToolCall(
+                name="search_tools", json_args=json.dumps({"queries": [f"github_{connection.id[:8]}"]}),
+                tool_call_id="discover-selected-repository",
+            )}
+            return
         if product:
             prefix = f"github_{connection.id[:8]}_"
+            assert "test/selected" in next(
+                tool.description for tool in info.function_tools if tool.name == tool_name
+            )
             assert prefix + "publication_status" in names
             for name in ("create_pull_request", "update_pull_request", "request_pull_request_write_access"):
                 assert (prefix + name in names) is not read_only
-        if any(
+        reads = sum(
             isinstance(part, ToolReturnPart) and part.tool_name == tool_name
             for message in messages for part in message.parts
-        ):
+        )
+        if reads == 2:
             yield "Repository read completed."
         else:
             yield {0: DeltaToolCall(
                 name=tool_name, json_args=json.dumps({"owner": "test", "repo": "selected"}),
-                tool_call_id="selected-repository-read",
+                tool_call_id=f"selected-repository-read-{reads}",
             )}
 
     runtime.models["test"].stream_function = stream
-    session = await runtime.database.create_session(actor, NewSession())
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="Read the selected repository.", request_key="connection-read",
-        connections=[connection.id],
+        connections=[connection.id, unrelated.id],
     ))
     await runtime.database.claim_next()
     converter = encrypted_converter(runtime.security, runtime.objects)
@@ -147,16 +172,18 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             result = await asyncio.wait_for(handle.result(), timeout=60)
             history = await handle.fetch_history()
         assert result["status"] == "completed"
-        assert calls == ["test/selected"]
+        assert calls == ["test/selected"] * 2
         assert any(name.endswith("__get_tools") for name in constructions)
         assert any(name.endswith("__call_tool") for name in constructions)
+        assert len(discovery_activities) == 1
+        assert dispatched_connections == [connection.id] * 2
         replaying = True
         await Replayer(
             interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
 
-    assert calls == ["test/selected"]
+    assert calls == ["test/selected"] * 2
     async with runtime.database.sessions() as db:
         saved = await db.get(Turn, turn.id)
         assert saved.status == "completed"

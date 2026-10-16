@@ -10,9 +10,9 @@ import tarfile
 from pathlib import Path
 
 FILES = (
-    ".env.example", "README.md", "compose.common.yaml", "compose.yaml",
+    ".env.example", ".gitignore", "README.md", "compose.common.yaml", "compose.yaml",
     "compose.split.yaml", "compose.temporal.yaml", "nginx.standalone.conf",
-    "nginx.split.conf", "temporal-databases.sql", "temporal-dynamic.yaml", "temporal-schema.sh", "upgrade.sh",
+    "nginx.split.conf", "temporal-databases.sql", "temporal-dynamic.yaml", "temporal-schema.sh", "upgrade.sh", "moyai.sh",
 )
 
 

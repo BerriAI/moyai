@@ -153,7 +153,9 @@ async def native_publication(runtime, actor, *, number=1, github_id=101, created
     )
     async with runtime.database.sessions.begin() as db:
         db.add(connection)
-    session = await runtime.database.create_session(actor, NewSession(title="PRIVATE_TITLE_DO_NOT_EXPORT"))
+    session = await runtime.database.create_session(actor, NewSession(
+        title="PRIVATE_TITLE_DO_NOT_EXPORT", visibility="private",
+    ))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="PRIVATE_PROMPT_DO_NOT_EXPORT", request_key=new_id(), connections=[connection.id],
     ))
@@ -211,7 +213,9 @@ async def test_native_confirmed_creation_is_idempotent_and_analytics_failure_doe
 
 
 async def test_report_uses_ledger_without_double_counting_zero_fills_and_exports_full_aggregates(runtime, actor):
-    session = await runtime.database.create_session(actor, NewSession(title="PRIVATE_TITLE_DO_NOT_EXPORT"))
+    session = await runtime.database.create_session(actor, NewSession(
+        title="PRIVATE_TITLE_DO_NOT_EXPORT", visibility="private",
+    ))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="PRIVATE_PROMPT_DO_NOT_EXPORT", request_key="recorded",
     ))
@@ -492,7 +496,7 @@ async def test_confirmed_native_pr_receipt_and_pre_projection_history_replay(run
     )
     async with runtime.database.sessions.begin() as db:
         db.add(connection)
-    session = await runtime.database.create_session(actor, NewSession())
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
     turn = await runtime.database.submit(actor, session.id, NewMessage(
         prompt="Create the synthetic PR", request_key="synthetic-native-pr", connections=[connection.id],
     ))

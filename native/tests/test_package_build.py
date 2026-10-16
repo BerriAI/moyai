@@ -54,6 +54,7 @@ def test_sdist_to_wheel_retains_runtime_resources_and_canonical_archive_helper(t
             "moyai/resources/skills/coding/SKILL.md", "moyai/static/index.html",
             "moyai/static/moyai.glb", "moyai/input_attachments.py",
             "moyai/product_start.py", "moyai/product_memory_review.py",
+            "moyai/install_config.py",
         }
         required |= {"app/config.py", "app/schema_initializers.py", "app/schema_versions.json", "app/security.py"}
         assert required <= names, sorted(required - names)

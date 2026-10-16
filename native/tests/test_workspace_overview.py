@@ -90,7 +90,7 @@ async def native_run(runtime, parent_id, *, terminal="run_completed", run_id=Non
 
 async def test_nested_colon_ids_follow_requester_ancestry_and_keep_stable_public_names(runtime, actor):
     shared = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    private = await runtime.database.create_session(actor, NewSession())
+    private = await runtime.database.create_session(actor, NewSession(visibility="private"))
     async with sign_in(runtime) as owner, member_client(runtime) as (member, requester):
         owner_turn = await prepared_turn(runtime, actor, shared)
         member_turn = await prepared_turn(runtime, requester, shared)
@@ -277,7 +277,7 @@ async def test_unicode_link_limit_counts_utf8_bytes(runtime, actor, kind, byte_l
 
 async def test_parallel_link_attachment_is_idempotent_and_remove_is_author_or_owner_only(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
-    private = await runtime.database.create_session(actor, NewSession())
+    private = await runtime.database.create_session(actor, NewSession(visibility="private"))
     async with (
         sign_in(runtime) as owner,
         member_client(runtime) as (author, _),

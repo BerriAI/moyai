@@ -19,6 +19,11 @@ Use the [Docker installation guide](deploy/docker/README.md) for a versioned bun
 persistent storage and guarded upgrades. Confirm that the chosen GitHub release
 contains the image and bundle; source on main alone does not establish publication.
 
+Export the service endpoints and credentials, then run `sh moyai.sh up` from the
+extracted bundle. It configures and starts the installation in one command.
+Choose an external Temporal connection or set `MOYAI_TEMPORAL_MODE=bundled`.
+The host only needs Docker; configuration runs inside the image.
+
 ## Run locally
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.13,

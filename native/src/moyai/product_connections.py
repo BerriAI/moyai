@@ -481,7 +481,20 @@ class ProductGitHubToolset(AbstractToolset[RunScope]):
                  or name in {"search_code", "search_issues", "search_pull_requests"})
         }
         selected.update(await self.publications.get_tools(ctx))
-        return {name: replace(tool, toolset=self) for name, tool in selected.items()}
+        repository = await source_database(
+            self.service.connectors.github.repository_name, self.grant.policy["product"]["repository_id"],
+        )
+        return {
+            name: replace(tool, toolset=self, tool_def=replace(
+                tool.tool_def,
+                description=(
+                    f"Connected GitHub repository: {repository}. {tool.tool_def.description or ''}"
+                    + (" Supply plain search terms; repository scope is added automatically."
+                       if name in {"search_code", "search_issues", "search_pull_requests"} else "")
+                ),
+            ))
+            for name, tool in selected.items()
+        }
 
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[RunScope], tool: ToolsetTool[RunScope],

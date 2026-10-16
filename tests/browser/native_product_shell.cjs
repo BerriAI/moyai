@@ -26,13 +26,14 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/logout'){state.signedIn=false;return json({signed_out:true});}
   if(!state.signedIn)return json({detail:'Sign in.'},401);
   if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.mode});
-  if(url.pathname==='/api/sessions'&&req.method==='POST')return json(session('c'.repeat(32)));
-  if(url.pathname==='/api/sessions')return json(state.denied?[]:[session()]);
+  if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;return json(session('c'.repeat(32)));}
+  if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections'||url.pathname==='/api/session-folders')return json([]);
   if(url.pathname==='/api/pull-requests/statuses')return json({});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
       {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId,title:'Current native work'}];
+    if(state.createdSession)rows.push({...session('c'.repeat(32)),key:'native:'+'c'.repeat(32),source:'native',url:'/#'+'c'.repeat(32)});
     if(url.pathname==='/api/history/sessions'&&url.searchParams.get('limit')==='100'&&state.inventoryPages) {
       const page=url.searchParams.get('cursor')==='page-2'?1:0;
       return json({sessions:state.inventoryPages[page],has_more:page===0,next_cursor:page===0?'page-2':null});
@@ -46,6 +47,7 @@ async function handle(req,res,next) {
     const id=url.pathname.split('/').at(-1);
     if(state.swarm.members.some(member=>member.session_id===id))return json({session:{...session(id),source:'native',url:'/#'+id,read_only:false}});
   }
+  if(state.createdSession&&url.pathname==='/api/history/sessions/'+'c'.repeat(32))return json({session:{...session('c'.repeat(32)),source:'native',url:'/#'+'c'.repeat(32),read_only:false}});
   if(url.pathname.startsWith(`/api/product/sessions/${legacyId}/`)) {
     if(url.pathname.endsWith('/messages'))return json({messages:[{id:8,role:'assistant',content:'Historical saved answer'}],has_more:false,next_offset:null});
     if(url.pathname.endsWith('/children'))return json({sessions:[],has_more:false,next_offset:null});
@@ -54,8 +56,17 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/settings/users/role')return state.roleConflict ? json({detail:'This role changed since you opened it. Refresh and try again.'},409) : json(data);
   if(url.pathname==='/api/settings/users')return json({source:'product',note:'Organization sign-in manages accounts.',capabilities:{roles:true,create:false,update:false,delete:false},users:[{id:'teammate@example.test',email:'teammate@example.test',username:'teammate@example.test',display_name:'Teammate',role:'member',revision:7,enabled:true}]});
   if(url.pathname==='/api/settings/overview')return json({counts:{},capabilities:{}});
+  if(url.pathname==='/api/skills') {
+    if(state.skillError)return json({detail:'Temporary skill outage.'},503);
+    return json({skills:(state.skills||[]).filter(row=>url.searchParams.get('shared')!=='true'||row.scope!=='personal'),has_more:false,next_offset:null});
+  }
   if(url.pathname==='/api/settings/skills')return json({skills:[],capabilities:{}});
   if(url.pathname==='/api/settings/automations')return json({automations:[],capabilities:{}});
+  if(url.pathname.startsWith('/api/turns/')&&req.method==='PATCH') {
+    const message=state.messages.find(row=>row.turn_id===url.pathname.split('/')[3]);
+    if(message)message.content=data.prompt;
+    return json({updated:true});
+  }
   if(url.pathname.startsWith('/api/sessions/')) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
@@ -65,11 +76,17 @@ async function handle(req,res,next) {
       state.streams.push({offset:url.searchParams.get('offset'),last:req.headers['last-event-id']});
       res.on('close',()=>clients.delete(res));return;
     }
-    if(url.pathname.endsWith('/messages'))return json(req.method==='POST'?{}:state.messages);
+    if(url.pathname.endsWith('/messages')) {
+      if(req.method==='POST') {
+        state.messages.push({id:state.messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
+        return json({id:'turn-skill',actor_id:'viewer',status:'completed'});
+      }
+      return json(state.messages);
+    }
     if(url.pathname.endsWith('/plan'))return json([]);
     if(url.pathname.endsWith('/read'))return json({});
     if(req.method==='PATCH')return json({...session(),...data});
-    return json({session:session(url.pathname.split('/')[3]),turns:[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,has_unsettled_effects:state.effects?.length>0,effects:state.effects});
+    return json({session:session(url.pathname.split('/')[3]),turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,has_unsettled_effects:state.effects?.length>0,effects:state.effects});
   }
   return json({detail:'Fixture endpoint not implemented: '+url.pathname},404);
 }
@@ -106,9 +123,9 @@ test('swarm Space and Chat retain drafts and worker navigation opens the full co
   await composer.fill('Keep this unsent direction.');
   await page.getByRole('button',{name:'Chat',exact:true}).click();
   assert.equal(await page.locator('.transcript').isVisible(),true);
-  assert.equal(await composer.inputValue(),'Keep this unsent direction.');
+  assert.equal(await composer.innerText(),'Keep this unsent direction.');
   await page.getByRole('button',{name:'Space',exact:true}).click();
-  assert.equal(await composer.inputValue(),'Keep this unsent direction.');
+  assert.equal(await composer.innerText(),'Keep this unsent direction.');
   await page.getByRole('link',{name:'Agent 2 · Working · Open conversation',exact:true}).click();
   await page.waitForURL('**/#worker-2');
   await page.locator('.transcript').waitFor({state:'visible'});
@@ -137,6 +154,103 @@ for(const attention of ['question','effect'])test(`swarm reveals a pending ${att
   assert.equal(await page.getByRole('region',{name:'Live swarm space',exact:true}).count(),0);
 });
 
+for(const width of [1440,768,320])test(`inline skills keep surrounding text, icon and scoped identity through send/reload at ${width}px`,async t=>{
+  const skills=[
+    {id:'personal-team',name:'team',description:'Investigate a bug with a team.',scope:'personal',reference:'personal:team',icon:'👥'},
+    {id:'org-team',name:'team',description:'Organization workflow.',scope:'organization',reference:'org:team',icon:'code'},
+  ];
+  reset({status:'completed',skills});
+  const page=await pageFor(t,'#',width), input=page.getByRole('textbox',{name:'Message Moyai'});
+  await page.getByRole('checkbox',{name:'Private session · Only you',exact:true}).check();
+  await input.fill('Please use /team');
+  const options=page.getByRole('listbox',{name:'Skills'});
+  await options.waitFor();assert.equal(await options.getByRole('option').count(),2);
+  assert.match(await options.innerText(),/Personal/);assert.match(await options.innerText(),/Organization/);
+  const box=await options.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=width+1);
+  await input.press('Enter');
+  const mention=input.getByLabel('/team skill');await mention.waitFor();
+  assert.equal(await mention.locator('svg[data-skill-icon="team"]').count(),1);
+  assert.match(await input.innerText(),/^Please use Team /);
+  assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,0);
+  await input.pressSequentially('to inspect the issue.');
+  await input.press('Enter');
+  await waitFor(()=>state.requests.some(r=>r.method==='POST'&&r.path.endsWith('/messages')));
+  const sent=state.requests.find(r=>r.method==='POST'&&r.path.endsWith('/messages'));
+  assert.equal(sent.body.prompt,'Please use [/team](moyai-skill:personal%3Ateam?icon=%F0%9F%91%A5) to inspect the issue.');
+  const saved=page.locator('.transcript').getByLabel('/team skill');await saved.waitFor();
+  assert.equal(await saved.locator('svg[data-skill-icon="team"]').count(),1);
+  state.skills=[];await page.reload();await saved.waitFor();
+  assert.equal(await saved.locator('svg[data-skill-icon="team"]').count(),1);
+  assert.match(await saved.locator('..').innerText(),/Please use Team to inspect the issue\./);
+  state.skills=skills;
+  await page.goto(base+'/#'+sessionId);await input.fill('/team');await options.waitFor();
+  await input.press('ArrowDown');await input.press('Tab');
+  await mention.waitFor();assert.match(await mention.getAttribute('title'),/org:team/);
+  await input.press('Backspace');await input.press('Backspace');await input.press('Backspace');
+  assert.equal(await mention.count(),0);
+  await input.fill('/nomatch');await page.getByRole('status').filter({hasText:'No matching skills'}).waitFor();
+  await input.fill('/team');await options.waitFor();await input.press('Escape');await options.waitFor({state:'hidden'});
+  assert.equal(await input.innerText(),'/team');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('inline mention editing preserves middle-of-text insertion, undo, copy/paste and code literals',async t=>{
+  reset({status:'completed',skills:[{id:'p',name:'team',description:'Team procedure',scope:'personal',reference:'personal:team',icon:'👥'}]});
+  const page=await pageFor(t,'#'+sessionId),input=page.getByRole('textbox',{name:'Message Moyai'}),options=page.getByRole('listbox',{name:'Skills'});
+  await input.fill('Before  after');await input.press('Home');for(let i=0;i<7;i++)await input.press('ArrowRight');
+  await input.pressSequentially('/team');await options.waitFor();await input.press('Enter');
+  await input.getByLabel('/team skill').waitFor();assert.match(await input.innerText(),/^Before Team  after$/);
+  await input.press('ControlOrMeta+z');await input.getByLabel('/team skill').waitFor({state:'hidden'});
+  assert.equal(await input.innerText(),'Before /team after');
+  await input.press('ControlOrMeta+Shift+z');await input.getByLabel('/team skill').waitFor();
+  await input.press('ControlOrMeta+a');
+  const clipboard=await input.evaluate(el=>{
+    const clipboardData=new DataTransfer();el.dispatchEvent(new ClipboardEvent('copy',{clipboardData,bubbles:true,cancelable:true}));
+    return {text:clipboardData.getData('text/plain'),rich:clipboardData.getData('application/x-moyai-message')};
+  });
+  assert.equal(clipboard.text,'Before /team  after');assert.match(clipboard.rich,/moyai-skill:personal%3Ateam/);
+  await input.fill('');
+  await input.evaluate((el,data)=>{
+    const clipboardData=new DataTransfer();clipboardData.setData('application/x-moyai-message',data.rich);clipboardData.setData('text/plain',data.text);
+    el.dispatchEvent(new ClipboardEvent('paste',{clipboardData,bubbles:true,cancelable:true}));
+  },clipboard);
+  await input.getByLabel('/team skill').waitFor();assert.equal(await input.innerText(),'Before Team  after');
+  await input.getByLabel('/team skill').click();
+  await input.press('Delete');assert.equal(await input.getByLabel('/team skill').count(),0);
+  await input.fill('Example: `use /team');await page.waitForTimeout(100);assert.equal(await options.count(),0);
+  await input.fill('A new line');await input.press('Shift+Enter');await input.pressSequentially('then /team');await options.waitFor();
+  await input.press('Enter');assert.match(await input.innerText(),/A new line\nthen Team/);
+  const posts=state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length;
+  await input.dispatchEvent('keydown',{key:'Enter',isComposing:true});assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,posts);
+});
+
+test('editing a queued message retains its inline token and restores the unsent draft',async t=>{
+  const token='[/team](moyai-skill:personal%3Ateam?icon=%F0%9F%91%A5)';
+  reset({messages:[{id:1,turn_id:'queued',role:'user',author_id:'viewer',content:'Use '+token+' here.'}],
+    turns:[{id:turnId,actor_id:'viewer',status:'running',connections:[]},{id:'queued',actor_id:'viewer',status:'queued',mode:'when_idle',connections:[]}]});
+  const page=await pageFor(t),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Keep this unsent draft.');
+  await page.locator('.queued-message').getByRole('button',{name:'Edit',exact:true}).click();
+  await input.getByLabel('/team skill').waitFor();
+  await input.press('End');await input.pressSequentially(' Revised.');
+  await page.getByRole('button',{name:'Save queued message'}).click();
+  await waitFor(()=>state.requests.some(row=>row.path==='/api/turns/queued'&&row.method==='PATCH'));
+  assert.equal(state.requests.find(row=>row.path==='/api/turns/queued'&&row.method==='PATCH').body.prompt,'Use '+token+' here. Revised.');
+  assert.equal(state.requests.filter(row=>row.method==='POST'&&row.path.endsWith('/messages')).length,0);
+  await page.locator('.queued-message').getByLabel('/team skill').waitFor();
+  await input.getByText('Keep this unsent draft.',{exact:true}).waitFor();
+  assert.equal(await input.innerText(),'Keep this unsent draft.');
+});
+
+test('skill catalog retries and excludes personal skills in shared sessions',async t=>{
+  reset({skillError:true,individual:false,skills:[{id:'p',name:'private-only',description:'Private',scope:'personal',reference:'personal:private-only'}]});
+  const page=await pageFor(t,'#'),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('/');await page.getByText('Couldn’t load your skills.').waitFor();
+  state.skillError=false;await page.getByRole('button',{name:'Retry skills'}).click();
+  await page.getByText('No matching skills available in shared sessions.').waitFor();
+  assert.equal(await page.getByRole('option').count(),0);
+});
+
 for(const width of [1440,768,320])test(`palette keyboard, escaped body search, focus handoff and historical isolation at ${width}px`,async t=>{
   reset();const page=await pageFor(t,'#'+sessionId,width);await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
   const input=page.getByRole('textbox',{name:'Message Moyai'});await input.focus();
@@ -144,7 +258,9 @@ for(const width of [1440,768,320])test(`palette keyboard, escaped body search, f
   await dialog.getByRole('option',{name:'Saved earlier investigation',exact:false}).waitFor();
   await search.press('ArrowUp');assert.match(await dialog.locator('[role=option][aria-selected=true]').innerText(),/Current native work/);
   await search.press('ArrowDown');assert.match(await dialog.locator('[role=option][aria-selected=true]').innerText(),/Start session/);
-  await search.press('Escape');await dialog.waitFor({state:'hidden'});assert.equal(await input.evaluate(el=>el===document.activeElement),true);
+  await search.press('Escape');await dialog.waitFor({state:'hidden'});
+  await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Message Moyai');
+  assert.equal(await input.evaluate(el=>el===document.activeElement),true);
   dialog=await palette(page);search=dialog.getByRole('combobox');await search.fill('Rename');await search.press('Enter');
   const rename=page.getByRole('dialog',{name:'Rename session',exact:true});await rename.waitFor();assert.equal(await rename.getByRole('textbox').evaluate(el=>el===document.activeElement),true);
   await page.keyboard.press('Control+k');assert.equal(await page.getByRole('dialog',{name:'Commands and session search'}).count(),0);
@@ -196,6 +312,17 @@ test('capability-driven product/standalone login and shared session admission',a
   reset({signedIn:false,mode:'standalone',google:false});await page.goto(base+'/');await page.getByLabel('Username',{exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Continue with Google'}).count(),0);
 });
 
+for(const privateSession of [false,true])test(`individual home defaults to shared with private opt-in: ${privateSession}`,async t=>{
+  reset();const page=await pageFor(t,'');
+  const privateChoice=page.getByRole('checkbox',{name:'Private session · Only you'});
+  await privateChoice.waitFor();assert.equal(await privateChoice.isEnabled(),true);assert.equal(await privateChoice.isChecked(),false);
+  await page.getByText(/Workspace members can see messages/).waitFor();
+  if(privateSession)await privateChoice.check();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('A new task');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path==='/api/sessions'&&req.method==='POST'));
+  assert.equal(state.requests.find(req=>req.path==='/api/sessions'&&req.method==='POST').body.visibility,privateSession?'private':'shared');
+});
+
 test('product Users editor exposes roles only and sends the captured optimistic revision',async t=>{
   reset();const page=await pageFor(t,'#settings/users');await page.getByRole('button',{name:'Edit role for teammate@example.test'}).click();
   const dialog=page.getByRole('dialog',{name:'Edit workspace role'});await dialog.waitFor();assert.equal(await dialog.getByRole('textbox').count(),0);assert.equal(await page.getByRole('button',{name:'Add user',exact:true}).count(),0);
@@ -218,8 +345,8 @@ test('composition and late search responses cannot trigger a command or cross a 
   assert.equal(await dialog.getByRole('option',{name:/Rename session|Pin session/}).count(),0);
 });
 
-test('shared identity side chat is admitted as shared and settings aliases replace the chat rail',async t=>{
-  reset({individual:false});const page=await pageFor(t);await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
+for(const individual of [false,true])test(`side chat defaults to shared and settings aliases replace the chat rail: individual=${individual}`,async t=>{
+  reset({individual});const page=await pageFor(t);await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
   await page.getByRole('button',{name:'Open side panel',exact:true}).click();await page.getByRole('button',{name:'Add panel tab',exact:true}).click();
   await page.getByRole('menuitem',{name:/Side chat/}).click();await page.getByRole('button',{name:'New side chat',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/sessions'&&req.method==='POST'));

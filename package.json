@@ -11,10 +11,15 @@
     "test:ui": "node --test --test-concurrency=1 tests/browser/native_*.cjs"
   },
   "dependencies": {
+    "@lexical/history": "0.52.0",
+    "@lexical/plain-text": "0.52.0",
+    "@lexical/react": "0.52.0",
+    "@lexical/utils": "0.52.0",
     "@novnc/novnc": "1.7.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "html-react-parser": "^5.2.7",
+    "lexical": "0.52.0",
     "lucide-react": "^0.468.0",
     "radix-ui": "^1.4.3",
     "react": "^19.2.0",

@@ -40,6 +40,7 @@ class MaintenanceRender(APIRender):
         self.retirement_polls = 2
         self.retiring = None
         self.remaining = 0
+        self.retirements = {}
         self.counts = dict.fromkeys(COUNTS, 0)
         self.policy = self.old_contract['source_policy']
         self.contracts = deepcopy(self.old_contract['contracts'])
@@ -89,6 +90,7 @@ class MaintenanceRender(APIRender):
             self.installed[sid] = deepcopy(self.env[sid])
             self.retiring = (sid, self.owners[sid][:])
             self.remaining = self.retirement_polls
+            self.retirements[sid] = [self.owners[sid][:], self.retirement_polls]
             if self.env[sid]['RENDER_MIGRATION_STAGE'] == 'false':
                 self.owners[sid].append(str(100 + len(self.deployments)) + '@new')
                 if sid == COORDINATOR and body['commitId'] == NEW:
@@ -105,12 +107,16 @@ class MaintenanceRender(APIRender):
         return deepcopy(deployment)
 
     def probe(self, service):
-        if self.retiring:
-            sid, old = self.retiring
-            if self.remaining:
-                self.remaining -= 1
+        for sid, (old, remaining) in list(self.retirements.items()):
+            if remaining:
+                self.retirements[sid][1] -= 1
             elif not self.block_retirement:
                 self.owners[sid] = [owner for owner in self.owners[sid] if owner not in old]
+                del self.retirements[sid]
+        if self.retiring:
+            pending = self.retirements.get(self.retiring[0])
+            self.remaining = pending[1] if pending else 0
+            if pending is None:
                 self.retiring = None
         source = self.candidate_contract if self.installed[service.id]['MOYAI_BUILD_SHA'] == NEW else self.old_contract
         staged = self.installed[service.id]['RENDER_MIGRATION_STAGE'] == 'true'

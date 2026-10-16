@@ -28,7 +28,8 @@ from moyai.swarm_tools import bounded_board, operate
 
 async def start(runtime, actor, *, key="one", workers=2, **kwargs):
     return await runtime.database.swarms.start(actor, NewSwarm(
-        prompt="Investigate the test dataset and share evidence.", request_key=key, workers=workers, **kwargs,
+        prompt="Investigate the test dataset and share evidence.", request_key=key, workers=workers,
+        visibility=kwargs.pop("visibility", "private"), **kwargs,
     ))
 
 

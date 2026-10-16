@@ -69,14 +69,20 @@ async def temporal(values: Mapping[str, str]) -> Client:
     return client
 
 
-async def check(values: Mapping[str, str], *, providers: bool = True) -> dict[str, str]:
-    report = {}
+def validate(values: Mapping[str, str]) -> Settings:
+    """Validate configuration without opening service connections."""
     try:
         load_product_config(values)
     except ProductConfigurationError as error:
         raise InstallationError(str(error)) from None
     configured = settings(values)
     configured.validate_worker()
+    return configured
+
+
+async def check(values: Mapping[str, str], *, providers: bool = True) -> dict[str, str]:
+    report = {}
+    configured = validate(values)
     component = "postgres"
     try:
         async with asyncio.timeout(90):

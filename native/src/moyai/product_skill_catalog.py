@@ -1,4 +1,4 @@
-"""Read the canonical skill library without conversion, publication or execution."""
+"""Read and invoke the canonical skill library without changing its source records."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .product_identity import ProductGrant, ProductIdentityAdapter, ProductPrincipal
 
-NOTE = "Skill conversion is deferred. The original library, revisions and supporting files are retained."
-CAPABILITIES = {"read": True, "create": False, "update": False, "delete": False, "load": False}
+NOTE = "Select a skill with / in chat. The original library, revisions and supporting files are retained."
+CAPABILITIES = {"read": True, "create": False, "update": False, "delete": False, "load": True}
 METADATA = ("id", "name", "description", "scope", "icon", "revision", "archived", "created_at", "updated_at")
 
 
@@ -66,18 +66,20 @@ class ProductSkillCatalog:
 
     async def listing(
         self, grant: ProductGrant, *, archived: bool = False, offset: int = 0, limit: int = 100,
+        shared: bool = False, name: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 100 or not 0 <= offset <= 10000:
             raise HTTPException(422, "Use a bounded skill page.")
         principal = await self.identity.require_current(grant)
         active = "" if archived else "AND archived=0"
+        filters = (" AND scope='organization'" if shared else "") + (" AND name=:name" if name else "")
         try:
             async with self.identity._reader(self.identity.source_engine) as db:
                 rows = [dict(row) for row in (await db.execute(text(
                     f"SELECT * FROM {self._table('skills')} WHERE "
                     "(scope='organization' OR (scope='personal' AND owner_id=:owner)) "
-                    f"{active} ORDER BY scope,name,id LIMIT :limit OFFSET :offset"
-                ), {"owner": principal.id, "limit": limit + 1, "offset": offset})).mappings()]
+                    f"{active}{filters} ORDER BY scope,name,id LIMIT :limit OFFSET :offset"
+                ), {"owner": principal.id, "limit": limit + 1, "offset": offset, "name": name})).mappings()]
             principal = await self.identity.require_current(grant)
             # Scope/archive changes during an await must not release stale metadata.
             async with self.identity._reader(self.identity.source_engine) as db:
@@ -100,6 +102,24 @@ class ProductSkillCatalog:
             "source": "canonical", "note": NOTE, "has_more": len(rows) > limit,
             "next_offset": offset + limit if len(rows) > limit else None,
         }
+
+    async def invocation(self, grant: ProductGrant, reference: str, *, shared: bool) -> dict[str, Any]:
+        """Resolve a short or scoped name, then recheck the complete revision before release."""
+        name = reference.split(":", 1)[-1]
+        listing = await self.listing(grant, shared=shared, name=name)
+        matches = [row for row in listing["skills"] if ":" not in reference or row["reference"] == reference]
+        if len(matches) != 1:
+            message = "Choose a scoped skill from the / picker." if matches else "Choose an available skill from the / picker."
+            raise HTTPException(422, f"Cannot invoke /{reference}. {message}")
+        _, row = await self._row(grant, matches[0]["id"])
+        if any(row[key] != matches[0][key] for key in METADATA):
+            raise HTTPException(409, "The selected skill changed. Select it again.")
+        if row["archived"] or (shared and row["scope"] != "organization"):
+            raise HTTPException(403, "This skill is not available in this conversation.")
+        instructions = self._decrypt(row["encrypted"])
+        _, files = await self._bundle(row)
+        await self._release(grant, row)
+        return {**self._metadata(row), "instructions": instructions, "supporting_files": files}
 
     def _decrypt(self, encrypted: str) -> str:
         try:

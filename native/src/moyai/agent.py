@@ -46,6 +46,7 @@ from .artifacts import artifact_capability
 from .browser import browser_capability
 from .bundled_skills import bundled_skill_catalog
 from .computer_startup import OnDemandDurability, on_demand_coder
+from .connection_catalog import ConnectionToolSearch
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
@@ -330,6 +331,13 @@ def make_agent(
             EffectReceipts(database),
             *product_capabilities,
             connection_tools(database.security),
+            ConnectionToolSearch(
+                strategy="keywords", max_results=6,
+                tool_description=(
+                    "Find tools for the selected connected accounts. Search by service, repository, "
+                    "and action before calling a connected tool. Only matching definitions are loaded."
+                ),
+            ),
             artifact_capability(database, objects),
             attachment_capability(database, objects),
             browser_capability(database),

@@ -1,6 +1,7 @@
 .swarm-space-mode > .swarm-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .swarm-space-mode > .transcript[hidden] { display: none; }
-.swarm-space-mode .composer textarea { min-height: 48px; height: 48px; padding-block: 10px; }
+.swarm-space-mode .composer :is(textarea, .skill-editor) { min-height: 48px; height: 48px; padding-block: 10px; }
+.swarm-space-mode .skill-editor-placeholder { top: 10px; }
 .swarm-details.swarm-space-details { flex: 1; min-height: 0; max-height: none; display: flex; flex-direction: column; overflow: hidden; }
 .swarm-space-details > .swarm-window { flex: none; padding-bottom: 10px; }
 .swarm-space { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; }

@@ -89,7 +89,7 @@ async def member(runtime, *, role="member"):
 
 
 async def automation(runtime, user, *, paused=False):
-    session = await runtime.database.create_session(user, NewSession())
+    session = await runtime.database.create_session(user, NewSession(visibility="private"))
     async with runtime.database.sessions.begin() as db:
         row = SettingAutomation(
             id=new_id(), owner_id=user.id, owner_auth_version=user.auth_version,
@@ -310,7 +310,9 @@ async def test_saved_skills_are_native_deferred_capabilities_with_correct_scopes
 
 async def test_analytics_uses_actual_rows_and_never_private_content_or_fabricated_cost(runtime, actor):
     other = await member(runtime)
-    session = await runtime.database.create_session(other, NewSession(title="Never disclose this private title"))
+    session = await runtime.database.create_session(other, NewSession(
+        title="Never disclose this private title", visibility="private",
+    ))
     first = await runtime.database.submit(other, session.id, NewMessage(
         prompt="Never disclose this private prompt", request_key="analytics-first",
     ))
@@ -479,7 +481,7 @@ async def test_real_temporal_schedule_pause_delete_and_durable_admission(runtime
                     break
                 await asyncio.sleep(0.1)
             assert (await automation_readiness(runtime))["create"]
-            session = await runtime.database.create_session(actor, NewSession())
+            session = await runtime.database.create_session(actor, NewSession(visibility="private"))
             async with client_for(runtime, actor) as client:
                 created = await client.post("/api/settings/automations", json={
                     "name": "Real schedule", "prompt": "Synthetic task", "session_id": session.id,

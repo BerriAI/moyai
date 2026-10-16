@@ -12,7 +12,7 @@ from .contracts import NewMessage
 
 class NewSwarm(NewMessage):
     workers: int = Field(default=20, ge=2, strict=True)
-    visibility: Literal["private", "shared"] = "private"
+    visibility: Literal["private", "shared"] = "shared"
     worker_models: list[str] = Field(default_factory=list, max_length=20)
     budget_seconds: int = Field(default=0, ge=0, le=2_592_000, strict=True)
 

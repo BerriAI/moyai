@@ -57,7 +57,7 @@ def test_v13_to_v14_maintenance_migrates_only_after_all_source_owners_retire(cut
         assert service.id == COORDINATOR
         assert release.drained and release.record["zero_owner_boundary_verified"]
         assert not any(render.owners.values())
-        assert len(render.history) == 5
+        assert len(render.history) == 4
         assert all(env["RENDER_MIGRATION_STAGE"] == "true" for env in render.installed.values())
         assert expected["native_required"] and not expected.get("core_switch")
         assert plan == migration_plan({**V13, "state": "receipted"}, V14)

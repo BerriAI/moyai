@@ -32,6 +32,8 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check src tests
       - run: uv run pyright
+      - name: Validate Docker helper shell syntax
+        run: sh -n ../deploy/docker/moyai.sh
       - run: uv build
   tests:
     name: Native tests (${{ matrix.shard }}/4)
