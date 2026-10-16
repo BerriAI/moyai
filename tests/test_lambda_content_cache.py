@@ -164,3 +164,23 @@ def test_image_baseline_is_recorded_once_before_ready_and_never_rebased(image, m
     with pytest.raises(RuntimeError, match='immutable image baseline'):
         guest.prepare_image_baseline()
     assert calls == [True]  # Missing data cannot authorize rebasing a live VM.
+
+
+def test_image_baseline_rejects_a_same_metadata_write_during_hashing(tmp_path, monkeypatch):
+    root = tmp_path / 'image'
+    root.mkdir()
+    path = root / 'file'
+    path.write_text('original')
+    old = path.stat()
+    original_digest = checkpoint.digest
+    def racing_digest(target):
+        value = original_digest(target)
+        target.write_text('modified')
+        os.utime(target, ns=(old.st_atime_ns, old.st_mtime_ns))
+        return value
+    monkeypatch.setattr(checkpoint, 'digest', racing_digest)
+    base = tmp_path / 'base.json'
+    with pytest.raises(RuntimeError, match='recording the image baseline'):
+        checkpoint.baseline(root, base)
+    assert not base.exists()
+    assert not base.with_suffix('.stats.json').exists()

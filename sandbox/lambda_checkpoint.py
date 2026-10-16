@@ -99,15 +99,23 @@ def signature(path, hash_file=None):
 def baseline(root=Path('/'), target=BASELINE):
     target.parent.mkdir(parents=True, exist_ok=True)
     signatures, stamps = {}, {}
-    for name in inventory(root):
+    def capture(name):
         path = root / name
         before = path.lstat()
-        signatures[name] = signature(path)
+        value = signature(path)
         after = path.lstat()
         if content_stamp(before) != content_stamp(after):
             raise RuntimeError('File changed while recording the image baseline')
-        if stat.S_ISREG(after.st_mode):
-            stamps[name] = content_stamp(after)
+        return name, value, content_stamp(after) if stat.S_ISREG(after.st_mode) else None
+    # This now runs on the materialized guest filesystem, where image reads may
+    # be cold. Bound concurrency exactly as for the checkpoint fallback scan.
+    names = inventory(root)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for offset in range(0, len(names), 1024):
+            for name, value, stamp in pool.map(capture, names[offset:offset + 1024]):
+                signatures[name] = value
+                if stamp is not None:
+                    stamps[name] = stamp
     raw = json.dumps(signatures).encode()
     target.write_bytes(raw)
     target.with_suffix('.stats.json').write_text(json.dumps({

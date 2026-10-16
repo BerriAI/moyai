@@ -33,7 +33,7 @@ def image_request(*, region, name, bucket, key, role):
         'egressNetworkConnectors': [f'arn:aws:lambda:{region}:aws:network-connector:aws-network-connector:INTERNET_EGRESS'],
         # The immutable baseline is hashed once before image readiness. This is
         # image-build time, not the deadline for every user checkpoint.
-        'hooks': {'port': 80, 'microvmImageHooks': {'ready': 'ENABLED', 'readyTimeoutInSeconds': 900}}}
+        'hooks': {'port': 80, 'microvmImageHooks': {'ready': 'ENABLED', 'readyTimeoutInSeconds': 1800}}}
 
 
 if __name__ == '__main__':
