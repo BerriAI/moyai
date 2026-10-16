@@ -177,12 +177,35 @@ The helper updates `MOYAI_IMAGE` in `.env` after successful schema preparation.
 It does not switch execution cores, automatically roll back, or bypass unknown
 external effects.
 
-If any step fails, execution stays paused or stopped. Inspect the recorded
-upgrade phase and database migration state before continuing; do not rerun a
+If the controller fails, its last native operation may already have committed.
+In particular, a lost resume acknowledgement can leave execution running while
+browser/webhook ingress remains closed. Inspect the recorded upgrade phase and
+database migration state before continuing; do not rerun a
 possibly applied migration or resume command blindly. Use the installed image's
 `status` command while the schemas remain readable. Restore a consistent backup
 or complete a reviewed repair for a partial migration. A changed schema may
 prevent rollback to the old image.
+
+If `begin-upgrade` times out or its controller exits while the original roles
+are still healthy, rerun `upgrade.sh` with the same candidate digest. The saved
+drain command retains its original worker, generation, and request key. Recovery
+checks the native receipt before sending anything: an accepted pause is observed
+without requesting another generation, and an uncommitted request can be retried
+only against the same worker and generation.
+
+If the candidate controller exits during `resume`, run:
+
+```sh
+docker compose run --rm --no-deps setup \
+  /app/native/.venv/bin/python -m moyai.deployment resume
+```
+
+This also checks the saved command against the native receipt. A confirmed
+resume opens ingress without repeating the operation. An unconfirmed or still
+paused result keeps the upgrade pending. Changed generations/workers and older
+interrupted records without an exact command require inspection; recovery does
+not invent their original intent. These retry rules do not retry an uncertain
+schema migration.
 
 Use the candidate bundle's Compose, proxy configuration, and upgrade helper
 together. Starting the proxy with `--no-deps` during replacement avoids rerunning
@@ -196,6 +219,11 @@ refuses to migrate while unfinished turns or uncertain effects/requests remain.
 If that check fails before migration, restart the old image and settle the work.
 Standalone replicas are unsupported; the shared runtime lock prevents a second
 container in the installation from starting.
+
+The execution worker contains four Temporal pollers. Their sequential shutdown
+shares a total 240-second grace allowance; HTTP shutdown has 270 seconds and
+Docker allows 300 seconds. The API/coordinator/broker/worker remain four
+application roles using the same image.
 
 Bundled Temporal version/database upgrades are a separate maintenance
 operation; an application image upgrade does not update the pinned Temporal
