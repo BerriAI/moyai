@@ -1,36 +1,19 @@
 # Pydantic core deployment boundary
 
-`MOYAI_CORE=legacy` remains the default. `MOYAI_CORE=pydantic` selects the
-separately locked `native/.venv` interpreter. The image contains both environments
-during migration; the old OpenAI/Agents dependencies are not installed into the
-native environment. Root `app` modules remain importable there for product
-configuration, identity, storage and accounting. Selecting the native core never
-imports `app.main` or invokes the legacy checkpoint bootstrap.
+Current images run only `MOYAI_CORE=pydantic` (the default), using `/app/.venv`.
+The root `uv.lock` pins the runtime and shared product services together. The
+canonical `app` package contains identity, storage, accounting, schema setup and
+historical formats; it contains no executable legacy engine.
 
-The **Deploy production** workflow explicitly defaults to `maintenance` with
-`execution_core=pydantic`. The running source still defaults to `legacy` when
-`MOYAI_CORE` is absent. Preflight loads the candidate's real role admission checks;
-it never overrides `require_startable`, invents a qualification flag, or treats a
-provisioned schema as deployment readiness. Production role qualification and the
-actual before/after application rehearsal must pass before this cutover is
-accepted. The release uses the existing machinery described in
-[production-deploy.md](production-deploy.md),
-[rolling-deploy.md](rolling-deploy.md) and
-[schema-migrations.md](schema-migrations.md).
-
-The code now admits the reviewed existing-product `api`, `coordinator`, `broker`
-and `worker` roles, while retaining explicit role selection, configuration,
-dependency, schema, source-fence, ownership and drain checks. There is no
-operator-controlled qualification bypass. Schema commands report
-`deployment_readiness=not_checked`; role admission and migration receipts are
-not deployment approval. Final product acceptance still blocks on the reported
-deferred/cold-workspace expiry issue until its fix and actual recovery proof
-are complete.
+The **Deploy production** workflow defaults to maintenance with Pydantic selected.
+Preflight checks real role admission, provisioned schemas, current ownership and
+drain. There is no qualification bypass. See [production deployment](production-deploy.md)
+for operator steps and [schema migrations](schema-migrations.md) for canonical receipts.
 
 ## Configuration contract
 
 `moyai.product_config.load_product_config(environment)` reads only the supplied
-environment snapshot. It returns `None` for the legacy core, or `ProductConfig`.
+environment snapshot. It returns `ProductConfig` and rejects any retired core selector.
 It does not connect to a database, create files, initialize keys, or load `.env`.
 
 ```python
@@ -145,9 +128,9 @@ schema name or Temporal queue. Before dispatch, the release operator must:
    existing Docker, runtime and release CI.
 
 After review, dispatch the same selected candidate with `preflight_only=false`.
-A newer main commit is a new candidate and must pass its own checks. For
-compatible legacy deployments, select `execution_core=preserve` and the existing
-release type explicitly.
+A newer main commit is a new candidate and must pass its own checks. For an existing native deployment, `execution_core=preserve` keeps Pydantic.
+A legacy source must explicitly select Pydantic for this candidate; preserving
+its old engine fails preflight before any service changes.
 
 The underlying entrypoint is:
 
@@ -229,7 +212,7 @@ Staging proceeds API, worker, broker and coordinator in that order. Each candida
 receives the explicit `MOYAI_CORE` selection only after its stage/build flags are
 saved and the drain has been verified. Its previous selector value (including
 absence) is recorded before the one PUT. `AGENT_HARNESS` is preserved for a
-Pydantic cutover and a Pydantic-to-legacy switch. The old process keeps its
+Pydantic cutover ; current candidates cannot switch back to a retired engine. The old process keeps its
 independent environment snapshot until it retires.
 
 After all four owners retire, any required source offline migration runs through
@@ -265,9 +248,9 @@ every raw fence, including a child transaction whose parent has retired.
 `scripts/release/native_control.py` invokes the installed native interpreter:
 
 ```sh
-/app/native/.venv/bin/python -m moyai.product_drain request
-/app/native/.venv/bin/python -m moyai.product_drain status
-/app/native/.venv/bin/python -m moyai.product_drain resume
+/app/.venv/bin/python -m moyai.product_drain request
+/app/.venv/bin/python -m moyai.product_drain status
+/app/.venv/bin/python -m moyai.product_drain resume
 ```
 
 Each command reads at most 16 KiB of JSON from stdin. The request includes
@@ -289,26 +272,25 @@ The reviewed native migration seeds generation zero paused. At the first
 cutover, the release verifies that bootstrap while all roles are staged, before
 activating the coordinator. An in-place pause retains the old worker until work
 parks; an explicit resume rejects a live draining worker or unresolved effects
-and requests. A native-to-legacy switch leaves native maintenance paused and
-preserves its data and original workflow queue.
+and requests. Historical retirement checks remain fail-closed; the current release CLI does
+not offer a native-to-legacy target.
 
 ## Explicit schema provisioning
 
 The release transport runs these existing commands with
-`/app/native/.venv/bin/python`, from `/app`, in the staged coordinator. The image
-and workflow install the separately locked environment with the `product` extra.
+`/app/.venv/bin/python`, from `/app`, in the staged coordinator. The image
+and workflow install the one root workspace environment; product support is included.
 Direct operator use requires the same reviewed maintenance/ownership boundary;
 these commands alone are not a deployment controller.
 
-Canonical `app.schema_migrations.migrate` remains in `/app/.venv/bin/python`,
-through the existing maintenance migration transport. Its component registry
-imports legacy agent packages, including the session-title service. Do not run
-that migrator in the native environment or install legacy agents into the native
-lock to make it importable.
+Canonical `app.schema_migrations.migrate` uses that same interpreter through the
+existing maintenance transport. Its centralized `app/schema_initializers.py`
+registry needs no retired executor imports. The extraction preserves the original
+component identities, revision 21 and historical manifest digest.
 
 ```sh
-native/.venv/bin/python -m moyai.product_start provision --apply
-native/.venv/bin/python -m moyai.product_start verify
+.venv/bin/python -m moyai.product_start provision --apply
+.venv/bin/python -m moyai.product_start verify
 ```
 
 The first command checks the source product's migration receipt in a bounded
@@ -363,23 +345,12 @@ does not qualify new histories on the v13 worker. This boundary depends on the
 supported release controller: the old runtime verifier checks its expected
 receipts individually, so bypassing the controller is not a qualified rollback.
 
-Before native work is admitted, the current dual-runtime image can select
-`legacy` again while retaining original keys, cookies, source schema and object
-readers. Recovery must still account for any source schema upgrade; an older
-binary that cannot read that revision is not a safe rollback.
-
-After native work is admitted, a new clean-baseline maintenance release may
-select `execution_core=legacy` only after all native turns, effects and inference
-requests drain and the automation/core-retirement barriers above pass.
-An installation that adopted native automations currently requires roll-forward
-until its control-workflow drain contract is qualified. It does not convert
-native work into legacy work. Native data, keys,
-object prefix and Temporal namespace/queue remain preserved for later access or
-roll-forward. Historical native sessions may need the native reader even while
-new work uses legacy; verify the intended product visibility before approving
-that rollback. Unsettled effects or uncertain billing receipts require
-reconciliation or roll-forward. Never replay old Temporal histories through the
-new queue, delete native data to satisfy a probe, or rotate keys to recover.
+Current images cannot select a legacy engine. Retain earlier source images and
+their release receipts for recovery assessment, but an earlier image is safe only
+when its schema, histories and ownership protocols remain compatible. Use
+roll-forward recovery once the native execution receipt excludes that image.
+Never replay old Temporal histories on the native queue, delete data to satisfy
+a probe, or rotate encryption keys to recover.
 
 ## Local existing-product rehearsal
 
@@ -395,7 +366,7 @@ export MOYAI_SEPARATE_BROKER=false
 export MOYAI_COORDINATOR_HANDOFF=false
 export TEMPORAL_TLS=false
 # Supply the remaining required source/native configuration above.
-native/.venv/bin/python -m moyai.product_start serve --host 127.0.0.1 --port 8896
+.venv/bin/python -m moyai.product_start serve --host 127.0.0.1 --port 8896
 ```
 
 This path requires loopback PostgreSQL, Temporal, public URL and S3 endpoints,
@@ -436,14 +407,13 @@ direct callers to `product_start` so role flags cannot be bypassed.
 Run focused supplementary tests with a disposable PostgreSQL URL:
 
 ```sh
-uv sync --project native --frozen --python 3.13 --extra product
+uv sync --frozen --python 3.13
 MOYAI_TEST_POSTGRES_URL=postgresql://... \
   uv run --frozen --python 3.13 pytest -q tests/release
 ```
 
 These tests exercise the real release controller with simulated Render responses,
 real PostgreSQL guard/drain queries, and (when the native interpreter is installed)
-the real Harness schema receipt across interpreters. They do not replace the
+the real Harness schema receipt across supported old/new image layouts. They do not replace the
 required baseline/final locally deployed Moyai UI/service proof, real configured
-model/Modal execution, recording and screenshot. The parent application
-qualification must provide that evidence before PR handoff.
+model/Modal execution, recording and screenshot. Deployment acceptance requires that evidence for the actual target environment.

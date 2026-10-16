@@ -1,138 +1,89 @@
 # Moyai
 
-Press **Cmd+K** (Windows/Linux: **Ctrl+K**) to search session titles and saved
-messages, jump to settings, or act on the open session: copy its link, rename it,
-pin it, or move it to a folder. The sidebar search button opens the same palette.
-Use ↑/↓ and Enter to select, or Escape to close. **Cmd+Shift+O**
-(**Ctrl+Shift+O**) opens a new session. Search follows the selected My/All sessions scope.
+Moyai is a shared AI workspace for coding and connected-service tasks. Chat with
+an agent, steer its work, answer questions, inspect its computer, and keep the
+resulting files and history. Pydantic AI and Harness provide the agent; Temporal
+runs durable execution, Modal provides its computer, and LiteLLM supplies models.
 
-<p align="center">
-  <img src="docs/assets/moyai-hero.png" alt="Moyai, an open source cloud agent" width="100%">
-</p>
+The application has one Python installation, one lockfile, and one React frontend.
+An existing deployment keeps its users, permissions, historical sessions,
+credentials and accounting through the shared product services.
 
-A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
+![Moyai home with the session sidebar and task composer](docs/assets/native/home.png)
 
-Choose **Swarm** to give a team one mission and a maximum duration. Watch real delegated agents in **Space**, open their conversations, and steer the coordinator through chat. Swarms keep their saved deadline across restarts and support Pause, Resume, and Stop. Requires the cloud runtime and Temporal; see [Swarm mode](docs/swarm-mode.md).
+*Current frontend with synthetic accounts and session data.*
 
-Search sessions by title, original request, or words inside saved user and assistant messages. Matching excerpts appear in the sidebar, including agent conversations and side chats. Search covers older sessions beyond the recent list and follows your selected My sessions/All sessions view. Archived sessions remain recoverable by asking Moyai in chat.
+## Run locally
 
-Confirm **Delete session** once to stop its agents, close their sandboxes, and remove the session for everyone. Cleanup continues if you close the page or the app restarts, and retries automatically when a sandbox provider is temporarily unavailable. New work is blocked while the session shows **Deleting**. Stored conversation data, files, billing records, and backups remain retained; independent side chats remain available.
-
-Ask **“What is this session’s ID?”** or send **`/session-id`** in web chat or Slack
-thread chat to get the current Moyai session ID directly. These standalone requests
-use no model calls, tool searches, or sandbox startup, and leave active work alone.
-Web replies are saved in the conversation; Slack replies use the same durable
-control-message delivery as `status`. Requests with attachments or additional work
-continue through the agent normally.
-
-## Harnesses
-
-<p align="center">
-  <img src="docs/assets/harnesses.png" alt="Supported harnesses: Claude Agent SDK, Codex, Hermes, OpenCode, Deep Agents, and Tool Loop" width="100%">
-</p>
-
-New sessions automatically use **Codex SDK** for `openai/` models and **Claude Agent SDK** for `anthropic/` models, including new model versions. Other model prefixes fall back to Claude Agent SDK. You can pick a different harness for each session: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, Tool Loop, or Pi**. Every harness runs in the same isolated workspace with the same tools and permissions. See [supported combinations and custom harnesses](docs/harnesses.md).
-
-**GPT-6 Astra** uses normal processing by default. Choose **GPT-6 Astra Ultrafast** in the model picker to opt into [Ultrafast mode](https://docs.litellm.ai/docs/providers/openai/ultrafast). The choice is saved to your account immediately, survives sign-out and server restarts, and becomes the default for new sessions, just like choosing Opus. Choose regular **GPT-6 Astra** to opt out. Existing sessions and already queued messages retain their own model choices.
-
-Ultrafast automatically selects Codex for new sessions because it requires the Responses API. An explicitly selected incompatible harness is rejected with guidance to choose Codex or regular Astra. The saved ID `openai/gpt-6-astra-ultrafast` is a Moyai preference: requests still use the existing gateway model `openai/gpt-6-astra`, with `service_tier: "ultrafast"` only for opted-in Responses requests and `"default"` for regular Astra Responses requests. No new gateway deployment or database migration is needed. Ultrafast requires upstream access and uses its pricing and rate limits; context summaries and memory review retain normal processing.
-
-## Models and providers
-
-<p align="center">
-  <img src="docs/assets/providers.png" alt="Models and providers through LiteLLM: OpenAI, Anthropic, Google, Bedrock, Fireworks, xAI, Mistral, DeepSeek, Moonshot, and 100+ more" width="100%">
-</p>
-
-Moyai uses [LiteLLM](https://github.com/BerriAI/litellm) for inference, so it can run on any of the 100+ providers LiteLLM supports. Point it at your [LiteLLM gateway](https://docs.litellm.ai/), switch models between messages, and spend is tracked per teammate. Provider keys stay on the server, and the sandbox never sees them.
-
-## See it in action
-
-<img width="1196" height="720" alt="moyai" src="https://github.com/user-attachments/assets/2de74e6a-c37c-48d6-8a99-de2166c88626" />
-
-## Before vs after: 79% cheaper
-
-We moved our internal coding agent from Devin to Moyai. Same work, same 31 days: $101,872 on Devin vs about $21,700 on Moyai
-
-**Before: Devin, $101,872 in 31 days**
-
-<p align="center">
-  <img src="docs/assets/cost-before-devin.png" alt="Devin billing dashboard showing $101,872.24 spent between Aug 30 and Sep 29" width="100%">
-</p>
-
-**After: Moyai, about $700 a day**
-
-<p align="center">
-  <img src="docs/assets/cost-after-moyai.png" alt="Running total over the same 31 days: Devin reaches $101,872 while Moyai reaches $21,700, saving $80,172" width="100%">
-</p>
-
-Read the full story in the launch post: [Moyai is now open source](https://docs.litellm.ai/blog/moyai-open-source)
-
-## Getting started
-
-Choose **Modal, [Substrate](docs/substrate.md), or [AWS Lambda MicroVMs](docs/aws-lambda-microvms.md)** for agent sandboxes in **Settings → Runtime**. Modal is the default. Follow the provider's setup guide to connect your own infrastructure.
-
-This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Agent SDK harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
-
-You'll need Git, Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/installation/), a [Modal account](https://modal.com/docs/guide), and a [LiteLLM gateway](docs/getting-started.md#3-configure-a-model-endpoint) with GPT-6 Astra enabled. Commands use a macOS/Linux shell; Windows users can use WSL.
-
-### 1. Install
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.13,
+and Node.js 22 or newer. From the repository root:
 
 ```sh
-git clone https://github.com/BerriAI/moyai.git
-cd moyai
 uv sync --frozen
+npm ci
+npm run build
 cp .env.example .env
 chmod 600 .env
 ```
 
-### 2. Add your credentials
-
-Log in to Modal:
-
-```sh
-uv run modal token new
-```
-
-Open `~/.modal.toml` in a private editor window. Copy your workspace's `token_id` and `token_secret` into `.env`, then fill in the model settings:
-
-```dotenv
-MODAL_TOKEN_ID=<your Modal token_id>
-MODAL_TOKEN_SECRET=<your Modal token_secret>
-LITELLM_API_BASE=https://your-gateway.example.com/v1
-LITELLM_API_KEY=<your LiteLLM gateway key>
-AGENT_MODEL=openai/gpt-6-astra
-SESSION_TITLES_ENABLED=false
-```
-
-Ask your gateway administrator for the URL and a key with access to `openai/gpt-6-astra` through the Messages API. Leave the other settings unchanged for now, and keep `.env` out of Git and chat.
-
-### 3. Deploy and sign in
-
-> Deployment starts billed compute. Use a fresh Modal workspace; redeploying an existing installation interrupts its active tasks.
+Edit `.env` with your workspace password, LiteLLM gateway URL/key, enabled model
+alias, and Modal token pair. The model alias must support the gateway's Responses
+API. An authenticated local Modal CLI profile also works for source development.
+Leave `ENCRYPTION_KEY` empty on a new local installation to generate and persist
+one in `DATA_DIR`; preserve that directory and its key on subsequent starts.
 
 ```sh
-uv run python deploy_modal.py
+uv run --frozen moyai dev --port 8787
 ```
 
-Open the printed **Workspace URL**. Sign in with `WORKSPACE_PASSWORD` from `.env`, which the script generates for you. It also sets up HTTPS and the required secrets. Keep this `.env` for future deployments.
+Open <http://127.0.0.1:8787> and sign in as `admin` with `WORKSPACE_PASSWORD`.
+The command starts a local Temporal server, worker and API, using real configured
+inference and Modal. It may download Temporal and build the first computer image.
+Model and computer usage are billed by those providers.
 
-### 4. Run your first task
+Try: “Create `/workspace/hello.py` that prints Hello from Moyai, run it, and save
+it for download.” Success means the chat reports the observed output and a saved
+file opens in the Files panel. Follow up in the same conversation to change it.
+If inference fails, verify the model alias through your gateway's Responses API;
+if computer creation fails, check Modal authentication and the worker log.
 
-Start a new session. Under **Context & tools**, choose **Cloud session** and leave the repository empty. Select **Claude Agent SDK** in the harness picker and **GPT-6 Astra** in the model picker, then send:
+For a Docker-based local trial, use the same `.env` and run:
 
-> Create `/workspace/hello.py` that prints `Hello from Moyai`, run it, and show me the output.
+```sh
+docker compose up --build
+```
 
-The first run may take several minutes to build the agent image. Check **Activity** for the command output and **Files** for `hello.py`.
+This starts the same development service at port 8787 and keeps application data
+and Temporal history in the `workspace-data` volume. Keep that volume to preserve
+history. Local development is a single-host setup; it is not the production
+release procedure.
 
-**Next: [connect your GitHub repository](docs/getting-started.md#6-connect-your-github-repository)** to work on your code and open PRs. Add [Slack](docs/slack.md), [Linear, or Notion](docs/integrations.md) when you need them.
+## Use and operate
 
-To stop compute charges, stop the web app and remaining sandboxes in the Modal dashboard. Closing your browser leaves them running.
+- [Using Moyai](docs/usage.md): chat, files, computer control, connections, Settings,
+  Slack, approvals and recovery.
+- [Architecture](docs/architecture.md): how requests move through the system and
+  which data belongs to each service.
+- [Production deployment](docs/production-deploy.md): existing-product setup,
+  guarded maintenance, upgrade checks and recovery.
+- [Verification](docs/verification.md): tests, packaging and Docker checks.
+- [Consolidation scope](docs/consolidation.md): retired code, preserved contracts
+  and features that remain deferred.
+- [Documentation index](docs/README.md).
 
-## Documentation
+## Develop
 
-- [Detailed setup and troubleshooting](docs/getting-started.md)
-- [Models and harnesses](docs/getting-started.md#choose-a-harness)
-- [Deployment, backups, and security](docs/deployment.md) · [Access boundaries](docs/security-and-scope.md)
-- [Local UI preview](docs/getting-started.md#optional-local-ui-development-only) (simulated responses)
-- [Run Python agent regressions in CI with Lens](docs/lens-evals.md)
-- [All documentation](docs/README.md)
+```sh
+uv run --frozen pytest -q tests
+uv run --frozen pytest -q native/tests
+uv run --frozen ruff check --config native/pyproject.toml native/src native/tests
+uv run --frozen pyright --project native
+npm run typecheck
+npm test
+npm run test:ui
+```
+
+Install Chromium once with `npx playwright install chromium`. PostgreSQL tests
+need a disposable local database; see the verification guide. Build frontend
+changes with `npm run build` and commit `native/src/moyai/static` with their source.
+The Python image serves those assets without Node.js.

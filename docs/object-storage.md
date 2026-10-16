@@ -24,7 +24,7 @@ Object references bind the endpoint, bucket and prefix, so preserve those values
 ## Roll out without losing legacy files
 
 1. Keep the existing disk, database and encryption/session keys. Upgrade **all app writers** to the object-storage-aware release and configure the same private destination for them. Keep the existing standalone deployment until file migration is verified; SQLite always requires one app instance. Do not start an older binary against this database after publishing remote references; it cannot read those files.
-2. Verify a new upload, image preview, archive download and browser recording through Moyai, then restart and verify them again. The deployment configuration alone does not prove credentials, bucket policy or persistence.
+2. Verify a new upload, image preview and historical archive download through Moyai, then restart and verify them again. The deployment configuration alone does not prove credentials, bucket policy or persistence.
 3. Make a verified external database backup before migrating existing payloads. Preserve any legacy artifact directory and existing operator backup/audit files separately until they are verified externally too.
 4. Inspect the migration plan, then run bounded batches. Default migration preserves every source BLOB and local file. Repeated runs resume safely; already-published references are skipped. Only acknowledged run ZIPs, frozen agent handoff ZIPs and valid run capture filenames are considered. Temporary files, symlinks and unrelated files are excluded.
 
@@ -42,7 +42,7 @@ Migration uploads and reads back each payload before publishing references. It r
 
 Before removing disk dependence, drain file writers and run `verify`. It downloads every published original, preview and artifact, checks content hashes and sizes, and rejects missing payloads, changed references, unmanifested local files or symlinks. Inspect the plan's `local_inventory` and resolve excluded files separately; zero migratable records alone is insufficient. The receipt covers only the database and directory supplied, so compare the file count with your original-disk inventory. An empty directory on a replacement cannot prove the original disk is migrated. Verify authorized downloads from an isolated replacement with an empty local artifact directory before detaching the disk. No command deletes source files.
 
-For a repeatable local test using real PostgreSQL, the CLI in separate processes and a local S3-protocol HTTP fixture, set `MOYAI_TEST_POSTGRES_URL` to a disposable database and run `uv run --frozen python scripts/shared_storage_smoke.py`. This validates byte preservation and reads from a replacement without local files; it does not certify a cloud bucket's credentials or access policy.
+For a repeatable local test using real PostgreSQL, the CLI in separate processes and a local S3-protocol HTTP fixture, set `MOYAI_TEST_POSTGRES_URL` to a disposable database and run `uv run --frozen pytest -q tests/test_postgres_storage_maintenance.py`. This validates byte preservation and reads from a replacement without local files; it does not certify a cloud bucket's credentials or access policy.
 
 ## Reclaim existing local space separately
 

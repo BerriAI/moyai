@@ -2,6 +2,7 @@ services:
   workspace:
     build: .
     init: true
+    command: ["/app/.venv/bin/moyai", "dev", "--host", "0.0.0.0", "--port", "8787"]
     env_file: .env
     environment:
       DATA_DIR: /data

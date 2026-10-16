@@ -1,71 +1,273 @@
 # Using Moyai
 
-[Documentation](README.md) · [Project overview](../README.md)
+[Install Moyai](../README.md#run-locally) · [Documentation](README.md)
 
-> This guide retains the detailed reference material from the original README.
-> Dated acceptance reports describe past checks, not a current deployment or test result.
+## Attachments and the computer
 
-## Chat interface
+The native interface reuses Moyai's navigation style, home constellation and
+interactive sculpture. Start a task directly from the home composer, or continue
+an existing conversation beside the Computer, Activity, Plan and Files panel.
 
-The browser opens into a conversation workspace with searchable sessions in the sidebar, a centered new-session composer, and a full-height chat with the composer fixed below the conversation. Enter sends; Shift + Enter adds a line. Unsent follow-up drafts remain with their session while switching chats. Activity opens the session's progress, Slack source context, and file download in a collapsible panel. Connected-app tools execute without an approval prompt. Historical approval records remain readable.
+Drop files anywhere in the chat column, choose **Attach**, or paste an image
+with Command/Ctrl+V. New-session, main-chat and side-chat composers show
+removable attachment cards and support file-only messages. A message can contain
+eight files, each up to 20 MB; PNG, JPEG, GIF and WebP images are limited to 8 MB
+and 20 megapixels each. Zip a folder before attaching it.
+Uploads are stored in encrypted objects; admission binds each upload to its
+owner's chosen conversation. Images use native Pydantic `BinaryContent`,
+including when steering a run. Other originals are available through the shared
+`attachment_copy` capability and the SDK's workspace tools, without embedding
+large binary documents in model prompts.
+Attachment cards and local image thumbnails appear immediately, with an
+uploading indicator until the original is saved. Uploads run in bounded parallel
+batches; failed cards can be retried or removed, and incomplete files cannot be
+sent. The first accepted message appears directly in the chat when leaving the
+home screen. Only messages explicitly waiting behind active work appear in the
+queue; **Send now** moves saved input into the transcript while admission settles.
+Session search is available through Command/Ctrl+K rather than a second sidebar
+filter.
 
-The sidebar lists the 100 most recently updated parent sessions first, using the same last-updated time shown beneath each title. New messages and session state changes update this time; simply opening a session does not. Subagents stay nested under their parent in assignment order. The list refreshes every 15 seconds, and a selected older session remains accessible beyond the list limit.
+Saved-file links in the transcript, subagent results and side chats open the
+right-panel preview. Text and Markdown render in the panel; supported images,
+videos and audio use its media viewer. **Download original** remains available
+inside the preview. Reopening the same file selects its existing tab. External
+website links keep their normal behavior.
 
-**My sessions** includes sessions you pinned, created or sent a message in, including linked Slack activity and participation in a child agent chat. Only admins can select **All sessions**. Members always receive their personal list, even when the API scope is omitted; an explicit `scope=all` request requires an admin role. Saved admin filters are reset when a member signs in or the browser refreshes their role. This controls session discovery in the sidebar; existing authenticated shared links still let teammates open a session and join the conversation.
+Sessions open with chat only. **Workspace** opens a compact overlay ordered
+**Pull requests → Subagents → Outputs**, aligned to the main chat's right edge.
+It slides within the chat column, including when another panel is open, and
+respects reduced motion. Selecting a resource opens a right-panel tab. Its **+**
+menu adds Side chat, Files, Computer, Activity or Plan.
+The initial split is **65% chat / 35% panel**. Drag the divider to save a new
+default for this signed-in user and product mode in this browser, across
+conversations and reloads. The divider also supports arrow keys, Shift for larger
+steps, and Enter to restore 65:35. Smaller viewports clamp or stack the panes
+without overwriting that preference.
+After a task creates its Modal workspace, add **Computer** and choose **Open
+computer**, or use the session menu. Background coding and sandbox creation do
+not open the panel automatically.
 
-Use **Pin session** in a session's **⋯** menu to keep it in **Pinned** at the top. Pins are personal, survive reloads and deployments, and keep older sessions visible beyond the recent limit. Archiving hides a pin until the session is restored. **Participated** groups sessions you contributed to but did not create, including linked Slack identities and child-agent conversations. Personal folders take priority over this automatic grouping; each parent appears once. Opening a shared link alone does not count as participation, but you can pin that session.
+Opening the computer starts a real X desktop in the same sandbox, with Chromium open and a taskbar.
+The panel shows the desktop itself. Click **Take control** on the screen to
+click, type, paste text and scroll, using Chromium's own tabs and address bar.
+Expand the panel for more space. The small **Release control** overlay appears
+on hover or keyboard focus; Ctrl+Shift+Escape also returns control. Leaving or
+reloading the page releases this browser's control.
 
-A Slack logo marks sessions with saved Slack conversation bindings or source events. PR indicators count confirmed Moyai publications, including child-agent PRs: green for open, purple for merged, red for closed. **PR is ready** means an open, non-draft PR; **Review PR** means GitHub has requested reviewers, not necessarily you. GitHub status refreshes in the background on a 60-second cache; stale or unknown data never claims readiness. These indicators require a confirmed publication record, not just a PR URL in a message.
+Desktop access follows session visibility and rechecks the workspace's current
+account grants. A private session is owner-only; workspace members can view and
+take turns controlling a shared session's computer, including its browser sign-ins.
+A persistent database lease allows one human controller at a time.
+Chat, native coding work, and steering continue while a person controls the
+desktop. An idle conversation starts new work normally. Abandoned leases expire. Input is
+serialized in the UI and guest; uncertain input is not automatically repeated.
+An in-flight action also prevents another tab from releasing control, and
+expired input is rejected in the guest before dispatch.
+The desktop uses noVNC over an authenticated, origin-checked application WebSocket.
+Raw VNC and browser debugging listeners stay on guest loopback. Hidden tabs pause
+their display/input transport while retained control leases keep their heartbeat.
 
-For a local demo, run `uv run python scripts/sidebar_demo.py` and open **http://localhost:8846/demo/login**. This serves the actual app and SQLite with synthetic identities, Slack bindings and GitHub responses; it makes no external provider calls. Pass `--data-dir /path/to/demo-data` to retain demo pins across restarts.
+Files and browser sign-ins placed in this computer are accessible to
+code running there. The human input lease is not a security boundary against
+native shell execution. The agent's `browser_open`, `browser_action` and
+`browser_read` tools use the same visible Chromium. A human control lease refuses
+new automated browser writes while chat and coding continue. Ambiguous browser
+writes retain durable effect receipts and are not automatically repeated.
+Restrictions on the app's connected-service
+tools do not restrict an account signed into manually inside Chromium.
 
-Use **+** beside Sessions to create a named folder. Drag a session onto a folder to move it, or onto **Recent · not in a folder** to unfile it. The destination highlights while dragging, and a collapsed folder opens after the move. A session's **⋯** menu also moves it into a folder or back to **No folder** (including on touch screens or with a keyboard); the folder's **⋯** menu renames or removes the folder. Removing a folder keeps its conversations. Folders are personal to the signed-in identity (shared password sign-ins share an identity), and do not change who can access a session. Child agents stay with their parent. Folder names and membership are saved in the database and checkpoints; filed sessions remain in the sidebar beyond the recent-session limit. Search matches folders, sessions, and child agents. Collapsed folders are remembered in the current browser.
+Existing computers install the desktop prerequisites on first opening; new
+images include them. This adds basic viewing/control, not every legacy computer
+feature. Desktop recording, automatic workspace restoration, and restored
+browser-login workflows remain outside this implementation.
 
-**Settings** is the sidebar's single configuration entry. It groups Skills, Memory, Connections, Secrets, and Runtime, plus admin-only Users, Spend, and Environments. Available automation features appear under Workflows. Each section links back to Settings in the header; existing direct links such as `#skills` still work.
+The sidebar separates **Participated** (another person's shared session you have
+sent a message to) from **Recent** (sessions you created, including linked Slack
+history). This personal list applies to administrators too; unrelated shared
+sessions remain accessible through search or a direct link. Participated starts collapsed; an explicit
+expansion is remembered. Session action menus contain commands for that session;
+the dedicated New session controls create a new one. Pins, folders, collapsed groups and unread
+state are personal. Folder creation, rename and removal preserve session sharing.
+The session menu offers rename, folder placement, copy link, open computer,
+read/unread, pin, archive and delete; owner-only actions are enforced by the API.
+The header and sidebar use the same menu. Deleted conversations can be restored
+from the Deleted list once any active work has stopped. Restore preserves saved
+answers and downloads and does not restart cancelled work.
 
-Assistant replies render Markdown headings, lists, links, tables, and copyable code blocks. The pinned local Marked and DOMPurify libraries are listed with their source tarballs and hashes in `app/static/vendor/versions.json`; licenses ship alongside them. Raw HTML is escaped, the resulting markup is sanitized, and links are limited to HTTP(S)/mailto URLs plus strictly validated root-relative `/api/runs/<run_id>/artifacts/content` URLs with a valid relative file path and exact revision; the server authorizes access to the referenced artifact. No external script or image is loaded to format replies.
+**Workspace** opens an overlay of pull requests, subagents and outputs. Uploaded
+sources and saved outputs are also available in the Files tab.
+Subagents come from native Harness run lineage, with persistent display names;
+only their requester can inspect their answers and recorded steps. Saving a
+file with `save_artifact` adds an output, and `attach_link` adds a PR, external
+output or source. PR links in the public transcript also appear as mentioned PRs.
 
-Browser acceptance covered desktop and a 390px narrow viewport, session search, multiline input, Enter-to-send, queued follow-ups, per-session drafts, live status, activity controls, and hostile HTML/URL rendering. The 49 existing automated tests pass.
+PR badges in the sidebar and overview use the same GitHub state. The in-app PR
+view shows changes, description, discussion, commits and checks. Public PRs need
+no connection; private PRs use eligible native GitHub connections. Shared
+conversations never use a viewer's personal connection. Anonymous reads are
+cached for five minutes, with explicit Refresh available. Large or omitted
+GitHub patches are labelled; this is a read-only viewer.
 
-## Choose the model
+Queued messages appear above the composer. **Edit** loads their text into that
+same composer and keeps attachments; Save/Cancel restore the unsent draft.
+**Steer now** promotes the existing message through the native Temporal signal
+and Pydantic `AgentRun.enqueue` path. A message already admitted cannot be edited.
 
-**Live verification:** session `9d137408acbc4254a1c6fbbf7e86aa77` ran **Opus → Astra → Opus**. Opus remembered `copper lighthouse` and wrote `21`; Astra restored the conversation/file, incremented it to `22`, and a queued Opus turn read `22` and recalled the phrase. The picker changed to Opus while the active turn stayed on Astra. All three answers have model labels, connected apps were deselected, and all three sandboxes confirmed termination. The `@Moyai model opus` command was also verified in the existing #bot-spam test thread without starting compute.
+## Settings and administration
 
-Use the model picker in the new-session composer or below an existing conversation to choose **GPT-6 Astra** (`openai/gpt-6-astra`), **Claude Opus 5.5** (`anthropic/claude-opus-5-5`), or **GLM-5.3** (`fireworks_ai/glm-5p3`). The choice applies when you send the next message and becomes that session's preference. Your conversation and saved workspace stay together across a model switch. Each new assistant answer records its model; old answers without a stored model are left unlabeled.
+The account's Settings button opens a dedicated rail with Overview, Skills,
+Automations, Memory, Connections and Secrets. Administrators also see Users,
+Performance and Spend & usage. These pages use native application records,
+not the legacy application's database or APIs.
 
-You can also ask in ordinary language in Slack or on the web: **“switch to GLM 5.3”** or **“use GLM 5.3 and summarize this thread.”** The agent discovers `model_list` and `model_switch`, validates the enabled choice with the broker, and switches before continuing the remaining task. The next inference uses that model with the same conversation and workspace; completed work is not restarted. The currently selected model handles the initial request to switch, so it must be reachable. If it is unavailable, use the picker or the explicit Slack command below to switch without inference. A successful switch confirms routing selection, not provider availability; gateway credentials still need access to the target model.
+- **Skills:** bundled instructions stay available; personal and shared saved
+  skills load through Pydantic's deferred capability mechanism. Personal skills
+  are limited to their owner's private web conversations.
+- **Memory:** inspect and edit the Harness memory store in your authorized
+  namespaces. Version checks reject conflicting edits. Other users' personal
+  memory is not available to administrators.
+- **Automations:** interval schedules use Temporal Schedules and admit ordinary
+  native turns with deduplicated occurrence receipts. Pause/delete fences new
+  admissions; work already admitted follows the normal Stop controls. Creation
+  requires a registered Settings worker. Schedules are private and belong to
+  their requester.
+- **Connections:** manage the same account records selected in the composer.
+- **Secrets:** encrypted personal/shared storage with metadata-only reads and
+  rotation. Values are never returned to the browser or automatically injected
+  into tools or computers. Explicit scoped runtime secret grants remain future
+  product work.
+- **Users:** manage local accounts, roles and enabled state. Changes invalidate
+  prior authentication; the final enabled administrator cannot be disabled or
+  demoted.
+- **Analytics:** filter and export recorded usage and turn timing. Latency is
+  accepted-to-finished wall time, including tools and waits. Native turn records
+  do not yet carry authoritative billed cost; missing costs are shown as
+  unpriced, never as zero. Provider billing reconciliation remains separate.
 
-Every queued message captures its model at submission. Changing the picker or Slack preference does not reroute a response already running or queued. The agent's explicit `model_switch` tool changes the active turn starting with its **next** inference and becomes the default for future messages, unless a newer queued message already set a preference. An in-flight inference and queued messages keep their assigned models. Switches are scoped to a direct active user chat, recorded durably, and idempotent on retries; delayed retries cannot undo later switches. The broker ignores raw model overrides supplied by sandbox code. User-message labels preserve their original selection; assistant answers record the final selected model, with per-inference spend/traces retaining each actual routed model. `AGENT_MODEL` sets the default; a custom gateway default remains selectable alongside the catalog.
+## Separate API and workers (standalone installations)
 
-The picker and validation share `MODEL_CATALOG` in `app/config.py`. To add a model, add its gateway ID and display name there, optionally add a shorthand in `resolve_model()`, and deploy the code. Render does not need a separate model list. The legacy `AGENT_MODELS` environment variable is ignored and should be removed from Render and local `.env` files; it can no longer hide models added by a release.
+Configure a Temporal service, `TEMPORAL_TASK_QUEUE`, a dedicated PostgreSQL
+database, a shared `ENCRYPTION_KEY`, and shared object storage. Use the same
+configuration on every API and worker:
 
-Local routing demo: run `uv run python scripts/model_tools_demo.py` and open `http://127.0.0.1:8795/demo`. It exercises the real broker and a local HTTP provider stub, including the next inference and retry/queue behavior. Tool selection is scripted; it does not test live model intent recognition or production provider access.
-
-In Slack, mention the bot with `model opus`, `model astra`, or `model glm-5.3` to set the model for that thread's next messages. You can start with a model directive on the first line and the task on the next line, for example:
-
-```text
-@Moyai model opus
-Read this thread and suggest the next step.
+```sh
+uv run moyai serve --host 127.0.0.1 --port 8796
+uv run moyai worker
 ```
 
-A model-only command starts or updates the saved session without launching a sandbox. Its confirmation does not change running or already queued turns. These commands also work in DMs. Include the bot mention on channel follow-ups if the installation has not yet enabled ordinary thread events.
+The API owns admission/dispatch and optional Slack delivery. Workers execute the
+registered native activities. Use HTTPS at the application edge,
+`MOYAI_PUBLIC_URL`, and `MOYAI_SECURE_COOKIES=true`.
 
-## Session workspace panel
+Application tables have a `moyai_` prefix. Harness manages its own native tables.
+Standalone development can bootstrap its own database. Existing-product mode
+uses the canonical product database with an explicitly provisioned native schema,
+reuses canonical identities and exposes historical sessions as read-only history.
+Old sandboxes and pending workflows are not implicitly converted.
 
-Cloud sessions have a collapsible right-side workspace. Open **Computer** or
-**Files**, or use **+** to add a computer, file browser, activity view, or side
-chat. Each selected file gets its own preview tab. Tabs can be closed, resized,
-expanded, and reopened; their layout and side-chat drafts are saved per user and
-session in that browser. Hiding or leaving the Computer tab releases human
-control and stops preview polling. Closing a tab does not stop its agent.
+Existing-product startup verifies versioned application and Harness provisioning
+receipts. It never bootstraps a replacement user directory. The stock Harness
+stores still perform their documented lazy, idempotent DDL on first use; see the
+deployment boundary for required permissions and explicit provisioning commands.
+Drain or version active Temporal workflows before changing registered activity
+names or pinned SDK execution behavior.
 
-Side chats are independent durable sessions. They start with a complete snapshot
-of the original task, latest result and undeleted messages, including queued
-messages with their status and author. The snapshot remains fixed as the main
-conversation continues. Large snapshots stay retrievable from session files;
-the model receives a reference when the text exceeds its input allocation.
-Side chats use a separate workspace, message queue, and
-billing attribution for the person who sends the message. They do not steer the
-main agent, share its live browser/files, or mirror into its Slack thread. They
-remain available in the add-tab menu and session list after closing the tab.
-Credential requests can be completed through **Open session**.
+## Accounts and integrations
+
+Add accounts in **Connections**, then select them under **Context & connections**
+for a message. New conversations select no accounts; continuations restore the
+requester's previous selection for review. Read-only is the default;
+non-read-only tools require explicit approval by default.
+
+Personal accounts are restricted to private web conversations. Shared web
+conversations use explicitly shared accounts. A live computer is bound to its
+account context; changing that context requires a new conversation, rather than
+inheriting files from an account that is no longer selected.
+
+- GitHub uses a token with the intended repository permissions.
+- Linear uses an API key or OAuth access token.
+- Notion's hosted tools require an OAuth access token, not an integration token.
+- Personal Slack tools require a user token, not a bot token.
+
+Moyai uses the SDK's provider tool catalog and schemas. Token permissions establish
+resource access. An optional `allowed_tools` policy narrows the catalog further.
+Merge, approving-review and repository deletion tools are excluded. Account
+credentials never enter the coding computer, so a shell cannot obtain a
+merge-capable token from the application's connection configuration.
+
+Live provider qualification requires configured test accounts. Installing a
+capability is not evidence that every remote operation or legacy connector
+contract is available.
+
+## Slack bot surface
+
+The bot surface is separate from personal Slack tools. Set
+`SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`, `SLACK_TEAM_ID`, and an HTTPS
+`MOYAI_PUBLIC_URL`. Register `/hooks/slack` as the event endpoint. Configure the
+bot's mentions/messages and ordinary message-posting/history permissions.
+
+Create an application user linked to a verified Slack member ID:
+
+```sh
+uv run moyai user teammate --name "Teammate" --slack-user U0123456789
+```
+
+The command asks for the application password privately. Unlinked users cannot
+start work. Mentions create a thread conversation; replies from its original
+linked requester steer or queue work. All Slack-origin conversations have private
+web access for that requester. This avoids equating channel membership with
+workspace-wide sharing.
+
+Slack memory is isolated per thread and requester; it does not inject personal
+web-chat memory into a channel. Connected accounts are disabled for Slack-origin
+conversations until destination-specific export policies are implemented. The
+web interface identifies that its replies are delivered to Slack.
+
+Signed events are persisted before acknowledgment and deduplicated. Outgoing
+answers have persistent send ownership across network waits. A lost send
+acknowledgment is checked against Slack metadata; it is never automatically
+reposted. A missing receipt remains uncertain, including when a thread read is
+truncated or unavailable.
+
+The initial bot adapter sends a bounded answer and a link to the conversation.
+Questions and approvals are completed in the authenticated web app. Rich Slack
+cards, media uploads, OAuth onboarding and the full legacy Slack command set are
+not implemented by this adapter.
+
+## Behavior and recovery
+
+- Repeated client request identities do not admit duplicate turns.
+- Queued messages can be edited or cancelled until admission.
+- **Send now** uses the native pending-message mechanism. A changed requester,
+  model or connection set becomes a follow-up rather than inheriting an active
+  run's authority.
+- **Stop** revokes unstarted work before requesting Temporal cancellation.
+  Failed cancellation RPCs are reconciled. Native foreground-command cancellation
+  is exercised by the tests. Already returned background process handles and
+  external writes remain real effects; cancellation cannot undo them.
+- Model and tool attempts recheck current authorization at the activity boundary.
+  An approval cannot restore a revoked account grant.
+- Native working-history search and memory are scoped independently of the
+  shared product conversation. Private and shared memory namespaces differ.
+- A possibly dispatched shell or connected-service write retains an unresolved
+  receipt. Another write is blocked even if the model changes the call ID.
+  The requester can record inspected evidence using
+  `GET /api/sessions/{id}/effects` and `POST /api/effects/{id}/resolve`.
+  This is conservative uncertainty handling, not exactly-once external execution.
+- The answer is committed before computer snapshot settlement. A snapshot failure
+  produces a warning without replacing the received answer.
+- Deferred requests also checkpoint their computer before becoming ready for a
+  response. A cold continuation restores an eligible saved filesystem image before
+  native execution, preserving the conversation, deferred results and effect
+  receipts. Missing/stale images and uncertain actions fail closed; there is no
+  empty-workspace fallback. See [workspace recovery](pydantic-workspace-recovery.md)
+  for authority checks, the 30-day image retention policy and process-state limits.
+- Native model-client HTTP retries are disabled. Temporal allows up to three
+  model attempts; writes and arbitrary shell dispatch have one automatic attempt.
+  Specifically classified reads can have three attempts.
+
+Step, memory and plan stores contain private application data. Protect and back
+up the database. Application secrets, saved artifacts and Temporal payloads,
+including encoded failure attributes, are encrypted. Large Temporal payloads are
+offloaded to immutable private objects. Keep those objects for the lifetime of
+the corresponding workflow histories.
