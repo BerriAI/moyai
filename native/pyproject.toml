@@ -37,6 +37,7 @@ dev = [
     # Product-adapter tests run in the normal native CI suite.
     "PyJWT[crypto]>=2.10,<3",
     "psycopg[binary,pool]>=3.2,<4",
+    "pytest-split>=0.11,<0.12",
 ]
 
 [project.scripts]

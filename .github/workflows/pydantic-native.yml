@@ -13,24 +13,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  runtime:
+  quality:
+    name: Native lint, types and package
     runs-on: ubuntu-latest
-    # The full suite alone took 11m18s in qualification; allow cold install,
-    # typecheck and sdist/wheel builds on a smaller shared runner.
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_PASSWORD: native-test-only
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      MOYAI_TEST_POSTGRES: postgresql://postgres:native-test-only@127.0.0.1:5432/postgres
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: native
@@ -46,5 +32,69 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check src tests
       - run: uv run pyright
-      - run: uv run pytest -q --tb=short
       - run: uv build
+  tests:
+    name: Native tests (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    # Each shard has its own runner and Postgres service. Keep the cold-run
+    # allowance while measuring shard balance with durations and JUnit reports.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: native-test-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES: postgresql://postgres:native-test-only@127.0.0.1:5432/postgres
+      SHARD: ${{ matrix.shard }}
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.13'
+      - run: uv sync --frozen
+      # Stop this shard at its first failure so the check becomes red promptly;
+      # other shards keep running to preserve independent diagnostic coverage.
+      - run: >-
+          uv run pytest -x -q --tb=short --durations=20
+          --splits 4 --group "$SHARD" --splitting-algorithm least_duration
+          --junitxml="test-results/native-${SHARD}.xml"
+      - name: Save shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-tests-${{ matrix.shard }}
+          path: native/test-results/
+          if-no-files-found: warn
+  runtime:
+    # Preserve the existing required check and reject failed, cancelled or
+    # skipped prerequisites; a successful shard cannot stand in for the suite.
+    needs: [quality, tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require quality checks and every native test shard
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$TESTS_RESULT" = success

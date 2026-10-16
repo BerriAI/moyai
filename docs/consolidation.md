@@ -3,12 +3,12 @@
 This change makes the Pydantic product the sole executable application while
 preserving the behavior present in the native product at main commit
 [`9b6f460`](https://github.com/BerriAI/moyai/tree/9b6f460fe4785f60059fe4d0ffc78a7bb94b599e).
-It also incorporates main through `27737b4`, including the versioned Docker installer, full-row sidebar
-links, Midnight violet palette and CI test ownership. It does not claim parity with every retired engine feature.
+It also incorporates main through `cf1844f`, including the versioned Docker installer, full-row sidebar
+links, Midnight violet palette and parallel CI execution. It does not claim parity with every retired engine feature.
 
 ## Size
 
-Application source falls from **102,436 to 61,062 lines (40.4%)** against `27737b4`.
+Application source falls from **102,436 to 61,062 lines (40.4%)** against `cf1844f`.
 This counts Python, JavaScript/TypeScript, CSS and HTML in the application trees
 and root startup files, including comments/blank lines. It excludes generated
 bundles, vendored code, generated protocol code, tests, scripts and documentation.

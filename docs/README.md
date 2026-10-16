@@ -20,6 +20,7 @@
 | [Object storage](object-storage.md) | Historical payload migration and backup requirements |
 | [UI components](shadcn-ui.md) | Shared controls, frontend build and browser checks |
 | [Verification](verification.md) | Local and CI checks and their limits |
+| [CI execution](ci-execution.md) | Isolated native test shards and required release checks |
 | [Consolidation scope](consolidation.md) | Preserved functionality and removed runtime families |
 
 Older designs and rollout reports remain in Git history. They describe their
