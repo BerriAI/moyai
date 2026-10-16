@@ -138,6 +138,7 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   ];
   reset({status:'completed',skills});
   const page=await pageFor(t,'#',width), input=page.getByRole('textbox',{name:'Message Moyai'});
+  await page.getByRole('checkbox',{name:'Private session · Only you'}).check();
   await input.fill('Please use /team');
   const options=page.getByRole('listbox',{name:'Skills'});
   await options.waitFor();assert.equal(await options.getByRole('option').count(),2);
