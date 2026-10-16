@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 
 from pydantic_ai.durable_exec.temporal import AgentPlugin
 from temporalio.client import WorkflowExecutionStatus
@@ -59,6 +60,10 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         identity += "-memory-review-v1-"
     drain = getattr(runtime, "product_drain", None)
     activities = [*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities]
+    activity_pools = ("control", "model", "tools")
+    # WorkerPools retires pollers sequentially. Share the process's grace budget
+    # so adding activity pools cannot exceed the HTTP/container shutdown limits.
+    shutdown_timeout = timedelta(seconds=runtime.settings.worker_shutdown_seconds / (1 + len(activity_pools)))
     legacy = Worker(
         runtime.client,
         identity=identity,
@@ -68,6 +73,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         interceptors=interceptors,
         max_concurrent_activities=runtime.settings.temporal_worker_activities,
         max_cached_workflows=runtime.settings.temporal_workflow_cache_size,
+        graceful_shutdown_timeout=shutdown_timeout,
     )
     pools = tuple(Worker(
         runtime.client, identity=identity,
@@ -75,7 +81,8 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         activities=activities, plugins=agent_plugins, interceptors=interceptors,
         max_concurrent_activities=runtime.settings.temporal_worker_activities,
         max_cached_workflows=runtime.settings.temporal_workflow_cache_size,
-    ) for pool in ("control", "model", "tools"))
+        graceful_shutdown_timeout=shutdown_timeout,
+    ) for pool in activity_pools)
     # All pollers belong to the same canonical process owner. Register once,
     # before any poller can execute; retirement still follows owner disappearance.
     return WorkerPools((legacy, *pools), register=drain.register_worker if drain is not None else None)

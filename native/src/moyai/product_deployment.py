@@ -47,7 +47,7 @@ def build_role_plan(config: ProductConfig) -> RolePlan:
         # limits business routes to the role that actually owns them.
         role=role, serve_api=True,
         run_dispatcher=role in {"coordinator", "standalone"},
-        run_worker=role == "worker" or (role == "standalone" and config.local_rehearsal),
+        run_worker=role == "worker" or role == "standalone",
         blockers=blockers,
     )
 

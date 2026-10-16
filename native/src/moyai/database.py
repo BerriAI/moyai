@@ -21,7 +21,7 @@ from sqlalchemy import insert as sql_insert
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .contracts import (
     Grant,
@@ -51,6 +51,7 @@ from .models import (
     new_id,
     now,
 )
+from .postgres import create_engine
 from .product_identity import ProductGrant, ProductIdentityAdapter
 from .security import Security, password_hash
 from .settings import Settings
@@ -93,7 +94,7 @@ class Database:
             if not settings.postgres_url:
                 raise ValueError("Native database schemas require PostgreSQL.")
             connect_args = {"server_settings": {"search_path": f'"{self.execution_schema}",pg_catalog'}}
-        self.engine = create_async_engine(
+        self.engine = create_engine(
             settings.sqlalchemy_url, pool_pre_ping=True, connect_args=connect_args,
             **({"pool_size": settings.database_pool_size, "max_overflow": 0, "pool_timeout": 10}
                if settings.postgres_url else {}),

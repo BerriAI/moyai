@@ -13,6 +13,12 @@ credentials and accounting through the shared product services.
 
 *Current frontend with synthetic accounts and session data.*
 
+## Install a released Docker package
+
+Use the [Docker installation guide](deploy/docker/README.md) for a versioned bundle,
+persistent storage and guarded upgrades. Confirm that the chosen GitHub release
+contains the image and bundle; source on main alone does not establish publication.
+
 ## Run locally
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.13,
@@ -20,13 +26,11 @@ and Node.js 22 or newer. From the repository root:
 
 ```sh
 uv sync --frozen
-npm ci
-npm run build
 cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` with your workspace password, LiteLLM gateway URL/key, enabled model
+Installation also builds the frontend from source. Edit `.env` with your workspace password, LiteLLM gateway URL/key, enabled model
 alias, and Modal token pair. The model alias must support the gateway's Responses
 API. An authenticated local Modal CLI profile also works for source development.
 Leave `ENCRYPTION_KEY` empty on a new local installation to generate and persist
@@ -76,14 +80,14 @@ release procedure.
 ```sh
 uv run --frozen pytest -q tests
 uv run --frozen pytest -q native/tests
-uv run --frozen ruff check --config native/pyproject.toml native/src native/tests
-uv run --frozen pyright --project native
+uv run --frozen --directory native ruff check src tests
+uv run --frozen --directory native pyright
 npm run typecheck
 npm test
 npm run test:ui
 ```
 
 Install Chromium once with `npx playwright install chromium`. PostgreSQL tests
-need a disposable local database; see the verification guide. Build frontend
-changes with `npm run build` and commit `native/src/moyai/static` with their source.
+need a disposable local database; see the verification guide. Build frontend changes with `npm run build`. The generated
+`native/src/moyai/static` directory is ignored by Git and included by the package build.
 The Python image serves those assets without Node.js.

@@ -58,7 +58,7 @@ That configuration exists for first use and development. It cannot accidentally
 bootstrap replacement users inside an existing product installation.
 
 The frontend is `native/web`, using `frontend/components/ui` and `frontend/theme.css`.
-Its checked-in build is served from `native/src/moyai/static`. The wheel includes
+Its generated build is served from `native/src/moyai/static`. The wheel includes
 both the runtime and shared `app` package, so it works outside this checkout.
 
 See [deployment](pydantic-deployment.md) for the exact ownership and migration

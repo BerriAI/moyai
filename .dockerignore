@@ -5,4 +5,14 @@
 __pycache__
 .pytest_cache
 tests
+**/node_modules
+**/.venv
+**/.data
+**/.env
+**/.env.*
+**/__pycache__
+**/.pytest_cache
+**/test-results
+native/dist
+native/src/moyai/static
 

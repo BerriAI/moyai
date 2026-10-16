@@ -1,6 +1,7 @@
 # Deploy and maintain production
 
-The supported production path is an existing Moyai installation with separate
+For a new installation, use the [versioned Docker guide](../deploy/docker/README.md).
+The existing Render production path has separate
 API, coordinator, broker and worker services. Every role runs the same Docker
 image and root `.venv`. Pydantic is the only executable core in current images.
 A fresh local evaluation starts with the [root guide](../README.md#run-locally).

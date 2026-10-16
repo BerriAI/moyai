@@ -39,6 +39,10 @@ jobs:
       MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-migration-test@127.0.0.1:5432/moyai_test
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
       - uses: astral-sh/setup-uv@v6
       - name: Verify real database fidelity, constraints, concurrency and rollback
         run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_migration.py

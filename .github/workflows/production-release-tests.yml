@@ -25,6 +25,10 @@ jobs:
       MOYAI_TEST_POSTGRES_URL: postgresql://postgres:synthetic-release-test@127.0.0.1:5432/moyai_test
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
       - uses: astral-sh/setup-uv@v6
       - name: Verify release ordering, failures and real PostgreSQL drain guards
         run: uv run --frozen --python 3.13 pytest -q tests/release tests/test_render.py tests/test_render_shutdown.py tests/test_online_migrations.py

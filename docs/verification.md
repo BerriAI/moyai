@@ -22,8 +22,8 @@ uv run --frozen pytest -q native/tests --tb=short
 uv run --frozen pytest --postgres-backend -q tests/test_database_boundaries.py tests/test_message_snapshot_pool.py
 uv run --frozen --extra postgres-migration python scripts/postgres_migration_smoke.py
 uv run --frozen python -m scripts.online_migration_probe --output /tmp/moyai-online-migration
-uv run --frozen ruff check --config native/pyproject.toml native/src native/tests
-uv run --frozen pyright --project native
+uv run --frozen --directory native ruff check src tests
+uv run --frozen --directory native pyright
 uv build --package moyai-pydantic
 ```
 
@@ -46,12 +46,13 @@ npm run typecheck
 npm test
 npm run build
 npm run test:ui
-git diff --exit-code -- native/src/moyai/static
+test -z "$(git ls-files -- native/src/moyai/static)"
 docker build -t moyai-local-test .
 python3 scripts/docker_smoke.py moyai-local-test
 ```
 
-The asset-drift command expects source and generated assets to have been committed.
+The asset check ensures generated frontend files have not been committed.
+The package test builds from a fresh source tree and verifies the resulting assets.
 Browser tests use synthetic API data with Chromium at desktop, tablet and mobile
 sizes. Docker smoke uses disposable containers and volumes: it verifies login,
 CSRF, credential redaction, persistent sessions/connections across restart, UID and

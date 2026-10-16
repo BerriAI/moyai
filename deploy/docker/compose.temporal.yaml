@@ -1,0 +1,66 @@
+services:
+  setup:
+    depends_on:
+      temporal-namespace:
+        condition: service_completed_successfully
+  temporal-db:
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${MOYAI_TEMPORAL_DATABASE_PASSWORD:?Set a dedicated Temporal database password}
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-data:/var/lib/postgresql
+      - ./temporal-databases.sql:/docker-entrypoint-initdb.d/temporal-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
+    stop_grace_period: 60s
+  temporal-schema:
+    image: temporalio/admin-tools:1.32.1@sha256:9ef0dc5b063bf4ffd5c1512de72e0e73e225bd2c7006a18ce69bd592a8862a83
+    entrypoint: ["/bin/sh", "/setup/temporal-schema.sh"]
+    environment:
+      SQL_PASSWORD: ${MOYAI_TEMPORAL_DATABASE_PASSWORD:?Set a dedicated Temporal database password}
+    volumes:
+      - ./temporal-schema.sh:/setup/temporal-schema.sh:ro
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+    restart: "no"
+  temporal:
+    image: temporalio/server:1.32.1@sha256:acecbab5b0b8ae9cf4012b508866ca97feda3709577bf157b537239f40029049
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: temporal-db
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${MOYAI_TEMPORAL_DATABASE_PASSWORD:?Set a dedicated Temporal database password}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      BIND_ON_IP: 0.0.0.0
+    volumes:
+      - ./temporal-dynamic.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro
+    depends_on:
+      temporal-schema:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 120s
+  temporal-namespace:
+    extends:
+      file: compose.common.yaml
+      service: setup
+    command: ["/app/.venv/bin/python", "-m", "moyai.deployment", "namespace"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+volumes:
+  temporal-data:

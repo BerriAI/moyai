@@ -66,6 +66,7 @@
 }
 
 .sidebar .session-row {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -84,6 +85,31 @@
   padding: 0 6px;
   min-height: 26px;
   line-height: 20px;
+}
+
+/* Stretch the native link over the timestamp and row padding, retaining
+   keyboard navigation, modifier clicks and the non-link deleted state. */
+.sidebar .session-row > a[href]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+}
+
+.sidebar .session-row > a[href]:focus-visible {
+  outline: none; /* The stretched link below draws the full-row focus ring. */
+}
+
+.sidebar .session-row > a[href]:focus-visible::after {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: -2px;
+}
+
+/* Independent controls stay above the link without nesting them inside it. */
+.sidebar .session-row-actions,
+.sidebar button.session-pr-indicator {
+  position: relative;
+  z-index: 1;
 }
 
 .sidebar .session-row .session-indicator {

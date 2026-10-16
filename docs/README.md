@@ -6,6 +6,7 @@
 | --- | --- |
 | [Using Moyai](usage.md) | Chat, computer, files, Settings, connections and Slack |
 | [Architecture](architecture.md) | Execution ownership, service roles and storage boundaries |
+| [Docker installation](../deploy/docker/README.md) | Versioned standalone or split services and upgrades |
 | [Production deployment](production-deploy.md) | Prepare and upgrade the existing four-role product |
 | [Deployment contract](pydantic-deployment.md) | Configuration, schema receipts, drain and release ordering |
 | [Authentication](authentication.md) | Local accounts and existing Google/Cloudflare identity |

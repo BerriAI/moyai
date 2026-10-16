@@ -10,8 +10,9 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from .postgres import create_engine
 from .product_config import ProductConfigurationError, load_product_config
 from .product_deployment import ProductDeploymentError, require_startable
 from .product_drain import ProductDrainError, ProductDrainService
@@ -66,7 +67,7 @@ async def execute(command: str, body: DrainCommand) -> dict:
             role_policy=expected.worker_policy,
         )
     url = "postgresql+asyncpg://" + config.database_url.split("://", 1)[1]
-    engine = create_async_engine(url, connect_args={"server_settings": {
+    engine = create_engine(url, connect_args={"server_settings": {
         "search_path": f'"{config.native_schema}",pg_catalog',
         "statement_timeout": "5000", "lock_timeout": "5000",
     }}, pool_size=1, max_overflow=0)

@@ -20,8 +20,8 @@ quiet for sustained work. Inspect the current screens before changing them.
 - [Component contract](../../../docs/shadcn-ui.md): build and verification workflow.
 
 Keep API/state logic in the existing hooks and adapters. Avoid alternate renderers,
-feature-specific themes or nearly identical token overrides. Commit the generated
-`native/src/moyai/static` build with source changes.
+feature-specific themes or nearly identical token overrides. Build with `npm run build`; generated `native/src/moyai/static` is ignored by Git
+and packaged at build time.
 
 ## Layout and interaction
 

@@ -46,6 +46,9 @@ moyai = "moyai.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = ["/src/moyai/static"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/moyai"]
 

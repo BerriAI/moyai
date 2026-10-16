@@ -49,6 +49,10 @@ jobs:
             echo 'Explicit core selection requires a maintenance release.'
             exit 1
           fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
       - uses: astral-sh/setup-uv@v6
         if: inputs.release_type != 'coordinated'
       - name: Install candidate settings dependencies before loading deployment credentials

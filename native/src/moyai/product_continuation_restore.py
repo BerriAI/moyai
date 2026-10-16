@@ -19,13 +19,13 @@ import modal
 from pydantic import TypeAdapter
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
 from .contracts import PreparedTurn, RunScope
 from .models import Session, Turn
+from .postgres import create_engine
 from .product_continuation_errors import preparation_blocked
 from .product_continuation_guest import MAX_BYTES, MAX_ENTRIES, archive_manifest, digest_file
 from .product_continuation_models import (
@@ -236,7 +236,7 @@ class ProductWorkspaceRestorer:
         # A dedicated unpooled connection holds ONLY this advisory transaction,
         # never product data or an ACL lock. Consuming a normal pool slot here
         # could deadlock live reauthorization when the application's pool is full.
-        engine = create_async_engine(self.runtime.database.engine.url, poolclass=NullPool)
+        engine = create_engine(self.runtime.database.engine.url, poolclass=NullPool)
         try:
             async with engine.begin() as connection:
                 if not await connection.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": key}):

@@ -24,9 +24,9 @@ npx playwright install chromium
 npm run test:ui
 ```
 
-Commit generated `native/src/moyai/static` changes alongside frontend source.
-Docker and wheels serve this build without Node.js. CI rebuilds it and rejects
-drift. `npm run dev` rebuilds on changes; use `uv run moyai dev` to serve the
+Generated `native/src/moyai/static` assets are ignored by Git. Docker and package
+builds create them from source; wheels and source distributions carry the build
+without requiring Node.js at runtime. `npm run dev` rebuilds on changes; use `uv run moyai dev` to serve the
 application with its configured backend.
 
 Browser tests in `tests/browser/native_*.cjs` serve the real React application
