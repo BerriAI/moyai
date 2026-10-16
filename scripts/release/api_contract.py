@@ -10,14 +10,18 @@ import sys
 def contract():
     from render_start import configure_environment
     from app.config import Settings
-    from app.runtime_compatibility import api_fingerprint
+    from app.runtime_compatibility import api_fingerprint, background_fingerprint
     from app.schema_migrations import SCHEMA_REVISION
     configure_environment()
     settings = Settings(_env_file=None)
     if (settings.moyai_runtime_role != 'api' or settings.moyai_schema_mode != 'verify'
             or settings.maintenance_drain or not settings.moyai_separate_broker):
         raise ValueError('Invalid API configuration')
-    return {'contract': api_fingerprint(settings), 'schema': SCHEMA_REVISION}
+    value = {'contract': api_fingerprint(settings), 'schema': SCHEMA_REVISION}
+    if settings.moyai_core == 'pydantic':
+        value['contracts'] = {'api': value['contract'], **{
+            role: background_fingerprint(settings, role) for role in ('worker', 'broker', 'coordinator')}}
+    return value
 
 
 if __name__ == '__main__':
