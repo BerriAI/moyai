@@ -10,11 +10,10 @@ import hashlib
 import json
 import time
 from typing import TYPE_CHECKING, Literal
-from uuid import NAMESPACE_URL, uuid5
 
 import modal
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 
 from .contracts import PreparedTurn, RunScope
 from .models import ComputerLease, ComputerOperation, Effect, Session, Turn, User
@@ -124,71 +123,6 @@ async def product_bindings(db: AsyncSession, scope: RunScope, reference: dict) -
         context.fingerprint if context else None,
         restoration.manifest_fingerprint if restoration else None,
     )
-
-
-async def save_checkpoint(runtime: Runtime, turn_id: str, reference: dict) -> bool:
-    """Return False for an older workflow, whose existing settlement stays valid."""
-    database = runtime.database
-    async with database.sessions() as db:
-        turn = await db.get(Turn, turn_id)
-        if turn is None or turn.preparation is None:
-            return False
-        prepared = TypeAdapter(PreparedTurn).validate_json(runtime.security.unseal(turn.preparation))
-        if not prepared.checkpoint_workspace:
-            return False
-    identity = str(uuid5(NAMESPACE_URL, "moyai-checkpoint:" + turn_id))
-    async with database.sessions.begin() as db:
-        session, turn = await locked_scope(database, db, prepared.scope, status="saving")
-        saved = checkpoint(session.snapshot)
-        if (
-            saved is None or saved.workspace != reference or saved.turn_id != turn_id
-            or saved.session_id != session.id or session.workspace_scope != prepared.scope.workspace_key
-            or saved.scope != prepared.scope.workspace_key
-            or saved.result_fingerprint != turn.result_fingerprint
-            or json.loads(session.workspace or "null") != reference
-        ):
-            raise PermissionError("The checkpoint source changed before capture.")
-        await require_settled(db, session.id)
-        if runtime.product is not None:
-            context, manifest = await product_bindings(db, prepared.scope, reference)
-            saved = saved.model_copy(update={"product_context": context, "restoration_manifest": manifest})
-            session.snapshot = saved.model_dump_json()
-        await db.execute(delete(ComputerOperation).where(ComputerOperation.session_id == session.id))
-        db.add(ComputerOperation(session_id=session.id, identity=identity, expires_at=int(time.time()) + 240))
-        expected, revision = session.snapshot, session.revision
-    try:
-        async with asyncio.timeout(150):
-            sandbox = await modal.Sandbox.from_id.aio(reference["id"])
-            if await sandbox.poll.aio() is not None:
-                raise preparation_blocked("workspace_checkpoint_missing")
-            # Keep the existing Modal image retention policy (30 days in the
-            # pinned SDK); a missing image is a refusal, never a blank fallback.
-            image = await sandbox.snapshot_filesystem.aio(timeout=120)
-        # A returned image is evidence, but publication still needs current
-        # authority and the exact source. Stop/revocation cannot resurrect it.
-        async with database.sessions.begin() as db:
-            session, turn = await locked_scope(database, db, prepared.scope, status="saving")
-            operation = await db.get(ComputerOperation, session.id)
-            if (
-                session.snapshot != expected or session.revision != revision
-                or json.loads(session.workspace or "null") != reference
-                or operation is None or operation.identity != identity
-                or operation.expires_at <= time.time()
-            ):
-                raise PermissionError("The computer changed while it was being saved.")
-            if runtime.product is not None and await product_bindings(db, prepared.scope, reference) != (
-                saved.product_context, saved.restoration_manifest,
-            ):
-                raise PermissionError("The computer's project context changed during capture.")
-            session.snapshot = saved.model_copy(update={"image_id": image.object_id}).model_dump_json()
-            database._settle_answer(turn, session)
-        return True
-    finally:
-        async with database.sessions.begin() as db:
-            await db.execute(delete(ComputerOperation).where(
-                ComputerOperation.session_id == prepared.scope.session_id,
-                ComputerOperation.identity == identity,
-            ))
 
 
 async def live_sandbox(reference: dict) -> bool:
