@@ -186,3 +186,24 @@ def test_drift_during_batch_stops_before_migration_or_resume(concurrent, fault):
     assert len(render.history) == 4
     assert not release.record.get('zero_owner_boundary_verified')
     assert release.test_control['receipt']['paused']
+
+
+def test_parallel_activation_waits_for_ssh_routing_to_every_new_owner(cutover):
+    release, render = configure_native_source(cutover)
+    original_probe = release.probe
+    delayed = []
+
+    def probe(service):
+        # A new worker can own its PostgreSQL connection before SSH begins
+        # reaching it. The other candidate's snapshot already sees that owner.
+        if (release.batch and service.id == WORKER and len(render.history) >= 7
+                and (len(render.history) == 7 or not delayed)):
+            delayed.append(True)
+            return {'ok': False, 'reason': 'runtime_validation_failed', 'stage': 'environment'}
+        return original_probe(service)
+
+    release.probe = probe
+    release.run()
+    assert delayed and len(render.history) == 8
+    assert release.record['status'] == 'success'
+    assert all(group['status'] == 'verified' for group in release.record['batches'])

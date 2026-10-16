@@ -132,13 +132,6 @@ class MaintenanceRelease(RollingRelease):
             return {item.receipt['id']} if item and item.receipt['id'] else set()
         return super().permitted_deploys(service_id)
 
-    def unchanged(self):
-        self.check_control_plane()
-        if self.batch:
-            self.observe_batch()
-        if self.baseline is not None:
-            self.check_unaffected()
-
     def source(self, service):
         candidate_settings = (self.candidate is not None
             and service.env.get('MOYAI_CORE', 'legacy') == self.candidate.get('core', 'legacy')
@@ -628,8 +621,9 @@ class MaintenanceRelease(RollingRelease):
             states[sid] = state
         # Discover every candidate identity before validating shared ownership
         # snapshots; a peer may have started before this role's probe completed.
-        for state in states.values():
-            self.check_state(state)
+        if len(states) == len(self.batch):
+            for state in states.values():
+                self.check_state(state)
         self.save()
         return states
 
@@ -675,8 +669,12 @@ class MaintenanceRelease(RollingRelease):
 
         # POSTs remain bounded, ordered mutations. Render performs their builds
         # and replacements concurrently; no threads share controller state.
+        # The complete source ownership boundary was checked above. Once a
+        # batch starts, a peer can acquire its new owner before SSH reaches it.
+        # Recheck control-plane drift before each POST, then require every
+        # candidate's authenticated observation before advancing the batch.
         for sid, item in self.batch.items():
-            self.unchanged()
+            self.check_control_plane()
             self.rotate_probe(item.target)
             item.requested = True
             item.receipt['status'] = 'requested'
@@ -718,8 +716,10 @@ class MaintenanceRelease(RollingRelease):
         def ready():
             self.check_control_plane()
             states = self.observe_batch()
+            if len(states) != len(self.batch):
+                return False
             self.check_unaffected()
-            if len(states) != len(self.batch) or any(not state['ready'] for state in states.values()):
+            if any(not state['ready'] for state in states.values()):
                 return False
             old_owners = {item.old_owner for item in self.batch.values() if item.old_owner}
             if any(old_owners & set(state['owners']) for state in states.values()):
