@@ -88,6 +88,9 @@ jobs:
       - name: Test default Deep Agents execution and real Temporal recovery
         if: matrix.group == 'recovery'
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_deepagents_runtime.py tests/test_deepagents_acceptance.py tests/test_deepagents_publication.py tests/test_deepagents_failures.py tests/test_tool_dispatch.py
+      - name: Test failure explanations and known rejection receipts
+        if: matrix.group == 'recovery'
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_deepagents_catalog.py tests/test_deepagents_receipts.py tests/test_failure_explanations.py tests/test_known_tool_rejections.py tests/test_metadata_failure_diagnostics.py tests/test_tool_failure_diagnostics.py
       - name: Test cloud diagnostics and durable recovery
         if: matrix.group == 'recovery'
         run: uv run --python 3.13 pytest -q --tb=line tests/test_broker_transport.py tests/test_startup_recovery.py tests/test_startup_overlap.py tests/test_durable.py tests/test_temporal_integration.py tests/test_redeploy_recovery.py tests/test_scheduling_diagnostics.py

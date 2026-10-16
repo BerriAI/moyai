@@ -5,9 +5,9 @@ import urllib.error
 import urllib.request
 
 try:
-    from .broker_failure import TRANSIENT_STATUSES
+    from .broker_failure import TRANSIENT_STATUSES, http_status
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
-    from broker_failure import TRANSIENT_STATUSES
+    from broker_failure import TRANSIENT_STATUSES, http_status
 
 
 # The local caller must outlive the relay's complete metadata reconnect window.
@@ -42,7 +42,8 @@ def _read_with_reconnect(request, reader, *, stage, notify=None, budget=45, atte
                 notify('Workspace services reconnected. Preparing the agent.')
             return result
         except urllib.error.HTTPError as exc:
-            if exc.code not in TRANSIENT_STATUSES:
+            if (exc.code not in TRANSIENT_STATUSES
+                    or http_status((exc.headers or {}).get('x-moyai-upstream-status')) in {401, 403}):
                 raise
             reason = f'HTTP {exc.code}'
             exc.close()

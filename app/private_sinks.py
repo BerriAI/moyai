@@ -5,7 +5,7 @@ privacy metadata. Re-read the persisted run at each content release boundary.
 """
 from fastapi import HTTPException
 
-from .session_privacy import SessionPrivacy
+from .session_privacy import SessionPrivacy, PrivateExportDenied
 
 
 def stored_run(store, run_id, connection=None):
@@ -40,4 +40,4 @@ def require_request_owner(store, security, request, run_id):
 
 def deny_export(store, run_id, connection=None):
     if private_run(store, run_id, connection):
-        raise HTTPException(403, 'Export from private sessions is not supported.')
+        raise PrivateExportDenied(403, 'Export from private sessions is not supported.')

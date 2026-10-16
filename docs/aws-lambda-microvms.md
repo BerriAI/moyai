@@ -66,12 +66,16 @@ AWS detects idle time from inbound endpoint traffic, which misses outbound model
 
 ## Conformance tests
 
-Local tests use the real full Linux guest image, shell/package processes, HTTP service, and a TLS S3 fixture. They simulate the AWS control plane; they do not validate AWS IAM, quotas, networking, image builds, or service behavior:
+Local tests build the packaged ZIP in an empty directory, then use that Linux guest image, shell/package processes, HTTP service, and a TLS S3 fixture. Building from the ZIP catches missing deployment files that a build from the full checkout would hide. These tests simulate the AWS control plane; they do not validate AWS IAM, quotas, networking, AWS image builds, or service behavior:
 
 ```sh
 uv run pytest -q tests/test_lambda_microvms.py
-docker build --target lambda-workspace -f Dockerfile.sandbox -t moyai-lambda:test .
+uv run python scripts/lambda_image.py
+context_dir="$(mktemp -d)"
+uv run python -m zipfile -e .data/lambda-image.zip "$context_dir"
+docker build --platform linux/arm64 --target aws-image -t moyai-lambda:test "$context_dir"
 uv run python scripts/lambda_smoke.py --local-image moyai-lambda:test
+rm -rf "$context_dir"
 ```
 
 With AWS settings and permissions available, run the same conformance checks on actual MicroVMs. Use a disposable checkpoint prefix and grant the test caller `s3:DeleteObject` on that prefix so it can clean up its test checkpoints:

@@ -363,7 +363,7 @@ def test_unknown_native_fields_and_messages_do_not_enter_diagnostics():
 
 
 @pytest.mark.parametrize('failure', ['native', 'mcp'])
-async def test_claude_hooks_hide_intermediate_failures_and_collapse_completed_progress(tmp_path, failure):
+async def test_claude_hooks_preserve_safe_failure_details_and_collapse_completed_progress(tmp_path, failure):
     from pathlib import Path
     import shutil
     import subprocess
@@ -427,7 +427,8 @@ async def test_claude_hooks_hide_intermediate_failures_and_collapse_completed_pr
         return json.loads(result.stdout)
 
     active = projection()
-    assert active['rows'] == ['completed']
+    assert active['rows'] == ['error', 'completed']
+    assert 'Underlying cause unknown' in active['html']
     assert active['headline'] == 'Verifying the saved preference'
     assert active['collapsed'] == []
     assert 'temporary-unavailable-marker' not in active['html']
@@ -435,5 +436,5 @@ async def test_claude_hooks_hide_intermediate_failures_and_collapse_completed_pr
     store.update_run(run['id'], status='idle')
     finished = projection()
     assert finished['collapsed'] == [str(turn['id'])]
-    assert finished['rows'] == ['completed']
+    assert finished['rows'] == ['error', 'completed']
     assert store.messages(run['id'])[-1]['content'] == 'Saved to your personal preferences.'

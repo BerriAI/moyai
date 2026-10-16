@@ -1,4 +1,4 @@
-from .session_privacy import SessionPrivacy
+from .session_privacy import SessionPrivacy, PrivateExportDenied
 import asyncio
 import hmac
 import json
@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
@@ -1466,15 +1467,33 @@ def _create_app(settings, store):
         try:
             result = await execute_tool(run_id, request, run, body, dispatch)
         except (Exception, asyncio.CancelledError) as exc:
+            from sandbox.broker_failure import TOOL_REJECTION_HEADERS, exception_diagnostic, tool_rejection_headers
+            rejected = isinstance(exc, (PrivateExportDenied, ToolRejected))
+            if isinstance(exc, StarletteHTTPException):
+                # Provider/ordinary HTTP exceptions cannot impersonate a local
+                # guard, including an error raised after a committed write.
+                exc.headers = {key: value for key, value in (exc.headers or {}).items()
+                               if key.lower() not in TOOL_REJECTION_HEADERS}
+            if rejected:
+                kind = 'PrivateExportDenied' if isinstance(exc, PrivateExportDenied) else 'ToolRejected'
+                exc.headers.update(tool_rejection_headers(kind, body.request_id))
             if dispatch:
                 # A status code alone cannot prove no action happened: handlers
                 # can recheck scope after committing an internal write.
-                rejected = isinstance(exc, ToolRejected)
                 try:
                     await database(dispatch.finish, {'dispatched': False} if rejected else None,
                                    outcome='rejected' if rejected else 'unknown')
                 except BaseException as cleanup_error:
                     raise exc from cleanup_error
+            if rejected:
+                try:
+                    await database(store.event, run_id, 'error', 'Tool request rejected.', {
+                        'phase': 'tool_failure', 'tool': body.name,
+                        **exception_diagnostic(exc, stage='tool_dispatch', request_id=body.request_id),
+                        'action': {'dispatched': False, 'outcome': 'rejected', 'retryable': False}},
+                        turn_id=run['active_message_id'])
+                except Exception:
+                    pass  # Failure reporting must not replace the access denial.
             raise
         # Confirmed outcomes must survive cancellation during receipt persistence.
         if dispatch:
@@ -1924,9 +1943,11 @@ def _create_app(settings, store):
             await database(harness_gateway.live_context.require_current, run, request, selected_model)
             client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
             status = 'unknown'
-            upstream = await client.send(client.build_request('POST',
+            outgoing = client.build_request('POST',
                 settings.litellm_api_base.rstrip('/') + '/chat/completions', json=payload,
-                headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}), stream=True)
+                headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id})
+            accounting.dispatched(request)
+            upstream = await client.send(outgoing, stream=True)
             await accounting.headers(upstream, False)
             if upstream.status_code >= 400:
                 status = 'failed'

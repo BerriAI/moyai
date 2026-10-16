@@ -56,6 +56,31 @@ model and prefix checks still fence adoption. The full typed transcript continue
 to grow in encrypted storage; this change does not make it an unlimited context.
 The broker still rejects an input that cannot safely be reduced to fit.
 
+## Native web search
+
+GPT-6 Astra (`openai/gpt-6-astra`) can use provider-native web search through the
+same LiteLLM Responses gateway. The engine advertises `web_search` alongside the
+two workspace bridge tools; the model chooses whether a request needs search.
+No separate search API key, `/search` integration, browser or sandbox is required.
+Provider search access and charges belong to the configured gateway/model.
+
+`NATIVE_WEB_SEARCH_MODELS` is a JSON list of exact saved model IDs, defaulting to
+`["openai/gpt-6-astra"]`. Set it to `[]` to disable native search. Configure the same
+list on the agent workers. Other aliases, including Astra Ultrafast, remain
+unchanged unless explicitly added after validating their native Responses search
+support through the gateway. A model's advertised search capability alone does
+not establish protocol compatibility. This setting does not grant model access
+or change the workspace model allowlist, and it does not affect legacy harnesses.
+
+Search runs inside the existing model activity. Completed native search items
+and citation annotations remain in the typed response/history, with source URLs
+requested through `web_search_call.action.sources`. Answer publication still
+requires a completed Responses stream. Normal model traces retain the
+`web_search` tool name without copying search queries or result bodies. Native
+search does not create a workspace-tool receipt or an independently replayed
+tool activity; the existing bounded model retries can repeat a search if a model
+response is lost.
+
 ## Recovery guarantees and limits
 
 Completed Temporal activities are reused on replay. Model requests have three
@@ -68,6 +93,24 @@ Arbitrary tool writes have one activity attempt. A failure after dispatch stops
 with an explicit reconciliation message rather than automatically repeating an
 external action. Existing broker outboxes and computer receipts remain authoritative.
 Temporal is not an exactly-once guarantee for external services.
+
+During a planned worker replacement, agent activities have up to 240 seconds to
+finish, leaving cleanup headroom inside Render's 300-second shutdown allowance.
+Computer activities allow three attempts, so Temporal can reconnect after worker
+shutdown or heartbeat loss using the original operation, turn and input identities.
+The existing computer receipt decides whether to resume observation or return a
+saved result; this does not create a second shell command or repeat an external
+effect. Explicit uncertain outcomes remain non-retryable, and arbitrary broker
+tools retain their single attempt. Stop and revoked capabilities still fence execution.
+
+Only the activity retry policy changes; workflow command order and tool inputs
+remain compatible with saved histories. The first deployment of this support must
+drain existing work or use the planned maintenance path: an old worker's
+one-second grace and an already scheduled single-attempt tool cannot be retroactively
+changed by a new image. Subsequent compatible replacements can use this handoff.
+Service health alone does not establish task continuity; release qualification
+must exercise an active tool, new task admission and the real ingress path across
+worker, broker, coordinator and API replacements.
 
 Before dispatch, catalog discovery retries transient broker HTTP failures, network
 interruptions and busy local database reads with at most three attempts, one- and

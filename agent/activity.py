@@ -38,12 +38,18 @@ def split_focus(text):
     return focus, prose.strip()
 
 
-def result_status(result):
+def result_status(result, *, receipt_status=None):
     """Read explicit machine status only; tool output may mention unrelated errors."""
+    # A trusted computer receipt outranks the body's apparent success, including
+    # primitive results. A completed receipt can still carry a tool-level error.
+    if isinstance(receipt_status, str) and receipt_status in {'unknown', 'cancelled', 'rejected'}:
+        return 'error', result_status(result)[1]
     if isinstance(result, str):
         try:
             result = json.loads(result)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
+            # Result text is optional status metadata. Parser depth limits
+            # must not discard the independent computer receipt.
             return 'completed', None
     if not isinstance(result, dict):
         return 'completed', None
@@ -134,11 +140,13 @@ class ActivityReporter:
         self.emit('tool', data['label'], {**data, 'activity_version': 1,
                   'call_id': self.prefix + ':' + str(call_id), 'phase': 'started'})
 
-    def complete(self, call_id, name, args, result):
+    def complete(self, call_id, name, args, result, *, receipt_status=None):
+        from sandbox.broker_failure import tool_evidence
         with self.lock:
             started, data = self.starts.pop(str(call_id), (None, tool_summary(name, args)))
-        phase, code = result_status(result)
+        phase, code = result_status(result, receipt_status=receipt_status)
         data = {**data, 'activity_version': 1, 'call_id': self.prefix + ':' + str(call_id), 'phase': phase}
+        data.update(tool_evidence(result, receipt_status=receipt_status))
         details, notice = formatted_details(data['tool'], result)
         if details is not None:
             data['output'] = details

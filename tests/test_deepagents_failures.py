@@ -47,7 +47,7 @@ async def test_terminal_workflow_diagnostic_replaces_recovered_broker_error(acti
     assert len(events) == 1
     assert events[0]['data'] == {'phase': 'sdk_failure', 'version': 1, 'sdk': 'deepagents-temporal',
         'source': 'workflow_failure', 'activity_type': 'deepagents.invoke_tool',
-        'exception_type': 'BrokerRejected', 'http_status': 500, 'turn_id': scope.message_id}
+        'exception_type': 'BrokerRejected', 'non_retryable': False, 'http_status': 500, 'turn_id': scope.message_id}
     assert 'PRIVATE' not in str(events)
     assert 'recovered-model-request' not in str(events)
     public = failure_record({**events[0], 'data': json.dumps(events[0]['data'])})

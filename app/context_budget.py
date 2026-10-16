@@ -10,6 +10,8 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .model_selection import gateway_model
+from agent.activity import public_text
+from sandbox.broker_failure import provider_error, request_ids, safe_error
 
 
 class ModelContextLimits(BaseModel):
@@ -182,9 +184,28 @@ class ContextBudget:
                 # A routed alias must fit every candidate deployment.
                 limits = ModelContextLimits(**{field: min(getattr(c, field) for c in candidates)
                     for field in ('context_window', 'max_input_tokens', 'max_output_tokens')})
-            except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-                raise HTTPException(503, 'The selected model has no verified context limits. '
-                    'Configure MODEL_CONTEXT_LIMITS or allow gateway model metadata access.') from None
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                headers = {'X-Moyai-Failure-Stage': 'model_metadata',
+                           'X-Moyai-Error-Stage': 'context_preparation',
+                           'X-Moyai-Upstream-Error-Type': safe_error({'cause_type': type(exc).__name__}).get('cause_type', 'Exception')}
+                detail = ('The selected model has no verified context limits. '
+                          'Configure MODEL_CONTEXT_LIMITS or allow gateway model metadata access.')
+                if isinstance(exc, httpx.HTTPStatusError):
+                    upstream = exc.response
+                    headers['X-Moyai-Upstream-Status'] = str(upstream.status_code)
+                    headers.update({name: value for name, value in request_ids(upstream.headers).items()
+                                    if '/' not in value and public_text(value) == value})
+                    try:
+                        headers['X-Moyai-Error-Code'] = provider_error(json.loads(upstream.content[:8192]))
+                    except (ValueError, RecursionError):
+                        headers['X-Moyai-Error-Code'] = 'unknown'
+                    if upstream.status_code in {401, 403}:
+                        detail = ('The gateway rejected model metadata access '
+                                  f'(HTTP {upstream.status_code}). An administrator must verify the configured '
+                                  'gateway credentials and metadata access before model preparation can continue.')
+                # Keep the 503 API contract; preserve the distinct observed
+                # upstream status without forwarding its body, URL or headers.
+                raise HTTPException(503, detail, headers=headers) from None
             if len(self.cache) >= 128:
                 self.cache.clear()
             self.cache[key] = (time.monotonic() + 300, limits)

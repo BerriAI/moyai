@@ -178,7 +178,9 @@ class TemporalRunManager(DurableRunner):
         return agent_workers(client, self.deepagents_runtime, self.settings.temporal_task_queue + '-agents-v1',
             max_concurrent_activities=self.settings.temporal_worker_activities,
             max_cached_workflows=self.settings.temporal_workflow_cache_size,
-            graceful_shutdown_timeout=timedelta(seconds=1))
+            # Render allows 300 seconds for retirement. Leave cleanup headroom
+            # while bounded model/tool calls persist their real outcomes.
+            graceful_shutdown_timeout=timedelta(seconds=240))
 
     async def serve(self):
         self.dispatch_loop = asyncio.get_running_loop()

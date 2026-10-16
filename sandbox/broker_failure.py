@@ -17,6 +17,8 @@ REQUEST_ID_HEADERS = (
     'x-render-request-id', 'rndr-id', 'x-litellm-call-id',
 )
 TRANSIENT_STATUSES = {408, 425, 429, 500, 502, 503, 504, 524}
+TOOL_REJECTION_HEADERS = {'x-moyai-tool-rejection-v1', 'x-moyai-tool-request-id'}
+TOOL_REJECTION_TYPES = {'PrivateExportDenied', 'ToolRejected'}
 ERROR_CODES = {
     'cyber_policy', 'content_policy_violation', 'authentication_error', 'permission_error',
     'invalid_request_error', 'not_found_error', 'rate_limit_error', 'overloaded_error',
@@ -44,6 +46,8 @@ CLAUDE_RESULTS = {'success', 'error_during_execution', 'error_max_turns',
 CLAUDE_TERMINAL_REASONS = {'completed', 'max_turns', 'max_budget_usd',
                           'aborted_streaming', 'aborted_tools', 'error'}
 FAILURE_STAGES = {
+    'runtime_entrypoint',
+    'model_metadata',
     'tool_catalog', 'tool_activity', 'tool_dispatch', 'computer_poll', 'computer_step',
     'tool_receipt', 'tool_journal', 'supervisor_launch', 'supervisor_events', 'supervisor_wait',
     'remote_setup', 'remote_prepare', 'remote_finish', 'remote_activate', 'remote_attachments',
@@ -81,6 +85,21 @@ def _exception_diagnostic(exc, *, stage, request_id):
             if name == 'BrokerRejected' and exc.details:
                 for key, value in safe_error({'http_status': exc.details[0]}).items():
                     result.setdefault(key, value)
+                if len(exc.details) > 1:
+                    for key, value in safe_error(exc.details[1]).items():
+                        result.setdefault(key, value)
+            if exc.details and isinstance(exc.details[-1], dict):
+                if recovery := safe_recovery(exc.details[-1].get('recovery')):
+                    result.setdefault('recovery', recovery)
+        if recovery := safe_recovery(getattr(exc, 'moyai_recovery', None)):
+            result.setdefault('recovery', recovery)
+        if isinstance(exc, urllib.error.HTTPError):
+            result.setdefault('http_status', exc.code)
+            provenance = upstream_diagnostic(exc.headers or {})
+            for key, value in provenance.items():
+                result.setdefault(key, value)
+            if provenance.get('failure_stage') == 'model_metadata':
+                result['failure_stage'] = 'model_metadata'
         chain.append(name)
         if 'exception_type' not in result:
             result['exception_type'] = name
@@ -122,7 +141,7 @@ def safe_error(data):
                         'route': BROKER_ROUTES, 'code': CODEX_ERRORS, 'native_status': CLAUDE_RESULTS,
                         'terminal_reason': CLAUDE_TERMINAL_REASONS,
                         'failure_stage': FAILURE_STAGES,
-                        'outcome_type': {'UncertainToolOutcome'}}.items():
+                        'outcome_type': {'UncertainToolOutcome', 'ToolNotDispatched'}}.items():
         if isinstance(data.get(key), str) and data[key] in values:
             result[key] = data[key]
     for key in ('response_status', 'http_status', 'upstream_status'):
@@ -148,7 +167,80 @@ def safe_error(data):
                 result[key] = values
     if isinstance(data.get('request_ids'), dict):
         result['request_ids'] = request_ids(data['request_ids'])
+    if recovery := safe_recovery(data.get('recovery')):
+        result['recovery'] = recovery
     return result
+
+
+def safe_recovery(value):
+    if not isinstance(value, dict):
+        return None
+    method, decision = value.get('method'), value.get('decision')
+    if (method not in ('catalog_read', 'startup', 'model_transport', 'context_transport', 'attachment_read')
+            or decision not in ('retrying', 'recovered', 'exhausted', 'deadline', 'not_retryable',
+                                'unconfirmed_action', 'unknown', 'retry_after_unavailable', 'retry_after_budget',
+                                'credential_replay_blocked')):
+        return None
+    result = {'method': method, 'decision': decision}
+    for key in ('attempts', 'limit', 'scheduled_retries'):
+        number = value.get(key)
+        if type(number) is int and 0 <= number <= 10000:
+            result[key] = number
+    return result
+
+
+def upstream_diagnostic(headers):
+    """Decode only our body-free provenance headers, independently of wire status."""
+    result = safe_error({
+        'upstream_status': http_status(headers.get('x-moyai-upstream-status')),
+        'error_code': headers.get('x-moyai-error-code'),
+        'stage': headers.get('x-moyai-error-stage'),
+        'failure_stage': headers.get('x-moyai-failure-stage'),
+        'cause_type': headers.get('x-moyai-upstream-error-type'),
+    })
+    if ids := request_ids(headers):
+        result['request_ids'] = ids
+    return result
+
+
+def tool_rejection_headers(kind, request_id):
+    """Only the broker's explicit no-dispatch guards may produce this signal."""
+    if (not isinstance(kind, str) or kind not in TOOL_REJECTION_TYPES or not isinstance(request_id, str)
+            or not re.fullmatch(r'[0-9a-f]{32}', request_id)):
+        return {}
+    return {'x-moyai-tool-rejection-v1': kind, 'x-moyai-tool-request-id': request_id}
+
+
+def tool_rejection_diagnostic(headers, request_id):
+    """Bind a trusted broker rejection to the submitted tool, never its prose."""
+    kind = headers.get('x-moyai-tool-rejection-v1')
+    if (not isinstance(kind, str) or not tool_rejection_headers(kind, request_id)
+            or headers.get('x-moyai-tool-request-id') != request_id):
+        return {}
+    return {'outcome_type': 'ToolNotDispatched', 'exception_type': kind,
+            'failure_stage': 'tool_dispatch', 'request_id': request_id}
+
+
+def tool_evidence(value, *, receipt_status=None):
+    """Public receipt fields only; never treat tool prose as an outcome."""
+    value = value if isinstance(value, dict) else {}
+    action = {}
+    for field in ('dispatched', 'retryable'):
+        if type(value.get(field)) is bool:
+            action[field] = value[field]
+    outcome = value.get('outcome')
+    if isinstance(outcome, str) and outcome in {'completed', 'failed', 'rejected', 'cancelled', 'unknown'}:
+        action['outcome'] = outcome
+    if value.get('outcome_uncertain') is True:
+        action['outcome'] = 'unknown'
+    # Only the computer adapter may supply this argument, never the tool body.
+    if isinstance(receipt_status, str) and receipt_status in {'unknown', 'cancelled', 'rejected'}:
+        action.update(outcome=receipt_status, retryable=False)
+    diagnostic = safe_error(value.get('diagnostic'))
+    diagnostic.update(safe_error({'http_status': value.get('status_code')}))
+    return {**({'action': action} if action else {}),
+            **({'outcome_type': 'UncertainToolOutcome'} if receipt_status == 'unknown' else {}),
+            **({'diagnostic': diagnostic} if diagnostic else {})}
 
 
 def provider_error(value):
@@ -248,7 +340,8 @@ def failure(route, request_id, exc, *, headers=None, status=None, response_start
         cause = exc.__cause__
     errno = getattr(cause, 'errno', None) if cause else getattr(exc, 'errno', None)
     return {
-        **safe_error({'error_code': headers.get('x-moyai-error-code'), 'stage': headers.get('x-moyai-error-stage')}),
+        **safe_error({'error_code': headers.get('x-moyai-error-code'), 'stage': headers.get('x-moyai-error-stage'),
+                      'failure_stage': headers.get('x-moyai-failure-stage')}),
         'version': 1, 'route': route if route in BROKER_ROUTES else 'unknown',
         'http_status': status, 'upstream_status': upstream,
         'request_id': request_id, 'request_ids': request_ids(headers),

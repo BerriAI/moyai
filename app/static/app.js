@@ -937,7 +937,16 @@ function syncEventTimeline(target,events){
   }
   for(const event of visible)if(!nodes.has(String(event.id))){const markup=eventHTML(event);if(markup)MoyaiUI.insert(target,'beforeend',markup);}
 }
-function eventHTML(event){if(MoyaiActivity.isFocus(event))return '';const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});const detail=event.data?.command||event.data?.detail;return `<div class="event event-${esc(event.kind)}" data-event-id="${esc(event.id)}"><span class="event-marker">${event.kind==='result'?'✓':event.kind==='tool'?'⌘':'·'}</span><div class="event-heading"><strong>${esc(event.message)}</strong><time>${stamp}</time></div>${detail?`<details class="event-detail"><summary>Details</summary><pre>${esc(typeof detail==='string'?detail:JSON.stringify(detail,null,2))}</pre></details>`:''}</div>`;}
+function eventHTML(event){
+  if(MoyaiActivity.isFocus(event)||event.data?.phase==='recovery_decision')return '';
+  if(event.kind==='tool'&&event.data?.phase==='error'||event.kind==='error'&&(
+    ['tool_failure','slack_attachment_read','response_completion','supervisor_failure'].includes(event.data?.phase)||event.data?.stage==='capture_sync'))
+    return `<div class="event event-error" data-event-id="${esc(event.id)}">${MoyaiActivity.explanationHTML(event.failure_explanation)}</div>`;
+  if(event.kind==='error')return '';
+  const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const detail=event.data?.command||event.data?.detail;
+  return `<div class="event event-${esc(event.kind)}" data-event-id="${esc(event.id)}"><span class="event-marker">${event.kind==='result'?'✓':event.kind==='tool'?'⌘':'·'}</span><div class="event-heading"><strong>${esc(event.message)}</strong><time>${stamp}</time></div>${detail?`<details class="event-detail"><summary>Details</summary><pre>${esc(typeof detail==='string'?detail:JSON.stringify(detail,null,2))}</pre></details>`:''}</div>`;
+}
 function renderApprovals(approvals){ if(!$('#approvals'))return;MoyaiUI.render($('#approvals'), approvals.filter(a=>a.status==='pending').map(a=>`<div class="approval"><h3>Approval needed: ${esc(a.tool)}</h3><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>${state.role==='admin'?`<div class="approval-actions"><button data-approval="${a.id}" data-decision="approve" class="primary small">Approve once</button><button data-approval="${a.id}" data-decision="deny" class="small">Deny</button></div>`:'<p>An organization administrator must approve this action.</p>'}</div>`).join(''));document.querySelectorAll('[data-approval]').forEach(b=>b.onclick=async()=>{try{await api(`/api/approvals/${b.dataset.approval}`,{method:'POST',body:JSON.stringify({decision:b.dataset.decision})});await refreshApproval(state.selected);}catch(e){toast(e.message);}});}
 async function refreshApproval(id){if(state.selected!==id)return;const run=await api(`/api/runs/${id}`);if(state.selected===id){renderApprovals(run.approvals);MoyaiUI.render($('#run-status'), run.swarm?`<span class="status ${esc(run.status)}">${esc(run.swarm.status==='active'?sessionStatus(run):globalThis.MoyaiSwarm?.clock(run)?.label||sessionStatus(run))}</span>`:statusLabel(run.status));}}
 async function renderConnections(recent=false){

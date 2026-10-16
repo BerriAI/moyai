@@ -115,6 +115,91 @@ async def test_real_temporal_restart_does_not_replay_completed_tool(tmp_path):
                        plugins=[deepagents_plugin()]).replay_workflow(history)
 
 
+@pytest.mark.parametrize('computer', [True, False])
+async def test_worker_shutdown_during_tool_preserves_computer_receipt_without_replaying_writes(tmp_path, computer):
+    class PendingToolRuntime(ScriptedRuntime):
+        def __init__(self, directory):
+            super().__init__(directory)
+            self.dispatched = asyncio.Event()
+            self.identities = []
+            self.name = 'computer_terminal' if computer else 'write_note'
+
+        async def model_request(self, scope, messages, settings, parameters):
+            if any(isinstance(m, ToolMessage) for m in messages):
+                return AIMessage(content='Recovered the saved computer result.')
+            return AIMessage(content='', tool_calls=[{'name': 'workspace_call',
+                'args': {'name': self.name, 'arguments_json': '{}'}, 'id': 'original-tool-call'}])
+
+        async def call_tool(self, scope, call_id, name, arguments):
+            # A computer keeps the effect and receipt identity independently
+            # of the worker observing it, as ComputerOperations.exchange does.
+            identity = (scope.run_id, scope.message_id, scope.segment, scope.input_id, call_id)
+            self.identities.append(identity)
+            if len(self.identities) == 1:
+                self.tool_calls += 1
+                (self.directory / 'effect.txt').write_text('one effect\n')
+                self.dispatched.set()
+            else:
+                assert computer and identity == self.identities[0]
+            await self.release.wait()
+            return {'result': {'saved': True}}
+
+    runtime = PendingToolRuntime(tmp_path)
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        client = configured_client(env.client, converter(tmp_path))
+        first = worker(client, runtime)
+        serving = asyncio.create_task(first.run())
+        handle = await client.start_workflow(DeepAgentsTurnWorkflow.run, TurnScope('shutdown-tool', 1),
+            id='shutdown-during-tool', task_queue='deepagents-test')
+        try:
+            await asyncio.wait_for(runtime.dispatched.wait(), 25)
+        finally:
+            await first.shutdown()
+            await serving
+        runtime.release.set()
+        async with worker(client, runtime):
+            if computer:
+                result = await asyncio.wait_for(handle.result(), 30)
+                assert result.result['completed']
+                assert len(runtime.identities) == 2
+            else:
+                with pytest.raises(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), 30)
+                assert len(runtime.identities) == 1
+        assert runtime.tool_calls == 1
+        assert (tmp_path / 'effect.txt').read_text() == 'one effect\n'
+        history = await handle.fetch_history()
+        await Replayer(workflows=[DeepAgentsTurnWorkflow], data_converter=client.data_converter,
+                       plugins=[deepagents_plugin()]).replay_workflow(history)
+
+
+async def test_uncertain_computer_outcome_is_not_retried(tmp_path):
+    class UncertainComputer(ScriptedRuntime):
+        async def model_request(self, scope, messages, settings, parameters):
+            return AIMessage(content='', tool_calls=[{'name': 'workspace_call',
+                'args': {'name': 'computer_terminal', 'arguments_json': '{}'}, 'id': 'uncertain-computer'}])
+
+        async def call_tool(self, scope, call_id, name, arguments):
+            self.tool_calls += 1
+            with (self.directory / 'effect.txt').open('a') as stream:
+                stream.write('one effect\n')
+            # This is the runtime's explicit reconciliation boundary after a
+            # lost broker/computer outcome; retries must not override it.
+            raise ApplicationError('Inspect saved receipts before retrying.',
+                                   type='UncertainToolOutcome', non_retryable=True)
+
+    runtime = UncertainComputer(tmp_path)
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        client = configured_client(env.client, converter(tmp_path))
+        async with worker(client, runtime):
+            handle = await client.start_workflow(DeepAgentsTurnWorkflow.run, TurnScope('uncertain-computer', 1),
+                id='uncertain-computer-result', task_queue='deepagents-test')
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), 30)
+        assert runtime.tool_calls == 1
+        assert (tmp_path / 'effect.txt').read_text() == 'one effect\n'
+
+
 async def test_accepted_steering_survives_worker_restart_and_replays_once(tmp_path):
     class SteeringRuntime(ScriptedRuntime):
         def __init__(self, directory):
@@ -1002,7 +1087,8 @@ async def test_official_provider_sdk_uses_sealed_responses_broker(model_name):
     thread.start()
     runtime = object.__new__(DeepAgentsRuntime)
     runtime.runner = SimpleNamespace(settings=SimpleNamespace(public_url=f'http://127.0.0.1:{edge.server_port}',
-        cloudflare_access_client_id='', cloudflare_access_client_secret=''), token=lambda *args: 'scoped-token')
+        cloudflare_access_client_id='', cloudflare_access_client_secret='', native_web_search_models=[]),
+        token=lambda *args: 'scoped-token')
     runtime.current = lambda scope: {}
     try:
         result = await runtime._model_request(TurnScope('test', 1, model=model_name, input_budget=10000),

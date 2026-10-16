@@ -33,8 +33,10 @@ def read_diagnostics(store, run_id):
             SELECT max(created_at) AS created_at FROM messages WHERE run_id=? AND status!='deleted'
             UNION ALL SELECT max(created_at) FROM events WHERE run_id=?) activity''', (run_id, run_id)).fetchone()[0]
         agents = agent_summary(conn, run_id)
-        failures = conn.execute("""SELECT id,created_at,data FROM events WHERE run_id=? AND kind='error'
-            AND json_text(data,'phase') IN ('broker_failure','sdk_failure') ORDER BY id DESC LIMIT 5""", (run_id,)).fetchall()
+        failures = conn.execute("""SELECT id,created_at,data FROM events WHERE run_id=? AND (
+            (kind='tool' AND json_text(data,'phase')='error') OR (kind='error' AND (
+            json_text(data,'phase') IN ('broker_failure','sdk_failure','tool_failure','supervisor_failure','slack_attachment_read','response_completion')
+            OR json_text(data,'stage')='capture_sync'))) ORDER BY id DESC LIMIT 5""", (run_id,)).fetchall()
         recent_failures = [{key: public_text(value, 200) if isinstance(value, str) else value
                             for key, value in failure_record(row).items()} for row in failures]
     return last, agents, recent_failures

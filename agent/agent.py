@@ -150,6 +150,13 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
         wait_credential = waiting.credential if waiting.can_continue(result) else ''
         continuing = not relay.last_error and (bool(wait_group) or bool(wait_credential) or rotation.can_continue(result))
         steered = steering.message_id if steering.can_continue(result) and not relay.last_error else None
+        if (completed and not transport_retry and not continuing and not steered
+                and not str(result.get('final_response') or '').strip()):
+            # Observe the native result before fallback prose is substituted.
+            # This does not change its completion status or replay any action.
+            emit('error', 'Completion was reported without a final answer.', {
+                'phase': 'response_completion', 'code': 'missing_final_answer',
+                'completed_marker': True, 'final_text_present': False})
         summary = ("" if steered else
                    "Cloud connection interrupted. Saving completed work before reconnecting." if transport_retry else
                    "Access is needed. Connect securely through the form in this session, not in chat." if continuing and wait_credential else

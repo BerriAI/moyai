@@ -6,6 +6,7 @@ the original turn and its capability.
 """
 import hashlib
 import json
+import logging
 import time
 
 import modal
@@ -149,7 +150,15 @@ class IndependentRuntime:
                         {'phase': 'environment', 'project_health': computer['project_health']}, turn_id=state['message_id'])
                 except Exception:
                     pass
-        return computer['phase'] == 'ready'
+        ready = computer['phase'] == 'ready'
+        if ready and computer.get('project_health', {}).get('status') != 'needs_repair':
+            from .db import now
+            from .performance import computer_ready
+            try:
+                await database(computer_ready, r.store, run_id, state['message_id'], now())
+            except Exception as exc:
+                logging.getLogger(__name__).warning('Computer timing unavailable (%s)', type(exc).__name__)
+        return ready
 
     def preparation_input(self, run_id, turn_id):
         inputs = self.runner.store.rows("""SELECT id FROM messages
@@ -279,7 +288,8 @@ class IndependentRuntime:
                     try:
                         await database(r.store.event, run_id, 'error', notice,
                                        {'stage': 'capture_sync', 'tool': operation['name'],
-                                        'request_id': operation['request_id'], **persistence})
+                                        'request_id': operation['request_id'], **persistence},
+                                       turn_id=operation['turn_id'])
                     except Exception:
                         pass  # The authoritative receipt already carries this warning.
             await database(self.operations.settle, operation, result['status'], result['result'])
