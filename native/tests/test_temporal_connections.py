@@ -152,6 +152,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         assert any(name.endswith("__call_tool") for name in constructions)
         replaying = True
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
             interceptors=[ActivityCapacity()],
         ).replay_workflow(history)
