@@ -126,9 +126,15 @@ async def test_signed_review_broker_uses_original_completed_scope_without_stream
     from moyai import product_inference_routes as routes
 
     ctx = maintenance
+    ctx.service.settings = ctx.service.settings.model_copy(update={
+        "cloudflare_access_client_id": inference_fixtures.ACCESS_HEADERS["CF-Access-Client-Id"],
+        "cloudflare_access_client_secret": inference_fixtures.ACCESS_HEADERS["CF-Access-Client-Secret"],
+    })
     calls = []
 
     async def upstream(request):
+        assert request.headers["authorization"] == "Bearer synthetic-inference-key"
+        assert all(name not in request.headers for name in inference_fixtures.ACCESS_HEADERS)
         calls.append(request)
         return httpx2.Response(200, stream=WireStream(json.dumps(payload(cost="0.07")).encode()), headers={
             "content-type": "application/json", "x-litellm-call-id": "review-broker-receipt",
@@ -146,6 +152,7 @@ async def test_signed_review_broker_uses_original_completed_scope_without_stream
             assert response.status_code == 409
         assert not calls
         signed = signed_review(ctx)
+        assert all(signed.headers[name] == value for name, value in inference_fixtures.ACCESS_HEADERS.items())
         response = await client.post(str(signed.url), headers=signed.headers, content=signed.content)
         assert response.status_code == 200
         repeat = await client.post(str(signed.url), headers=signed.headers, content=signed.content)
