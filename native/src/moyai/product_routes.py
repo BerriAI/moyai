@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 Source = Literal["native", "legacy"]
 Sources = Literal["all", "native", "legacy"]
+NavigationScope = Literal["all", "mine"]
 SEARCH_ROWS = 1000
 SEARCH_BYTES = 4 * 1024 * 1024
 CIPHER_CHARS = 180_000
@@ -117,6 +118,7 @@ class ProductReadService:
             Session.status, Session.active_turn, Session.archived, Session.deleted, Session.created_at,
             Session.updated_at, SessionPreference.pinned, SessionPreference.folder,
             SessionRead.unread.label("marked_unread"), unread.label("new_messages"),
+            (Session.owner_id == reader.user.id).label("created_by_me"),
             (and_(Session.owner_id != reader.user.id, participated)).label("participated"),
         ).outerjoin(SessionPreference, preference).outerjoin(SessionRead, read)
         if self.continuations is not None:
@@ -145,6 +147,7 @@ class ProductReadService:
                                   memberships.c.owner_id == folders.c.owner_id),
             ).where(memberships.c.run_id == original, memberships.c.owner_id == reader.user.id).limit(1).scalar_subquery()
             linked = select(users.c.id).where(users.c.kind == "slack", users.c.linked_user_id == reader.user.id)
+            owned = or_(Session.owner_id == reader.user.id, Session.owner_id.in_(linked))
             old_participation = select(old_messages.c.run_id).join(
                 roots, roots.c.run_id == old_messages.c.run_id,
             ).where(
@@ -154,12 +157,14 @@ class ProductReadService:
             # Preserve each viewer's saved navigation without copying another
             # person's preferences. An explicit native preference overrides it.
             query = query.with_only_columns(
-                *(item for item in query.selected_columns if item.key not in {"pinned", "folder", "participated"}),
+                *(item for item in query.selected_columns
+                  if item.key not in {"pinned", "folder", "created_by_me", "participated"}),
                 case((SessionPreference.user_id.is_not(None), SessionPreference.pinned),
                      else_=old_pin).label("pinned"),
                 case((SessionPreference.user_id.is_not(None), SessionPreference.folder),
                      else_=old_folder).label("folder"),
-                and_(Session.owner_id != reader.user.id, or_(participated, old_participation)).label("participated"),
+                owned.label("created_by_me"),
+                and_(~owned, or_(participated, old_participation)).label("participated"),
             )
         return query
 
@@ -198,11 +203,18 @@ class ProductReadService:
 
     async def native_list(
         self, reader: Reader, *, limit: int, offset: int, archived: bool = False, deleted: bool = False,
+        scope: NavigationScope = "all",
     ) -> dict[str, Any]:
         async with self.runtime.database.sessions() as db:
             query = self.native_query(reader).where(self.visible(reader, deleted=deleted))
             if not deleted:
                 query = query.where(Session.archived.is_(archived))
+                if scope == "mine":
+                    columns = query.selected_columns
+                    query = query.where(or_(
+                        columns.created_by_me, columns.participated, columns.pinned.is_(True),
+                        func.coalesce(columns.folder, "") != "",
+                    ))
             rows = list((await db.execute(query.order_by(Session.updated_at.desc(), Session.id.desc())
                                           .offset(offset).limit(limit + 1))).mappings())
         valid = await self.native_recheck(reader, [r["id"] for r in rows], deleted=deleted)
@@ -284,8 +296,11 @@ class ProductReadService:
         }
 
     @staticmethod
-    def cursor_scope(reader: Reader, source: Sources, query: str, archived: bool, deleted: bool) -> str:
-        return hashlib.sha256(json.dumps([reader.user.id, source, query, archived, deleted]).encode()).hexdigest()
+    def cursor_scope(
+        reader: Reader, source: Sources, query: str, archived: bool, deleted: bool,
+        scope: NavigationScope = "all",
+    ) -> str:
+        return hashlib.sha256(json.dumps([reader.user.id, source, query, archived, deleted, scope]).encode()).hexdigest()
 
     @staticmethod
     def offsets(cursor: str | None, scope: str) -> dict[str, int]:
@@ -307,14 +322,15 @@ class ProductReadService:
     async def listing(
         self, reader: Reader, *, source: Sources = "all", query: str = "", limit: int = 50,
         cursor: str | None = None, archived: bool = False, deleted: bool = False,
+        scope: NavigationScope = "all",
     ) -> dict[str, Any]:
         bounded(limit)
         query = query.strip()
         if len(query) > 200:
             raise HTTPException(422, "Search text must contain at most 200 characters.")
         await self.current(reader)
-        scope = self.cursor_scope(reader, source, query, archived, deleted)
-        offsets = self.offsets(cursor, scope)
+        cursor_scope = self.cursor_scope(reader, source, query, archived, deleted, scope)
+        offsets = self.offsets(cursor, cursor_scope)
         pages: dict[str, dict[str, Any]] = {}
         notices, states = [], {}
         for selected in (("native", "legacy") if source == "all" else (source,)):
@@ -328,7 +344,7 @@ class ProductReadService:
                     if selected == "native":
                         page = await self.native_search(reader, query, limit=limit, offset=offsets[selected]) if query else \
                             await self.native_list(reader, limit=limit, offset=offsets[selected],
-                                                   archived=archived, deleted=deleted)
+                                                   archived=archived, deleted=deleted, scope=scope)
                     else:
                         if reader.principal is None:
                             raise HTTPException(401, "Current product authorization is required.")
@@ -340,6 +356,7 @@ class ProductReadService:
                         ) \
                             if query else await self.history.sessions(
                                 reader.principal, limit=limit, offset=offsets[selected], archived=archived, deleted=deleted,
+                                 personal=scope == "mine",
                                 **({"exclude_continued": True} if source == "all" and self.continuations else {}),
                             )
                 pages[selected], states[selected] = page, "available"
@@ -378,7 +395,7 @@ class ProductReadService:
             has_more = False
             notices.append("History page limit reached. Narrow the search to find more sessions.")
         next_cursor = base64.urlsafe_b64encode(json.dumps(
-            {"v": 1, "scope": scope, **offsets}, separators=(",", ":"),
+            {"v": 1, "scope": cursor_scope, **offsets}, separators=(",", ":"),
         ).encode()).decode().rstrip("=") if has_more else None
         return {"sessions": chosen, "has_more": has_more, "next_cursor": next_cursor, "sources": states,
                 "partial": "unavailable" in states.values(), "notice": " ".join(notices) or None,
@@ -458,10 +475,11 @@ def routes(runtime: Runtime, actor) -> APIRouter:
     async def sessions(
         source: Sources = "all", limit: int = Query(50, ge=1, le=MAX_PAGE),
         cursor: str | None = Query(None, max_length=512), archived: bool = False, deleted: bool = False,
+        scope: NavigationScope = "all",
         current: Reader = Depends(reader),
     ):
         return await service.listing(current, source=source, limit=limit, cursor=cursor,
-                                     archived=archived, deleted=deleted)
+                                     archived=archived, deleted=deleted, scope=scope)
 
     @router.get("/api/history/search")
     async def search(

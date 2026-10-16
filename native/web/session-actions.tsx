@@ -8,7 +8,7 @@ import { api } from "./api"
 
 export type SidebarSession = {
   id: string; title: string; owner_id: string; status: string; archived: boolean; deleted?: boolean
-  pinned?: boolean; folder?: string; participated?: boolean; unread?: boolean; updated_at?: string
+  pinned?: boolean; folder?: string; participated?: boolean; created_by_me?: boolean; unread?: boolean; updated_at?: string
   surface?: string
   source?: "native" | "legacy"; key?: string; url?: string; read_only?: boolean; deleting?: boolean; folder_id?: string | null
   pull_requests?: { url: string; title: string; repository: string; number: number; state: "open" | "closed" | "merged" | "unknown"; draft: boolean; accessible: boolean; error?: string }[]
@@ -120,7 +120,7 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
       <DialogContent className="sidebar-editor"><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>
         {editor?.action === "delete" ? "Stops active and queued work and removes this session for everyone. Saved history and files are kept. You can restore it from Deleted sessions."
           : editor?.action === "restore" ? "Return this session to the active list. Stopped tasks will stay stopped."
-          : editor?.action === "folder-remove" ? "Its sessions stay saved and return to Recent or Participated."
+          : editor?.action === "folder-remove" ? "Its sessions stay saved and remain available through search or their links."
           : editor?.action === "archive" ? "This changes the session for everyone. You can restore it from Archived sessions."
           : editor?.action === "rename" ? "Choose a title you can find later."
           : "Folders organize your sidebar. Session sharing stays the same."}

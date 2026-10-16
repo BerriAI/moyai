@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ActionItem, ActionMenu, SessionMenu, sessionHash, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import type { SessionFolder, SidebarSession } from "./session-actions"
-import { currentDragSession, movableSession, SESSION_DRAG_TYPE, sessionDrop, sessionPlacement } from "./sidebar-drag"
+import { currentDragSession, movableSession, SESSION_DRAG_TYPE, sessionCreatedByMe, sessionDrop, sessionPlacement } from "./sidebar-drag"
 import type { SessionDrag, SessionDropTarget, SidebarDragContext } from "./sidebar-drag"
 import slackLogo from "../../app/static/slack-logo.svg"
 import "./sidebar-layout.css"
@@ -129,7 +129,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
     return next
   })
   const nativeRows = sessions.filter(row => !sessionIsReadOnly(row))
-  const placements = new Map(nativeRows.map(row => [row, sessionPlacement(row, folders)]))
+  const placements = new Map(nativeRows.map(row => [row, sessionPlacement(row, folders, userId)]))
   const unfiled = sessions.filter(row => sessionIsReadOnly(row)
     ? !row.pinned && !row.folder : ["recent", "participated"].includes(placements.get(row)!.kind))
   const pinned = sessions.filter(row => sessionIsReadOnly(row) ? row.pinned : placements.get(row)!.kind === "pinned")
@@ -248,8 +248,8 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
           placements.get(row)?.key === folder.id).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))), folder))}
         {legacyFolders.map(folder => section(`history-folder:${folder.key}`, folder.name, <Folder size={15} />, sessions.filter(row =>
           sessionIsReadOnly(row) && !row.pinned && `${row.source ?? "native"}:${row.folder_id ?? row.folder}` === folder.key)))}
-        {section("participated", "Participated", <Users size={15} />, unfiled.filter(row => row.participated))}
-        {section("recent", "Recent", <Clock3 size={15} />, unfiled.filter(row => !row.participated))}
+        {section("participated", "Participated", <Users size={15} />, unfiled.filter(row => row.participated && !sessionCreatedByMe(row, userId)))}
+        {section("recent", "Recent", <Clock3 size={15} />, unfiled.filter(row => sessionCreatedByMe(row, userId)))}
       </>}
       {notice && <p className="empty-rail muted" role="status">{notice}</p>}
       {hasMore && onLoadMore && <Button className="sidebar-load-more" variant="ghost" disabled={loading} onClick={onLoadMore}>{loading ? "Loading…" : "Show more sessions"}</Button>}
