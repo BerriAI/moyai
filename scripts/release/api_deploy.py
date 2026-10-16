@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from copy import deepcopy
 
 from scripts.release.deploy import (ACTIVE_DEPLOYS, BROKER, COORDINATOR, WORKER,
                                     Release, ReleaseError, SHARED_DEFAULTS, SHARED_KEYS)
@@ -35,6 +36,9 @@ def candidate_contract(environment):
         if (not re.fullmatch('[0-9a-f]{64}', value['contract'])
                 or type(value['schema']) is not int):
             raise ValueError()
+        if environment.get('MOYAI_CORE') == 'pydantic':
+            from scripts.release.native_migration import candidate_manifest
+            value['native'] = {**candidate_manifest(environment), 'state': 'receipted'}
         return value
     except (ValueError, KeyError, TypeError):
         raise ReleaseError('Candidate API contract could not be verified; no changes made.') from None
@@ -45,10 +49,15 @@ def topology(service):
     return {**{key: service.get(key) for key in ('name', 'type', 'suspended', 'autoDeploy',
                 'autoDeployTrigger', 'branch', 'repo', 'ownerId', 'rootDir')},
             'details': {key: details.get(key) for key in ('region', 'numInstances', 'autoscaling',
-                'disk', 'runtime', 'sshAddress', 'envSpecificDetails', 'maxShutdownDelaySeconds')}}
+                'disk', 'runtime', 'sshAddress', 'envSpecificDetails', 'maxShutdownDelaySeconds',
+                'healthCheckPath')}}
 
 
 class APIRelease(Release):
+    # Only this API controller and maintenance admit native services. API
+    # preflight additionally requires identical provisioned native contracts.
+    native_release = True
+
     def __init__(self, *args, api_service_id, contract=candidate_contract, readiness_timeout=300,
                  retirement_timeout=430, **kwargs):
         super().__init__(*args, **kwargs)
@@ -57,9 +66,18 @@ class APIRelease(Release):
         self.topologies = {}
         self.background = set()
         self.baseline = None
+        self.native = False
+        self.identities = {}
 
     def inspect(self, service_id, role):
         item, owner = super().inspect(service_id, role)
+        if item.env.get('MOYAI_CORE') == 'pydantic':
+            if (item.env.get('MOYAI_PRODUCT_MODE') != 'existing'
+                    or item.env.get('MOYAI_NATIVE_SCHEMA_MODE', 'verify') != 'verify'
+                    or item.env.get('MOYAI_PRODUCT_LOCAL_REHEARSAL', 'false') != 'false'
+                    or item.env.get('MOYAI_COORDINATOR_HANDOFF') != 'true'):
+                raise ReleaseError('Native API releases require verified existing-product roles without rehearsal or maintenance.')
+            self.native = True
         metadata = self.render.call('GET', '/services/' + service_id)
         details = metadata['serviceDetails']
         if item.env.get('MOYAI_SCHEMA_MODE') != 'verify' or item.env.get('MOYAI_SEPARATE_BROKER') != 'true':
@@ -72,6 +90,8 @@ class APIRelease(Release):
                     or docker.get('dockerfilePath') not in {'Dockerfile', './Dockerfile'}
                     or docker.get('dockerContext') != '.' or metadata.get('rootDir', '') not in {'', '.'}):
                 raise ReleaseError('API requires diskless Docker startup, no command overrides, and a 300-second shutdown allowance.')
+            if self.native and details.get('healthCheckPath') != '/health':
+                raise ReleaseError('Native API replacement requires Render HTTP readiness at /health before traffic switches.')
         self.topologies[service_id] = topology(metadata)
         return item, owner
 
@@ -81,7 +101,11 @@ class APIRelease(Release):
             if topology(self.render.call('GET', '/services/' + sid)) != original:
                 raise ReleaseError('Render service configuration changed outside this release; stopped without overwriting it.')
         if self.background:
-            self.check_background(self.probe(self.expected[COORDINATOR]), require_ready=True)
+            self.check_background_services()
+
+    def check_background_services(self):
+        for sid in ((COORDINATOR, BROKER, WORKER) if self.native else (COORDINATOR,)):
+            self.check_background(self.probe(self.expected[sid]), require_ready=True)
 
     def configure(self, service, changes):
         if service.id != self.api_service_id or set(changes) != {'MOYAI_BUILD_SHA'}:
@@ -97,6 +121,17 @@ class APIRelease(Release):
                 or not self.background <= set(state.get('owners', []))
                 or not 4 <= len(state['owners']) <= 5):
             raise ReleaseError('Background ownership or the API contract changed; inspect the receipt before proceeding.')
+        if self.native:
+            if (any(state.get(key) != self.baseline[key]
+                    for key in ('core', 'contracts', 'native', 'native_drain', 'broker_leaders'))
+                    or state.get('role') not in self.identities):
+                raise ReleaseError('Native receipts, maintenance generation or role contracts changed; release stopped.')
+            role = state['role']
+            if role != 'api' and (state.get('identity') != self.identities[role]
+                    or state.get('ready') is not True
+                    or (role == 'coordinator' and state.get('coordinator_state') != 'leader')
+                    or (role == 'broker' and state.get('broker_draining') is not False)):
+                raise ReleaseError('A native background owner changed or lost readiness; release stopped.')
         # A known dependency failure must not trigger an API rollback either.
         if require_ready and state.get('ready') is not True:
             raise ReleaseError('A background service is unhealthy; release stopped.')
@@ -132,7 +167,7 @@ class APIRelease(Release):
                 raise ReleaseError('Render selected a different commit; release stopped.')
             entry['status'] = state['status']
             self.save()
-            self.check_background(self.probe(self.expected[COORDINATOR]), require_ready=True)
+            self.check_background_services()
             if state['status'] in {'build_failed', 'pre_deploy_failed', 'update_failed'}:
                 raise FailedDeployment('The API candidate failed before a verified release.')
             if state['status'] not in ACTIVE_DEPLOYS | {'live'}:
@@ -223,6 +258,20 @@ class APIRelease(Release):
             if any(not state.get('ok') or state.get('ready') is not True for state in states):
                 raise ReleaseError('Preflight health or release-support check failed; no changes made.')
             self.baseline = states[-1]
+            if self.native:
+                self.wait(lambda: self.github.rolling_ready(sha) and self.github.native_ready(sha),
+                          'Required native runtime and release CI did not finish; no changes made.', 1800)
+                self.identities = {service.role: state.get('identity')
+                                   for service, state in zip(self.expected.values(), states)}
+                if (len(set(self.identities.values())) != 4 or None in self.identities.values()
+                        or any(state.get('role') != service.role
+                               for service, state in zip(self.expected.values(), states))
+                        or self.baseline.get('core') != 'pydantic-v1'
+                        or self.baseline.get('native', {}).get('state') != 'receipted'
+                        or self.baseline.get('native_drain', {}).get('paused') is not False
+                        or self.baseline.get('broker_leaders') != [self.identities['broker']]
+                        or set(self.baseline['owners']) != set(self.identities.values())):
+                    raise ReleaseError('Native API preflight requires four healthy identified roles and active native receipts.')
             old_owner = self.baseline['api_owner']
             if (not old_owner or len(set(self.baseline['owners'])) != 4
                     or len(self.baseline['coordinators']) != 1 or len(self.baseline['brokers']) != 1
@@ -237,12 +286,17 @@ class APIRelease(Release):
                 if set(state['owners']) != set(self.baseline['owners']):
                     raise ReleaseError('Runtime ownership changed during preflight; no changes made.')
             candidate = self.contract({**api.env, 'MOYAI_BUILD_SHA': sha})
-            if candidate != {k: self.baseline[k] for k in ('contract', 'schema')}:
+            keys = ('contract', 'schema', 'contracts', 'native') if self.native else ('contract', 'schema')
+            if candidate != {k: self.baseline[k] for k in keys}:
                 raise ReleaseError('Candidate API contract is incompatible with the running cluster; use a maintenance release.')
             self.record.update(previous_commit=api.sha, previous_deploy=api.deploy_id,
                                background_owners=sorted(self.background), previous_api_owner=old_owner,
                                cluster_policy=self.baseline['policy'], api_contract=self.baseline['contract'],
                                schema_revision=self.baseline['schema'])
+            if self.native:
+                self.record.update(core='pydantic-v1', native=deepcopy(self.baseline['native']),
+                                   native_drain=deepcopy(self.baseline['native_drain']),
+                                   background_identities={k: v for k, v in self.identities.items() if k != 'api'})
             self.unchanged()
             if self.preflight_only:
                 self.record['status'] = 'preflight_passed'
