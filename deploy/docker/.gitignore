@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+compose.environment.json
+installation.json
+.moyai-config-*

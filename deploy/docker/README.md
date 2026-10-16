@@ -10,21 +10,54 @@ existing Moyai deployment still requires the procedure in
 `docs/pydantic-deployment.md`; this initializer refuses to adopt populated schemas
 without their original installation state.
 
-Use Docker Compose 2.30 or newer for raw env-file support.
+Use Docker Compose 2.30 or newer for raw env-file support. The helper uses the
+image's Python runtime; you do not need Python or Node installed on the host.
+Run it on the machine hosting Docker.
 
 ## First installation
 
 Download `moyai-docker.tar.gz` from a Moyai GitHub release and extract it. The
 bundle's `.env.example` already names the release image by immutable digest.
 Until a release includes that bundle, use the checkout build instructions below.
-From the extracted `moyai-docker` directory:
+Export the settings below, then run one command from the extracted
+`moyai-docker` directory:
 
 ```sh
-cp .env.example .env
-chmod 600 .env
+sh moyai.sh up
 ```
 
-Edit `.env` with your endpoints and credentials. Container-to-service addresses
+On first startup, `up` reads the exported environment, validates it, chooses the
+Compose files, and starts setup and the application. No wizard or separate
+configuration command is required. PostgreSQL, storage, model and provider
+credentials stay in the invoking environment. Generated non-provider
+configuration is saved in a private `.env`; when bundling Temporal, its generated
+database password is also saved there. Keep provider credentials exported for
+future starts and upgrades.
+
+For Temporal Cloud or your own server, supply `TEMPORAL_ADDRESS`,
+`TEMPORAL_NAMESPACE`, `TEMPORAL_TLS` and any required `TEMPORAL_API_KEY`.
+External Temporal is the unattended default. To run the included Temporal
+server instead, set `MOYAI_TEMPORAL_MODE=bundled`; setup prepares its persistent
+database and namespace. No separately configured Temporal service or database
+password is required.
+
+Set `MOYAI_INSTALL_TOPOLOGY=split` for all four application roles, or leave it
+unset for standalone. The same command handles either choice.
+
+The application generates and retains its own missing signing/encryption keys
+during setup. Subsequent starts retain the saved configuration and data
+destinations. To change them, edit the configuration deliberately and follow
+the migration/upgrade instructions below.
+
+If you prefer prompts, run `sh moyai.sh configure` first. The optional wizard
+writes endpoints and supplied credentials to `.env` with mode 0600 and refuses
+to overwrite existing configuration.
+
+For manual configuration, copy `.env.example` to `.env`, protect it with
+`chmod 600 .env`, and fill in the settings below. Use the helper to start either
+generated or manually prepared configuration.
+
+Container-to-service addresses
 must be reachable from Docker; `localhost` inside a container names that
 container. The installation ID is 1–8 lowercase letters/digits and starts with a
 letter. It determines separate application schemas, object prefixes, and queues.
@@ -43,10 +76,64 @@ Each installation needs its own ID and Compose project.
 | `MODAL_APP_NAME` | A dedicated Modal application name for this installation. |
 | `WORKSPACE_PASSWORD` | An initial administrator password of at least 16 characters, or leave empty to generate one. |
 
-The app's `.env` uses Compose's raw env-file format. Enter values without shell
-quotes. Do not commit this file or include it in support logs. Compose itself
-interpolates the image, project, port, and bundled-database settings; use an
-alphanumeric password for `MOYAI_TEMPORAL_DATABASE_PASSWORD`.
+The app's `.env` uses Compose's raw env-file format. Enter values without adding
+shell quotes. The helper reads only the image/project/port settings needed for
+Compose interpolation; credentials remain literal raw values, including dollars
+and quotes. Do not source `.env` as a shell script, commit it, or include it in
+support logs. Use letters, digits, underscores or hyphens for
+`MOYAI_TEMPORAL_DATABASE_PASSWORD`.
+
+### Example: external services
+
+Provide these through your secret manager or private shell environment:
+
+```sh
+export MOYAI_PUBLIC_URL=https://moyai.example.com
+export MOYAI_DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
+export OBJECT_STORAGE_BUCKET=your-private-bucket
+export OBJECT_STORAGE_REGION=us-east-1
+# Export storage credentials, or use your AWS workload credentials.
+export TEMPORAL_ADDRESS=your-namespace.tmprl.cloud:7233
+export TEMPORAL_NAMESPACE=your-namespace
+export TEMPORAL_TLS=true
+export TEMPORAL_API_KEY=YOUR_TEMPORAL_KEY
+export LITELLM_API_BASE=https://your-gateway.example.com/v1
+export LITELLM_API_KEY=YOUR_MODEL_KEY
+export AGENT_MODEL=YOUR_RESPONSES_MODEL
+export MODAL_TOKEN_ID=YOUR_MODAL_ID
+export MODAL_TOKEN_SECRET=YOUR_MODAL_SECRET
+export MOYAI_INSTALL_TOPOLOGY=split
+sh moyai.sh up
+```
+
+For bundled Temporal, omit the external Temporal connection settings and export
+`MOYAI_TEMPORAL_MODE=bundled` before the same `up` command. For S3-compatible
+storage, export `OBJECT_STORAGE_ENDPOINT` too.
+
+### Optional separate configuration
+
+To generate and inspect configuration before startup:
+
+```sh
+sh moyai.sh configure --from-env --secrets-from-env --topology split --temporal bundled
+sh moyai.sh up
+```
+
+This writes a `compose.environment.json` override containing credential names
+without values. Keep the credentials exported whenever starting, recreating, or
+upgrading containers. If you export `MOYAI_TEMPORAL_DATABASE_PASSWORD`, it also
+stays in the invoking environment; otherwise the generated internal database
+password is retained in private `.env`.
+Database URLs and initial signing/encryption/password values are also kept in
+the environment. Missing application keys are still generated once and retained
+in the private installation volume.
+
+Omit `--secrets-from-env` to store supplied credentials in private `.env` instead.
+Automatic first startup uses the environment-credential mode.
+
+You can append a custom Compose override to `COMPOSE_FILE` in `.env`, for example
+to mount a private certificate bundle. The helper uses this directory's
+configured project, image and Compose files.
 
 Place your existing HTTPS ingress in front of the bound proxy port and preserve
 the incoming Host header. The default binding is `127.0.0.1:8787`. Set
@@ -97,10 +184,21 @@ container restarts. Temporal remains internal to the Compose network.
 ### Start
 
 ```sh
-docker compose up -d
+sh moyai.sh up
 docker compose ps -a
 docker compose logs setup
 ```
+
+The helper first validates configuration and any existing installation's image
+and data destination. It then waits for service health and, in split mode, the
+activation job's successful completion. It does not treat a running activation
+job as completed. A final HTTP/readiness check reports the application URL and
+explicitly states that model execution has not been checked.
+
+Use `sh moyai.sh up --timeout 600` to set the timeout, in seconds, for each
+readiness wait phase. A timeout leaves services and volumes in place for
+inspection. `sh moyai.sh status` checks HTTP/activation readiness without waiting
+behind a maintenance command's file lock.
 
 The setup service checks PostgreSQL, reads and writes a small encrypted storage
 probe, checks the Temporal namespace, lists the selected gateway model, and
@@ -110,8 +208,7 @@ checks do not execute a model or start a computer.
 Retrieve the generated initial password only in your private terminal:
 
 ```sh
-docker compose run --rm --no-deps setup \
-  /app/.venv/bin/python -m moyai.deployment password
+sh moyai.sh password
 ```
 
 Open `MOYAI_PUBLIC_URL`, sign in, and ask Moyai to create a small file in its
@@ -123,9 +220,13 @@ computer, or tool compatibility.
 Run connection and schema checks again with:
 
 ```sh
-docker compose run --rm --no-deps setup \
-  /app/.venv/bin/python -m moyai.deployment check
+sh moyai.sh check
 ```
+
+Use `sh moyai.sh validate` for offline configuration validation only. A retried
+initial activation reconciles its original native resume receipt, so a lost
+acknowledgement does not cause another resume or leave a confirmed activation
+permanently pending.
 
 ## State and recovery
 
@@ -145,9 +246,8 @@ service error first. Keep runtime containers stopped, correct the underlying
 problem, then explicitly resume preparation with the original image:
 
 ```sh
-docker compose run --rm --no-deps setup \
-  /app/.venv/bin/python -m moyai.deployment recover-setup
-docker compose up -d
+sh moyai.sh recover-setup
+sh moyai.sh up
 ```
 
 This command retains the original keys and uses the same migration guards.
@@ -163,7 +263,7 @@ Back up application data, objects, `.env`, and installation state. Keep the old 
 digest and current bundle for recovery.
 
 ```sh
-sh upgrade.sh ghcr.io/berriai/moyai@sha256:THE_CANDIDATE_DIGEST
+sh moyai.sh upgrade ghcr.io/berriai/moyai@sha256:THE_CANDIDATE_DIGEST
 ```
 
 For split mode, the helper requests a generation-bound drain from the live worker, waits for
@@ -187,7 +287,7 @@ or complete a reviewed repair for a partial migration. A changed schema may
 prevent rollback to the old image.
 
 If `begin-upgrade` times out or its controller exits while the original roles
-are still healthy, rerun `upgrade.sh` with the same candidate digest. The saved
+are still healthy, rerun the helper's `upgrade` command with the same candidate digest. The saved
 drain command retains its original worker, generation, and request key. Recovery
 checks the native receipt before sending anything: an accepted pause is observed
 without requesting another generation, and an uncommitted request can be retried
@@ -196,8 +296,7 @@ only against the same worker and generation.
 If the candidate controller exits during `resume`, run:
 
 ```sh
-docker compose run --rm --no-deps setup \
-  /app/.venv/bin/python -m moyai.deployment resume
+sh moyai.sh resume
 ```
 
 This also checks the saved command against the native receipt. A confirmed
@@ -206,6 +305,10 @@ paused result keeps the upgrade pending. Changed generations/workers and older
 interrupted records without an exact command require inspection; recovery does
 not invent their original intent. These retry rules do not retry an uncertain
 schema migration.
+
+`sh moyai.sh maintenance-status` reads the native maintenance generation and
+counts. `sh moyai.sh pause` requests a coordinated drain. These commands, along
+with `resume`, apply to split installations.
 
 Use the candidate bundle's Compose, proxy configuration, and upgrade helper
 together. Starting the proxy with `--no-deps` during replacement avoids rerunning
@@ -237,10 +340,17 @@ From the repository root:
 docker build --build-arg MOYAI_BUILD_SHA="$(git rev-parse HEAD)" -t moyai-local .
 ```
 
-Set `MOYAI_IMAGE=moyai-local` in a private copy of this bundle's `.env`. Release
+Then configure the checked-out bundle:
+
+```sh
+cd deploy/docker
+MOYAI_IMAGE=moyai-local sh moyai.sh up
+```
+
+Release
 images contain the actual Git revision; do not override it to bypass admission.
 The Docker Node stage runs `npm ci` and `npm run build:native`. The runtime image
-contains generated assets and the separately locked Python environments, without
+contains generated assets and the shared, locked Python environment, without
 Node or `node_modules`.
 
 The release workflow publishes AMD64/ARM64 images and attaches a digest-pinned

@@ -184,14 +184,17 @@ async def activate(environment: dict[str, str], state: dict, values: dict[str, s
     await health(values)
     status = await control(values, "status")
     if state.get("activation_pending"):
-        if status["generation"] != 0 or status["request_key"] != "bootstrap" or status["state"] != "drained":
-            raise InstallationError("Initial activation requires the untouched, drained bootstrap receipt.")
-        if any(status["counts"].values()):
+        if "activation_command" not in state:
+            if status["generation"] != 0 or status["request_key"] != "bootstrap" or status["state"] != "drained":
+                raise InstallationError("Initial activation requires the untouched, drained bootstrap receipt.")
+            if any(status["counts"].values()):
+                raise InstallationError("Initial activation cannot adopt existing queued or unfinished work.")
+            key = state.get("activation_intent") or uuid4().hex
+            state.update(activation_intent=key, activation_command=control_intent(values, status, key))
+            write_state(environment, state)
+        if not confirms(status, state["activation_command"], paused=False) and any(status["counts"].values()):
             raise InstallationError("Initial activation cannot adopt existing queued or unfinished work.")
-        key = state.get("activation_intent") or uuid4().hex
-        state["activation_intent"] = key
-        write_state(environment, state)
-        status = await control(values, "resume", request_key=key)
+        status = await reconcile_control(values, "resume", state["activation_command"])
         state["activation_pending"] = False
         write_state(environment, state)
     if status["paused"]:
@@ -311,7 +314,48 @@ async def standalone_upgrade(
     return {"upgrade": "prepared", "revision": state["revision"]}
 
 
+def validate_configuration(environment: dict[str, str]) -> dict:
+    state = read_state(environment)
+    values = configuration(environment, state)
+    if state is not None:
+        if state["phase"] != "initialized" or state.get("upgrade"):
+            raise InstallationError("An installation or maintenance operation is pending; inspect it before startup.")
+        if state["revision"] != values["MOYAI_BUILD_SHA"]:
+            raise InstallationError("The image revision changed; use the maintenance upgrade procedure.")
+    else:
+        values = configuration(environment, new_state(environment, values))
+    deployment_checks.validate(values)
+    return {"configuration": "valid", "service_connections": "not_checked"}
+
+
+async def ready(environment: dict[str, str], state: dict, values: dict[str, str]) -> dict:
+    if (
+        state["phase"] != "initialized" or state["revision"] != values["MOYAI_BUILD_SHA"]
+        or state.get("upgrade") or state.get("activation_pending")
+    ):
+        raise InstallationError("Startup or maintenance is incomplete; inspect setup and activation.")
+    if values["MOYAI_PRODUCT_MODE"] == "existing":
+        await health(values)
+        status = await control(values, "status")
+        if status["paused"] or not (state_path(environment).parent / "ingress/ready").is_file():
+            raise InstallationError("The installation has not opened ingress; inspect activation or maintenance.")
+    else:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get("http://app:8787/health")
+            response.raise_for_status()
+            body = response.json()
+            expected = {"status": "ok", "engine": "pydantic-ai", "durability": "temporal"}
+            if not isinstance(body, dict) or any(body.get(key) != value for key, value in expected.items()):
+                raise InstallationError("The application did not return its expected health response.")
+    return {
+        "installation": "serving", "http": "healthy", "revision": state["revision"],
+        "url": values["MOYAI_PUBLIC_URL"], "model_execution": "not_checked",
+    }
+
+
 async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dict:
+    if args.command == "validate":
+        return validate_configuration(environment)
     if args.command == "namespace":
         if environment.get("MOYAI_TEMPORAL_MODE") != "bundled":
             raise InstallationError("Namespace creation is restricted to the bundled Temporal server.")
@@ -341,6 +385,8 @@ async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dic
     if state is None:
         raise InstallationError("Run the initialization service first.")
     values = configuration(environment, state, role="worker")
+    if args.command == "ready":
+        return await ready(environment, state, values)
     if args.command == "begin-upgrade":
         return await begin_upgrade(args, environment, state, values)
     if args.command == "apply-upgrade":
@@ -411,7 +457,10 @@ async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dic
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("initialize", "check", "activate", "status", "resume", "namespace", "apply-upgrade", "recover-setup"):
+    for command in (
+        "initialize", "validate", "ready", "check", "activate", "status", "resume", "namespace", "apply-upgrade",
+        "recover-setup",
+    ):
         commands.add_parser(command)
     upgrade = commands.add_parser("begin-upgrade")
     upgrade.add_argument("--revision", required=True)
@@ -443,6 +492,11 @@ def main() -> None:
             lock = standalone_lock(environment) if args.role == "standalone" else nullcontext()
             with lock:
                 start(["serve", "--host", "0.0.0.0", "--port", "8787"])
+            return
+        if args.command in {"validate", "ready", "status"}:
+            # Atomic state-file replacement gives readers a coherent snapshot.
+            # Read-only checks must not wait behind a long-running maintenance command.
+            print(json.dumps(asyncio.run(dispatch(args, environment)), sort_keys=True))
             return
         lock = state_path(environment).parent / ".installation.lock"
         lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
