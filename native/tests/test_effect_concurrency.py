@@ -35,6 +35,7 @@ from moyai.runtime import Runtime
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
@@ -188,6 +189,7 @@ async def qualify_parallel_children(runtime, active, *, legacy=False):
         TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent]
         count = len(scenario.executed)
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
         assert len(scenario.executed) == count
@@ -231,6 +233,7 @@ async def test_cancel_waiting_children_leaves_only_dispatched_effect_uncertain(r
             await receipts.reserve(admitted.scope, "never-replay-unknown", "shell", {"child": 99})
         assert [r.state for r in await effect_rows(runtime, session.id)] == expected
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
         assert len(scenario.executed) == len(expected)

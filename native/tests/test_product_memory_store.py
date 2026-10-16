@@ -30,6 +30,7 @@ from moyai.runtime import Runtime
 from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Set a disposable local PostgreSQL URL.")
@@ -454,6 +455,7 @@ async def test_canonical_capture_in_real_temporal_replays_without_rewriting_memo
                 assert (await asyncio.wait_for(execution.result(), 45))["status"] == "completed"
                 history = await execution.fetch_history()
             await Replayer(
+                interceptors=[ActivityCapacity()],
                 workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
             ).replay_workflow(history)
         view = await product.memory.listing(product.principal.grant)

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     data_dir: Path = Field(default=Path(".data"), validation_alias="DATA_DIR")
     database_url: str = Field(default="", validation_alias="MOYAI_DATABASE_URL")
+    database_pool_size: int = Field(default=8, ge=1, le=256, validation_alias="MOYAI_DATABASE_POOL_SIZE")
     product_mode: Literal["standalone", "existing"] = Field(
         default="standalone", validation_alias="MOYAI_PRODUCT_MODE",
     )
@@ -55,6 +56,10 @@ class Settings(BaseSettings):
     http_shutdown_seconds: int = Field(
         default=20, ge=1, le=270, validation_alias="MOYAI_HTTP_SHUTDOWN_SECONDS",
     )
+    temporal_worker_activities: int = Field(default=120, ge=1, le=10000, validation_alias="TEMPORAL_WORKER_ACTIVITIES")
+    temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000, validation_alias="TEMPORAL_WORKFLOW_CACHE_SIZE")
+    temporal_dispatch_concurrency: int = Field(default=10, ge=1, le=1000, validation_alias="TEMPORAL_DISPATCH_CONCURRENCY")
+    temporal_dispatch_batch_size: int = Field(default=200, ge=1, le=10000, validation_alias="TEMPORAL_DISPATCH_BATCH_SIZE")
     modal_app: str = Field(
         default="moyai-pydantic",
         validation_alias=AliasChoices("MOYAI_MODAL_APP", "MODAL_APP_NAME"),

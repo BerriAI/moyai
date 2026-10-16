@@ -28,6 +28,7 @@ from moyai.effects import EffectReceipts, claim_browser_dispatch, effect_id, req
 from moyai.models import ComputerOperation, Effect, User, new_id
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
@@ -326,6 +327,7 @@ async def test_native_temporal_browser_receipts_and_pre_guard_history_replay(run
         runtime.agent = build(False)
         TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent]
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
     assert len(calls) == 1

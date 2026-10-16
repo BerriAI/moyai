@@ -19,6 +19,7 @@ from moyai.contracts import NewMessage, NewSession
 from moyai.models import Session, Turn, User, new_id
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
@@ -64,6 +65,7 @@ async def test_native_tools_skills_memory_delegation_and_replay(runtime, active)
             history = await handle.fetch_history()
         assert result["status"] == "completed"
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
     plan = await runtime.stores.plan(session.id).get_items()

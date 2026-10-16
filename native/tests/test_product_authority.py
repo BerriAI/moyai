@@ -48,6 +48,7 @@ from moyai.settings_runtime import SettingsSkills
 from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 pytestmark = pytest.mark.skipif(
@@ -466,6 +467,7 @@ async def test_product_grant_and_canonical_memory_run_in_real_temporal_and_repla
                 assert result["status"] == "completed"
                 history = await execution.fetch_history()
             await Replayer(
+                interceptors=[ActivityCapacity()],
                 workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
             ).replay_workflow(history)
         memory = await runtime.stores.memory.read(

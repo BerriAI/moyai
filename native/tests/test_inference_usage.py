@@ -39,6 +39,7 @@ from moyai.inference_usage import (
 )
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 SCOPE = RunScope("session", "turn", "actor", "route-alias")
@@ -470,7 +471,7 @@ async def test_native_temporal_retry_counts_paid_attempts_and_replay_does_not_bi
                 result = await asyncio.wait_for(handle.result(), timeout=45)
                 history = await handle.fetch_history()
             assert result["status"] == "completed"
-            await Replayer(workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()],
+            await Replayer(interceptors=[ActivityCapacity()], workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()],
                            data_converter=converter).replay_workflow(history)
     finally:
         for model in runtime.models.values():

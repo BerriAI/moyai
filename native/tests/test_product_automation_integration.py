@@ -37,6 +37,7 @@ from moyai.settings import Settings
 from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 pytestmark = pytest.mark.skipif(
@@ -179,6 +180,7 @@ async def test_native_runtime_api_tools_and_worker_replay(
                 assert result["status"] == "completed"
                 history = await execution.fetch_history()
             await Replayer(
+                interceptors=[ActivityCapacity()],
                 workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
             ).replay_workflow(history)
         async with runtime.database.sessions() as db:

@@ -44,6 +44,7 @@ from moyai.settings_runtime import (
 )
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
@@ -504,7 +505,7 @@ async def test_real_temporal_schedule_pause_delete_and_durable_admission(runtime
                 )
                 assert (await execution.result())["status"] == "admitted"
                 history = await execution.fetch_history()
-                await Replayer(workflows=SETTINGS_WORKFLOWS, data_converter=converter).replay_workflow(history)
+                await Replayer(interceptors=[ActivityCapacity()], workflows=SETTINGS_WORKFLOWS, data_converter=converter).replay_workflow(history)
                 assert (await client.delete(f"/api/settings/automations/{identity}")).status_code == 200
                 with pytest.raises(RPCError) as missing:
                     await handle.describe()
@@ -669,6 +670,7 @@ async def test_saved_skill_runs_through_integrated_native_temporal_agent_and_rep
             assert result["status"] == "completed"
             history = await execution.fetch_history()
         await Replayer(
+            interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
         ).replay_workflow(history)
     async with runtime.database.sessions() as db:

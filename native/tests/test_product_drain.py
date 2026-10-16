@@ -30,6 +30,7 @@ from moyai.runtime import Runtime
 from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
+from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 pytestmark = pytest.mark.skipif(
@@ -285,6 +286,7 @@ async def test_temporal_parks_before_prepare_then_resumes_without_repeating_mode
                 history = await handle.fetch_history()
             assert calls == [True]
             await Replayer(
+                interceptors=[ActivityCapacity()],
                 workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
             ).replay_workflow(history)
             assert calls == [True]
@@ -357,6 +359,7 @@ async def test_active_parallel_batch_settles_before_parking_without_cancellation
                 assert (await asyncio.wait_for(handle.result(), 30))["status"] == "completed"
                 history = await handle.fetch_history()
             await Replayer(
+                interceptors=[ActivityCapacity()],
                 workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
             ).replay_workflow(history)
             assert sorted(scenario.executed) == list(range(5))

@@ -33,6 +33,7 @@ from .contracts import (
     RunScope,
     SteeringInput,
 )
+from .dispatch_wakeups import notify_dispatch
 from .models import (
     Base,
     ComputerOperation,
@@ -93,7 +94,11 @@ class Database:
             if not settings.postgres_url:
                 raise ValueError("Native database schemas require PostgreSQL.")
             connect_args = {"server_settings": {"search_path": f'"{self.execution_schema}",pg_catalog'}}
-        self.engine = create_engine(settings.sqlalchemy_url, pool_pre_ping=True, connect_args=connect_args)
+        self.engine = create_engine(
+            settings.sqlalchemy_url, pool_pre_ping=True, connect_args=connect_args,
+            **({"pool_size": settings.database_pool_size, "max_overflow": 0, "pool_timeout": 10}
+               if settings.postgres_url else {}),
+        )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         if settings.sqlalchemy_url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
@@ -245,9 +250,11 @@ class Database:
             if not db.in_transaction() or db.get_bind().engine is not self.engine.sync_engine:
                 raise ValueError("Admission requires a transaction on this native database.")
             yield db  # The caller owns the entire receipt/admission transaction.
+            await notify_dispatch(db, self.settings)
         else:
             async with self.sessions.begin() as transaction:
                 yield transaction
+                await notify_dispatch(transaction, self.settings)
 
     async def create_session(
         self, actor: User, body: NewSession, *, db: AsyncSession | None = None,
@@ -492,37 +499,55 @@ class Database:
         return grants
 
     async def claim_next(self) -> Turn | None:
-        """Atomically own a queued turn. Network dispatch happens after this transaction."""
+        claimed = await self.claim_batch(1)
+        return claimed[0] if claimed else None
+
+    async def claim_batch(self, limit: int) -> list[Turn]:
+        """Reserve at most one turn per session; RPCs happen after this commit."""
+        if limit < 1:
+            raise ValueError("Dispatch batch size must be positive.")
+        claimed_turns: list[Turn] = []
+        claimed_sessions: set[str] = set()
         async with self.sessions.begin() as db:
             if self.product_drain is not None and not await self.product_drain.admit(db):
-                return None
-            candidates = (await db.scalars(select(Turn).join(
-                Session, Session.id == Turn.session_id
-            ).where(
-                Turn.status == "queued", Session.active_turn.is_(None),
-                Session.deleted.is_(False),
-            ).order_by(Turn.created_at, Turn.id).limit(20))).all()
-            for turn in candidates:
-                claimed = await db.scalar(update(Session).where(
-                    Session.id == turn.session_id, Session.active_turn.is_(None),
+                return []
+            while len(claimed_turns) < limit:
+                before = len(claimed_turns)
+                candidates = (await db.scalars(select(Turn).join(
+                    Session, Session.id == Turn.session_id
+                ).where(
+                    Turn.status == "queued", Session.active_turn.is_(None),
                     Session.deleted.is_(False),
-                ).values(revision=Session.revision + 1).returning(Session.id))
-                if claimed is not None:
+                ).order_by(Turn.created_at, Turn.id).limit(limit - len(claimed_turns))
+                  .with_for_update(of=Session, skip_locked=True))).all()
+                if not candidates:
+                    break
+                for turn in candidates:
+                    if turn.session_id in claimed_sessions:
+                        continue
+                    claimed = await db.scalar(update(Session).where(
+                        Session.id == turn.session_id, Session.active_turn.is_(None),
+                        Session.deleted.is_(False),
+                    ).values(revision=Session.revision + 1).returning(Session.id))
+                    if claimed is None:
+                        continue
                     admitted = await db.scalar(update(Turn).where(
                         Turn.id == turn.id, Turn.status == "queued",
                     ).values(status="starting").returning(Turn.id))
-                    if admitted is None:
-                        continue
-                    await db.execute(update(Session).where(Session.id == turn.session_id).values(
-                        active_turn=turn.id, status="queued", updated_at=now(),
-                    ))
-                    turn.status = "starting"
-                    return turn
-        return None
+                    if admitted is not None:
+                        await db.execute(update(Session).where(Session.id == turn.session_id).values(
+                            active_turn=turn.id, status="queued", updated_at=now(),
+                        ))
+                        turn.status = "starting"
+                        claimed_turns.append(turn)
+                        claimed_sessions.add(turn.session_id)
+                if len(claimed_turns) == before:
+                    break
+        return claimed_turns
 
     async def steer_queued(self, actor: User, turn_id: str) -> Turn:
         """Promote saved input into the SDK's existing durable enqueue path."""
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             actor_grant = await self._actor_product_grant(db, actor)
             turn = await db.get(Turn, turn_id)
             if turn is None or turn.actor_id != actor.id:
@@ -553,11 +578,30 @@ class Database:
                 turn.status = "steering"
             return turn
 
-    async def starting_turns(self) -> list[Turn]:
+    async def dispatch_boundary(self) -> tuple[str, str] | None:
         async with self.sessions() as db:
-            return list((await db.scalars(
-                select(Turn).where(Turn.status == "starting").limit(100)
-            )).all())
+            row = (await db.execute(select(Turn.created_at, Turn.id).where(
+                Turn.status.in_(["queued", "starting"]),
+            ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))).first()
+            return (row[0], row[1]) if row is not None else None
+
+    async def starting_turns(
+        self, *, limit: int = 100, after: tuple[str, str] | None = None,
+        through: tuple[str, str] | None = None,
+    ) -> list[Turn]:
+        async with self.sessions() as db:
+            query = select(Turn).where(Turn.status == "starting")
+            if after is not None:
+                stamp, identity = after
+                query = query.where(or_(
+                    Turn.created_at > stamp, and_(Turn.created_at == stamp, Turn.id > identity),
+                ))
+            if through is not None:
+                stamp, identity = through
+                query = query.where(or_(
+                    Turn.created_at < stamp, and_(Turn.created_at == stamp, Turn.id <= identity),
+                ))
+            return list((await db.scalars(query.order_by(Turn.created_at, Turn.id).limit(limit))).all())
 
     async def unsettled_turns(self) -> list[Turn]:
         async with self.sessions() as db:
@@ -789,7 +833,7 @@ class Database:
             ]
 
     async def settle(self, turn_id: str, *, snapshot: str | None = None, warning: str | None = None) -> None:
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             session_id = await db.scalar(select(Turn.session_id).where(Turn.id == turn_id))
             if session_id is None:
                 raise ValueError("Unknown turn.")
@@ -834,7 +878,7 @@ class Database:
             session.active_turn = None
 
     async def fail(self, turn_id: str, message: str, *, only_unsettled: bool = False) -> None:
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             # Resolve ownership without caching a mutable Turn. Stop, deletion
             # and answer publication fence the session first; take that same
             # lock before reading the outcome this failure is allowed to settle.
@@ -868,7 +912,7 @@ class Database:
                 session.status = "failed"
 
     async def stop(self, actor: User, session_id: str) -> str | None:
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             session = await self.allowed_session(db, session_id, actor)
             if actor.id != session.owner_id and actor.role != "admin":
                 raise HTTPException(403, "Only the conversation owner or an administrator can stop it.")
@@ -890,7 +934,7 @@ class Database:
 
     async def delete_session(self, actor: User, session_id: str) -> None:
         """Hide a session and fence work atomically; the existing Stop dispatcher cancels execution."""
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             locked = await db.scalar(update(Session).where(
                 Session.id == session_id, Session.owner_id == actor.id,
             ).values(revision=Session.revision + 1).returning(Session.id))
@@ -929,7 +973,7 @@ class Database:
             session.updated_at = now()
 
     async def stopped(self, turn_id: str, conversation: str | None = None) -> None:
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             session_id = await db.scalar(select(Turn.session_id).where(Turn.id == turn_id))
             if session_id is None:
                 return
@@ -1017,7 +1061,7 @@ class Database:
             return SteeringInput(turn.id, self.security.unseal(turn.prompt).decode(), "asap")
 
     async def steering_receipt(self, turn_id: str, enqueue_id: str | None) -> None:
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             turn = await db.get(Turn, turn_id)
             if turn is None or turn.status not in ("steering", "signal_sent", "accepted"):
                 return
@@ -1055,7 +1099,7 @@ class Database:
         self, actor: User, session_id: str, previous_id: str,
         request_key: str, results: dict[str, Any], fingerprint: str,
     ) -> Turn:
-        async with self.sessions.begin() as db:
+        async with self._admission_session(None) as db:
             product_grant = await self._actor_product_grant(db, actor)
             if self.product_authority_enabled:
                 locked_actor = await db.scalar(update(User).where(

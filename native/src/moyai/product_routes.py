@@ -186,6 +186,7 @@ class ProductReadService:
 
     async def native_recheck(self, reader: Reader, ids: list[str], *, deleted: bool = False) -> set[str]:
         await self.current(reader)
+        mapped: dict[str, str] = {}
         async with self.runtime.database.sessions() as db:
             valid = set(await db.scalars(select(Session.id).where(self.visible(reader, deleted=deleted),
                                                                 Session.id.in_(ids))))
@@ -197,9 +198,12 @@ class ProductReadService:
                     ProductContinuation.source_schema == self.continuations.source_schema,
                     ProductContinuation.native_session_id.in_(valid),
                 ))).all())
-                source_allowed = await self.history.recheck(reader.principal, list(mapped.values()))
-                valid -= {native for native, source in mapped.items() if source not in source_allowed}
-            return valid
+        # Canonical revalidation reads native controls through its own connection.
+        # Release this snapshot before it can borrow from the same bounded pool.
+        if self.continuations and self.history and reader.principal and not deleted:
+            source_allowed = await self.history.recheck(reader.principal, list(mapped.values()))
+            valid -= {native for native, source in mapped.items() if source not in source_allowed}
+        return valid
 
     async def native_list(
         self, reader: Reader, *, limit: int, offset: int, archived: bool = False, deleted: bool = False,
