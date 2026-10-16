@@ -97,17 +97,11 @@ jobs:
       - name: Test durable swarm mode and mixed-harness delegation
         if: matrix.group == 'recovery'
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_execution_deadline.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py tests/test_swarm_timing.py tests/test_swarm_time_controls.py tests/test_swarm_time_runtime.py tests/test_swarm_broker_timing.py tests/test_swarm_chat.py
-  docker:
-    # Keep one explicit success gate for every matrix result and the real image.
-    needs: regression
-    if: ${{ always() }}
+  image:
+    name: Docker image and startup
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Require every regression group to pass
-        env:
-          REGRESSION_RESULT: ${{ needs.regression.result }}
-        run: test "$REGRESSION_RESULT" = success
       - uses: actions/checkout@v4
       - name: Build production image
         run: docker build -t moyai-docker-smoke .
@@ -119,3 +113,18 @@ jobs:
         with:
           name: docker-startup-evidence
           path: /tmp/docker-evidence
+  docker:
+    # Build and exercise the real image alongside regressions, then retain the
+    # existing success gate for both branches of the workflow.
+    needs: [regression, image]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every regression group and Docker startup to pass
+        env:
+          REGRESSION_RESULT: ${{ needs.regression.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          test "$REGRESSION_RESULT" = success
+          test "$IMAGE_RESULT" = success
