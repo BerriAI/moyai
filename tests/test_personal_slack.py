@@ -1,4 +1,5 @@
 """Real ASGI OAuth and scoped-read requests with synthetic upstream token identities."""
+import json
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -259,6 +260,34 @@ def test_refresh_disconnect_cas_and_redacted_check(personal):
     response = client.post('/api/connections/slack/personal/check')
     assert response.status_code == 409
     assert PERSONAL not in response.text
+    assert not service.configured('google:alice')
+
+
+def test_health_check_keeps_native_authority_but_reconnect_rotates_it(personal):
+    from app.connection_authority import authority
+
+    _, client, service, _, _ = personal
+    connect(personal)
+
+    def current_authority():
+        row = service.row('google:alice')
+        return authority(json.loads(service.security.decrypt(row['encrypted'])), row['encrypted'])
+
+    before = current_authority()
+    revision = service.row('google:alice')['revision']
+    assert client.post('/api/connections/slack/personal/check').status_code == 200
+    assert current_authority() == before
+    assert service.row('google:alice')['revision'] != revision
+    connect(personal)
+    assert current_authority() != before
+
+
+def test_disconnect_during_health_verification_cannot_be_undone(personal):
+    _, client, service, _, state = personal
+    connect(personal)
+    state['hook'] = lambda endpoint: service.disconnect('google:alice') if endpoint == 'auth.test' else None
+    response = client.post('/api/connections/slack/personal/check')
+    assert response.status_code == 409 and PERSONAL not in response.text
     assert not service.configured('google:alice')
 
 

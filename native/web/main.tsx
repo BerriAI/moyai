@@ -1,0 +1,836 @@
+import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from "react"
+import { createRoot } from "react-dom/client"
+import Markdown from "react-markdown"
+import remarkGfm from "remark-gfm"
+import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, ListTree, LockKeyhole, LogOut, Menu, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import "@/theme.css"
+import "./style.css"
+import "./product-shell.css"
+import logo from "../../app/static/moyai-logo.png"
+import { api, ApiError, csrfToken, setCsrf } from "./api"
+import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
+import { ComputerPanel } from "./computer"
+import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
+import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
+import { WorkspaceOverview, SubagentPanel } from "./workspace"
+import { PullRequestPanel } from "./pull-request"
+import { FilesPanel, OutputPanel } from "./output"
+import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
+import type { OutputResource, WorkspaceTab } from "./workspace-types"
+import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
+import { applyLiveEvent, emptyLiveTranscript, liveCommentary, mergeActivity, type LiveEvent } from "./live-transcript"
+import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
+import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
+import { previewFileLink, type OpenFile } from "./file-links"
+import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
+import { ProductCredentialRequest } from "./product-credentials"
+
+const Home = React.lazy(() => import("./home").then(module => ({ default: module.Home })))
+const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
+const ProductHistory = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistory })))
+const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
+
+type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
+type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request"; url?: string }
+
+type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing" }
+type SessionInventory = { sessions: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
+type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
+type Plan = { id: string; content: string; status: string }
+type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
+type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
+type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
+type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type Activity = LiveEvent
+type Question = { header: string; question: string; multi_select?: boolean; options: { label: string; description?: string }[] }
+const settingsDestinations = [
+  { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
+  { page: "connections", label: "Connections" }, { page: "secrets", label: "Secrets" },
+  { page: "personal-slack", label: "Personal Slack", productOnly: true },
+  { page: "users", label: "Users", adminOnly: true }, { page: "performance", label: "Performance", adminOnly: true },
+  { page: "usage", label: "Spend & usage", adminOnly: true },
+]
+function currentRoute() {
+  const hash = location.hash.slice(1)
+  if (hash === "tasks") return ""
+  if (hash === "spend") return "settings/usage"
+  if (settingsDestinations.some(item => item.page === hash)) return `settings/${hash}`
+  return hash.startsWith("run=") || hash.startsWith("settings/") ? hash : decodeRoute(hash)
+}
+function decodeRoute(value: string) { try { return decodeURIComponent(value) } catch { return value } }
+const searchSessions: PaletteSearchAdapter = (query, { signal, limit }) => api(
+  query ? `/history/search?source=all&limit=${limit}&q=${encodeURIComponent(query)}` : `/history/sessions?source=all&limit=${limit}`,
+  "GET", undefined, signal,
+)
+type SessionReference = Pick<PaletteSession, "id" | "source" | "url"> & { source_session_id?: string }
+export function sessionReferenceHash(session: SessionReference): string {
+  const original = session.url?.match(/^\/#run=([a-f0-9]{32})$/)?.[1]
+  return original ? `run=${original}` : session.source === "legacy" ? `run=${encodeURIComponent(session.id)}` : encodeURIComponent(session.id)
+}
+export function continuationReference(session: SessionReference, original: string): SessionReference | null {
+  return /^[a-f0-9]{32}$/.test(original) && session.source === "native"
+    && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(session.id)
+    && session.source_session_id === original && session.url === `/#run=${original}` ? session : null
+}
+function openSessionReference(session: SessionReference) {
+  location.hash = sessionReferenceHash(session)
+}
+
+function Choice({ value, onChange, options, label }: { value: string; onChange: (value: string) => void; options: { value: string; label: string }[]; label: string }) {
+  return <Select value={value} onValueChange={onChange}>
+    <SelectTrigger aria-label={label}><SelectValue /></SelectTrigger>
+    <SelectContent>{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+  </Select>
+}
+
+function App() {
+  const [me, setMe] = useState<Me | null>(null)
+  const [ready, setReady] = useState(false)
+  const [error, setError] = useState("")
+  const [folders, setFolders] = useState<SessionFolder[]>([])
+  const refreshVersion = useRef(0)
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [sessionPageCount, setSessionPageCount] = useState(1)
+  const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, notice: "" })
+  const [selected, setSelected] = useState(currentRoute)
+  const [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceRequest | null>(null)
+  const [prStates, setPrStates] = useState<Record<string, PRSummary[]>>({})
+  const [prRefresh, setPrRefresh] = useState(0)
+  const [connections, setConnections] = useState<Connection[]>([])
+  const [listView, setListView] = useState<SessionListView>("active")
+  const listViewRef = useRef(listView)
+  listViewRef.current = listView
+  const [mobileNav, setMobileNav] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [sidebarHidden, setSidebarHidden] = useState(false)
+  const [currentSession, setCurrentSession] = useState<Session | null>(null)
+  const [initialConversation, setInitialConversation] = useState<{ scope: string; value: NewConversation } | null>(null)
+  const [routeRevision, setRouteRevision] = useState(0)
+  const [continued, setContinued] = useState<{ scope: string; original: string; id: string } | null>(null)
+  const continuedNow = useRef(continued)
+  continuedNow.current = continued
+  const [nativeRoute, setNativeRoute] = useState<{ key: string; ready?: boolean; error?: string } | null>(null)
+  const lastConversation = useRef("")
+  const settingsOpen = selected === "settings" || selected.startsWith("settings/")
+  const historical = selected.startsWith("run=")
+  const scopeKey = `${me?.user.id}:${me?.user.role}:${me?.user.individual}:${me?.csrf}`
+  const routeScope = `${scopeKey}:${routeRevision}`, routeKey = `${routeScope}:${selected}`
+  const originalId = historical ? decodeRoute(selected.slice(4)) : ""
+  const acceptedStart = (initialConversation?.scope === scopeKey && initialConversation.value.session.id === selected)
+    || currentSession?.id === selected
+  const nativeSelected = !selected || settingsOpen ? "" : historical
+    ? continued?.scope === routeScope && continued.original === originalId ? continued.id : ""
+    : me?.product_mode !== "existing" || acceptedStart || (nativeRoute?.key === routeKey && nativeRoute.ready) ? selected : ""
+  const routeError = nativeRoute?.key === routeKey ? nativeRoute.error : undefined
+  useEffect(() => {
+    if (!me || me.product_mode !== "existing" || !selected || settingsOpen || historical) return
+    const controller = new AbortController(), key = routeKey
+    // A native UUID can itself be an alias. Only the authenticated read adapter
+    // may supply that mapping; ordinary session reads still enforce native ACLs.
+    void api<{ session: SessionReference }>(`/history/sessions/${encodeURIComponent(selected)}?source=native`, "GET", undefined, controller.signal).then(({ session }) => {
+      if (controller.signal.aborted || currentRoute() !== selected) return
+      if (session.id !== selected || session.source !== "native") throw new Error("The session reference changed. Reopen the conversation.")
+      if (session.source_session_id) {
+        const reference = continuationReference(session, session.source_session_id)
+        if (!reference) throw new Error("The saved continuation reference is invalid.")
+        const original = session.source_session_id
+        setContinued({ scope: routeScope, original, id: reference.id })
+        history.replaceState(null, "", `#run=${original}`)
+        setSelected(`run=${original}`)
+      } else setNativeRoute({ key, ready: true })
+    }).catch(reason => {
+      if (!controller.signal.aborted && currentRoute() === selected) {
+        setCurrentSession(null); setInitialConversation(null); setContinued(null)
+        setNativeRoute({ key, error: reason instanceof Error ? reason.message : "The conversation could not be authorized." })
+      }
+    })
+    return () => controller.abort()
+  }, [me?.product_mode, selected, settingsOpen, historical, routeKey, routeScope])
+  function openHistorySession(reference: SessionReference) {
+    if (reference.source !== "native") { openSessionReference(reference); return }
+    if (!historical || currentRoute() !== selected) return
+    const authorized = continuationReference(reference, originalId)
+    if (!authorized) { setError("The saved continuation reference is invalid. Refresh this history."); return }
+    setContinued({ scope: routeScope, original: originalId, id: authorized.id })
+    void refresh().catch(reason => setError(String(reason)))
+  }
+  useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
+  const refresh = useCallback(async () => {
+    const version = ++refreshVersion.current
+    setInventoryState(previous => ({ ...previous, loading: true }))
+    const inventory = async () => {
+      const rows = new Map<string, Session>(), notices = new Set<string>()
+      let cursor: string | null = null, hasMore = false
+      for (let page = 0; page < sessionPageCount; page++) {
+        const next: SessionInventory = await api(`/history/sessions?source=all&limit=100&archived=${listView === "archived"}&deleted=${listView === "deleted"}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)
+        if (version !== refreshVersion.current || listViewRef.current !== listView) return null
+        for (const row of next.sessions) {
+          let unread = row.unread
+          if (row.source === "legacy" && row.read_marker_key && row.completion_marker) {
+            try { unread = localStorage.getItem(row.read_marker_key) !== row.completion_marker } catch { unread = false }
+          }
+          rows.set(sessionKey(row), { ...row, unread })
+        }
+        if (next.notice) notices.add(next.notice)
+        hasMore = Boolean(next.has_more && next.next_cursor)
+        if (!hasMore || next.next_cursor === cursor) break
+        cursor = next.next_cursor!
+      }
+      return { rows: [...rows.values()], hasMore, notice: [...notices].join(" ") }
+    }
+    try {
+      const [result, accounts, groups] = await Promise.all([
+        inventory(), api<Connection[]>("/connections"), api<SessionFolder[]>("/session-folders"),
+      ])
+      if (!result || version !== refreshVersion.current || listViewRef.current !== listView) return
+      setSessions(result.rows); setConnections(accounts); setFolders(groups)
+      setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
+    } catch (reason) {
+      if (version !== refreshVersion.current) return
+      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
+      throw reason
+    } finally {
+      if (version === refreshVersion.current) setInventoryState(previous => ({ ...previous, loading: false }))
+    }
+  }, [listView, sessionPageCount])
+
+  useEffect(() => {
+    api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
+    const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
+    const accessChanged = () => {
+      const requestCsrf = csrfToken()
+      ++refreshVersion.current
+      setSessions([]); setConnections([]); setFolders([]); setPrStates({}); setPrRefresh(value => value + 1); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false)
+      setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1)
+      void api<Me>("/me").then(value => { if (csrfToken() === requestCsrf) { setCsrf(value.csrf); setMe(value) } }, () => {})
+    }
+    const navigate = () => {
+      const id = currentRoute()
+      const alias = continuedNow.current
+      if (alias && (id === alias.id || id === `run=${alias.original}`)) {
+        // Revisiting the same logical conversation through its native alias
+        // must not discard an in-progress composer or its panel tabs.
+        history.replaceState(null, "", `#run=${alias.original}`)
+        setSelected(`run=${alias.original}`); setMobileNav(false)
+        return
+      }
+      if (id && id !== "settings" && !id.startsWith("settings/")) lastConversation.current = id
+      setSelected(id); setMobileNav(false); setCurrentSession(null)
+      setContinued(null); setNativeRoute(null)
+      setWorkspaceRequest(request => request?.sessionId === id ? request : null)
+    }
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.repeat || document.querySelector('[data-slot="dialog-content"][data-state="open"]')) return
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); location.hash = "" }
+    }
+    window.addEventListener("moyai:signed-out", signedOut)
+    window.addEventListener("moyai:access-changed", accessChanged)
+    window.addEventListener("hashchange", navigate)
+    window.addEventListener("keydown", shortcut)
+    return () => { window.removeEventListener("moyai:access-changed", accessChanged); window.removeEventListener("moyai:signed-out", signedOut); window.removeEventListener("hashchange", navigate); window.removeEventListener("keydown", shortcut) }
+  }, [])
+  useEffect(() => {
+    if (!me) return
+    let live = true
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try { await refresh() } catch (e) { if (live) setError(String(e)) }
+      if (live) timer = setTimeout(poll, 4000)
+    }
+    void poll()
+    return () => { live = false; ++refreshVersion.current; clearTimeout(timer) }
+  }, [me, refresh])
+
+  const prSessionIds = [...new Set([...sessions.filter(row => !row.deleted && !sessionIsReadOnly(row)).map(row => row.id), ...(nativeSelected ? [nativeSelected] : [])])].sort().join(",")
+  const connectionVersion = JSON.stringify(connections.map(item => [item.id, item.enabled, item.shared, item.revision]))
+  useEffect(() => {
+    setPrStates({})
+    if (!me || !prSessionIds) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const ids = prSessionIds.split(",")
+        const batches = await Promise.all(Array.from({ length: Math.ceil(ids.length / 100) }, (_, index) =>
+          api<Record<string, PRSummary[]>>("/pull-requests/statuses", "POST", { session_ids: ids.slice(index * 100, (index + 1) * 100) }, controller.signal),
+        ))
+        const states = Object.assign({}, ...batches) as Record<string, PRSummary[]>
+        if (!controller.signal.aborted) setPrStates(states)
+      } catch {
+        if (!controller.signal.aborted) setPrStates({})
+      }
+      if (!controller.signal.aborted) timer = setTimeout(poll, 20000)
+    }
+    void poll()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [me?.user.id, prSessionIds, connectionVersion, prRefresh])
+
+  if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
+  if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError("") }} />
+  const newSession = () => { location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
+  const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
+  const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
+  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
+    setWorkspaceRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1, tab: "computer" }))
+    location.hash = sessionId; setMobileNav(false)
+  }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
+    {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
+      <a href="#" className="brand"><img src={logo} alt="" /><span>Moyai<small>LiteLLM</small></span></a>
+      <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
+      <Button variant="ghost" className="rail-palette-trigger" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={16} /><span>Search sessions & commands</span><span className="key-hint">⌘K</span></Button>
+      <nav className="rail-destinations" aria-label="Workspace tools">
+        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><BookOpen />Skills</Button>
+        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
+        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
+      </nav>
+      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
+        hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
+        onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
+        onOpenPullRequest={(sessionId, url) => { setWorkspaceRequest(previous => ({ sessionId, url, tab: "pull-request", sequence: (previous?.sequence ?? 0) + 1 })); location.hash = sessionId; setMobileNav(false) }} />
+      <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Settings" onClick={() => navigateSettings("overview")}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => {
+        try { const result = await api<{ logout_url?: string }>("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")); if (result.logout_url) navigateAuth(result.logout_url, true) }
+        catch (reason) { setError(String(reason)) }
+      }}><LogOut /></Button></div>
+    </aside>}
+    <main className="main">
+      {!settingsOpen && <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>}
+      {!settingsOpen && sidebarHidden && <Button className="restore-sidebar" variant="outline" size="icon-sm" aria-label="Show sidebar" onClick={() => setSidebarHidden(false)}><PanelLeft size={16} /></Button>}
+      {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
+      {settingsOpen
+        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} /></React.Suspense>
+        : historical && !nativeSelected
+        ? <React.Suspense fallback={<div className="center muted">Opening saved history…</div>}><ProductHistory key={`${routeScope}:${selected}`} sessionId={originalId} scopeKey={routeScope} onOpenSession={openHistorySession} onStartNewNative={newSession} /></React.Suspense>
+        : nativeSelected
+        ? <Conversation key={`${scopeKey}:${nativeSelected}`} id={nativeSelected} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refresh} workspaceRequest={workspaceRequest?.sessionId === nativeSelected ? workspaceRequest : null} pullRequests={prStates[nativeSelected] ?? []} onPRUpdated={() => setPrRefresh(value => value + 1)}
+          originalSessionId={originalId || undefined} authorityKey={routeScope}
+          initial={initialConversation?.scope === scopeKey && initialConversation.value.session.id === nativeSelected ? initialConversation.value : undefined}
+          onSession={session => { setCurrentSession(session); setInitialConversation(previous => previous?.value.session.id === (session?.id ?? nativeSelected) ? null : previous) }} />
+        : selected
+        ? <div className="center" role={routeError ? "alert" : "status"}>{routeError || "Opening conversation…"}{routeError && <Button variant="outline" onClick={() => setRouteRevision(value => value + 1)}>Retry</Button>}</div>
+        : <React.Suspense fallback={<div className="center muted">Opening workspace…</div>}><Home models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
+          onStarted={value => { setInitialConversation({ scope: scopeKey, value }); setSelected(value.session.id); location.hash = value.session.id }} /></React.Suspense>}
+    </main>
+    <AppCommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} scopeKey={`${scopeKey}:${selected}`} role={me.user.role} productMode={me.product_mode}
+      current={currentSession?.id === nativeSelected ? { ...currentSession, url: originalId ? `/#run=${originalId}` : currentSession.url } : sessions.find(row => !sessionIsReadOnly(row) && row.id === nativeSelected)}
+      historicalId={historical && !nativeSelected ? originalId : undefined} onNewSession={newSession} onToggleSidebar={toggleSidebar} onOpenSettings={navigateSettings} onError={setError} />
+  </div></SessionActionsProvider></PanelRatioProvider>
+}
+
+function AppCommandPalette({ current, historicalId, productMode, ...props }: {
+  current?: Session; historicalId?: string; productMode?: Me["product_mode"]; open: boolean; onOpenChange: (open: boolean) => void; scopeKey: string; role: string
+  onNewSession: () => void; onToggleSidebar: () => void; onOpenSettings: (page: string) => void; onError: (error: string) => void
+}) {
+  const actions = useSessionActions()
+  const session: PaletteCurrentSession | undefined = current ? {
+    ...current, source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
+  } : historicalId ? { id: historicalId, title: "Saved session", source: "legacy", read_only: true } : undefined
+  return <CommandPalette {...props} scopeLabel="Your accessible sessions" currentSession={session} busy={actions.busy} search={searchSessions}
+    destinations={settingsDestinations.filter(item => !item.productOnly || productMode === "existing")} onOpenSession={openSessionReference}
+    onNewFolder={() => actions.openEditor({ action: "folder-create" })}
+    onCopySessionLink={async row => { await navigator.clipboard.writeText(`${location.origin}/#${sessionReferenceHash(row)}`) }}
+    onRenameSession={() => { if (current) actions.openEditor({ action: "rename", session: current }) }}
+    onMoveSession={() => { if (current) actions.openEditor({ action: "move", session: current }) }}
+    onSetPinned={async (_row, pinned) => { if (current) await actions.edit(current, { pinned }, pinned ? "Session pinned." : "Session unpinned.") }} />
+}
+
+function navigateAuth(value: string, sameOrigin = false) {
+  const url = new URL(value, location.origin)
+  if (url.username || url.password || (sameOrigin ? url.origin !== location.origin : url.protocol !== "https:" && url.origin !== location.origin)) throw new Error("The sign-in destination is invalid.")
+  location.assign(url.href)
+}
+type AuthConfig = { mode: "standalone" | "existing"; password_enabled: boolean; google_enabled: boolean; access_enabled: boolean }
+function Login({ onLogin }: { onLogin: (me: Me) => void }) {
+  const [config, setConfig] = useState<AuthConfig | null>(null)
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    const controller = new AbortController()
+    setError("")
+    void api<AuthConfig>("/auth/config", "GET", undefined, controller.signal).then(value => { if (!controller.signal.aborted) setConfig(value) }, reason => { if (!controller.signal.aborted) setError(String(reason)) })
+    return () => controller.abort()
+  }, [retry])
+  return <main className="center"><section className="login" aria-labelledby="login-title">
+    <img src={logo} alt="" /><h1 id="login-title">Welcome to Moyai</h1><p className="muted">Sign in to your workspace.</p>
+    {!config && !error && <p role="status">Loading sign-in options…</p>}
+    {config?.google_enabled && <Button variant="outline" disabled={busy} onClick={async () => {
+      setBusy(true); setError("")
+      try { const result = await api<{ url: string }>("/auth/google/start", "POST", { return_to: "/" }); navigateAuth(result.url) }
+      catch (reason) { setError(String(reason)); setBusy(false) }
+    }}>Continue with Google</Button>}
+    {config?.password_enabled && <form className="login-password" onSubmit={async event => {
+      event.preventDefault(); setBusy(true); setError("")
+      const form = new FormData(event.currentTarget)
+      try {
+        const result = await api<{ csrf?: string }>("/login", "POST", Object.fromEntries(form))
+        if (result.csrf) setCsrf(result.csrf)
+        onLogin(await api<Me>("/me"))
+      } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
+    }}>
+      {config.mode === "standalone" && <label>Username<Input name="username" autoComplete="username" required autoFocus disabled={busy} /></label>}
+      <label>{config.mode === "existing" ? "Workspace password" : "Password"}<Input name="password" type="password" autoComplete="current-password" required autoFocus={config.mode === "existing" && !config.google_enabled} disabled={busy} /></label>
+      <Button type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Button>
+    </form>}
+    {config?.access_enabled && <><p className="muted">Your organization uses Cloudflare Access. Continue through your organization’s sign-in to open Moyai.</p><Button onClick={() => location.reload()}>Continue to workspace</Button></>}
+    {config && !config.password_enabled && !config.google_enabled && !config.access_enabled && <p className="muted">No sign-in method is enabled. Contact your workspace administrator.</p>}
+    {error && <p className="error" role="alert">{error}</p>}
+    {!config && error && <Button variant="outline" onClick={() => setRetry(value => value + 1)}>Retry sign-in options</Button>}
+  </section></main>
+}
+
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; originalSessionId?: string; authorityKey?: string }) {
+  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : null)
+  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : [])
+  const [plan, setPlan] = useState<Plan[]>([])
+  const [draft, setDraft] = useState("")
+  const [model, setModel] = useState(initial?.session.model ?? me.default_model)
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
+  const [accountRevision, setAccountRevision] = useState(0)
+  const [accountNotice, setAccountNotice] = useState("")
+  const [accountCatalog, setAccountCatalog] = useState<{ scope: string; rows: Connection[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
+  const [mode, setMode] = useState("when_idle")
+  const [error, setError] = useState("")
+  const pictures = useAttachments(setError)
+  const [busy, setBusy] = useState(false)
+  const [activity, setActivity] = useState<Activity[]>([])
+  const [liveText, setLiveText] = useState(emptyLiveTranscript)
+  const liveNow = useRef(liveText)
+  const [reconnecting, setReconnecting] = useState(false)
+  const endedStreams = useRef(new Set<string>())
+  const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
+  const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  const sessionActions = useSessionActions()
+  const titleCallback = useRef(onTitle)
+  titleCallback.current = onTitle
+  const sessionCallback = useRef(onSession)
+  sessionCallback.current = onSession
+  const [editing, setEditing] = useState<Message | null>(null)
+  const [sendingNow, setSendingNow] = useState<Set<string>>(() => new Set())
+  const fileDrop = useFileDrop(pictures.add, setError, busy || Boolean(editing) || !visible)
+  const [editText, setEditText] = useState("")
+  const composerInput = useRef<HTMLTextAreaElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
+  const transcript = useRef<HTMLDivElement>(null)
+  const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
+  const lastRequest = useRef<{ payload: string; key: string } | null>(null)
+  const loaded = useRef(false)
+  const readThrough = useRef<number | null>(null)
+  const loadVersion = useRef(0)
+  const visibleNow = useRef(visible)
+  visibleNow.current = visible
+  function clearSensitive() {
+    ++loadVersion.current
+    liveNow.current = emptyLiveTranscript()
+    setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([])
+    setDraft(""); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
+    dispatchPanel({ type: "reset" })
+    sessionCallback.current?.(null)
+  }
+  const clearSensitiveNow = useRef(clearSensitive)
+  clearSensitiveNow.current = clearSensitive
+  useEffect(() => () => { ++loadVersion.current }, [])
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const version = ++loadVersion.current
+    try {
+      const [next, history, tasks] = await Promise.all([
+        api<View>(`/sessions/${id}`, "GET", undefined, signal),
+        api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal),
+        sideMode ? Promise.resolve([] as Plan[]) : api<Plan[]>(`/sessions/${id}/plan`, "GET", undefined, signal),
+      ])
+      if (signal?.aborted || version !== loadVersion.current) return
+      setView(next); setMessages(history); setPlan(tasks)
+      setSendingNow(previous => {
+        const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
+        return pending.length === previous.size ? previous : new Set(pending)
+      })
+      sessionCallback.current?.(next.session)
+      const latestMessage = history.at(-1)?.id ?? 0
+      if (visibleNow.current && readThrough.current !== latestMessage) {
+        await api(`/sessions/${id}/read`, "POST", { message_id: latestMessage }, signal)
+        if (signal?.aborted || version !== loadVersion.current) return
+        readThrough.current = latestMessage
+      }
+      if (next.activity) setActivity(next.activity)
+      if (!loaded.current) {
+        setModel(next.session.model)
+        const latest = next.turns[0]
+        if (latest?.actor_id === me.user.id) setSelectedAccounts(latest.connections ?? [])
+        loaded.current = true
+      }
+    } catch (reason) {
+      if (signal?.aborted || version !== loadVersion.current) return
+      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) {
+        clearSensitiveNow.current()
+      }
+      throw reason
+    }
+  }, [id, me.user.id, sideMode])
+  useEffect(() => {
+    if (sideMode && !visible) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try { await load(controller.signal) } catch (e) {
+        if (!controller.signal.aborted) {
+          setError(String(e))
+        }
+      }
+      if (!controller.signal.aborted) timer = setTimeout(poll, 1500)
+    }
+    void poll()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [load, sideMode, visible])
+  const productAccounts = me.product_mode === "existing"
+  const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
+  const effectiveConnections = productAccounts ? accountCatalog.scope === accountScope ? accountCatalog.rows : [] : connections
+  const accountBlocked = productAccounts && (Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error)))
+  useEffect(() => {
+    if (!productAccounts || !view || !visible) return
+    const controller = new AbortController(), scope = accountScope
+    setAccountCatalog({ scope, rows: [], loading: true, error: "" })
+    const query = new URLSearchParams({ session_id: id })
+    void api<Connection[]>(`/connections?${query}`, "GET", undefined, controller.signal).then(rows => {
+      if (!controller.signal.aborted) setAccountCatalog({ scope, rows, loading: false, error: "" })
+    }, reason => { if (!controller.signal.aborted) setAccountCatalog({ scope, rows: [], loading: false, error: String(reason) }) })
+    return () => controller.abort()
+  }, [productAccounts, accountScope, visible])
+  useEffect(() => {
+    if (!productAccounts || accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
+    const available = new Set(accountCatalog.rows.filter(row => row.enabled).map(row => row.id))
+    const retained = selectedAccounts.filter(account => available.has(account))
+    if (retained.length !== selectedAccounts.length) {
+      setSelectedAccounts(retained)
+      setAccountNotice("Account access changed. Review Context & connections before sending your next message.")
+    }
+  }, [productAccounts, accountScope, accountCatalog, selectedAccounts])
+  useEffect(() => {
+    if (!workspaceRequest || sideMode) return
+    setWorkspaceOpen(false)
+    if (workspaceRequest.tab === "computer") dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+    else if (workspaceRequest.url) dispatchPanel({ type: "open", tab: { id: `pr:${workspaceRequest.url.toLowerCase()}`, kind: "pull-request", title: "Pull request", url: workspaceRequest.url } })
+  }, [workspaceRequest, sideMode])
+  useEffect(() => { if (visible) heading.current?.focus() }, [Boolean(view), visible])
+  useEffect(() => {
+    if (!sideMode) document.title = `${view?.session.title ?? "Conversation"} · Moyai`
+    else if (view?.session.title) titleCallback.current?.(view.session.title)
+  }, [view?.session.title, sideMode])
+  useEffect(() => {
+    const element = transcript.current
+    if (element) element.scrollTop = element.scrollHeight
+  }, [messages.length, sendingNow])
+  const active = view?.turns.find(turn => turn.id === view.session.active_turn)
+  const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
+  useEffect(() => {
+    if (!activeId || endedStreams.current.has(activeId)) return
+    if (liveNow.current.turnId !== activeId) {
+      liveNow.current = emptyLiveTranscript(activeId)
+      setLiveText(liveNow.current)
+    }
+    const auth = csrfToken()
+    let closed = false
+    const stream = new EventSource(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`)
+    const current = () => !closed && auth === csrfToken() && visibleNow.current
+    const refreshSaved = () => { if (current()) void load().catch(reason => { if (current()) setError(String(reason)) }) }
+    stream.onmessage = event => {
+      if (!current() || !/^\d+$/.test(event.lastEventId)) return
+      try {
+        const value: LiveEvent = JSON.parse(event.data)
+        if (!value || typeof value.type !== "string") return
+        const next = applyLiveEvent(liveNow.current, value, Number(event.lastEventId))
+        if (next !== liveNow.current) { liveNow.current = next; setLiveText(next) }
+      } catch { /* A malformed presentation event must not interrupt saved-state refresh. */ }
+    }
+    stream.addEventListener("connected", () => { if (current()) setReconnecting(false) })
+    stream.addEventListener("refresh", refreshSaved)
+    stream.addEventListener("finished", () => {
+      if (!current()) return
+      endedStreams.current.add(activeId)
+      liveNow.current = { ...liveNow.current, finished: true }
+      setLiveText(liveNow.current); setReconnecting(false)
+      refreshSaved(); closed = true; stream.close()
+    })
+    stream.addEventListener("access_revoked", () => {
+      if (!current()) return
+      closed = true; stream.close(); setReconnecting(false); endedStreams.current.add(activeId)
+      clearSensitiveNow.current()
+      window.dispatchEvent(new Event("moyai:access-changed"))
+      void load().catch(reason => { if (auth === csrfToken()) setError(String(reason)) })
+    })
+    stream.onerror = () => { if (current()) { setReconnecting(true); refreshSaved() } }
+    return () => { closed = true; stream.close() }
+  }, [activeId, id, load])
+  useEffect(() => {
+    const element = transcript.current
+    if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 180) element.scrollTop = element.scrollHeight
+  }, [liveText])
+
+  async function send() {
+    if (editing) {
+      if (busy || !editText.trim()) return
+      setBusy(true); setError("")
+      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt: editText }); setEditing(null); await load() }
+      catch (error) { setError(String(error)) } finally { setBusy(false) }
+      return
+    }
+    if ((!draft.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
+    setBusy(true); setError("")
+    const body = { prompt: draft, model, mode, connections: selectedAccounts, attachments: pictures.readyFiles.map(file => file.id) }
+    const serialized = JSON.stringify(body)
+    if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
+    try {
+      await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: lastRequest.current.key })
+      setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
+    } catch (e) { setError(String(e)) } finally { setBusy(false) }
+  }
+  async function sendNow(turnId: string) {
+    if (busy) return
+    setBusy(true); setError("")
+    setSendingNow(previous => new Set(previous).add(turnId))
+    try {
+      const turn = await api<Turn>(`/turns/${turnId}/steer`, "POST")
+      setView(previous => previous ? { ...previous, turns: previous.turns.map(item => item.id === turn.id ? turn : item) } : previous)
+      await load()
+    } catch (reason) {
+      setSendingNow(previous => { const next = new Set(previous); next.delete(turnId); return next })
+      setError(String(reason))
+    } finally { setBusy(false) }
+  }
+  if (!view) return <div className="center" role="status">{error || "Opening conversation…"}</div>
+  const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
+  const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
+  const commentary = liveCommentary(liveText, savedAssistant)
+  const liveMessage = commentary ? <article className="message assistant live-message" data-turn-id={liveText.turnId}>
+    <div className="message-author">Moyai</div><div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{commentary}</Markdown></div>
+  </article> : null
+  const displayedActivity = mergeActivity(activity, liveText.activity)
+  const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
+    turn.id === message.turn_id && waitsBehindActive(turn, active, sendingNow.has(turn.id))))
+  const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
+  const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
+  function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
+  function openOutput(resource: OutputResource, sourceSessionId = id) {
+    openTab({
+      id: `output:${sourceSessionId}:${resource.kind}:${resource.id ?? resource.url}`,
+      kind: "output", title: resource.name, resource, sessionId: sourceSessionId,
+    })
+  }
+  function addTab(kind: AddTabKind) {
+    const titles = { "side-chat": "Side chat", computer: "Computer", files: "Files", activity: "Activity", plan: "Plan" }
+    openTab({ id: kind === "side-chat" ? `side-chat:new:${crypto.randomUUID()}` : kind, kind, title: titles[kind] })
+  }
+  const chat = <section className="chat file-drop-zone" id={chatId} {...fileDrop.handlers}>
+        {fileDrop.dragging && <FileDropOverlay />}
+        {originalSessionId && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>
+          <ProductHistoryPrefix sessionId={originalSessionId} scopeKey={`${authorityKey}:${connectionVersion}`} active={visible} onOpenSession={openSessionReference} />
+        </React.Suspense>}
+        <div className="transcript" ref={transcript}
+          onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
+          {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
+          {messages.filter(message => !queued.some(item => item.id === message.id)).map(message => {
+            const turn = view.turns.find(item => item.id === message.turn_id)
+            return <React.Fragment key={message.id}>{message.role === "assistant" && message.turn_id === liveText.turnId && liveMessage}<article className={`message ${message.role}`}>
+              <div className="message-author">{message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
+                {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
+                {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
+              </div>
+              <div className={message.role === "user" ? "user-bubble" : undefined}>
+                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : message.content}</div>}
+                <AttachmentPreviews files={message.attachments ?? []} />
+              </div>
+
+            </article></React.Fragment>
+          })}
+          {!savedAssistant && liveMessage}
+          {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
+          {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
+          {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} onDone={load} />}
+          {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
+          {view.turns[0]?.error && <p className="error" role="alert">{view.turns[0].error}</p>}
+          {!session.active_turn && view.effects?.map(effect => <EffectReview key={effect.id} effect={effect} onDone={load} />)}
+          {!session.active_turn && view.has_unsettled_effects && !view.effects?.length && <p className="notice">An earlier action needs review by its requester before more changes can be made.</p>}
+          {session.save_warning && <p className="notice" role="status">{session.save_warning}</p>}
+        </div>
+        <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
+          {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
+          {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
+            <span><small>Queued after the current task</small><span>{message.content || "File message"}</span></span>
+            <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
+            <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={async () => { try { await api(`/turns/${message.turn_id}`, "DELETE"); if (editing?.id === message.id) setEditing(null); await load() } catch (error) { setError(String(error)) } }}><X size={14} /></Button>
+          </div>)}</div>}
+          {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
+          <div className="composer">
+            <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
+            <Textarea ref={composerInput} aria-label="Message Moyai" placeholder="Describe the work…" value={editing ? editText : draft} onChange={e => editing ? setEditText(e.target.value) : setDraft(e.target.value)} onPaste={editing || busy ? undefined : pictures.paste} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <div className="composer-actions">
+              <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
+              <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
+              <div className="send-actions">
+                {session.active_turn && <><Choice value={mode} onChange={setMode} label="Delivery timing" options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /><Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button></>}
+                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || session.status === "waiting" || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
+              </div>
+            </div>
+          </div>
+          {accountNotice && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Dismiss</Button></p>}
+          {session.surface !== "slack" && (productAccounts || effectiveConnections.some(item => item.enabled)) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
+            {productAccounts && (accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
+            {productAccounts && accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
+            <div className="connection-options">{effectiveConnections.filter(item => item.enabled && (session.visibility === "private" || item.shared)).map(item => <label key={item.id}><Checkbox checked={selectedAccounts.includes(item.id)} onCheckedChange={checked => { setAccountNotice(""); setSelectedAccounts(values => checked ? [...values, item.id] : values.filter(value => value !== item.id)) }} />{item.name}<span className="muted">{item.read_only ? "Read only" : "Can make changes"}</span></label>)}</div>
+            {productAccounts && !accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this session’s visibility and surface. <a href="#settings/connections">Manage Connections</a></p>}
+          </details>}
+          <p className="composer-hint">{pictures.uploading ? "Uploading files…" : "Drop files or paste images · Enter to send · Shift+Enter for a new line"}</p>
+        </form>
+      </section>
+  if (sideMode) return <div className="conversation side-conversation">
+    <header className="side-chat-heading"><h2 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h2><a href={`#${id}`} title="Open as main conversation" aria-label="Open side chat as main conversation"><ExternalLink size={15} /></a></header>
+    {chat}
+  </div>
+  return <div className="conversation">
+    <WorkspaceOverlay open={workspaceOpen} onOpenChange={setWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
+    <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
+      <header className="topbar">
+        <div className="session-heading"><h1 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h1>
+          <span className={`status ${displayStatus}`}>{displayStatus === "waiting" ? "Needs input" : displayStatus}</span>
+          <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
+        </div>
+        <div className="header-controls">
+          <Button className="header-new-session" type="button" variant="ghost" size="icon-sm" aria-label="New session" title="New session" onClick={sessionActions.newSession}><SquarePen size={16} /></Button>
+          <SessionMenu session={session} header />
+          <WorkspaceOverlayTrigger asChild><Button className="workspace-toggle" type="button" variant={workspaceOpen ? "secondary" : "ghost"} size="icon-sm" aria-label={workspaceOpen ? "Close workspace" : "Open workspace"} title="Workspace"><ListTree size={17} /></Button></WorkspaceOverlayTrigger>
+          <Button variant={panelState.visible ? "secondary" : "ghost"} size="icon-sm" aria-label={panelState.visible ? "Hide side panel" : "Open side panel"} title={panelState.visible ? "Hide panel" : "Open panel"} onClick={() => dispatchPanel({ type: panelState.visible ? "hide" : "show" })}><PanelRight size={16} /></Button>
+        </div>
+      </header>
+      {chat}
+      <WorkspaceOverlayContent>
+        <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
+          onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
+          onSubagent={agent => openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })}
+          onOutput={openOutput} />
+      </WorkspaceOverlayContent>
+      <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
+      <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
+        if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); setWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
+        if (tab.kind === "subagent") return <SubagentPanel sessionId={id} agent={{ id: tab.runId, name: tab.name, status: tab.status, avatar: tab.avatar }} active={activeTab} onOpenFile={openOutput} />
+        if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
+          onOpenFile={openOutput} onName={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
+        if (tab.kind === "files") return <FilesPanel sessionId={id} onOpen={openOutput} active={activeTab} />
+        if (tab.kind === "computer") return <ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} />
+        if (tab.kind === "activity") return <>{!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}</>
+        if (tab.kind === "plan") return <>{!plan.length && <div className="panel-empty"><Check /><p>Moyai’s task plan will appear here.</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>
+        if (tab.kind === "side-chat") return tab.sessionId
+          ? <Conversation key={`${me.user.id}:${tab.sessionId}`} id={tab.sessionId} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refreshList} workspaceRequest={null} pullRequests={[]} onPRUpdated={onPRUpdated} sideMode visible={activeTab} onOpenFile={openOutput} onTitle={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
+          : <SideChatPicker parentId={id} defaultModel={me.default_model} individual={me.user.individual !== false} onCreated={refreshList} onSelect={selected => dispatchPanel({ type: "replace", id: tab.id, tab: { id: `side-chat:${selected.id}`, kind: "side-chat", sessionId: selected.id, title: selected.title } })} />
+        return null
+      }}</PanelTabs>
+    </div>
+    </WorkspaceOverlay>
+  </div>
+}
+
+function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelect }: { parentId: string; defaultModel: string; individual: boolean; onCreated: () => Promise<void>; onSelect: (session: Session) => void }) {
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [query, setQuery] = useState("")
+  const [error, setError] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [revision, setRevision] = useState(0)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true); setError("")
+    void api<Session[]>("/sessions", "GET", undefined, controller.signal).then(rows => {
+      if (!controller.signal.aborted) { setSessions(rows.filter(row => row.id !== parentId && !row.deleted)); setLoading(false) }
+    }, reason => { if (!controller.signal.aborted) { setLoading(false); setError(String(reason)) } })
+    return () => controller.abort()
+  }, [parentId, revision])
+  return <div className="side-chat-picker"><h2>Side chat</h2><p>Start a separate conversation, or open an existing one beside this session.</p>
+    {!individual && <p className="muted">This shared sign-in creates shared sessions. Use an individual sign-in for private work.</p>}
+    <Button className="side-chat-new" disabled={busy} onClick={async () => {
+      setBusy(true); setError("")
+      try {
+        const next = await api<Session>("/sessions", "POST", { visibility: individual ? "private" : "shared", model: defaultModel })
+        if (alive.current) onSelect(next)
+        // The session already exists; a sidebar refresh failure must not turn
+        // a confirmed creation into an invitation to create it again.
+        void onCreated().catch(() => {})
+      } catch (reason) { if (alive.current) setError(String(reason)) }
+      finally { if (alive.current) setBusy(false) }
+    }}><Plus size={16} />{busy ? "Creating…" : "New side chat"}</Button>
+    <label className="side-chat-search"><Search size={16} /><Input aria-label="Find a side chat" placeholder="Search conversations…" value={query} onChange={event => setQuery(event.target.value)} /></label>
+    {error && <p className="error" role="alert">{error}<Button variant="ghost" size="sm" onClick={() => setRevision(value => value + 1)}>Retry</Button></p>}
+    {loading && <p className="muted" role="status">Loading conversations…</p>}
+    {sessions.filter(row => row.title.toLowerCase().includes(query.toLowerCase())).map(row => <Button key={row.id} className="side-chat-choice" variant="ghost" disabled={busy} onClick={() => onSelect(row)}><MessageSquare size={16} /><span>{row.title}<small>{row.visibility === "shared" ? "Shared conversation" : "Private conversation"}</small></span></Button>)}
+    {!loading && !error && !sessions.some(row => row.title.toLowerCase().includes(query.toLowerCase())) && <p className="muted">No matching conversations.</p>}
+  </div>
+}
+
+function ActivityRow({ item }: { item: Activity }) {
+  if (item.type === "agent_finished") return null
+  if (item.type === "text_start") return <div className="activity-text">{item.text}</div>
+  return <details className="activity-row"><summary>{item.type === "tool_result" ? "Finished" : item.type === "tool_call" ? "Using" : "Updated"} {item.name?.replaceAll("_", " ")}</summary><pre>{typeof item.content === "string" ? item.content : JSON.stringify(item.arguments ?? item.data ?? {}, null, 2)}</pre></details>
+}
+
+function EffectReview({ effect, onDone }: { effect: Effect; onDone: () => Promise<void> }) {
+  const [outcome, setOutcome] = useState("completed")
+  const [evidence, setEvidence] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  return <form className="pending" onSubmit={async event => {
+    event.preventDefault(); setBusy(true); setError("")
+    try { await api(`/effects/${effect.id}/resolve`, "POST", { outcome, evidence }); await onDone() }
+    catch (error) { setError(String(error)) } finally { setBusy(false) }
+  }}>
+    <h3>An action needs review</h3><p>Its outcome was not confirmed. Inspect the command or destination before allowing more changes.</p>
+    <details><summary>{effect.tool_name.replaceAll("_", " ")}</summary><pre>{JSON.stringify(effect.arguments, null, 2)}</pre></details>
+    <label>What did you verify?<Choice label="Verified outcome" value={outcome} onChange={setOutcome} options={[{ value: "completed", label: "The action completed" }, { value: "not_executed", label: "The action did not run" }]} /></label>
+    <label>Evidence<Textarea value={evidence} onChange={event => setEvidence(event.target.value)} placeholder="Describe what you checked and what you found." minLength={10} required /></label>
+    {error && <p className="error" role="alert">{error}</p>}<Button disabled={busy || evidence.trim().length < 10} type="submit">Record verified outcome</Button>
+  </form>
+}
+
+function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pending; turnId: string; sessionId: string; onDone: () => Promise<void> }) {
+  const [values, setValues] = useState<Record<string, string[]>>({})
+  const [custom, setCustom] = useState<Record<string, string>>({})
+  const [approvals, setApprovals] = useState<Record<string, boolean>>({})
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const requestKey = useRef(crypto.randomUUID())
+  const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
+  const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
+  const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
+  return <>
+    {credentials.map(call => {
+      const requestId = pending.metadata?.[call.tool_call_id]?.request_id
+      return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
+    })}
+    {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
+    {(questions.length > 0 || pending.approvals.length > 0) && <form className="pending" onSubmit={async e => {
+    e.preventDefault(); setBusy(true); setError("")
+    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
+      const key = `${call.tool_call_id}:${question.header}`
+      return { header: question.header, selected: custom[key]?.trim() ? [] : values[key] ?? [], custom_answer: custom[key]?.trim() || null }
+    }) }]))
+    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }); await onDone() }
+    catch (e) { setError(String(e)) } finally { setBusy(false) }
+  }}>
+    <h3>Your input is needed</h3>
+    {questions.map(({ call, questions }) => questions.map(question => {
+      const key = `${call.tool_call_id}:${question.header}`
+      return <fieldset key={key}><legend>{question.question}</legend><div className="question-options">{question.options.map(option => <Button type="button" key={option.label} variant={(values[key] ?? []).includes(option.label) && !custom[key] ? "secondary" : "outline"} aria-pressed={(values[key] ?? []).includes(option.label) && !custom[key]} onClick={() => { setCustom(previous => ({ ...previous, [key]: "" })); setValues(previous => ({ ...previous, [key]: question.multi_select ? (previous[key] ?? []).includes(option.label) ? previous[key].filter(item => item !== option.label) : [...previous[key] ?? [], option.label] : [option.label] })) }} title={option.description}>{option.label}</Button>)}</div><Input aria-label={`Custom answer for ${question.header}`} placeholder="Or write your own answer…" value={custom[key] ?? ""} onChange={e => setCustom(previous => ({ ...previous, [key]: e.target.value }))} /></fieldset>
+    }))}
+    {pending.approvals.map(call => <fieldset key={call.tool_call_id}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
+    {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
+    {error && <p className="error" role="alert">{error}</p>}<Button type="submit" disabled={busy || unknown}>{busy ? "Submitting…" : "Continue"}</Button>
+  </form>}
+  </>
+}
+
+createRoot(document.getElementById("root")!).render(<App />)

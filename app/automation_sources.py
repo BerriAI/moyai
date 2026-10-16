@@ -53,7 +53,7 @@ def items(value):
 class EventTrigger(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     provider: Literal['session','slack','github','gitlab','linear','jira','pylon','pagerduty','webhook']
-    session_id: str = Field(default='', max_length=32)
+    session_id: str = Field(default='', max_length=36)
     event: str = Field(default='*', min_length=1, max_length=80)
     repository: str = Field(default='', max_length=200)
     repository_id: int | None = Field(default=None, gt=0, strict=True)
@@ -80,8 +80,10 @@ class EventTrigger(BaseModel):
 
     @model_validator(mode='after')
     def valid_filters(self):
-        if self.session_id and (self.provider != 'session' or not re.fullmatch(r'[0-9a-f]{32}', self.session_id)):
-            raise ValueError('Session filters require a session source and a 32-character session ID.')
+        if self.session_id and (self.provider != 'session' or not re.fullmatch(
+            r'(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})', self.session_id
+        )):
+            raise ValueError('Session filters require a session source and an exact product session ID.')
         if self.provider == 'session':
             allowed = {'provider', 'event', 'session_id', 'text_contains', 'text_starts_with', 'sender_type'}
             if self.sender_type == 'bot' or any(

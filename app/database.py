@@ -90,7 +90,12 @@ RUNTIME_SETTINGS = ('session_secret', 'encryption_key', 'object_storage_bucket',
 
 
 def runtime_fingerprint(settings):
-    return hashlib.sha256(json.dumps({name: getattr(settings, name) for name in RUNTIME_SETTINGS}, sort_keys=True).encode()).hexdigest()
+    from .native_contract import core_contract
+    values = {name: getattr(settings, name) for name in RUNTIME_SETTINGS}
+    native = core_contract(settings)
+    if native is not None:
+        values["execution_core"] = native
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 INTEGRITY_ERRORS = (sqlite3.IntegrityError, IntegrityError)

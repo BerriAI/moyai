@@ -11,7 +11,6 @@ import tempfile
 from urllib.parse import urlsplit
 
 import aiohttp
-from agentchat.channels.slack_files import slack_attachments
 
 from .audio import AUDIO_TYPES, AudioTranscriber, audio_type
 from .attachments import filename, inspect_file
@@ -111,6 +110,8 @@ async def file_operation(operation, *args):
 
 def file_ids(files):
     """Persist SDK-normalized references; downloads happen on the claimed turn."""
+    from agentchat.channels.slack_files import slack_attachments
+
     if not isinstance(files, list):
         return []
     # The SDK normalizer has a per-call bound. Enumerate every transport batch

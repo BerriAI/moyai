@@ -315,20 +315,8 @@ class Credentials:
         return rows[0]
 
     def same_requester(self, owner_id, actor_id, *, connection=None):
-        if owner_id == actor_id:
-            return bool(owner_id)
-        # Accounting links are not authentication. Require a fresh, eligible
-        # Slack profile matching an independently verified Google identity.
-        rows = self.store.rows('SELECT * FROM users WHERE id IN (?,?)', (owner_id, actor_id), connection=connection)
-        owner = next((u for u in rows if u['id'] == owner_id and u['kind'] in {'google', 'cloudflare'}), None)
-        actor = next((u for u in rows if u['id'] == actor_id and u['kind'] == 'slack'), None)
-        if not owner or not actor or not actor['profile_eligible'] or actor['profile_conflict'] or not actor['email']:
-            return False
-        try:
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(actor['profile_checked_at'])).total_seconds()
-        except (ValueError, TypeError):
-            return False
-        return 0 <= age < PROFILE_MAX_AGE_SECONDS and owner['email'] == actor['email']
+        from .requester_identity import same_requester
+        return same_requester(self.store, owner_id, actor_id, connection=connection)
 
     def audit_in(self, conn, actor, secret, action, run_id=''):
         conn.execute('INSERT INTO credential_audit(actor_id,secret_id,action,run_id,created_at) VALUES(?,?,?,?,?)',
@@ -455,7 +443,7 @@ class Credentials:
                     raise HTTPException(422, 'Invalid AWS SSO profile or cache.') from None
         return value
 
-    def insert_secret(self, conn, body, user_id, admin, root_id=''):
+    def insert_secret(self, conn, body, user_id, admin, root_id='', *, authorized_native_root=None):
         if body.scope == 'organization' and not admin:
             raise HTTPException(403, 'Only an administrator can save organization credentials.')
         if body.scope != 'organization' and not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
@@ -463,7 +451,8 @@ class Credentials:
         root_id = root_id or body.root_id if body.lifetime == 'session' else ''
         if body.lifetime == 'session' and not root_id:
             raise HTTPException(422, 'Session credentials must be associated with a session.')
-        if root_id and not conn.execute("SELECT 1 FROM runs WHERE id=? AND deleted_at=''", (root_id,)).fetchone():
+        if (root_id and root_id != authorized_native_root
+                and not conn.execute("SELECT 1 FROM runs WHERE id=? AND deleted_at=''", (root_id,)).fetchone()):
             raise HTTPException(404, 'Session not found.')
         value = self.validated_value(body)
         fields = {key: getattr(body, key) for key in ('provider', 'scope', 'lifetime', 'name', 'format', 'env_var', 'expires_at')}
@@ -1086,9 +1075,11 @@ class Credentials:
                 raise HTTPException(502, 'Provider returned an invalid JSON response.') from None
             return status, result
 
-    def update_secret(self, secret_id, body, user_id, admin):
+    def update_secret(self, secret_id, body, user_id, admin, *, authorized_native_root=None, authorize=None):
         with self.store.connect() as conn:
             conn.begin_write()
+            if authorize is not None:
+                admin = authorize(conn)
             row = conn.execute('SELECT * FROM provider_secrets WHERE id=? AND revoked_at=\'\'', (secret_id,)).fetchone()
             if not row or (row['scope'] == 'organization' and not admin) or (row['scope'] != 'organization' and row['owner_id'] != user_id):
                 raise HTTPException(404, 'Credentials not found.')
@@ -1108,15 +1099,21 @@ class Credentials:
                 if not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
                     raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
             if values['lifetime'] == 'session':
-                root = self.store.run(values['root_id'], connection=conn) if values['root_id'] else None
-                if not root or root['deleted_at'] or self.root(root, connection=conn) != values['root_id']:
-                    raise HTTPException(422, 'Choose an existing root session for session-only use.')
-                if values['scope'] == 'personal' and not self.same_requester(values['owner_id'], root['active_user_id'], connection=conn):
-                    raise HTTPException(403, 'Choose your own session for personal credentials.')
+                if not authorized_native_root or values['root_id'] != authorized_native_root:
+                    root = self.store.run(values['root_id'], connection=conn) if values['root_id'] else None
+                    if not root or root['deleted_at'] or self.root(root, connection=conn) != values['root_id']:
+                        raise HTTPException(422, 'Choose an existing root session for session-only use.')
+                    if values['scope'] == 'personal' and not self.same_requester(values['owner_id'], root['active_user_id'], connection=conn):
+                        raise HTTPException(403, 'Choose your own session for personal credentials.')
             else:
                 values['root_id'] = ''
             if body.value is not None:
-                candidate = SaveSecret(**{key: values[key] for key in ('provider', 'name', 'format', 'env_var', 'scope', 'lifetime', 'root_id', 'expires_at', 'client_id', 'label')}, value=body.value)
+                candidate_fields = {key: values[key] for key in ('provider', 'name', 'format', 'env_var', 'scope', 'lifetime', 'root_id', 'expires_at', 'client_id', 'label')}
+                # The product adapter validated this explicit native namespace;
+                # the legacy schema model still accepts only canonical run IDs.
+                if authorized_native_root and values['root_id'] == authorized_native_root:
+                    candidate_fields['root_id'] = ''
+                candidate = SaveSecret(**candidate_fields, value=body.value)
                 values['encrypted'] = self.security.encrypt(self.validated_value(candidate))
                 values['invalid_reason'] = ''
             values['label'] = values['label'].strip()

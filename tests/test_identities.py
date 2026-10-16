@@ -387,7 +387,7 @@ def test_spend_identities_exclude_unrelated_channel_participants(profiles):
 
 @pytest.fixture
 def memory_profiles(profiles, monkeypatch):
-    from app import credentials, identities
+    from app import credentials, identities, requester_identity
 
     app, control = profiles
     clock = [time.time()]
@@ -400,6 +400,7 @@ def memory_profiles(profiles, monkeypatch):
     monkeypatch.setattr(identities, 'time', SimpleNamespace(time=lambda: clock[0]))
     monkeypatch.setattr(identities, 'now', lambda: Clock.now(timezone.utc).isoformat())
     monkeypatch.setattr(credentials, 'datetime', Clock)
+    monkeypatch.setattr(requester_identity, 'datetime', Clock)
     app.state.settings.google_client_id = 'test-client'
     app.state.settings.google_client_secret = 'test-secret'
     google(app.state.store)

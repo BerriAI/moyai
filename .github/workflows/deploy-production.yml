@@ -8,7 +8,12 @@ on:
         description: Deploy main at button press; maintenance pauses all four roles for incompatible runtime upgrades
         type: choice
         options: [rolling, api, coordinated, maintenance]
-        default: rolling
+        default: maintenance
+      execution_core:
+        description: Pydantic selects the reviewed maintenance cutover; preserve keeps the running core for compatible releases
+        type: choice
+        options: [pydantic, preserve, legacy]
+        default: pydantic
       preflight_only:
         description: Optional check only (every deployment already runs preflight)
         type: boolean
@@ -35,11 +40,23 @@ jobs:
       # Deploy the same main commit as checkout, selected at button press.
       # A later push cannot change this release's tooling or deployment target.
       - uses: actions/checkout@v4
+      - name: Validate explicit core selection before credentials are loaded
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          EXECUTION_CORE: ${{ inputs.execution_core }}
+        run: |
+          if [ "$EXECUTION_CORE" != preserve ] && [ "$RELEASE_TYPE" != maintenance ]; then
+            echo 'Explicit core selection requires a maintenance release.'
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@v6
         if: inputs.release_type != 'coordinated'
       - name: Install candidate settings dependencies before loading deployment credentials
         if: inputs.release_type != 'coordinated'
         run: uv sync --frozen --python 3.13
+      - name: Install the separately locked native candidate and product adapters
+        if: inputs.release_type == 'maintenance'
+        run: uv sync --project native --frozen --python 3.13 --extra product
       - name: Coordinate app, worker and activated broker deployment
         if: inputs.release_type == 'coordinated'
         env:
@@ -75,7 +92,8 @@ jobs:
           RENDER_DEPLOY_SSH_KEY: ${{ secrets.RENDER_DEPLOY_SSH_KEY }}
           PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
           MOYAI_API_SERVICE_ID: ${{ vars.MOYAI_API_SERVICE_ID }}
-        run: .venv/bin/python -m scripts.release.deploy --release-type maintenance --receipt release-receipt.json
+          EXECUTION_CORE: ${{ inputs.execution_core }}
+        run: .venv/bin/python -m scripts.release.deploy --release-type maintenance --core "$EXECUTION_CORE" --receipt release-receipt.json
       - name: Save deployment receipt
         if: always()
         uses: actions/upload-artifact@v4

@@ -11,11 +11,16 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from uuid import uuid4
 
 from scripts.release.deploy import (ACTIVE_DEPLOYS, BROKER, COORDINATOR, WORKER,
     MUTABLE, Release, ReleaseError, SHARED_DEFAULTS, SHARED_KEYS)
 from scripts.release.rolling_deploy import (RollingRelease, candidate_migration_plan,
     valid_contract, valid_schema_support)
+from scripts.release.native_migration import candidate_manifest
+from scripts.release.native_probe import (COUNTS as NATIVE_COUNTS, CORE_COUNTS as NATIVE_CORE_COUNTS,
+    migration_plan as native_migration_plan)
+from scripts.release.native_control import owner as native_owner, validate as validate_native_control
 
 COUNTS = ('unsafe_sessions', 'executing_sessions', 'legacy_active_sessions',
           'model_requests', 'live_leases')
@@ -35,6 +40,7 @@ import app.schema_migrations
 value = contract()
 settings = Settings(_env_file=None)
 value.update(source_policy=runtime_fingerprint(settings), default_harness=settings.default_harness(),
+    core=getattr(settings, "moyai_core", "legacy"),
     source_schema_digest=json.loads(Path(app.schema_migrations.__file__).with_name('schema_versions.json').read_text())[str(SCHEMA_REVISION)])
 print(json.dumps(value))
 '''
@@ -52,7 +58,10 @@ print(json.dumps(value))
 
 def valid_maintenance_contract(value):
     return (isinstance(value, dict)
-        and set(value) == {'schema', 'schema_support', 'contracts', 'source_policy', 'default_harness', 'source_schema_digest'}
+        and set(value) in (
+            {'schema', 'schema_support', 'contracts', 'source_policy', 'default_harness', 'source_schema_digest'},
+            {'schema', 'schema_support', 'contracts', 'source_policy', 'default_harness', 'source_schema_digest', 'core'})
+        and value.get('core', 'legacy') in {'legacy', 'pydantic'}
         and valid_contract({key: value[key] for key in ('schema', 'schema_support', 'contracts')})
         and isinstance(value['source_policy'], str) and re.fullmatch('[0-9a-f]{64}', value['source_policy'])
         and isinstance(value['default_harness'], str)
@@ -61,8 +70,12 @@ def valid_maintenance_contract(value):
 
 
 class MaintenanceRelease(RollingRelease):
+    native_release = True
+
     def __init__(self, *args, contract=maintenance_contract,
-                 migration_plan=candidate_migration_plan, offline_migrate=None, **kwargs):
+                 migration_plan=candidate_migration_plan, offline_migrate=None,
+                 target_core='preserve', native_manifest=candidate_manifest, native_migrate=None,
+                 native_control=None, automation_probe=None, **kwargs):
         super().__init__(*args, contract=contract, migration_plan=migration_plan, **kwargs)
         self.offline_migrate = offline_migrate
         self.running = {}
@@ -71,9 +84,25 @@ class MaintenanceRelease(RollingRelease):
         self.drained = False
         self.candidate_policy_active = False
         self.retired = set()
+        if target_core not in {'preserve', 'legacy', 'pydantic'}:
+            raise ReleaseError('Unknown candidate core; no changes made.')
+        self.target_core = target_core
+        self.native_manifest, self.native_migrate = native_manifest, native_migrate
+        self.core_changes = {}
+        self.native_required = False
+        self.native_inventory = None
+        self.native_plan = None
+        self.native_control = native_control
+        self.native_control_receipt = None
+        self.source_core = 'legacy'
+        self.automation_probe = automation_probe
+        self.legacy_schedule_count = None
+        self.legacy_automation_receipt = None
 
     def source(self, service):
-        candidate_settings = service.env.get('AGENT_HARNESS', DEFAULT_HARNESS) == DEFAULT_HARNESS
+        candidate_settings = (self.candidate is not None
+            and service.env.get('MOYAI_CORE', 'legacy') == self.candidate.get('core', 'legacy')
+            and service.env.get('AGENT_HARNESS', DEFAULT_HARNESS) == self.candidate['default_harness'])
         return (self.candidate if service.sha == self.record['commit'] and candidate_settings
                 else self.sources[service.id])
 
@@ -85,6 +114,7 @@ class MaintenanceRelease(RollingRelease):
                 or state.get('source_schema_digest') != source['source_schema_digest']
                 or state.get('source_contracts') != source['contracts']
                 or state.get('source_policy') != source['source_policy']
+                or state.get('core', 'legacy') != source.get('core', 'legacy')
                 or state.get('default_harness') != source['default_harness']
                 or state.get('schema_support') != source.get('schema_support')):
             raise ReleaseError('Running source, maintenance flags or effective harness changed; release stopped.')
@@ -105,8 +135,16 @@ class MaintenanceRelease(RollingRelease):
                or any(not isinstance(v, str) or not v for v in state[key])
                or len(state[key]) != len(set(state[key])) for key in INVENTORIES):
             raise ReleaseError('Incomplete or duplicate runtime ownership inventory.')
-        if any(type(state.get(key)) is not int or state[key] < 0 for key in COUNTS):
+        count_keys = self.drain_keys()
+        if any(type(state.get(key)) is not int or state[key] < 0 for key in count_keys):
             raise ReleaseError('Incomplete maintenance drain inventory.')
+        if self.native_required and state.get('native') != self.native_inventory:
+            raise ReleaseError('Native migration receipts changed outside the verified maintenance boundary.')
+        if self.native_required and state.get('native_drain') != self.native_control_receipt:
+            raise ReleaseError('Native maintenance generation changed outside this release.')
+        if (self.core_changes and self.legacy_schedule_count is not None and not self.candidate_policy_active
+                and state.get('legacy_schedule_count') != self.legacy_schedule_count):
+            raise ReleaseError('Source schedule inventory changed during core cutover.')
         changes_contract = self.candidate['contracts']['coordinator'] != self.baseline['contracts']['coordinator']
         expected_policy = (self.candidate['source_policy'] if self.candidate_policy_active and changes_contract
                            else self.baseline['policy'])
@@ -114,7 +152,7 @@ class MaintenanceRelease(RollingRelease):
         if (state.get('schema') != (self.baseline['schema'] if schema is None else schema)
                 or state.get('policy') != expected_policy or state.get('contracts') != expected_contracts):
             raise ReleaseError('Cluster policy, schema or contracts changed outside the verified maintenance boundary.')
-        if self.drained and any(state[key] for key in COUNTS):
+        if self.drained and any(state[key] for key in count_keys):
             raise ReleaseError('Execution or leases reappeared after the maintenance drain.')
         owners = set(state['owners'])
         fixed = {identity for sid, identity in self.identities.items() if sid != self.selected}
@@ -124,6 +162,11 @@ class MaintenanceRelease(RollingRelease):
         if (not fixed <= owners or not owners <= allowed
                 or (not self.selected and owners != allowed)
                 or (settled and owners != fixed | extra)):
+            self.record['ownership_failure'] = {
+                'observed_count': len(owners), 'allowed_count': len(allowed),
+                'unexpected_count': len(owners - allowed), 'missing_required_count': len(fixed - owners),
+                'settled_required': settled,
+            }
             raise ReleaseError('Unexpected runtime owner appeared or a required owner disappeared.')
         if owners & self.retired:
             raise ReleaseError('A retired runtime owner reappeared.')
@@ -146,6 +189,22 @@ class MaintenanceRelease(RollingRelease):
             expected_broker = extra if self.selected == BROKER else broker
             if actual_coordinators != expected_coordinator or leaders != expected_broker:
                 raise ReleaseError('Selected role leadership did not settle.')
+
+    def drain_keys(self):
+        keys = COUNTS + (NATIVE_COUNTS if self.native_required else ())
+        if self.core_changes:
+            keys += ('legacy_core_runs',)
+            if not (self.candidate_policy_active and self.candidate.get('core') == 'pydantic'):
+                keys += ('legacy_automations', 'legacy_events')
+            if self.native_required:
+                # Once the new native policy owns admission, new inputs and
+                # automation definitions may wait for the final resume. They
+                # must never be stranded by retiring the native core.
+                keys += tuple(key for key in NATIVE_CORE_COUNTS
+                    if not (key in {'native_queued', 'native_automations', 'native_events',
+                                    'native_automation_history'} and self.candidate_policy_active
+                            and self.candidate.get('core') == 'pydantic'))
+        return keys
 
     def check_unaffected(self):
         for sid, service in self.running.items():
@@ -191,6 +250,31 @@ class MaintenanceRelease(RollingRelease):
         entry['confirmed'] = True
         self.save()
 
+    def select_candidate_core(self, service):
+        """Only the selector changes; prepared credentials/codecs remain intact."""
+        if service.id not in self.core_changes:
+            return
+        previous = self.core_changes[service.id]
+        target = self.candidate['core']
+        if (not self.drained or self.selected is not None
+                or self.expected.get(service.id) is not service
+                or service.env.get('RENDER_MIGRATION_STAGE') != 'true'
+                or service.env.get('MOYAI_BUILD_SHA') != self.record['commit']
+                or service.env.get('MOYAI_CORE') != previous):
+            raise ReleaseError('Core selection requires a drained, staged candidate; release stopped.')
+        self.unchanged()
+        entry = {'service': service.id, 'key': 'MOYAI_CORE', 'previous': previous,
+                 'value': target, 'confirmed': False}
+        self.record['changes'].append(entry)
+        self.save()
+        self.render.call('PUT', f'/services/{service.id}/env-vars/MOYAI_CORE', {'value': target})
+        service.env['MOYAI_CORE'] = target
+        if self.environment(service.id) != service.env:
+            raise ReleaseError('Saved environment did not match the reviewed core selection; release stopped.')
+        service.original['MOYAI_CORE'] = target
+        entry['confirmed'] = True
+        self.save()
+
     def plan_schema(self, states):
         current, target = self.baseline['schema'], self.candidate['schema']
         if target == current:
@@ -217,6 +301,10 @@ class MaintenanceRelease(RollingRelease):
         expected.update({key: [] for key in INVENTORIES})
         expected.update(sha=self.record['commit'], source_schema=self.candidate['schema'],
                         source_schema_digest=self.candidate['source_schema_digest'])
+        if self.native_required:
+            expected['native_required'] = True
+        if self.core_changes:
+            expected['core_switch'] = True
         entry = self.record['schema_migration']
         entry.update(status='requested', confirmed=False)
         self.phase('Apply installed candidate schema migration with all runtime owners stopped')
@@ -238,6 +326,134 @@ class MaintenanceRelease(RollingRelease):
         self.save()
         self.unchanged()
 
+    def migrate_native(self):
+        self.unchanged()
+        if (not self.drained or self.identities or self.selected is not None
+                or not all(s.env['RENDER_MIGRATION_STAGE'] == 'true' for s in self.running.values())):
+            raise ReleaseError('Native provisioning requires all four owners retired and services staged.')
+        expected = {key: deepcopy(self.baseline[key]) for key in ('schema', 'policy', 'contracts')}
+        expected.update({key: [] for key in INVENTORIES})
+        expected.update(sha=self.record['commit'], source_schema=self.candidate['schema'], native_required=True)
+        if self.core_changes:
+            expected['core_switch'] = True
+        entry = self.record['native_migration']
+        entry.update(status='requested', confirmed=False)
+        self.phase('Verify or provision native application and Harness receipts at zero owners')
+        receipt = self.native_migrate(self.expected[COORDINATOR], deepcopy(self.native_plan), expected)
+        if receipt != {'status': 'verified', 'target': self.native_plan['target']}:
+            raise ReleaseError('Native provisioning result is uncertain or mismatched; no activation was attempted.')
+        entry.update(status='verified', confirmed=True)
+        self.native_inventory = {**deepcopy(self.native_plan['target']), 'state': 'receipted'}
+        # The versioned native migration seeds a paused bootstrap. No candidate
+        # coordinator may admit work before this durable pause is observed.
+        staged = self.expected[COORDINATOR]
+        status = self.native_status(staged, staged=True)
+        receipt = self.control_receipt(status, staged=True)
+        if (not receipt['paused'] or status['workers']
+                or (self.native_control_receipt is not None and receipt != self.native_control_receipt)):
+            raise ReleaseError('Native bootstrap is not paused or its generation changed; no activation was attempted.')
+        self.native_control_receipt = receipt
+        entry['drain_generation'] = receipt['generation']
+        self.save()
+        self.unchanged()
+        entry['verified'] = True
+        self.save()
+
+    def verify_source_automation_pause(self, service):
+        if not self.core_changes or not self.legacy_schedule_count:
+            return
+        from scripts.release.automation_probe import valid_receipt
+        if self.automation_probe is None:
+            raise ReleaseError('Core switching with source schedules requires their read-only Temporal pause probe.')
+        receipt = self.automation_probe(service)
+        if (not valid_receipt(receipt) or receipt['count'] != self.legacy_schedule_count
+                or (self.legacy_automation_receipt is not None and receipt != self.legacy_automation_receipt)):
+            raise ReleaseError('Source automation pause or tracked schedule inventory changed; core activation stopped.')
+        self.legacy_automation_receipt = deepcopy(receipt)
+        self.record['legacy_automation_pause'] = deepcopy(receipt)
+        self.save()
+
+    def control_body(self, service, *, staged=False):
+        body = {'protocol': 1, 'core': 'pydantic-v1',
+                'native_schema': service.env['MOYAI_NATIVE_SCHEMA'],
+                'task_queue': service.env['MOYAI_NATIVE_TASK_QUEUE']}
+        if not staged:
+            policy = (self.candidate['source_policy']
+                if self.candidate_policy_active
+                and self.candidate['contracts']['coordinator'] != self.baseline['contracts']['coordinator']
+                else self.baseline['policy'])
+            body['expected_worker'] = {
+                **native_owner(self.identities[WORKER]), 'source_policy': policy,
+                'worker_policy': self.source(service)['contracts']['worker'],
+            }
+        return body
+
+    def control_receipt(self, status, *, staged=False):
+        service = self.expected[COORDINATOR if staged else WORKER]
+        try:
+            receipt = validate_native_control(status, self.control_body(service, staged=staged), 'status')
+            if not staged:
+                worker = self.control_body(service)['expected_worker']
+                if status['workers'] != [{**worker,
+                        'maintenance_drain': service.env['MAINTENANCE_DRAIN'] == 'true'}]:
+                    raise ValueError()
+            return receipt
+        except (ValueError, KeyError, TypeError):
+            raise ReleaseError('Native status did not verify the exact registered worker and maintenance receipt.') from None
+
+    def native_status(self, service, *, staged=False):
+        if self.native_control is None:
+            raise ReleaseError('The native in-place maintenance transport is unavailable; no release changes may proceed.')
+        try:
+            return self.native_control(service, 'status', self.control_body(service, staged=staged))
+        except (ValueError, KeyError, TypeError):
+            raise ReleaseError('Native maintenance status is incomplete or mismatched.') from None
+
+    def change_native_control(self, command):
+        """Persist one CAS intent; an unconfirmed response never permits retry."""
+        self.unchanged()
+        service = self.expected[WORKER]
+        status = self.native_status(service)
+        receipt = self.control_receipt(status)
+        if receipt != self.native_control_receipt:
+            raise ReleaseError('Native maintenance generation changed before the requested operation.')
+        body = {**self.control_body(service), 'expected_generation': receipt['generation'],
+                'request_key': f"release:{self.record['commit']}:{uuid4().hex}:{command}"}
+        entry = {'command': command, 'request': deepcopy(body), 'confirmed': False}
+        self.record.setdefault('native_control', []).append(entry)
+        self.save()
+        value = self.native_control(service, command, deepcopy(body))
+        try:
+            confirmed = validate_native_control(value, body, command)
+        except (ValueError, KeyError, TypeError):
+            raise ReleaseError('Native maintenance outcome is uncertain or mismatched; no retry was attempted.') from None
+        self.native_control_receipt = confirmed
+        entry.update(confirmed=True, receipt=deepcopy(confirmed))
+        if command == 'resume':
+            # Work may resume as soon as CAS commits, before its response arrives.
+            self.drained = False
+        self.save()
+        self.unchanged()
+
+    def begin_native_drain(self):
+        self.phase('Request native SDK safe boundaries before replacing the running worker')
+        self.change_native_control('request')
+        def drained():
+            self.unchanged()
+            status = self.native_status(self.expected[WORKER])
+            if self.control_receipt(status) != self.native_control_receipt:
+                raise ReleaseError('Native drain generation changed while waiting for safe boundaries.')
+            states = [self.required_state(service) for service in self.running.values()]
+            for state in states:
+                self.check_state(state)
+            keys = self.drain_keys()
+            return status['state'] == 'drained' and all(state[key] == 0 for state in states for key in keys)
+        self.wait(drained, 'Native drain timed out; the original worker remains alive and paused, with saved work preserved.',
+                  self.drain_timeout)
+        self.drained = True
+        self.record['native_in_place_drain_verified'] = True
+        self.save()
+
     def migrate_schema(self, plan):
         # Existing transport verifies the same old four owners/contracts inside
         # the DDL transaction and never retries an uncertain schema write.
@@ -246,9 +462,11 @@ class MaintenanceRelease(RollingRelease):
     def transition_service(self, service, sha, changes, *, release_drain=False):
         self.unchanged()
         self.configure(service, changes)
-        if (sha == self.record['commit'] and service.env['RENDER_MIGRATION_STAGE'] == 'true'
-                and service.env.get('AGENT_HARNESS') != DEFAULT_HARNESS):
-            self.migrate_default_harness(service)
+        if sha == self.record['commit'] and service.env['RENDER_MIGRATION_STAGE'] == 'true':
+            if service.id in self.core_changes:
+                self.select_candidate_core(service)
+            if service.env.get('AGENT_HARNESS') != DEFAULT_HARNESS:
+                self.migrate_default_harness(service)
         self.unchanged()
         target = deepcopy(service)
         target.sha = sha
@@ -356,6 +574,12 @@ class MaintenanceRelease(RollingRelease):
                 raise ReleaseError('Maintenance requires four matching builds and preserved shared configuration.')
         states = {sid: self.required_state(service) for sid, service in self.expected.items()}
         self.baseline = deepcopy(states[COORDINATOR])
+        self.source_core = coordinator.env.get('MOYAI_CORE', 'legacy')
+        self.native_required = bool(coordinator.env.get('MOYAI_NATIVE_SCHEMA'))
+        self.native_inventory = deepcopy(self.baseline.get('native'))
+        self.native_control_receipt = deepcopy(self.baseline.get('native_drain'))
+        if self.native_required and not isinstance(self.native_inventory, dict):
+            raise ReleaseError('Prepared native schema has no verified receipt inventory; no changes made.')
         if (not valid_contract({key: self.baseline.get(key) for key in ('schema', 'contracts')})
                 or not isinstance(self.baseline.get('policy'), str)
                 or not re.fullmatch('[0-9a-f]{64}', self.baseline['policy'])):
@@ -369,6 +593,7 @@ class MaintenanceRelease(RollingRelease):
             self.sources[sid] = {'schema': state.get('source_schema'), 'contracts': state.get('source_contracts'),
                 'source_policy': state.get('source_policy'), 'default_harness': state.get('default_harness'),
                 'source_schema_digest': state.get('source_schema_digest'),
+                **({'core': state['core']} if 'core' in state else {}),
                 **({'schema_support': state['schema_support']} if 'schema_support' in state else {})}
             if (not valid_maintenance_contract(self.sources[sid])
                     or self.sources[sid]['contracts'] != self.baseline['contracts']):
@@ -376,19 +601,64 @@ class MaintenanceRelease(RollingRelease):
             self.schema_supports[sid] = deepcopy(state.get('schema_support'))
             self.github.forward_from(service.sha, sha)
             candidate_env = {**service.env, 'MOYAI_BUILD_SHA': sha}
-            if 'AGENT_HARNESS' in candidate_env and candidate_env['AGENT_HARNESS'] != DEFAULT_HARNESS:
+            source_core = service.env.get('MOYAI_CORE', 'legacy')
+            selected_core = source_core if self.target_core == 'preserve' else self.target_core
+            if selected_core != source_core:
+                self.core_changes[sid] = service.env.get('MOYAI_CORE')
+            if self.target_core != 'preserve':
+                candidate_env['MOYAI_CORE'] = selected_core
+            if (selected_core == source_core == 'legacy'
+                    and 'AGENT_HARNESS' in candidate_env and candidate_env['AGENT_HARNESS'] != DEFAULT_HARNESS):
                 self.harness_changes[sid] = candidate_env['AGENT_HARNESS']
                 candidate_env['AGENT_HARNESS'] = DEFAULT_HARNESS
             candidate = self.contract(candidate_env)
             if not valid_maintenance_contract(candidate) or (self.candidate is not None and self.candidate != candidate):
                 raise ReleaseError('Candidate contracts differ across preserved role settings; no changes made.')
-            if candidate['default_harness'] != DEFAULT_HARNESS:
+            if candidate.get('core', 'legacy') != selected_core:
+                raise ReleaseError('Candidate source did not select the requested core; no changes made.')
+            if selected_core == source_core == 'legacy' and candidate['default_harness'] != DEFAULT_HARNESS:
                 raise ReleaseError('Candidate settings did not select the reviewed Deep Agents default; no changes made.')
+            if selected_core == 'pydantic':
+                if not self.native_required or self.native_migrate is None or self.native_control is None:
+                    raise ReleaseError('Pydantic requires prepared native settings and guarded migration transport; no changes made.')
+                try:
+                    native_plan = native_migration_plan(self.native_inventory, self.native_manifest(candidate_env))
+                except (ValueError, KeyError, TypeError):
+                    raise ReleaseError('Native app or Harness migration receipts are missing, unknown or incompatible; no changes made.') from None
+                if self.native_plan is not None and self.native_plan != native_plan:
+                    raise ReleaseError('Native migration plans differ across preserved role settings; no changes made.')
+                self.native_plan = native_plan
             self.candidate = deepcopy(candidate)
             self.running[sid] = deepcopy(service)
         for sid, state in states.items():
             self.check_state(state)
             self.check_source(self.running[sid], state)
+        if (self.core_changes and self.native_required
+                and any(state['native_automation_history'] for state in states.values())):
+            raise ReleaseError(
+                'Core switching after native automation adoption requires a qualified Temporal control-workflow '
+                'drain receipt. Preserve the native core and roll forward; no changes made.')
+        if self.core_changes and any(state['legacy_automations'] for state in states.values()):
+            raise ReleaseError(
+                'Pause source automations and confirm their installed schedule revision before core switching; '
+                'no changes made.')
+        if self.core_changes:
+            counts = [state.get('legacy_schedule_count') for state in states.values()]
+            if any(type(count) is not int or count < 0 for count in counts) or len(set(counts)) != 1:
+                raise ReleaseError('Source schedule inventory is incomplete or inconsistent; no changes made.')
+            self.legacy_schedule_count = counts[0]
+            self.verify_source_automation_pause(self.expected[COORDINATOR])
+        if self.source_core == 'pydantic':
+            if self.native_control_receipt is None:
+                raise ReleaseError('The native source lacks its versioned drain receipt; no changes made.')
+            status = self.native_status(self.expected[WORKER])
+            if self.control_receipt(status) != self.native_control_receipt or status['state'] != 'running':
+                raise ReleaseError('Native production is not at a clean running maintenance generation; inspect the prior receipt.')
+        elif self.native_plan and self.native_control_receipt is not None and not self.native_control_receipt['paused']:
+            raise ReleaseError('The existing native destination is not paused; inspect its previous owner and release receipt.')
+        if self.core_changes and self.candidate.get('core') == 'pydantic':
+            self.wait(lambda: self.github.native_ready(sha),
+                      'Native runtime CI did not complete on the selected main commit; no changes made.', 1800)
         if (states[COORDINATOR].get('coordinator_state') != 'leader'
                 or states[BROKER].get('broker_draining') is not False):
             raise ReleaseError('Preflight requires healthy coordinator and broker leadership.')
@@ -402,6 +672,11 @@ class MaintenanceRelease(RollingRelease):
             cluster_policy=self.baseline['policy'], contracts=deepcopy(self.baseline['contracts']),
             candidate_contracts=deepcopy(self.candidate['contracts']),
             candidate_default_harness=self.candidate['default_harness'],
+            candidate_core=self.candidate.get('core', 'legacy'),
+            core_migration=[{'service': sid, 'previous': previous, 'value': self.candidate['core']}
+                            for sid, previous in self.core_changes.items()],
+            native_migration=({'plan': deepcopy(self.native_plan), 'status': 'planned',
+                               'confirmed': False, 'verified': False} if self.native_plan else None),
             default_harness_migration=[{'service': sid, 'role': self.expected[sid].role,
                 'previous': value, 'value': DEFAULT_HARNESS} for sid, value in self.harness_changes.items()],
             schema_revision=self.baseline['schema'], schema_migration=(
@@ -418,13 +693,17 @@ class MaintenanceRelease(RollingRelease):
                 self.record.update(status='preflight_passed', transport_check_rounds=3)
                 self.phase('Four-role maintenance preflight passed; no changes made')
                 return
-            if not self.harness_changes and all(service.sha == sha for service in self.expected.values()):
+            if (not self.core_changes and not self.harness_changes
+                    and not (self.native_plan and self.native_plan['apply'])
+                    and all(service.sha == sha for service in self.expected.values())):
                 self.record['status'] = 'success'
                 self.phase('Selected build is already active on all four roles')
                 return
             self.record['status'] = 'running'
             if plan and plan.get('mode') != 'offline':
                 self.migrate_schema(plan)
+            if self.source_core == 'pydantic':
+                self.begin_native_drain()
             worker = self.expected[WORKER]
             self.phase('Pause new execution on the existing worker build')
             self.transition_service(worker, worker.sha, {'MAINTENANCE_DRAIN': 'true'})
@@ -434,7 +713,8 @@ class MaintenanceRelease(RollingRelease):
                 states = [self.required_state(service) for service in self.running.values()]
                 for state in states:
                     self.check_state(state)
-                return all(state[key] == 0 for state in states for key in COUNTS)
+                keys = self.drain_keys()
+                return all(state[key] == 0 for state in states for key in keys)
             self.wait(drained, 'Drain timed out; new execution remains paused and no sessions were cancelled.', self.drain_timeout)
             self.drained = True
             self.record['drain_verified'] = True
@@ -449,15 +729,25 @@ class MaintenanceRelease(RollingRelease):
                 raise ReleaseError('Old runtime owners remain; candidate coordinator was not activated.')
             self.record['zero_owner_boundary_verified'] = True
             self.save()
+            self.verify_source_automation_pause(self.expected[COORDINATOR])
+            if self.legacy_automation_receipt is not None:
+                self.record['legacy_control_disposition'] = 'preserved_on_original_queue_with_paused_admission'
+                self.save()
             if plan and plan.get('mode') == 'offline':
                 self.migrate_offline(plan)
+            if self.native_plan:
+                self.migrate_native()
             for sid in (COORDINATOR, BROKER, WORKER, self.api_service_id):
                 service = self.expected[sid]
                 self.phase('Activate matching candidate ' + service.role + ' while execution remains drained')
                 self.transition_service(service, sha, {'RENDER_MIGRATION_STAGE': 'false'})
             self.unchanged()
             self.phase('Release worker drain after all four candidate roles are verified')
-            self.transition_service(worker, sha, {'MAINTENANCE_DRAIN': 'false'}, release_drain=True)
+            native = self.candidate.get('core') == 'pydantic'
+            self.transition_service(worker, sha, {'MAINTENANCE_DRAIN': 'false'}, release_drain=not native)
+            if native:
+                self.phase('Resume the native maintenance generation after every candidate role and retirement verifies')
+                self.change_native_control('resume')
             self.unchanged()
             self.record['status'] = 'success'
             self.phase('All four roles match; prior owners retired and queued execution resumed')

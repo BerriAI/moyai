@@ -237,7 +237,11 @@ class GitHubRepositories:
             return value
 
         with self.store.connect() as conn:
+            conn.begin_write()
             for run in conn.execute("SELECT id,repo_url,github_repository_id FROM runs WHERE repo_url!='' OR github_repository_id IS NOT NULL").fetchall():
+                mutable = getattr(self, 'source_run_mutable', None)
+                if mutable is not None and not mutable(conn, run['id']):
+                    continue
                 identity = run['github_repository_id'] or identify(run['repo_url'])
                 if identity in labels:
                     conn.execute('UPDATE runs SET github_repository_id=?,repo_url=? WHERE id=?',

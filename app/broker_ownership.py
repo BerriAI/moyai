@@ -96,7 +96,8 @@ class BrokerMaintenance:
             while not await database(self.acquire):
                 await asyncio.sleep(.2)
             self.spend_recovery.start()
-            self.memory_review.start()
+            if self.memory_review:
+                self.memory_review.start()
             if self.skill_learning:
                 self.skill_learning.start()
             if self.repository_context:
@@ -104,7 +105,9 @@ class BrokerMaintenance:
             await asyncio.Event().wait()
         finally:
             errors = []
-            closes = [self.memory_review.close, self.spend_recovery.close]
+            closes = [self.spend_recovery.close]
+            if self.memory_review:
+                closes.insert(0, self.memory_review.close)
             if self.skill_learning:
                 closes.insert(1, self.skill_learning.close)
             if self.repository_context:

@@ -1,0 +1,53 @@
+/* Preserve the established command-palette.css geometry and palette, scoped to this React dialog. */
+[data-slot="dialog-overlay"]:has(+ .native-command-palette) { z-index: 1100; }
+.native-command-palette[data-slot="dialog-content"] {
+  z-index: 1101;
+  width: min(720px, calc(100vw - 32px));
+  max-width: min(720px, calc(100vw - 32px));
+  max-height: min(720px, calc(100dvh - 32px));
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--ui-background);
+  border-color: var(--ui-control-border);
+  box-shadow: var(--ui-shadow);
+  color: var(--ui-foreground);
+}
+.native-command-palette .palette-search-bar { display: flex; align-items: center; gap: 12px; padding: 20px; border-bottom: 1px solid var(--ui-border); }
+.native-command-palette .palette-search-icon, .native-command-palette .palette-icon { display: grid; place-items: center; flex: none; color: var(--ui-muted); }
+.native-command-palette [role="combobox"] { flex: 1; min-width: 0; height: 40px; padding: 4px; border: 0; box-shadow: none; background: transparent; color: var(--ui-foreground); font-size: 20px; font-weight: 350; letter-spacing: -.02em; }
+.native-command-palette [role="combobox"]:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; border-radius: 4px; box-shadow: none; }
+.native-command-palette .palette-close { flex: none; min-width: 36px; padding: 6px; border: 0; background: transparent; color: var(--ui-muted); }
+.native-command-palette .palette-body { min-height: 0; overflow-y: auto; padding: 8px; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--ui-control-border) transparent; }
+.native-command-palette .palette-scope { margin: 8px 12px 12px; color: var(--ui-muted); font-size: 12px; }
+.native-command-palette .palette-group-title { margin: 16px 12px 6px; color: var(--ui-muted); font: 11px/1.5 "Geist Mono", monospace; letter-spacing: .06em; }
+.native-command-palette .palette-option { display: flex; align-items: center; gap: 14px; min-height: 48px; padding: 12px; border-radius: 8px; cursor: pointer; }
+.native-command-palette .palette-option[aria-selected="true"] { background: var(--ui-secondary); color: var(--ui-foreground); box-shadow: inset 2px 0 var(--ui-primary); }
+.native-command-palette .palette-option[aria-selected="true"] .palette-icon { color: var(--ui-primary); }
+.native-command-palette .palette-option[aria-disabled="true"] { cursor: default; opacity: .6; }
+.native-command-palette .palette-copy { display: grid; gap: 3px; flex: 1; min-width: 0; }
+.native-command-palette .palette-label { font-size: 15px; line-height: 1.4; overflow-wrap: anywhere; }
+.native-command-palette .palette-description, .native-command-palette .palette-snippet { color: var(--ui-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.native-command-palette .palette-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.native-command-palette .palette-status { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; color: var(--ui-muted); font-size: 13px; line-height: 1.5; }
+.native-command-palette .palette-status:empty { display: none; }
+.native-command-palette .palette-footer { display: flex; flex-wrap: wrap; gap: 16px; flex: none; padding: 14px 20px; border-top: 1px solid var(--ui-border); color: var(--ui-muted); font-size: 12px; }
+.native-command-palette .palette-footer > span { display: flex; align-items: center; gap: 6px; }
+.native-command-palette .palette-footer > span:last-child { margin-inline-start: auto; }
+.native-command-palette kbd { font-family: inherit; font-size: 12px; line-height: 1.5; white-space: nowrap; color: var(--ui-muted); }
+.native-command-palette .palette-footer kbd, .native-command-palette .palette-close kbd { background: var(--ui-secondary); border: 1px solid var(--ui-border); border-radius: 4px; padding: 1px 4px; }
+.native-command-palette button:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; }
+@media (max-width: 600px) {
+  .native-command-palette .palette-search-bar { padding: 12px; gap: 8px; }
+  .native-command-palette [role="combobox"] { font-size: 16px; }
+  .native-command-palette .palette-option { gap: 10px; }
+  .native-command-palette .palette-footer { gap: 8px; padding: 12px; }
+  .native-command-palette .palette-option > kbd { display: none; }
+  .native-command-palette [data-slot="button"] { min-width: 44px; min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .native-command-palette, .native-command-palette * { animation: none; transition: none; scroll-behavior: auto; }
+}

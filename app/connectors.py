@@ -253,12 +253,14 @@ class Connectors:
                            (provider, now(), status))
 
     def save(self, provider, credentials, label):
+        from .connection_authority import new_credentials
         self.store.execute("INSERT INTO connections VALUES(?,?,?,?) ON CONFLICT(provider) DO UPDATE SET encrypted=excluded.encrypted,label=excluded.label,updated_at=excluded.updated_at",
-                           (provider, self.security.encrypt(json.dumps(credentials)), label, now()))
+                           (provider, self.security.encrypt(json.dumps(new_credentials(credentials))), label, now()))
 
     async def credentials(self, provider):
+        from .connection_authority import refresh_connection
         async with self.locks[provider]:
-            rows = self.store.rows("SELECT * FROM connections WHERE provider=?", (provider,))
+            rows = await database(self.store.rows, "SELECT * FROM connections WHERE provider=?", (provider,))
             if not rows:
                 raise ConnectorError(f"Connect {provider.title()} in Connections first.", dispatched=False)
             credentials = json.loads(self.security.decrypt(rows[0]["encrypted"]))
@@ -268,8 +270,8 @@ class Connectors:
                 fresh = await self.exchange(provider, refresh_token=credentials["refresh_token"])
                 if provider == "slack" and credentials.get("bot") and not fresh.get("bot"):
                     fresh["bot"] = credentials["bot"]
-                self.save(provider, fresh, rows[0]["label"])
-                return fresh
+                return await database(
+                    refresh_connection, self.store, self.security, provider, rows[0], fresh)
             return credentials
 
     def slack_installation(self, *, connection=None):
@@ -282,6 +284,7 @@ class Connectors:
                 "user_id": bot.get("bot_user_id"), "bot_id": bot.get("bot_id"), "app_id": bot.get("app_id"), "scopes": bot.get("scope", "").split(",")}
 
     async def slack_bot_token(self):
+        from .connection_authority import refresh_connection
         async with self.locks["slack"]:
             rows = await database(self.store.rows, "SELECT * FROM connections WHERE provider='slack'")
             credentials = json.loads(self.security.decrypt(rows[0]["encrypted"])) if rows else {}
@@ -293,7 +296,8 @@ class Connectors:
                     raise ConnectorError("The Slack bot connection expired. Reconnect Slack.", dispatched=False)
                 fresh = await self.exchange("slack", refresh_token=bot["refresh_token"])
                 credentials["bot"] = bot = {**bot, **fresh}
-                await database(self.save, "slack", credentials, rows[0]["label"])
+                await database(
+                    refresh_connection, self.store, self.security, "slack", rows[0], credentials)
             return bot["access_token"]
 
     async def request(self, method, url, *, allowed_errors=(), **kwargs):
@@ -661,7 +665,7 @@ class Connectors:
                 if self.settings.slack_identity_linking_enabled:
                     params["scope"] += ",users:read,users:read.email"
                 if self.settings.slack_thread_chat_enabled:
-                    params["scope"] += ",channels:history,groups:history"
+                    params["scope"] += ",channels:history,groups:history,channels:read,groups:read"
             base = "https://slack.com/oauth/v2/authorize"
         else:
             params["owner"] = "user"

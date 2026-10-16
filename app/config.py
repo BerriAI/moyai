@@ -30,6 +30,16 @@ class Settings(BaseSettings):
         # unrelated global gateway key. Containers do not contain the .env file.
         return init_settings, dotenv_settings, env_settings, file_secret_settings
     data_dir: Path = Path(".data")
+    # Release/ownership contracts need these values without importing the new
+    # framework into the legacy interpreter. Native validation is stricter at
+    # the selected entrypoint; the legacy defaults preserve existing hashes.
+    moyai_core: Literal["legacy", "pydantic"] = "legacy"
+    moyai_native_schema: str = ""
+    moyai_native_task_queue: str = ""
+    moyai_native_encryption_key: str = Field(default="", repr=False)
+    moyai_native_key_format: str = ""
+    moyai_native_object_prefix: str = ""
+    moyai_native_object_format: str = ""
     moyai_database_url: str = Field(default='', repr=False)
     moyai_database_initialize: bool = False
     moyai_schema_mode: Literal['auto', 'verify'] = 'auto'

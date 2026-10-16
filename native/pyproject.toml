@@ -1,0 +1,77 @@
+[project]
+name = "moyai-pydantic"
+version = "0.1.0"
+description = "Moyai built on Pydantic AI Harness, Modal, Temporal, and LiteLLM."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic-ai[temporal]==2.55.0",
+    "pydantic-ai-harness[coder,modal,skills,github,linear,notion,slack,temporal,playwright,code-mode]==0.55.0",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "httpx>=0.28,<1",
+    "websockets>=15,<17",
+    "pydantic-settings>=2.8,<3",
+    "python-dotenv>=1,<2",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "aiosqlite>=0.20,<1",
+    "asyncpg>=0.30,<1",
+    "cryptography>=44",
+    "itsdangerous>=2.2,<3",
+    "boto3>=1.43,<2",
+    "pillow>=12.3,<13",
+]
+
+[project.optional-dependencies]
+product = [
+    "PyJWT[crypto]>=2.10,<3",
+    "psycopg[binary,pool]>=3.2,<4",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+    "pytest>=8",
+    "pytest-asyncio>=1",
+    "ruff>=0.14",
+    "pyright>=1.1",
+    # Product-adapter tests run in the normal native CI suite.
+    "PyJWT[crypto]>=2.10,<3",
+    "psycopg[binary,pool]>=3.2,<4",
+]
+
+[project.scripts]
+moyai = "moyai.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/moyai"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "moyai/resources/skills"
+"instructions.md" = "moyai/resources/instructions.md"
+"desktop.py" = "moyai/resources/desktop.py"
+"browser_guest.py" = "moyai/resources/browser_guest.py"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src", ".."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]
+
+[tool.pyright]
+include = ["src"]
+extraPaths = [".."]
+typeCheckingMode = "standard"
+

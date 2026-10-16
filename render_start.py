@@ -180,28 +180,46 @@ def broker_failed():
 
 
 def main():
+    from docker_start import ensure_selected_interpreter, selected_core
+    ensure_selected_interpreter()
+    core = selected_core()
     configure_environment()
     stage = os.environ.get("RENDER_MIGRATION_STAGE", "true").lower()
     if stage not in {"true", "false"}:
         raise RuntimeError("RENDER_MIGRATION_STAGE must be true or false.")
-    if stage == "false":
+    if stage == "false" and core == "legacy":
         asyncio.run(bootstrap())
+    target = maintenance if stage == "true" else "app.main:app"
+    if stage == "false" and core == "pydantic":
+        # No legacy bootstrap or app.main import in this branch. Native startup
+        # verifies schemas, source fencing and canonical role ownership.
+        from moyai.product_config import load_product_config
+        from moyai.product_start import create_application
+        product_config = load_product_config()
+        assert product_config is not None
+        target = create_application(product_config, host="0.0.0.0")
     role = os.environ.get("MOYAI_RUNTIME_ROLE")
     config = uvicorn.Config(
-        maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
+        target, host="0.0.0.0",
         port=int(os.environ.get("PORT", "10000")), workers=1,
         timeout_graceful_shutdown=(API_GRACEFUL_SHUTDOWN_SECONDS if role == "api" else
                                    BROKER_GRACEFUL_SHUTDOWN_SECONDS if role == "broker" else 20),
         # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
         proxy_headers=False,
     )
-    server = (RenderOverlapServer(config, failure_check=broker_failed if stage == 'false' and role == 'broker' else None)
+    server = (RenderOverlapServer(config, failure_check=broker_failed
+                                  if core == 'legacy' and stage == 'false' and role == 'broker' else None)
               if role in {'api', 'broker', 'coordinator'} else uvicorn.Server(config))
+    lifecycle = None
+    if core == "pydantic" and stage == "false":
+        lifecycle = getattr(getattr(target, "state", None), "product_lifecycle", None)
+        if lifecycle is not None:
+            lifecycle.retire = lambda: setattr(server, "should_exit", True)
     try:
         server.run()
     except KeyboardInterrupt:
         pass
-    if getattr(server, 'retired', False):
+    if getattr(server, 'retired', False) or (lifecycle is not None and lifecycle.failed):
         raise SystemExit(1)
 
 

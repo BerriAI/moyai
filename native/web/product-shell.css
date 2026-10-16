@@ -1,0 +1,18 @@
+.sidebar .rail-destinations { display: grid; gap: 2px; }
+.sidebar .rail-palette-trigger { justify-content: flex-start; gap: 8px; width: 100%; min-width: 0; padding-inline: 8px; font-size: 12px; color: var(--ui-muted); }
+.rail-palette-trigger > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rail-palette-trigger .key-hint { margin-inline-start: auto; }
+.login-password { display: grid; gap: 20px; }
+.login-password label { display: grid; gap: 8px; }
+.live-action > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.live-action > button { margin-inline-start: auto; flex-shrink: 0; }
+.restore-sidebar { position: fixed; z-index: 45; inset: 8px auto auto 8px; }
+@media (min-width: 601px) {
+  .app.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
+  .app.sidebar-collapsed > .sidebar { display: none; }
+  .sidebar-collapsed .topbar { padding-inline-start: 48px; }
+}
+@media (max-width: 600px) {
+  .restore-sidebar { display: none; }
+  .login-password input { font-size: 16px; }
+}

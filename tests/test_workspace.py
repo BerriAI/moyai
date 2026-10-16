@@ -314,7 +314,7 @@ def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
     builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics", "bundled_skill_read", "history_read", "goal", "computer_handoff", "artifact_publish", "artifact_fetch", "artifact_read", "artifacts_list"}
-    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | builtins
+    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues", "linear_options"} | builtins
     denied = client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).json()
     assert denied['code'] == 'access_denied' and denied['dispatched'] is False

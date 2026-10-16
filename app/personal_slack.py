@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from .connector_errors import ConnectorError
+from .db import database
 from .security import digest
 
 LIMITATION = 'Personal Slack reads require your private web chat. Start a private chat, or disconnect personal Slack in Settings > Personal Slack to use organization access.'
@@ -78,7 +79,16 @@ class PersonalSlack:
         self.store.execute('INSERT INTO personal_slack_grants(owner_id,revision) VALUES(?,?) ON CONFLICT(owner_id) DO NOTHING', (owner, secrets.token_hex(24)))
         return self.row(owner)['revision']
 
-    def save(self, owner, credentials, label, revision):
+    def save(self, owner, credentials, label, revision, *, refresh=False):
+        from .connection_authority import AUTHORITY, authority, new_credentials
+        if refresh:
+            previous = self.row(owner)
+            if not previous or previous["revision"] != revision or previous["encrypted"] is None:
+                raise ConnectorError('Personal Slack changed. Retry from Settings > Personal Slack.')
+            original = json.loads(self.security.decrypt(previous["encrypted"]))
+            credentials = {**credentials, AUTHORITY: authority(original, previous["encrypted"])}
+        else:
+            credentials = new_credentials(credentials)
         changed = self.store.execute('''UPDATE personal_slack_grants SET encrypted=?,label=?,health='healthy',revision=?
             WHERE owner_id=? AND revision=?''', (self.security.encrypt(json.dumps(credentials)), label,
                 secrets.token_hex(24), owner, revision))
@@ -165,7 +175,7 @@ class PersonalSlack:
 
     async def credentials(self, owner, expected_revision=None):
         async with self.locks.setdefault(owner, asyncio.Lock()):
-            row = self.row(owner)
+            row = await database(self.row, owner)
             if not row or row['encrypted'] is None or (expected_revision is not None and row['revision'] != expected_revision):
                 raise ConnectorError('Personal Slack changed. Retry.')
             try:
@@ -176,13 +186,13 @@ class PersonalSlack:
                     fresh = await self.exchange(refresh_token=value['refresh_token'])
                     fresh['team_id'], fresh['user_id'] = value['team_id'], value['user_id']
                     label = await self.verify(fresh)
-                    self.save(owner, fresh, label, row['revision'])
-                    value, row = fresh, self.row(owner)
+                    await database(self.save, owner, fresh, label, row['revision'], refresh=True)
+                    value, row = fresh, await database(self.row, owner)
                 if not value.get('access_token'):
                     raise ConnectorError(FAILURE)
                 return value, row['revision']
             except Exception:
-                self.record_error(owner, row['revision'])
+                await database(self.record_error, owner, row['revision'])
                 raise ConnectorError(FAILURE) from None
 
     def redirect_uri(self):
@@ -220,27 +230,30 @@ class PersonalSlack:
 
         @app.get('/api/connections/slack/personal')
         async def status(request: Request):
-            _, owner = actor(request, required=False)
-            return self.status(owner)
+            _, owner = await database(actor, request, required=False)
+            return await database(self.status, owner)
 
         @app.post('/api/connections/slack/personal/oauth')
         async def start(request: Request):
-            sid, owner = actor(request, True)
+            sid, owner = await database(actor, request, True)
             if not self.connectors.configured_oauth('slack'):
                 raise HTTPException(409, 'Configure the Slack OAuth client first.')
             state = OAUTH_STATE_PREFIX + secrets.token_urlsafe(32)
-            self.store.execute('INSERT INTO personal_slack_states VALUES(?,?,?,?,?)',
-                (digest(state), digest(sid), owner, self.revision(owner), time.time() + 600))
+            revision = await database(self.revision, owner)
+            await database(self.store.execute, 'INSERT INTO personal_slack_states VALUES(?,?,?,?,?)',
+                (digest(state), digest(sid), owner, revision, time.time() + 600))
             await flush()
             return {'url': 'https://slack.com/oauth/v2/authorize?' + urlencode({
                 'client_id': self.settings.slack_client_id, 'redirect_uri': self.redirect_uri(), 'state': state,
                 'user_scope': 'search:read,channels:history,groups:history,im:history,mpim:history'})}
 
         async def callback(request: Request, state: str = '', code: str = '', error: str = ''):
-            sid, owner = actor(request)
-            with self.store.connect() as conn:
-                row = conn.execute('DELETE FROM personal_slack_states WHERE state_hash=? AND session_hash=? AND owner_id=? AND expires>? RETURNING revision',
-                    (digest(state), digest(sid), owner, time.time())).fetchone()
+            sid, owner = await database(actor, request)
+            def consume():
+                with self.store.connect() as conn:
+                    return conn.execute('DELETE FROM personal_slack_states WHERE state_hash=? AND session_hash=? AND owner_id=? AND expires>? RETURNING revision',
+                        (digest(state), digest(sid), owner, time.time())).fetchone()
+            row = await database(consume)
             await flush()
             if not row:
                 raise HTTPException(400, 'Expired or invalid personal Slack request. Start again.')
@@ -249,8 +262,8 @@ class PersonalSlack:
             try:
                 credentials = await self.exchange(code=code)
                 label = await self.verify(credentials)
-                actor(request)
-                self.save(owner, credentials, label, row['revision'])
+                await database(actor, request)
+                await database(self.save, owner, credentials, label, row['revision'])
             except Exception:
                 raise HTTPException(409, FAILURE) from None
             await flush()
@@ -258,27 +271,27 @@ class PersonalSlack:
 
         @app.delete('/api/connections/slack/personal')
         async def disconnect(request: Request):
-            _, owner = actor(request, True)
-            self.disconnect(owner)
+            _, owner = await database(actor, request, True)
+            await database(self.disconnect, owner)
             await flush()
-            return self.status(owner)
+            return await database(self.status, owner)
 
         @app.post('/api/connections/slack/personal/check')
         async def check(request: Request):
-            _, owner = actor(request, True)
+            _, owner = await database(actor, request, True)
             revision = None
             try:
                 credentials, revision = await self.credentials(owner)
                 label = await self.verify(credentials)
-                actor(request)
-                self.save(owner, credentials, label, revision)
+                await database(actor, request)
+                await database(self.save, owner, credentials, label, revision, refresh=True)
             except Exception:
                 if revision:
-                    self.record_error(owner, revision)
+                    await database(self.record_error, owner, revision)
                 await flush()
                 raise HTTPException(409, FAILURE) from None
             await flush()
-            return self.status(owner)
+            return await database(self.status, owner)
 
         return callback
 

@@ -17,7 +17,11 @@ async function setup(t, width=1440, {failFirst=false}={}) {
   const page = await browser.newPage({viewport:{width,height:1000}});
   const errors=[], writes=[];
   page.on('pageerror', error=>errors.push(error.message));
-  t.after(async()=>{await page.close(); assert.deepEqual(errors,[]);});
+  t.after(async()=>{
+    try {await page.unrouteAll({behavior:'wait'});}
+    finally {await page.close();}
+    assert.deepEqual(errors,[]);
+  });
   const messages=[
     {id:1,role:'user',user_id:'user-0',status:'running',content:'Current request'},
     {id:2,role:'user',user_id:'user-0',status:'queued',content:'Queued correction',revision:0,queue_locked:0,attachments:[]},

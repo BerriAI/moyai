@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 
 if '_rolling_probe' not in globals():
     from scripts.release import rolling_probe as _rolling_probe
+if '_native_probe' not in globals():
+    from scripts.release import native_probe as _native_probe
 
 ProbeFailure = _rolling_probe.ProbeFailure
 require = _rolling_probe.require
@@ -30,6 +32,8 @@ def snapshot(connection, schema):
     # aggregates in that same transaction as schema, policy, and ownership.
     state = _rolling_probe.snapshot(connection, schema)
     state.update(drain_counts(connection))
+    state['native'] = _native_probe.inventory(connection)
+    state['native_drain'] = _native_probe.control_receipt(connection)
     return state
 
 
@@ -47,10 +51,39 @@ def drain_counts(connection):
         'legacy_active_sessions': connection.execute('''SELECT count(*) FROM runs r
             WHERE r.deleted_at='' AND r.status NOT IN ('queued','idle','completed','failed','cancelled','interrupted')
             AND NOT EXISTS(SELECT 1 FROM durable_sessions d WHERE d.run_id=r.id)''').fetchone()[0],
+        'legacy_core_runs': connection.execute("""SELECT count(*) FROM runs WHERE deleted_at=''
+            AND status NOT IN ('idle','completed','failed','cancelled','interrupted')""").fetchone()[0],
         'model_requests': connection.execute("SELECT count(*) FROM model_requests WHERE status IN ('pending','running')").fetchone()[0],
         'live_leases': connection.execute('SELECT count(*) FROM runtime_leases WHERE expires_at>clock_timestamp()').fetchone()[0],
         'database_connections': connection.execute('SELECT count(*) FROM pg_stat_activity').fetchone()[0],
+        **legacy_automation_counts(connection),
+        **_native_probe.drain_counts(connection),
     }
+
+
+def legacy_automation_counts(connection):
+    """Future canonical schedules and inbox work can exist without a run yet."""
+    counts = {'legacy_automations': 0, 'legacy_events': 0, 'legacy_schedule_count': 0}
+    if connection.execute("SELECT to_regclass('automations')").fetchone()[0] is not None:
+        # This is the installed source's format, inspected in legacy Python.
+        # Importing its definitions does not instantiate a scheduler or client.
+        from app.automations import SCHEDULE_VERSION
+        require(type(SCHEDULE_VERSION) is int and SCHEDULE_VERSION > 0)
+        counts['legacy_automations'] = connection.execute("""
+            SELECT count(*) FROM automations WHERE paused IS DISTINCT FROM 1
+                OR synced_revision IS DISTINCT FROM revision
+                OR synced_schedule_version IS DISTINCT FROM %s
+                OR sync_error IS DISTINCT FROM ''
+        """, (SCHEDULE_VERSION,)).fetchone()[0]
+    if connection.execute("SELECT to_regclass('automation_events')").fetchone()[0] is not None:
+        counts['legacy_events'] = connection.execute(
+            "SELECT count(*) FROM automation_events WHERE status='pending'"
+        ).fetchone()[0]
+    if connection.execute("SELECT to_regclass('automation_schedules')").fetchone()[0] is not None:
+        counts['legacy_schedule_count'] = connection.execute(
+            'SELECT count(*) FROM automation_schedules'
+        ).fetchone()[0]
+    return counts
 
 
 def source_schema(connection, schema, revision, *, staged):
@@ -81,6 +114,8 @@ def source_schema(connection, schema, revision, *, staged):
 
 def health_identity(response, options, state):
     if not options['staged']:
+        if os.environ.get('MOYAI_CORE', 'legacy') == 'pydantic':
+            require(response.headers.get('X-Moyai-Core') == 'pydantic-v1')
         return _rolling_probe.health_identity(response, options, state)
     require(response.status == 200 and json.load(response) == {'status': 'ok', 'mode': 'migration_staging'})
     # Staging imports render_start's maintenance app, never the application owner.
@@ -149,6 +184,7 @@ def probe(options):
         except (TimeoutError, ConnectionError, http.client.HTTPException):
             raise ProbeFailure('health_unavailable') from None
     return {'ok': True, 'staged': options['staged'], 'drain': options['drain'],
+            'core': os.environ.get('MOYAI_CORE', 'legacy'),
             'default_harness': default_harness, 'source_policy': source_policy,
             'source_contracts': contracts, **state, **health}
 
@@ -168,6 +204,8 @@ def piped_source():
     # replacing imports from the installed app used for contract verification.
     return ("import types\n_rolling_probe = types.ModuleType('moyai_maintenance_rolling_probe')\n"
             'exec(' + repr((ROOT / 'rolling_probe.py').read_text()) + ', _rolling_probe.__dict__)\n'
+            "_native_probe = types.ModuleType('moyai_maintenance_native_probe')\n"
+            'exec(' + repr((ROOT / 'native_probe.py').read_text()) + ', _native_probe.__dict__)\n'
             + (ROOT / 'maintenance_probe.py').read_text())
 
 

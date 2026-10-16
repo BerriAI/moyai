@@ -1,0 +1,280 @@
+# Integrating the Pydantic core into Moyai
+
+- **Target: one Moyai product with a new execution core.**
+  - Merge acceptance: **merge #465 → deploy through the existing release workflow → run production Moyai on the new core**, with qualified data compatibility, operational ownership, billing, and rollback. Intermediate gated/local milestones are progress toward that acceptance criterion.
+  - Keep the new native UI and build on it.
+  - Make Pydantic AI, Pydantic AI Harness, Temporal, Modal, and LiteLLM the execution foundation.
+  - Migrate the existing product services, data, workflows, and operational contracts onto that foundation.
+  - `native/` contains the new core, standalone development mode, and the first existing-product adapters. Its directory name is not a requirement for the final deployment.
+  - Do not keep a second permanent product with separate users, billing, session history, or administration.
+  - Do not delete the existing implementation while it is still needed to read historical data, finish active work, or support rollback.
+  - **Explicitly deferred from #465 on October 15, 2026:** interactive subagent chat, including direct messages to active children and continuation of completed child conversations. Keep native delegation, existing subagent summary panels, and ordinary side chats. Preserve the unfinished child-chat work for a follow-up; its new runtime hooks and v14 migration are excluded from this candidate.
+
+- **Current position and concrete integration gaps.**
+  - Standalone mode retains its own development accounts and data. Existing-product mode reuses canonical sign-in, users, roles, historical sessions, and original file readers, with explicit native execution schemas and codecs.
+  - It already reuses shared React/shadcn components and Moyai visual assets. The current work also reuses the existing analytics renderer through a build adapter.
+  - Native execution, UI, desktop, settings, and analytics work is a foundation, not a completed production migration.
+  - Docker/Render selection supports separately locked native and legacy environments. The production workflow selects maintenance + Pydantic explicitly; the runtime's legacy default remains available for source identification and guarded rollback. Native roles verify schema, ownership and drain contracts before becoming ready.
+  - Existing user accounts, historical sessions, billing records, object references, OAuth connections, and operational ownership protocols are not automatically adopted by pointing the native app at the same database.
+  - There are material compatibility differences: the legacy and native authentication cookies differ; encryption-key interpretation differs; S3 object key/encoding formats differ; and Temporal workflow histories belong to their original workflow implementations.
+  - This outline is based on repository code and deployment runbooks. It is not a new audit of live Render configuration or production data.
+  - Local actual-app proof has opened an original session with its existing cookie/link, continued eligible idle work through the native core, preserved old history and downloads, recovered verified workspace files, and captured real model costs. Original messages remain read-only. This is not a production cutover.
+
+- **1. Establish the ownership boundary before moving more features.**
+  - Keep agent execution in the SDK: model/tool loop, validation, native continuation, delegation, planning, compaction, and durable execution.
+  - Keep Moyai responsible for the product: identity, permissions, admission, navigation, billing, notifications, artifacts, schedules, and operations.
+  - Define shared product interfaces for:
+    - User/workspace identity and current authorization.
+    - Logical sessions, messages, participation, and navigation.
+    - Execution admission, status, steering, Stop, approvals, and questions.
+    - Credential selection and provider connections.
+    - Artifacts and storage.
+    - Inference accounting, PR publication receipts, and analytics.
+  - Implement adapters at these boundaries instead of copying the old runtime into Pydantic callbacks.
+  - Give each execution an explicit engine/version identity. A logical session can have historical executions from an older engine without running two engines for the same turn.
+  - Use the existing feature inventory as a parity checklist. Mark each behavior as reused, adapted, migrated, deferred, or intentionally retired; retirement needs an explicit product decision.
+
+- **2. Preserve existing identity and authorization.**
+  - Reuse the existing user IDs, organization membership, admin/member roles, and Slack identity links.
+  - Integrate the existing Google/Cloudflare Access login paths and account-revocation behavior.
+  - Prevent the native bootstrap path from creating an unrelated new administrator/workspace in an existing production installation.
+  - Decide explicitly whether existing login cookies remain valid or users sign in again at cutover; either way, their accounts and ownership remain the same.
+  - Preserve private/shared visibility, participation rules, credential ownership, and admin-only operations.
+  - Continue checking current permissions at admission and at execution, including after an approval wait, retry, or reconnect.
+  - Preserve both encryption formats during the transition. Reusing the same environment variable value alone does not make old ciphertext readable by the current native codec.
+  - Keep personal credentials and memory private even when a session or administrative report is shared.
+
+- **3. Make existing sessions appear in the new UI before migrating active execution.**
+  - Build a unified session/history read model over existing and native records.
+  - Preserve session IDs or maintain explicit, durable ID mappings.
+  - Preserve titles, messages, timestamps, authors, private/shared status, folders, pins, participation, unread state, archives, and deletion/restore semantics.
+  - Preserve existing links, including `/#run=<id>`, Slack session links, artifact URLs, and bookmarked admin destinations.
+  - Make historical attachments, downloads, PRs, browser captures, and child-session relationships visible through the new UI.
+  - Start with read compatibility. Showing an old session must not provision a computer, restart its task, or reinterpret its saved tool calls.
+  - For continuing an idle old session:
+    - Reconstruct supported conversation context for the new core.
+    - Preserve public user/assistant history and explicit application state.
+    - Keep private working history subject to its original requester permissions.
+    - Validate workspace and credential compatibility before reusing a computer.
+    - Record the transition so retries cannot import or continue the same message twice.
+  - Do not claim arbitrary old agent checkpoints can resume as Pydantic checkpoints. Temporal histories and pending tool protocols need an explicit compatibility boundary.
+
+- **4. Make the new UI the production UI while retaining existing product behavior.**
+  - Keep the compact header/sidebar, message layout, workspace overlay, dynamic panel tabs, previews, side chats, and desktop improvements.
+  - Align the Workspace overlay to the main chat's right edge and contain its slide animation within that column, including with an open resource panel. Keep the order PRs, Subagents, Outputs.
+  - Start with a 65:35 chat/panel split; persist deliberate divider adjustments per user and product mode in the browser across sessions. Viewport clamps must not overwrite that preference.
+  - Default Participated to collapsed. Use the dedicated New session controls instead of repeating New session inside either session menu.
+  - Add visible left-navigation destinations for **Skills, Automations, and Connections**, backed by the same destinations available in Settings.
+  - Maintain one navigation registry for links, Settings, command search, permissions, and route aliases.
+  - Preserve the complete **Cmd/Ctrl+K command palette**:
+    - Commands and title/message search.
+    - Recent and matching sessions, including appropriate child-session results.
+    - New session, copy link, rename, move, pin/unpin, new folder, sidebar toggle, and Settings.
+    - Permission-aware actions, loading/error/empty states, and stale-search cancellation.
+    - Arrow navigation, Enter, Escape, focus return, and platform-specific shortcut labels.
+    - The native command palette is implemented; the separate sidebar Filter sessions input has been removed.
+  - Reuse existing shadcn primitives and reusable Moyai helpers; adapt legacy controllers that depend on old globals/API contracts.
+  - Preserve uploads, paste, queued editing, steering, approvals, notifications, session sharing, deep links, and browser back/forward behavior.
+  - Retain every relevant Settings/admin destination from the inventory. Runtime, prepared environments, personal Slack, and other existing pages cannot disappear just because the first native Settings slice omitted them.
+  - Add explicit compatibility routes where old links or clients still use old endpoint/route names.
+
+- **4a. Build user-facing streaming and progress on native Pydantic events.**
+  - The SDK/Temporal execution stream is the authoritative source for text, tool activity, plans, delegation, questions, approvals, and completion.
+  - Moyai owns the presentation policy: what is visible by default, grouping, ordering, throttling, persistence, and notification delivery.
+  - Reuse the native event stream and its offsets. Do not add another model loop or a competing event/recovery engine.
+  - Preserve the implemented streaming contract:
+    - The native API already projects SDK events through SSE with event IDs/cursors.
+    - The frontend projects user-facing text into the conversation while retaining detailed activity separately.
+    - Reconnected streams and saved-state polling must not duplicate or erase newer text.
+  - In the main conversation:
+    - Stream user-facing assistant text as it arrives.
+    - Show concise assistant progress when the model supplies it.
+    - Maintain one compact current-action row, such as reading files, running a command, checking a PR, or waiting for a response.
+    - Group related tool steps into an expandable activity block.
+    - Keep detailed arguments, logs, and tool results out of the default transcript.
+    - Keep delegated work primarily in its subagent view, with meaningful parent-level status.
+    - Surface questions, approvals, failures, Stop, and connection loss immediately.
+  - Avoid creating a chat message for every tool event or periodic heartbeat.
+  - Avoid extra model requests merely to narrate every progress update. Friendly activity labels can be deterministic; model commentary can follow explicit instructions.
+  - Distinguish actual progress from elapsed waiting. Do not fabricate “still working on X” when no corresponding activity is known.
+  - Preserve requester-only working context and exclude private reasoning, secrets, and another participant's private tool output.
+  - Revalidate long-lived stream access and make revocation behavior explicit.
+  - Bind client state to the session, turn, run, and native event cursor:
+    - Deduplicate reconnects and repeated events.
+    - Keep root/subagent streams distinct.
+    - Prevent late events from appearing in another session.
+    - Prevent older polling snapshots from overwriting newer streamed text.
+    - Replace/settle the streamed response with the committed final message exactly once.
+  - A disconnected stream should reconnect or fall back to saved state without implying the agent failed or starting another execution.
+  - Qualify this through the actual app with real streaming inference, a long tool call, delegation, approval, Stop, worker replacement, reconnect, and revoked access.
+  - Preserve useful existing Moyai activity/notification behavior, but do not make its current verbosity the default for the replacement UI.
+
+- **5. Connect native inference to the existing accounting and broker contracts.**
+  - Preserve the existing model gateway, authorized model selection, request limits, attribution, tracing, and key-rotation behavior.
+  - Decide the production inference path explicitly. Prefer retaining the existing broker boundary initially where it owns credentials, admission limits, request accounting, and reconciliation.
+  - Use the SDK's provider/client extension points to call that boundary. The broker remains a product/infrastructure service, not another agent loop.
+  - Consolidate native request receipts and the existing `model_requests` ledger into one accounting model or a versioned unified read model.
+  - Retain historical spending and map new requests to the same users, logical sessions, organizations, and delegated work.
+  - Preserve decimal monetary values and distinguish:
+    - Provider-reported final costs.
+    - Pending reconciliation.
+    - Missing/unavailable costs.
+    - Any separately labelled estimates.
+  - Deduplicate by trustworthy request/receipt identity. Separate paid retry attempts must remain distinct.
+  - Ensure cost-persistence failure cannot cause a completed paid model request to be repeated merely to repair analytics.
+  - Preserve spend recovery, gateway/key scoping, infrastructure reports, exports, and identity-linking behavior.
+  - Migrate native data captured before accounting integration as unpriced where no authoritative amount exists; never backfill guessed prices as actual charges.
+
+- **6. Preserve and extend the existing analytics product.**
+  - Use one date-range control across relevant admin pages: Last 24 hours, Last 7 days, Last 30 days, and custom ranges; default to Last 7 days.
+  - Define timezone, inclusive custom-date handling, and rolling-window semantics consistently in the UI and API.
+  - Overall:
+    - Session counts and time series, with a clear definition of created sessions versus sessions active in the range.
+    - PRs created, merged, merge rate, and cost per merged PR where the inputs are known.
+    - Status distributions and relevant coverage notices.
+  - Users:
+    - Sessions, requests, tokens, recorded spend, PRs created, PR status distribution, and PRs merged.
+    - Cost per merged PR with a documented numerator, denominator, attribution rule, and missing-cost coverage.
+  - Usage:
+    - Daily recorded spend and cumulative recorded spend.
+    - Model breakdown by requests, tokens, spend, and coverage.
+    - Request/turn detail and CSV exports consistent with the filtered totals.
+  - Count PR creation from confirmed publication receipts, not arbitrary links pasted into chat.
+  - Preserve the existing distinction between creation date, merge date, tracking date, and current status.
+  - Reuse the legacy chart, date, formatting, and PR-calculation behavior where its contract fits the new data source.
+  - Keep aggregate reporting separate from permission to read another user's private prompts, credentials, or private PR content.
+
+- **7. Adopt the existing PostgreSQL deployment and schema-management system.**
+  - Keep the production database configuration, schema selection, TLS, pool sizing, ownership, and backup/PITR practices.
+  - Replace native startup `create_all` as a production upgrade mechanism with reviewed, versioned migrations integrated into the existing release process.
+  - Decide explicitly which product tables remain canonical and which need compatibility views, mappings, or bounded backfills.
+  - Keep SDK-managed execution stores separate from product identity/history/accounting tables where their ownership differs.
+  - Use additive migrations first; preserve source rows until counts, relationships, ownership, and restored reads are verified.
+  - Provide dry-run plans, checkpoints, resumable batches, integrity checks, and receipts.
+  - Test concurrent writers and restarts on PostgreSQL, including the real configured schema.
+  - Refuse accidental empty-database initialization or SQLite fallback in a production integration mode.
+
+- **8. Adopt existing S3 objects and file access without breaking old downloads.**
+  - Preserve the existing bucket, endpoint, prefix, permissions, object manifests, and encryption keys.
+  - Add a storage adapter that reads existing object references and the new native format.
+  - Preserve authenticated download/preview URLs, draft-upload ownership, multipart manifests, range requests, hashes, and retention rules.
+  - Do not assume legacy `<prefix>/blobs/<sha256>` references and native encrypted/HMAC-addressed objects are interchangeable.
+  - Select a canonical format for new writes; read compatibility can precede rewriting old objects.
+  - Migrate bytes only through verified copy/read-back/publish steps. Keep originals until rollback and restoration are qualified.
+  - Retain Temporal offloaded payloads for the lifetime of the workflow histories that reference them.
+  - Verify recovery from an empty application disk using PostgreSQL plus S3 and the preserved keys.
+
+- **9. Integrate the new core into the existing service roles.**
+  - Use the repository's four-role production design as the initial compatibility target; verify the actual live topology before cutover.
+  - API: new UI, authenticated product APIs, history/search, authorized files, and streaming endpoints.
+  - Coordinator: durable admission, scheduling/event ingress, lifecycle ownership, and delivery orchestration.
+  - Worker: native Pydantic/Harness execution through Temporal.
+  - Broker: existing centrally owned inference/credential/maintenance responsibilities where still required.
+  - Preserve routing, role health/readiness, ownership locks, leases, concurrency permits, drain/staging flags, and release contracts.
+  - Move the prototype's dispatcher and reconciliation loops into the appropriate production roles; do not start every background service in every API replica.
+  - Simplify roles only after the replacement responsibilities are proven. “New framework” is not itself a reason to discard the production separation.
+
+- **10. Plan Temporal and in-flight-session migration explicitly.**
+  - Use versioned workflow/task-queue identities for the new engine.
+  - Keep old workers available for old histories until those executions are safely finished, drained, or transitioned through a reviewed boundary.
+  - Route new work to the new core only after an atomic admission decision.
+  - Preserve queues, steering, Stop, questions, approvals, and uncertain-effect receipts across the transition.
+  - Never run an old and new engine against the same active turn or replay an uncertain external write as migration work.
+  - Treat long-running goals, schedules, and swarms as dedicated migration cases; they may not naturally finish during a short rollout window.
+  - Test worker replacement, lost acknowledgments, stale permissions, and mixed-version deployment boundaries.
+  - Keep Temporal as the active-execution authority. Snapshot history is not a competing recovery scheduler.
+
+- **11. Preserve Modal computers, environments, and human control.**
+  - Reuse production Modal configuration, prepared images, environment setup, repository/bootstrap behavior, timeouts, and resource policies.
+  - Integrate the noVNC work into the new panel interface after its independent verification.
+  - Show the desktop directly with click-to-control; use the browser's own controls. Keep screenshot and other agent capabilities independent of presentation controls.
+  - Desktop video recording is an outstanding capability: add bounded capture/encoding and authorized artifact publication before advertising it as supported. Shell capability alone does not provide a recorder.
+  - Keep desktop and chat independent; switching tabs or hiding the panel must not cancel agent work.
+  - Preserve private/shared access, controller leases, reconnect behavior, input authorization, and revocation.
+  - Define which old sandboxes can be attached through the new native workspace API.
+  - Where direct attachment is incompatible, restore verified files into a new native workspace through an explicit migration path.
+  - Do not silently discard files, browser state, branches, or unknown operations by replacing a workspace.
+  - Reuse S3 artifacts and snapshots where their formats and permissions are compatible.
+
+- **12. Migrate integrations, Slack, automations, and remaining product workflows.**
+  - This is not a blanket rewrite of provider integrations or product setup.
+    - Preserve connection onboarding, stored accounts, OAuth refresh/revocation, permissions, and selection UI.
+    - Replace matching legacy agent-facing tools with native Harness service capabilities.
+    - Expose remaining useful Moyai operations through typed Pydantic tools that call shared product services.
+    - Keep ordinary provider API helpers where they remain correct; changing the agent framework does not require rewriting HTTP clients.
+    - Preserve the automation editor and stored definitions while adapting admission and execution to Temporal.
+    - Preserve skill content and management while adapting loading and legacy tool references.
+  - Do not confuse Slack tools with Slack as a chat product. The latter still needs Moyai's ingress, thread mapping, approvals, progress, artifacts, and delivery handling.
+  - The initial native token-based Connections page and fixed-interval Automations page do not yet replace the richer existing product flows.
+  - Preserve existing GitHub/Linear/Notion/Slack connections, OAuth/token refresh, GitHub App behavior, read-only policies, approvals, revocation, and account selection.
+  - Adapt provider access to native Harness tools where available; retain product-specific operations as scoped adapters.
+  - Preserve Slack as a complete surface: signed ingress, thread/session mapping, deduplication, progress, questions/approvals, final replies, artifacts, notifications, and delivery receipts.
+  - Migrate existing automation definitions and history, including cron/timezone/event sources and destinations.
+  - Use native Temporal schedules/workflows for execution, with one authoritative owner so an old and new scheduler cannot both fire.
+  - Preserve goal and swarm product semantics, budgets, cancellation, child-session visibility, and lineage while using native delegation/execution.
+  - Keep memory namespaces, privacy, conflict/version checks, and review workflows.
+  - Track all remaining feature-inventory items explicitly; do not infer full parity from the standard SDK capability list.
+
+- **13. Migrate skills in a later, controlled step.**
+  - Skill conversion is explicitly deferred until after deployment, per the user's sequencing decision. This integration does not bulk-edit existing skills.
+  - Preserve access to the current skill library, scope, versions, descriptions, and files first.
+  - Inventory skills that are already compatible Markdown instructions versus skills that assume legacy tool names, CLI harnesses, injected variables, or automation APIs.
+  - Map compatible libraries into Harness `Skills`; use native deferred capabilities for product-managed instructions where appropriate.
+  - Adapt legacy tool references and supporting scripts at the boundary.
+  - Keep personal/shared/repository scope and authorization intact.
+  - Qualify representative skills against real native tools before enabling them broadly.
+  - Keep the original version and conversion report so failures can be inspected and individual conversions reversed.
+
+- **Automation and memory ownership clarified during implementation.**
+  - Automation migration is part of the active integration work. Retain the product's definitions, editor, ownership, revision checks, history, and management actions. Adapt those actions into typed Pydantic tools; use native Temporal Schedules and workflows for scheduling and execution.
+  - A migration must fence the old scheduler before enabling the replacement. Copying a definition into another scheduler is not a completed migration. Preserve cron/timezone, overlap and catch-up behavior, pause semantics, idempotent occurrence IDs, and the authority originally granted by the owner.
+  - Existing webhook/event sources, connections, repositories, delivery destinations, and budgets require explicit compatibility checks. An unsupported variant remains blocked with a reason; it must not be silently reduced to the prototype's interval-only definition.
+  - Harness `Memory` supplies the agent's notebook tools and persistent store. Moyai supplies ownership boundaries, allowed namespaces, Settings access, and any review/promotion/learning policy.
+  - Existing memory content is not imported by loading the new capability. A separate versioned importer must preview the source records, map personal/team/connection scopes, verify content and ownership, and support resumable/idempotent execution while retaining the original data.
+  - Code deployment and data migration are separate steps. Ship a reviewed importer before using it, then run the import after deployment and verify it before enabling the new memory path for affected users. Do not ask an agent to rewrite ownership or bulk-copy private notes into a shared notebook.
+
+- **14. Make deployment work through the existing release system.**
+  - Update the production image/build to include the new runtime, new UI assets, shared components, and required Modal/noVNC resources.
+  - Wire the existing startup path, `PORT`, public origin, secure cookies, Cloudflare/Render routing, WebSocket proxying, and health/readiness contracts.
+  - Map current environment settings explicitly; preserve secrets and avoid introducing unrelated defaults in production.
+  - Update pre-deploy image building, dependency locks, CI, schema compatibility checks, role compatibility digests, and operational diagnostics.
+  - Use the existing GitHub deployment workflow instead of introducing a parallel deployment process.
+  - Classify the first engine/storage/auth transition honestly. It may require a planned maintenance cutover even though later compatible releases can roll.
+  - Validate API, coordinator, broker, and worker builds together.
+  - No production deployment is implied by this outline; the candidate and migration receipt must be reviewable before the actual cutover.
+
+- **15. Cut over in stages and define rollback before accepting native production writes.**
+  - First qualify a protected restore using existing data/storage formats.
+  - Make old sessions and product features readable in the new UI.
+  - Canary new execution for internal/new sessions while retaining engine affinity for active old work.
+  - Verify billing totals, permissions, files, Slack delivery, and deployment recovery on the mixed-version boundary.
+  - Move normal new work to the new core.
+  - Drain and retire old execution ownership only after the remaining histories and workflows are accounted for.
+  - Retire obsolete implementations after compatibility readers and retention obligations are understood.
+  - A rollback cannot simply boot an old binary against arbitrary new schema, ciphertext, or workflow history. Document which releases can read new writes, which workflows must drain, and when roll-forward is required.
+
+- **Delivery sequence for #465.**
+  - Finish safe deferred/cold workspace restoration and its actual-app proof.
+  - Assemble the v13 candidate with all product adapters and freshly built frontend assets.
+  - Run checks for the final changes, publish the candidate commit, and evaluate CI/reviews against that exact commit.
+  - Merge and perform the guarded production cutover only after approval.
+  - Keep interactive subagent chat and actual skill conversion in follow-ups. Conversational skill import additionally needs the unimplemented save/import/load bridge; retaining the original catalog does not supply that capability.
+  - Other compatibility limits remain explicit release-review items rather than silently approved deferrals.
+
+- **Release criteria for calling this “the new Moyai.”**
+  - Users sign in with their existing identities and permissions.
+  - Their existing sessions, links, files, folders, connections, and historical spending remain available.
+  - The native UI retains the required product controls, including the full command palette.
+  - New tasks run through Pydantic AI/Harness/Temporal/Modal with correct accounting and authorization.
+  - Existing infrastructure and the normal deployment workflow can run, replace, and recover every role.
+  - Historical and new billing reconcile without duplicate charges or fabricated missing costs.
+  - Representative old and new sessions pass real UI/service workflows on a protected staging restore.
+  - Actual before/after application proof covers restarts, active-work transitions, file access, revoked permissions, uncertain writes, desktop control, and delivery.
+  - All deferred feature families are explicitly approved; none are silently lost.
+
+- **Repository references used for this outline.**
+  - `Dockerfile`, `render_start.py`, `app/config.py`, `app/main.py`.
+  - `docs/production-deploy.md`, `docs/rolling-deploy.md`, `docs/schema-migrations.md`, `docs/object-storage.md`.
+  - `app/security.py`, `app/spend.py`, `app/spend_recovery.py`, `app/pr_analytics.py`, `app/session_pull_requests.py`.
+  - `app/static/command-palette.js`, `app/static/analytics.js`, the existing Settings controllers, and `frontend/components/ui/`.
+  - `native/src/moyai/`, `native/web/`, `native/README.md`, and the supplied feature inventory.

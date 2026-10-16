@@ -258,7 +258,9 @@ class RuntimeConnection:
             row = self.schema
         else:
             row = None
-        return SimpleNamespace(fetchone=lambda: row, fetchall=lambda: self.owners)
+        return SimpleNamespace(fetchone=lambda: row,
+            fetchall=lambda: [(*owner, [], owner[0] != 726940) if len(owner) == 4 else owner
+                              for owner in self.owners])
 
 
 def test_runtime_contracts_are_locked_until_ddl_transaction_finishes():

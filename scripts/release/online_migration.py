@@ -26,20 +26,16 @@ def check_runtime(connection, schema, expected):
         require(row == (expected['policy'], expected['contracts'][role]))
     state = connection.execute('SELECT revision,dirty FROM schema_state WHERE id=1').fetchone()
     require(state == (expected['schema'], 0))
-    rows = connection.execute('''SELECT l.classid::bigint,l.pid,a.backend_start,l.mode
-        FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid
-        WHERE l.locktype='advisory' AND l.classid IN (726940,726943,726944,726946)
-        AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
-        AND l.objid=%s::regnamespace::oid AND l.objsubid=2 AND l.granted
-        AND l.pid<>pg_backend_pid()''', (schema,)).fetchall()
-    kinds = {726940: ('owners', 'ShareLock'), 726943: ('coordinators', 'ExclusiveLock'),
-             726944: ('brokers', 'ShareLock'), 726946: ('broker_leaders', 'ExclusiveLock')}
-    owners = {name: [] for name, _ in kinds.values()}
-    for kind, pid, started, mode in rows:
-        name, wanted_mode = kinds[kind]
-        require(started is not None and mode == wanted_mode)
-        owners[name].append(f'{pid}@{started.isoformat()}')
-    require(all(sorted(value) == sorted(expected[key]) for key, value in owners.items()))
+    if '_migration_ownership' in globals():
+        inventory = globals()['_migration_ownership']
+    else:
+        from scripts.release.rolling_probe import ownership as inventory
+    try:
+        owners = inventory(connection, schema, exclude_current=True)
+    except ValueError:
+        raise ValueError('Online migration precondition failed') from None
+    require(all(owners[key] == sorted(expected[key])
+                for key in ('owners', 'coordinators', 'brokers', 'broker_leaders')))
 
 
 def execute(options, *, probe_fn):
@@ -77,7 +73,8 @@ class SSHMigration:
         # with the runner; its imports still inspect the installed app source.
         source = ("_probe_namespace = {'__name__': 'moyai_migration_probe'}\n"
                   'exec(' + repr(self.probe_source.read_text()) + ', _probe_namespace)\n'
-                  "_migration_probe = _probe_namespace['probe']\n" + self.transport.source.read_text())
+                  "_migration_probe = _probe_namespace['probe']\n"
+                  "_migration_ownership = _probe_namespace['ownership']\n" + self.transport.source.read_text())
         result = self.transport.run(service,
             {'service_id': service.id, 'service': service.probe_options(),
              'plan': plan, 'expected': expected_state},
