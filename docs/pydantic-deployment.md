@@ -208,7 +208,13 @@ replays them. The release receipt records
 The actual application qualification must prove that late old/current-revision
 control executions cannot create a run after the source pause.
 
-Staging proceeds API, worker, broker and coordinator in that order. Each candidate
+For a same-core native upgrade, staging first replaces and retires the API.
+The controller then starts worker, broker and coordinator replacements as one
+batch. Render builds and replaces those services concurrently. Each service
+retains its own saved request, deployment identity, source check and exact
+owner-retirement check. All three must finish before the zero-owner migration
+boundary. Core switches retain sequential API, worker, broker and coordinator
+staging. Each candidate
 receives the explicit `MOYAI_CORE` selection only after its stage/build flags are
 saved and the drain has been verified. Its previous selector value (including
 absence) is recorded before the one PUT. `AGENT_HARNESS` is preserved for a
@@ -223,10 +229,15 @@ held across the native application's and Harness's separate transactions and
 the subsequent verification command. A receipt change after preflight stops
 the migration. The native migration lock alone is not used as proof of drain.
 
-Activation remains coordinator → broker → drained worker → API → final worker
-undrain. Native worker startup with `MAINTENANCE_DRAIN=false` never automatically
-resumes a paused generation. After the final worker is healthy and the old
-maintenance worker has retired, the controller issues one explicit resume CAS.
+Same-core native activation proceeds coordinator → broker → worker and API
+together. The persisted maintenance generation keeps execution paused throughout.
+Native worker startup with `MAINTENANCE_DRAIN=false` never automatically resumes
+that generation, so this path keeps the flag false and avoids restarting the old
+and new workers merely to toggle it. After all four candidates are healthy and
+every prior owner has retired, the controller issues one explicit resume CAS.
+This performs eight Render deployments in five batches instead of ten sequential
+deployments. Core switches retain coordinator → broker → drained worker → API →
+final worker undrain and their existing core-retirement checks.
 Active native health must return exactly `{"status":"ok"}`, the existing
 build/role/owner/rolling headers and `X-Moyai-Core: pydantic-v1`; coordinator and
 broker leadership headers retain their existing meanings. Staged health owns no
@@ -333,6 +344,13 @@ rejects a partially staged baseline. Reconcile the receipt and actual processes
 before recovery; do not retry a failed provisioning call just because the staged
 HTTP listener is healthy. The source and native receipts remain separate, so a
 partially provisioned Harness cannot hide behind a successful application receipt.
+
+For concurrent replacements, inspect every entry in `batches[].deployments`.
+`prepared` means no deployment request was sent; `requested` with no ID means
+the POST outcome is unknown. A requested peer can finish after another member
+fails or the workflow stops. Batch failures never cancel peers, retry writes,
+start migration, or resume execution. Reconcile every requested service and
+its actual process/owner before recovery.
 
 After the v14 receipt is applied, use roll-forward recovery with a candidate that
 understands protocol 2. The maintenance controller inventories every native

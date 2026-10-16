@@ -128,6 +128,9 @@ class RollingRelease(Release):
         if (self.selected != BROKER or settled) and len(leaders) != 1:
             raise ReleaseError('A healthy broker maintenance leader is required.')
 
+    def permitted_deploys(self, service_id):
+        return {self.active_deploy} if service_id == self.selected and self.active_deploy else set()
+
     def check_control_plane(self):
         for service in self.expected.values():
             if self.environment(service.id) != service.env:
@@ -136,7 +139,7 @@ class RollingRelease(Release):
                 raise ReleaseError('Render service topology changed outside this release.')
             deploys = self.deploys(service.id)
             active = {item['id'] for item in deploys if item['status'] in ACTIVE_DEPLOYS}
-            permitted = {self.active_deploy} if service.id == self.selected and self.active_deploy else set()
+            permitted = self.permitted_deploys(service.id)
             live = [item for item in deploys if item['status'] == 'live']
             if not active <= permitted or len(live) != 1 or live[0]['id'] not in {service.deploy_id, *permitted}:
                 raise ReleaseError('An unexpected Render deployment appeared; inspect the release receipt.')

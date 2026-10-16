@@ -61,13 +61,17 @@ on the services. Merging a PR does not dispatch this workflow.
    let the existing worker reach verified safe boundaries. Unknown effects,
    unresolved billing attempts and unsafe turns block progress. Queued inputs
    remain saved; the controller does not cancel work to satisfy the drain.
-2. Stage API, worker, broker and coordinator. Verify each old process retires.
-   Staged listeners return maintenance responses and own no runtime.
+2. Stage and retire the API, then stage worker, broker and coordinator together.
+   Verify every old process retires before advancing. Staged listeners return
+   maintenance responses and own no runtime.
 3. With all owners gone, take exclusive runtime ownership, apply any reviewed
    canonical/native migrations, and verify their receipts. No schema fingerprint
    or old receipt is rewritten to force compatibility.
-4. Activate coordinator, broker, drained worker and API with matching contracts.
-   Replace the drained worker, verify ownership, then issue one explicit resume.
+4. Activate coordinator, then broker, then worker and API together with matching
+   contracts. The persisted native pause survives worker replacement without
+   toggling its drain environment flag. Verify all four roles and ownership,
+   then issue one explicit resume. Same-core native upgrades use eight Render
+   deployments in five batches.
 5. Check active `/health` returns `{"status":"ok"}` and the expected build, role,
    owner and `X-Moyai-Core: pydantic-v1` headers. Confirm existing sign-in, an old
    session/download, a new task and a continuation in the actual application.
@@ -82,6 +86,11 @@ An uncertain control-plane write or migration result stops the release at its
 recorded intent. Inspect the receipt and actual processes before another action;
 uncertainty does not prove rollback. Retain database backups, both encryption
 keys, object populations and Temporal histories together.
+
+Concurrent members have separate intents under `batches[].deployments`. Peers
+already requested can continue replacing after a failure. Inspect every member;
+an unconfirmed POST must not be retried, and a partially staged baseline must not
+be fed into a fresh release.
 
 Use a compatible roll-forward candidate after native protocol changes. Current
 images cannot start a retired engine. Recovering with an earlier image requires
