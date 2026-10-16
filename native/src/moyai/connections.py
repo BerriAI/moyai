@@ -14,6 +14,7 @@ from pydantic_ai_harness.linear import Linear
 from pydantic_ai_harness.notion import Notion
 from pydantic_ai_harness.slack import Slack
 
+from .connection_catalog import CatalogToolset, ConnectionCatalog
 from .contracts import RunScope
 from .security import Security
 
@@ -41,7 +42,9 @@ def read_only_tool(tool: ToolDefinition) -> bool:
 
 
 def connection_tools(security: Security) -> Toolset[RunScope]:
-    def resolve(ctx: RunContext[RunScope]) -> AbstractToolset[RunScope] | None:
+    catalog = ConnectionCatalog()
+
+    def build(ctx: RunContext[RunScope], tool_name: str | None = None) -> AbstractToolset[RunScope]:
         selected = []
         prefixes: set[str] = set()
         for grant in sorted(ctx.deps.grants, key=lambda item: item.id):
@@ -52,6 +55,8 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
             if prefix in prefixes:
                 raise ValueError("Selected account tool prefixes collide.")
             prefixes.add(prefix)
+            if tool_name is not None and not tool_name.startswith(prefix + "_"):
+                continue
             policy = ConnectionPolicy.model_validate(grant.policy)
             if policy.product is not None:
                 from .runtime import current
@@ -92,8 +97,13 @@ def connection_tools(security: Security) -> Toolset[RunScope]:
                 tools = tools.approval_required(
                     lambda _ctx, tool, _args: not read_only_tool(tool)
                 )
-            selected.append(tools.prefixed(prefix))
-        return CombinedToolset(selected) if selected else None
+            selected.append(tools.prefixed(prefix).defer_loading())
+        return CombinedToolset(selected)
+
+    def resolve(ctx: RunContext[RunScope]) -> AbstractToolset[RunScope] | None:
+        if not ctx.deps.grants:
+            return None
+        return CatalogToolset(catalog, ctx, lambda name: build(ctx, name))
 
     # Per-run factories execute in workflow code in the durable SDK. Resolve
     # selected accounts inside its get-tools/call-tool activities instead:
