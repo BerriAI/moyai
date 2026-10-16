@@ -3,7 +3,8 @@
 The ledger stores the exact allowlisted source fields, not recalculated prices.
 Mirrors run in the source write transaction, including late cost recovery.
 Backfill is bounded and resumable; reports switch only after exact comparison.
-Original tables remain current throughout the rollback window.
+Original tables remain current during copying; the maintenance cutover retires
+both physical sources and leaves one authoritative store behind updatable views.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from .billing_storage_models import BillingRecord, BillingStorageState
+from .billing_storage_models import BillingRecord, BillingStorageState, storage_column
 from .product_billing import LEGACY_FIELDS, NATIVE_FIELDS, BillingReadError
 
 VERSION = 1
@@ -105,18 +106,11 @@ async def fields(connection: AsyncConnection, storage: Storage, source: Source) 
     return tuple(name for name in STORAGE_FIELDS[source] if name in available)
 
 
-def record_sql(selected: tuple[str, ...], alias: str) -> str:
-    return "jsonb_build_object(" + ",".join(f"'{name}',{alias}.\"{name}\"" for name in selected) + ")"
-
-
-def identities_sql(selected: tuple[str, ...], source: Source, alias: str) -> str:
-    values = ",".join(
-        f'NULLIF({alias}."{name}"::text,\'\')' for name in IDENTITY_FIELDS[source] if name in selected
-    )
-    return f"array_remove(ARRAY[{values}]::text[],NULL)"
-
-
 def mirror_body(storage: Storage, source: Source, selected: tuple[str, ...]) -> str:
+    columns = tuple(storage_column(source, name) for name in selected)
+    names = ",".join(f'"{name}"' for name in columns)
+    values = ",".join(f'NEW."{name}"' for name in selected)
+    updates = ",".join(f'"{name}"=excluded."{name}"' for name in columns if name != "source_id")
     return f"""BEGIN
 IF TG_OP = 'TRUNCATE' THEN
     DELETE FROM {storage.ledger} WHERE source='{source}';
@@ -126,11 +120,8 @@ IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.id IS DISTINCT FROM NEW.id) THE
     DELETE FROM {storage.ledger} WHERE source='{source}' AND source_id=OLD.id::text;
 END IF;
 IF TG_OP <> 'DELETE' THEN
-    INSERT INTO {storage.ledger} (source,source_id,created_at,identities,record)
-    VALUES ('{source}',NEW.id::text,NEW.created_at::text,
-        {identities_sql(selected, source, "NEW")},{record_sql(selected, "NEW")})
-    ON CONFLICT (source,source_id) DO UPDATE SET
-        created_at=excluded.created_at,identities=excluded.identities,record=excluded.record;
+    INSERT INTO {storage.ledger} (source,{names}) VALUES ('{source}',{values})
+    ON CONFLICT (source,source_id) DO UPDATE SET {updates};
 END IF;
 RETURN NULL;
 END"""
@@ -151,11 +142,20 @@ async def _state(
         raise BillingStorageError("Billing storage has not been prepared.")
     if (
         row["version"] != VERSION or row["source_schema"] != storage.source_schema
-        or row["native_schema"] != storage.native_schema or row["phase"] not in {"shadow", "active"}
-        or (row["phase"] == "active" and (not row["legacy_done"] or not row["native_done"]))
+        or row["native_schema"] != storage.native_schema
+        or row["phase"] not in {"shadow", "active", "consolidated"}
+        or (row["phase"] != "shadow" and (not row["legacy_done"] or not row["native_done"]))
     ):
         raise BillingStorageError("Billing storage configuration differs from its saved receipt.")
     return dict(row)
+
+
+async def verify_storage(connection: AsyncConnection, storage: Storage, state: Mapping[str, Any]) -> None:
+    if state["phase"] == "consolidated":
+        from .billing_storage_cutover import verify_consolidated
+        await verify_consolidated(connection, storage, state)
+    else:
+        await verify_mirrors(connection, storage)
 
 
 async def verify_mirrors(connection: AsyncConnection, storage: Storage) -> None:
@@ -202,8 +202,8 @@ async def prepare(engine: AsyncEngine, storage: Storage) -> None:
                 raise BillingStorageError("Provision the reviewed native billing schema before preparing storage.")
         current = await connection.scalar(text(f"SELECT id FROM {storage.state} WHERE id=1"))
         if current is not None:
-            await _state(connection, storage)
-            await verify_mirrors(connection, storage)
+            state = await _state(connection, storage)
+            await verify_storage(connection, storage, state)
             return
         for source in SOURCES:
             await connection.execute(text(f"LOCK TABLE {storage.source_table(source)} IN SHARE ROW EXCLUSIVE MODE"))
@@ -237,10 +237,12 @@ async def backfill_batch(
     async with engine.begin() as connection:
         await _timeouts(connection)
         state = await _state(connection, storage, lock=True)
-        await verify_mirrors(connection, storage)
+        await verify_storage(connection, storage, state)
         if state[f"{source}_done"]:
             return True
         selected = await fields(connection, storage, source)
+        names = ",".join(f'"{storage_column(source, name)}"' for name in selected)
+        values = ",".join(f'b."{name}"' for name in selected)
         cursor = state[f"{source}_cursor"]
         # Lock each source row until its copy commits: concurrent deletion
         # cannot remove a row before the backfill inserts a stale copy of it.
@@ -250,9 +252,8 @@ async def backfill_batch(
                 WHERE (CAST(:cursor AS text) IS NULL OR s.id > CAST(:cursor AS text))
                 ORDER BY s.id LIMIT :size FOR SHARE
             ), copied AS (
-                INSERT INTO {storage.ledger} (source,source_id,created_at,identities,record)
-                SELECT '{source}',b.id::text,b.created_at::text,
-                    {identities_sql(selected, source, "b")},{record_sql(selected, "b")}
+                INSERT INTO {storage.ledger} (source,{names})
+                SELECT '{source}',{values}
                 FROM batch b ON CONFLICT (source,source_id) DO NOTHING
                 RETURNING source_id
             )
@@ -270,11 +271,12 @@ async def _compare(connection: AsyncConnection, storage: Storage) -> dict[str, d
     result = {}
     for source in SOURCES:
         selected = await fields(connection, storage, source)
+        mismatch = " OR ".join(
+            f'b."{storage_column(source, name)}" IS DISTINCT FROM s."{name}"' for name in selected
+        )
         row = (await connection.execute(text(f"""
             SELECT count(*) AS source_rows,
-                count(*) FILTER (WHERE b.source_id IS NULL OR b.record IS DISTINCT FROM {record_sql(selected, "s")}
-                    OR b.created_at IS DISTINCT FROM s.created_at::text
-                    OR b.identities IS DISTINCT FROM {identities_sql(selected, source, "s")}) AS mismatches
+                count(*) FILTER (WHERE b.source_id IS NULL OR {mismatch}) AS mismatches
             FROM {storage.source_table(source)} s LEFT JOIN {storage.ledger} b
                 ON b.source='{source}' AND b.source_id=s.id::text
         """))).mappings().one()
@@ -292,6 +294,9 @@ async def activate(engine: AsyncEngine, storage: Storage) -> dict[str, dict[str,
     async with engine.begin() as connection:
         await _timeouts(connection)
         state = await _state(connection, storage, lock=True)
+        if state["phase"] == "consolidated":
+            await verify_storage(connection, storage, state)
+            return await _compare(connection, storage)
         if not state["legacy_done"] or not state["native_done"]:
             raise BillingStorageError("Finish both source backfills before switching billing reads.")
         # Briefly freeze source changes so comparison and the read switch are
@@ -309,7 +314,11 @@ async def activate(engine: AsyncEngine, storage: Storage) -> dict[str, dict[str,
 async def rollback(engine: AsyncEngine, storage: Storage) -> None:
     async with engine.begin() as connection:
         await _timeouts(connection)
-        await _state(connection, storage, lock=True)
+        state = await _state(connection, storage, lock=True)
+        if state["phase"] == "consolidated":
+            raise BillingStorageError(
+                "Storage is physically consolidated; the original tables no longer store records."
+            )
         await connection.execute(text(f"UPDATE {storage.state} SET phase='shadow' WHERE id=1"))
 
 
@@ -327,9 +336,9 @@ async def active_storage(
         return None
     try:
         state = await _state(connection, storage)
-        if state["phase"] != "active":
+        if state["phase"] == "shadow":
             return None
-        await verify_mirrors(connection, storage)
+        await verify_storage(connection, storage, state)
     except BillingStorageError:
         raise BillingReadError("consolidated_accounting_storage_unavailable") from None
     return storage
@@ -340,11 +349,12 @@ async def status(engine: AsyncEngine, storage: Storage) -> dict[str, Any]:
         await connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         await _timeouts(connection)
         state = dict(await _state(connection, storage))
-        await verify_mirrors(connection, storage)
+        await verify_storage(connection, storage, state)
         counts = (await connection.execute(text(
             f"SELECT source,count(*) AS records FROM {storage.ledger} GROUP BY source ORDER BY source"
         ))).mappings().all()
         return {"version": VERSION, "phase": state["phase"],
+                "physical_billing_stores": 1 if state["phase"] == "consolidated" else 3,
                 "backfill": {source: bool(state[f"{source}_done"]) for source in SOURCES},
                 "records": {row["source"]: row["records"] for row in counts}}
 
@@ -370,6 +380,9 @@ async def run_command(args: argparse.Namespace) -> dict[str, Any]:
             return {**await status(engine, storage), "comparison": comparison}
         elif args.action == "rollback":
             await rollback(engine, storage)
+        elif args.action == "consolidate":
+            from .billing_storage_cutover import consolidate
+            await consolidate(engine, storage)
         return await status(engine, storage)
     finally:
         await engine.dispose()
@@ -377,7 +390,7 @@ async def run_command(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "backfill", "activate", "rollback", "status"))
+    parser.add_argument("action", choices=("prepare", "backfill", "activate", "consolidate", "rollback", "status"))
     parser.add_argument("--source-schema", default=os.environ.get("MOYAI_DATABASE_SCHEMA", ""))
     parser.add_argument("--native-schema", default=os.environ.get("MOYAI_NATIVE_SCHEMA", ""))
     parser.add_argument("--apply", action="store_true")

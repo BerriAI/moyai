@@ -713,6 +713,8 @@ class BillingReader:
     ) -> dict[str, dict[str, Any]]:
         from sqlalchemy import text
 
+        from .billing_storage_models import storage_column
+
         assert self.storage is not None
         parameters = {
             "source": engine, "start": period.start.isoformat(), "end": period.end.isoformat(),
@@ -720,21 +722,26 @@ class BillingReader:
         }
         predicates = [("created_at>=:start AND created_at<:end", parameters)]
         for offset in range(0, len(candidates), LOOKUP_CHUNK):
+            identities = (
+                ("id", "gateway_id", "cost_receipt_id") if engine == "legacy"
+                else ("id", "request_key", "provider_request_id")
+            )
             predicates.append((
-                "identities && CAST(:identities AS text[])",
+                " OR ".join(
+                    f'"{storage_column(engine, name)}"=ANY(CAST(:identities AS text[]))'
+                    for name in identities
+                ),
                 {**parameters, "identities": candidates[offset:offset + LOOKUP_CHUNK]},
             ))
         result: dict[str, dict[str, Any]] = {}
+        columns = ",".join(f'"{storage_column(engine, name)}" AS "{name}"' for name in fields)
         for predicate, params in predicates:
             records = (await self.billing_connection.execute(text(
-                f"SELECT source_id,record FROM {self.storage.ledger} "
+                f"SELECT {columns} FROM {self.storage.ledger} "
                 f"WHERE source=:source AND ({predicate}) LIMIT :limit"
             ), params)).mappings()
             for row in records:
-                saved = row["record"]
-                if not isinstance(saved, dict) or saved.get("id") != row["source_id"]:
-                    raise BillingReadError("incompatible_consolidated_accounting_record")
-                result[row["source_id"]] = {key: value for key, value in saved.items() if key in fields}
+                result[row["id"]] = dict(row)
                 if len(result) > self.max_records:
                     raise BillingReadError("too_many_accounting_records")
         return result

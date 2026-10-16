@@ -131,6 +131,8 @@ def _schema(value: str | None) -> str:
 
 
 def _is_identity(table: str, column: str) -> bool:
+    if table == "moyai_billing_records":
+        return False  # Shared historical identifiers retain their original unrestricted text.
     return (table == "moyai_users" and column == "id") or column in IDENTITY_COLUMNS
 
 
@@ -210,6 +212,21 @@ async def _verify(
     for table in metadata.sorted_tables:
         if not await _has_table(connection, schema, table.name):
             raise ProductSchemaError(f"Required native table is missing: {table.name}.")
+        if table.name == "moyai_inference_usage":
+            kind = await connection.scalar(text(
+                "SELECT relkind::text FROM pg_class WHERE oid=to_regclass(:name)"
+            ), {"name": f'"{schema}"."{table.name}"'})
+            if kind == "v":
+                from .billing_storage import Storage, _state
+                from .billing_storage_cutover import verify_consolidated
+                source = await connection.scalar(text(
+                    f'SELECT source_schema FROM "{schema}".moyai_billing_storage WHERE id=1'
+                ))
+                if not isinstance(source, str):
+                    raise ProductSchemaError("Consolidated billing source receipt is missing.")
+                storage = Storage(source, schema)
+                await verify_consolidated(connection, storage, await _state(connection, storage))
+                continue
         columns = await connection.run_sync(
             lambda conn, name=table.name: inspect(conn).get_columns(name, schema=schema)
         )

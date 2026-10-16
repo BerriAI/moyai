@@ -1,45 +1,41 @@
-# Consolidate billing storage
+# Consolidate the two spend tables into one store
 
-This migration gives existing-product billing reports one persisted source,
-`MOYAI_NATIVE_SCHEMA.moyai_billing_records`. It copies recorded accounting
-observations from `model_requests` and `moyai_inference_usage` without changing
-prices, recovery policies, identity mappings, duplicate-charge rules or missing
-cost coverage. It does not recover lost costs or change the native analytics UI.
+The completed migration stores legacy and native billing records in one physical
+table: `MOYAI_NATIVE_SCHEMA.moyai_billing_records`.
 
-Each record retains its source and original ID. The same ID in the two engines
-remains two observations. Existing billing reconciliation still decides whether
-observations describe one charge. An explicit field allowlist preserves accounting
-data, including exact cost strings and null values, without copying unknown
-columns, prompts, provider responses or credentials.
+`model_requests` and `moyai_inference_usage` become ordinary PostgreSQL views over
+that table. They contain no copies. Existing reads, inserts, updates, deletes,
+native upserts and row locks go directly to the ledger through those names.
+There are no mirroring triggers or old physical spend tables after the final
+transaction commits. The small `moyai_billing_storage` table holds the migration
+receipt and cursors, not a second copy of the spend records.
 
-The current release keeps the original tables as write-compatible sources during
-the rollback window. PostgreSQL triggers mirror inserts, updates, deletes and
-truncates in the original transaction. This includes existing cost-recovery
-updates; the storage command never calls a model or provider. This is the
-consolidated-read stage, not deletion of the source tables. Retiring the
-compatibility writers and tables is a later release.
+The migration preserves original IDs, exact recorded cost strings, nulls, statuses,
+token counts and request metadata. Source IDs remain namespaced; equal IDs from
+different engines do not prove duplicate charges. Existing calculations, charge
+reconciliation, identity mappings and cost recovery remain unchanged. Operational
+admission/turn tables retain their current purpose. This work does not recover
+lost costs or change which history the native usage UI displays.
 
-## Prerequisites and provisioning
+## Provision
 
-Use the existing product database connection and distinct configured schemas:
-`MOYAI_DATABASE_URL`, `MOYAI_DATABASE_SCHEMA`, and `MOYAI_NATIVE_SCHEMA`. These
-commands support PostgreSQL existing-product deployments. Standalone SQLite
-continues using its current storage.
+Use the existing PostgreSQL connection and explicit distinct schemas:
+`MOYAI_DATABASE_URL`, `MOYAI_DATABASE_SCHEMA`, and `MOYAI_NATIVE_SCHEMA`.
+Standalone SQLite is unchanged.
 
-Follow the existing reviewed deployment and backup procedure. Native schema v15
-adds the ledger and migration-state tables without modifying earlier migration
-receipts. Normal application startup never installs mirrors or copies history.
+Follow the existing maintenance and backup procedure. Canonical schema v22
+recognizes the completed compatibility view during future migrations. Native
+schema v15 adds the shared ledger and receipt tables while preserving earlier
+native migration receipts.
 
 ```sh
+python -m app.schema_migrations --apply
 python -m moyai.product_start provision --apply
 ```
 
-The operator/runtime database role must be able to use both configured schemas,
-execute the mirror functions and write the ledger. Mirrors use the caller's
-privileges, not `SECURITY DEFINER`. Keep the same schema ownership/access policy
-as the existing product. No role or permission changes are made by these commands.
+Normal application startup never copies history or retires tables.
 
-## Prepare, copy and switch
+## Copy while existing writers continue
 
 ```sh
 python -m moyai.billing_storage prepare --apply
@@ -47,51 +43,70 @@ python -m moyai.billing_storage backfill --apply --batch-size 1000 --max-batches
 python -m moyai.billing_storage status
 ```
 
-Preparation installs both mirrors and a shadow-mode receipt atomically. Repeating
-preparation verifies the existing configuration; it does not replace modified
-triggers or silently reset progress.
+During this temporary stage, PostgreSQL triggers mirror source changes into the
+new table in the original write transaction. Both old tables remain authoritative
+until physical cutover. Backfill commits a bounded batch and its cursor together.
+Repeat it until both completion flags are true. Source-row locks prevent
+delete/copy races, and a copied historical row cannot overwrite a newer mirrored
+cost update. Inserts behind the cursor are captured by the temporary mirrors.
 
-Backfill commits one batch at a time and stores its cursor in the same transaction.
-Repeat the command until both backfill flags are true. Interrupted batches can be
-retried. Source-row locks prevent delete/copy races, and existing mirrored records
-win conflicts so a historical copy cannot overwrite a more recent cost update.
-New records with IDs behind the cursor are captured by the mirrors.
+Commands use a five-second lock timeout and sixty-second statement timeout.
+Timed-out batches do not advance their committed cursor and can be retried.
 
-Each operation has a five-second lock timeout and a sixty-second statement
-timeout. A timeout fails that operation without advancing its committed cursor.
-Use smaller batches and retry rather than disabling the mirrors.
+Optionally compare the new reporting path before physical cutover:
 
 ```sh
 python -m moyai.billing_storage activate --apply
 ```
 
-Activation briefly blocks writes to the two source tables. It compares every
-allowlisted field, lookup identity and timestamp, checks for missing and extra
-records, verifies the mirrors, and switches the receipt in one transaction. Any
-mismatch keeps the original read path selected. No calculated subtotal is used
-as a substitute for comparing the underlying records.
+This validates every stored accounting field and switches the product billing
+APIs and CSV exports. `activate` alone is not the completed consolidation.
+Before physical cutover, `rollback --apply` can switch reads back while both
+original tables remain current.
 
-After activation, `/api/admin/spend`, `/api/settings/billing`, `/api/spend` and
-their CSV exports obtain both engines' accounting observations from the ledger.
-Identity, session-privacy and admission-proof lookups still use their owning
-product tables. Amount calculations and permissions are unchanged.
+## Complete physical consolidation
 
-An active report refuses unavailable or incompatible mirrors rather than
-silently returning a stale consolidated total. Status output contains only the
-phase, completion flags and record counts, not credentials or request contents.
-
-## Roll back reads
+Drain and stop all Moyai runtime owners through the existing maintenance workflow,
+then run:
 
 ```sh
-python -m moyai.billing_storage rollback --apply
+python -m moyai.billing_storage consolidate --apply
+python -m moyai.billing_storage status
 ```
 
-This selects the original billing read path. It leaves both mirrors running and
-does not delete any records. Because original writers remain authoritative and
-current, rollback does not lose requests or late cost updates. Activate again
-only after exact comparison succeeds.
+The command requires exclusive canonical runtime ownership and locks both source
+tables. In one transaction it:
 
-Do not remove or disable the source tables, mirrors or ledger while any runtime
-depends on this migration. A later cleanup must switch every writer and recovery
-path before retiring the original tables; retaining a table name as a stale
-archive is not sufficient for rollback.
+1. Verifies both backfills and the temporary mirrors, with no missing, extra or
+   different records.
+2. Preserves source nullability/length constraints, native unique request and
+   receipt keys, the legacy run foreign key, supported indexes and source defaults.
+3. Drops the two original tables with `RESTRICT` and creates automatically
+   updatable, source-filtered views under their original names. The views use
+   `CHECK OPTION` and a security barrier; existing data-access grants are retained
+   without granting callers direct access to the whole ledger.
+4. Removes the mirror functions and records the completed physical layout.
+
+Unknown source columns, custom RLS, unsupported constraints/triggers, changed
+ownership or dependent objects stop the transaction. Nothing is retired on a
+failed comparison or failed DDL statement. The command never uses `DROP CASCADE`.
+Custom database extensions must be reviewed and mapped before retirement.
+
+Successful status is `phase: consolidated` and `physical_billing_stores: 1`.
+Restart the updated application through the normal deployment workflow. Native
+startup verifies the compatibility views and ledger constraints against the
+cutover receipt. Re-running the physical cutover only verifies that receipt.
+
+The original names continue to support the application's data operations; they
+are no longer targets for physical-table DDL or `TRUNCATE`. Recovery updates
+through either existing write interface modify the same ledger row. The billing
+adapter reads the ledger directly, while user/session/privacy/admission lookups
+continue using their owning tables.
+
+## Rollback boundary
+
+Before `consolidate`, use `rollback --apply` to select the original reporting path.
+After `consolidate`, the two old stores no longer exist, so that read-only rollback
+command refuses to imply that it can restore them. Restore the reviewed backup
+or roll forward if a pre-cutover application/schema is required. Keep the backup
+outside the active billing schema; the completed application maintains one store.

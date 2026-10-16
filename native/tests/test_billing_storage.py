@@ -124,14 +124,14 @@ async def test_exact_projection_survives_backfill_cutover_and_rollback(billing):
     finally:
         event.remove(ctx.engine.sync_engine, "before_cursor_execute", capture)
         event.remove(ctx.native.sync_engine, "before_cursor_execute", capture)
-    assert any("SELECT source_id,record FROM" in query for query in queries)
+    assert any("moyai_billing_records WHERE" in query for query in queries)
     assert not any(query.startswith(("SELECT moyai.model_requests.", f'SELECT "{ctx.storage.native_schema}".moyai_inference_usage.')) for query in queries)
     async with ctx.engine.connect() as db:
-        records = (await db.execute(text(f"SELECT source,source_id,record FROM {ctx.storage.ledger}"))).mappings().all()
+        records = (await db.execute(text(f"SELECT * FROM {ctx.storage.ledger}"))).mappings().all()
         assert len(records) == 4
         assert "PRIVATE_" not in repr(records) and "api_key" not in repr(records) and "private_payload" not in repr(records)
-        legacy = next(row["record"] for row in records if row["source"] == "legacy" and row["source_id"] == "same-id")
-        assert legacy["cost"] == "0.12340000000000000001"
+        legacy = next(row for row in records if row["source"] == "legacy" and row["source_id"] == "same-id")
+        assert legacy["cost_usd"] == "0.12340000000000000001"
     await rollback(ctx.engine, ctx.storage)
     assert await projection(ctx) == before
     assert (await status(ctx.engine, ctx.storage))["phase"] == "shadow"
@@ -156,8 +156,10 @@ async def test_mirror_captures_commits_recovery_and_deletes_but_not_rollbacks(bi
             "WHERE id='native-observation'"
         ))
     async with ctx.engine.connect() as db:
-        records = dict((await db.execute(text(f"SELECT source,record FROM {ctx.storage.ledger}"))).all())
-        assert records["legacy"]["cost"] == "0.123400"
+        records = {row["source"]: row for row in (
+            await db.execute(text(f"SELECT * FROM {ctx.storage.ledger}"))
+        ).mappings()}
+        assert records["legacy"]["cost_usd"] == "0.123400"
         assert records["legacy"]["cost_source"] == "gateway_recovery"
         assert records["native"]["cost_usd"] == "0.10000009"
     await activate(ctx.engine, ctx.storage)  # Exact comparison still holds after late updates.
@@ -182,7 +184,7 @@ async def test_resume_and_updates_before_or_behind_cursor_are_not_lost(billing):
     assert comparison["legacy"] == {"source_rows": 3, "mismatches": 0, "extra_rows": 0}
     async with ctx.engine.connect() as db:
         saved = dict((await db.execute(text(
-            f"SELECT source_id,record->>'cost' FROM {ctx.storage.ledger} WHERE source='legacy'"
+            f"SELECT source_id,cost_usd FROM {ctx.storage.ledger} WHERE source='legacy'"
         ))).all())
         assert saved == {"a": "0.123400", "c": "0.123400", "d": "0.8"}
 
@@ -234,10 +236,11 @@ async def test_cutover_refuses_incomplete_or_unreliable_copy(billing, tamper):
     await finish_backfill(ctx)
     async with ctx.engine.begin() as db:
         if tamper == "record":
-            await db.execute(text(f"UPDATE {ctx.storage.ledger} SET record=record || '{{\"cost\":\"999\"}}'::jsonb"))
+            await db.execute(text(f"UPDATE {ctx.storage.ledger} SET cost_usd='999'"))
         elif tamper == "extra":
             await db.execute(text(
-                f"INSERT INTO {ctx.storage.ledger} SELECT source,'extra',created_at,identities,record "
+                f"INSERT INTO {ctx.storage.ledger}(source,source_id,created_at,cost_usd) "
+                f"SELECT source,'extra',created_at,cost_usd "
                 f"FROM {ctx.storage.ledger}"
             ))
         else:
