@@ -1,4 +1,63 @@
 {
   "protocol": 1,
-  "steps": []
+  "steps": [
+    {
+      "from_revision": 20,
+      "to_revision": 21,
+      "compatibility": 20,
+      "source_digest": "05660c74a972191f8848a5bcc5d5e6af7406b821492d364568dc4e7cf0673423",
+      "target_digest": "80f7f8b6bb173ed10a24fa7defdb5dc8f11e98b36e3db7a5dbe3e17ab0cb45fe",
+      "operations": [
+        {
+          "kind": "add_column",
+          "table": "performance_samples",
+          "name": "timing_version",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "kind": "add_column",
+          "table": "performance_samples",
+          "name": "dispatch_at",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "kind": "add_column",
+          "table": "performance_samples",
+          "name": "dispatch_broker_at",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "kind": "add_column",
+          "table": "performance_samples",
+          "name": "dispatch_request_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "kind": "add_column",
+          "table": "performance_samples",
+          "name": "computer_requested_at",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "kind": "add_column",
+          "table": "performance_samples",
+          "name": "computer_ready_at",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "kind": "add_column",
+          "table": "performance_samples",
+          "name": "computer_start_kind",
+          "type": "TEXT",
+          "nullable": true
+        }
+      ]
+    }
+  ]
 }

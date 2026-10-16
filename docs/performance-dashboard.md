@@ -7,10 +7,14 @@ prompts, responses, tool contents or account identifiers.
 
 | Measurement | Start | End |
 | --- | --- | --- |
-| Startup to model | Entry into the valid web submission handler | First agent model request recorded at the broker, after admission |
-| Send now pickup | Entry into the explicit Send now handler, or automatic immediate submission | Agent steering acknowledgement, or claim as a new turn |
+| Startup to dispatch | Entry into the valid web submission handler | First foreground outbound model HTTP attempt starts |
 | Queue pickup | Web submission handler entry | Turn claim |
-| After pickup | Turn claim | First agent model request recorded at the broker |
+| Worker to broker | Turn claim | Broker ingress of that first dispatched attempt |
+| Broker preparation | Broker ingress | Outbound model HTTP attempt starts |
+| Computer readiness | First accepted computer-tool request in the turn | Usable independent-runtime computer |
+| Send now pickup | Explicit Send now or automatic immediate handler entry | Steering acknowledgement, or claim as a new turn |
+| Startup to admission (historical) | Valid web submission handler entry | First model request registered at the broker |
+| After pickup to admission (historical) | Turn claim | First model request registered at the broker |
 
 These are server-observed intervals, not click-to-render, time to first token, or
 time to a visible answer. They include database, queue, execution startup and
@@ -54,6 +58,66 @@ choose a shorter period for full coverage. No full-history backfill is performed
 Rows follow the lifetime of their message/session through cascading foreign keys;
 soft-deleted rows are excluded from reports. No separate automatic retention task
 is introduced.
+
+## Outbound dispatch and computer readiness (schema 21)
+
+The headline **Startup to dispatch** measures web handler entry to the instant
+before Moyai invokes its HTTP client's first foreground model send. It includes
+request construction and pre-send persistence/authorization; it excludes connection
+setup, transport, gateway receipt, and inference. Both Chat Completions and native
+Responses/Messages routes record this boundary. Compaction and internal assessment
+requests do not qualify. An observed failed/cancelled HTTP attempt still counts;
+validation failures before send have no dispatch timestamp.
+
+The original `first_model_at` admission endpoint and API metric keys remain unchanged,
+under **Model admission timing (historical definition)**. New fields are nullable:
+`timing_version`, `dispatch_at`, `dispatch_broker_at`, `dispatch_request_id`,
+`computer_requested_at`, `computer_ready_at`, and `computer_start_kind`. New web
+submissions use timing version 2; historical rows are excluded from dispatch
+coverage unless a real dispatch is subsequently observed. There is no timestamp
+backfill. During mixed-version overlap old writers continue to work normally.
+
+Dispatch timestamps are captured synchronously at send and persisted off the event
+loop without placing another database write before network dispatch. Normal request
+cleanup joins that observation; telemetry failures are logged without changing the
+model outcome. A killed broker can leave a missing observation. The first observed
+attempt wins by timestamp, with its own broker-ingress timestamp and request ID;
+late persistence cannot attach a different retry's ingress or a later turn's identity.
+Broker ingress is captured by server middleware, never supplied by a client header.
+
+The breakdown uses one identical, ordered cohort:
+
+- **Queue:** API handler entry to turn claim.
+- **Worker to broker:** turn claim to the selected model attempt's broker ingress.
+  This includes preparation, workflow/activity scheduling, retry/backoff before that
+  attempt, and transport through the configured ingress; it is not worker CPU time.
+- **Broker preparation:** that ingress to outbound dispatch, including context,
+  compaction/admission and pre-send database work. It excludes the upstream stream.
+
+Phase averages share a cohort and add to that cohort's startup average, subject to
+rounding. Phase percentiles do not add. The headline can have a larger cohort when
+an earlier phase is missing; coverage is shown. Cross-host timestamps require clock
+synchronization. Invalid ordering is excluded, never presented as zero latency.
+
+Computer timing covers the first accepted computer-tool request per measured web
+turn using the independent runtime (including the default Deep Agents path). Its
+start commits with the accepted operation, before acquisition/admission. Its end is
+the worker's usable workspace boundary after runtime refresh and project startup/
+verification, or a verified already-running computer. A project needing repair
+cannot publish readiness. Cold start (base or prepared image), session snapshot
+restore, and running-computer reuse are reported separately. Repeated tool calls
+never replace the first acquisition. Tool-free turns, legacy non-independent
+harnesses and idle manual computer wakes have no sample; they are not zero-latency
+observations. A computer can start after model dispatch; these intervals must not
+be added to startup. The current schema records first acquisition, not every
+replacement within a long turn.
+
+The reviewed online migration adds seven nullable columns from schema 20 to 21,
+retaining compatibility revision 20 and existing role protocols. It does not provide
+a migration from an earlier compatibility baseline: first complete the base release's
+required transition. Once schema 20 is active, use the existing rolling release
+procedure and its declared additive plan. The UI tolerates an older API response
+without inventing dispatch data.
 
 ## Deployment order
 

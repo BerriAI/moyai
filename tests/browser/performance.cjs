@@ -19,8 +19,8 @@ async function open(t, fixture='populated', width=1440){
 }
 for(const width of [1440,768,320])test(`Performance is usable at ${width}px`,async t=>{
   const page=await open(t,'populated',width);
-  await page.locator('[data-performance-metric="first_model"]').waitFor();
-  assert.match(await page.locator('[data-performance-metric="first_model"]').innerText(),/3.40 s/);
+  await page.locator('[data-performance-metric="model_dispatch"]').waitFor();
+  assert.match(await page.locator('[data-performance-metric="model_dispatch"]').innerText(),/3.40 s/);
   assert.equal(await page.locator('#content h1').innerText(),'Performance');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   for(const selector of ['.performance-card','.performance-filters']){
@@ -29,7 +29,7 @@ for(const width of [1440,768,320])test(`Performance is usable at ${width}px`,asy
   const menu=page.getByRole('combobox',{name:'Conversation',exact:true});
   await menu.focus();await menu.press('Enter');
   await page.getByRole('option',{name:'Follow-ups',exact:true}).click();
-  await page.waitForFunction(()=>document.querySelector('[data-performance-metric="first_model"]')?.textContent.includes('1.90 s'));
+  await page.waitForFunction(()=>document.querySelector('[data-performance-metric="model_dispatch"]')?.textContent.includes('1.90 s'));
   await page.getByRole('button',{name:'Refresh',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#performance-status')?.textContent.startsWith('Updated'));
   assert.equal(await page.locator('#performance-kind').inputValue(),'follow_up');
@@ -41,7 +41,7 @@ for(const width of [1440,768,320])test(`Performance is usable at ${width}px`,asy
 test('Empty data is not zero and filters reset through the shared select',async t=>{
   const page=await open(t,'empty');
   await page.getByRole('heading',{name:'No timing samples in this view'}).waitFor();
-  assert.match(await page.locator('[data-performance-metric="first_model"]').innerText(),/—/);
+  assert.match(await page.locator('[data-performance-metric="model_dispatch"]').innerText(),/—/);
   await page.getByRole('combobox',{name:'Period',exact:true}).click();
   await page.getByRole('option',{name:'Last hour',exact:true}).click();
   await page.getByRole('button',{name:'Reset filters'}).click();
@@ -54,7 +54,7 @@ test('Load error retries without presenting invented numbers',async t=>{
   assert.equal(await page.locator('[data-performance-metric]').count(),0);
   await page.route('**/api/admin/performance?*',route=>route.fulfill({json:require('../../scripts/performance_ui_fixture.cjs')(new URL(route.request().url()).searchParams,false)}));
   await page.getByRole('button',{name:'Try again'}).click();
-  await page.locator('[data-performance-metric="first_model"]').waitFor();
+  await page.locator('[data-performance-metric="model_dispatch"]').waitFor();
 });
 test('Members cannot fetch or navigate to admin metrics',async t=>{
   const page=await open(t,'member');
@@ -66,7 +66,7 @@ test('Members cannot fetch or navigate to admin metrics',async t=>{
 });
 test('A late response cannot replace the next route',async t=>{
   const page=await open(t);
-  await page.locator('[data-performance-metric="first_model"]').waitFor();
+  await page.locator('[data-performance-metric="model_dispatch"]').waitFor();
   let release, entered;
   const pending=new Promise(resolve=>entered=resolve), gate=new Promise(resolve=>release=resolve);
   await page.route('**/api/admin/performance?*',async route=>{entered();await gate;await route.continue();});

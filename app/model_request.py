@@ -1,5 +1,7 @@
 """Request-owned accounting across async admission, cancellation and cleanup."""
 import asyncio
+import logging
+from datetime import datetime, timezone
 from copy import deepcopy
 from types import SimpleNamespace
 from uuid import uuid4
@@ -20,10 +22,29 @@ class ModelRequest:
         self.gateway_id = ''
         self.admission_attempted = False
         self.finalization = None
+        self.startup = False
+        self.dispatch_observation = None
 
     async def admit(self, validate, *, startup):
+        self.startup = startup
         self.admission_attempted = True
         await database(self.admit_in, validate, startup)
+
+    def dispatched(self, request):
+        if not self.startup or self.dispatch_observation is not None:
+            return
+        from .performance import model_dispatched
+        stamp = datetime.now(timezone.utc).isoformat()
+        received = request.scope.get('moyai_broker_received_at')
+
+        async def record():
+            try:
+                await database(model_dispatched, self.store, self.run, received, stamp, self.id)
+            except Exception as exc:
+                # Observability must not change an inference outcome or replay it.
+                logging.getLogger(__name__).warning('Dispatch timing unavailable (%s)', type(exc).__name__)
+
+        self.dispatch_observation = asyncio.create_task(record())
 
     def admit_in(self, validate, startup):
         validate()
@@ -67,6 +88,8 @@ class ModelRequest:
 
     async def settle(self, capture, status, messages, response, error, close, remember):
         failures = []
+        if self.dispatch_observation is not None:
+            await drain(self.dispatch_observation)
         for operation in close:
             try:
                 await operation()

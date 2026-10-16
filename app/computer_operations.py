@@ -100,6 +100,8 @@ class ComputerOperations:
                 conn.execute("""INSERT INTO events(run_id,kind,message,data,created_at)
                     VALUES(?,'computer_input','Computer input scope saved.',?,?)""",
                     (run['id'], encoded({'request_id': identity, 'input_id': body['input_id']}), now()))
+            from .performance import computer_requested_in
+            computer_requested_in(conn, run, json.loads(session['state']), now())
             self.submit(conn, run)
             return {'request_id': identity, 'status': 'queued', 'result': {}}
 
