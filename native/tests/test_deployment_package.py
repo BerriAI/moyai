@@ -423,7 +423,7 @@ async def test_ingress_opens_only_after_confirmed_resume(install_environment, mo
     monkeypatch.setattr(deployment, "health", health)
     monkeypatch.setattr(deployment, "control", control)
     await deployment.dispatch(argparse.Namespace(command=command), install_environment)
-    assert events == ["broker-ready", "status", *(["status"] if command == "resume" else []), "resume"]
+    assert events == ["broker-ready", "status", "status", "resume"]
     assert marker.is_file() and marker.stat().st_mode & 0o777 == 0o644
     persisted = read_state(install_environment)
     assert persisted["phase"] == "initialized"
