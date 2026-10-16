@@ -46,6 +46,8 @@ async def initialize_locked(environment: dict[str, str], state: dict | None, val
         await deployment_bootstrap.verify(values)
         return {"installation": "verified", "revision": state["revision"], "model_execution": "not_checked"}
     await asyncio.to_thread(deployment_bootstrap.require_empty, values)
+    if values["MOYAI_PRODUCT_MODE"] == "existing":
+        ingress(environment, ready=False)
     state = new_state(environment, values)
     values = configuration(environment, state)
     await deployment_checks.check(values)
@@ -87,6 +89,7 @@ async def control(values: dict[str, str], command: str, *, request_key: str | No
 
 
 async def health(values: dict[str, str]) -> None:
+    identities = {}
     async with httpx.AsyncClient(timeout=10) as client:
         for role in ("coordinator", "broker", "worker", "api"):
             response = await client.get(
@@ -97,11 +100,41 @@ async def health(values: dict[str, str]) -> None:
                 response.headers.get("X-Moyai-Core") != "pydantic-v1"
                 or response.headers.get("X-Moyai-Role") != role
                 or response.headers.get("X-Moyai-Build") != values["MOYAI_BUILD_SHA"]
+                or not response.headers.get("X-Moyai-Owner")
             ):
                 raise InstallationError("A running role has a different release or runtime identity.")
+            identities[role] = response.headers
+        headers = {"Cache-Control": "no-cache"}
+        if values.get("CLOUDFLARE_ACCESS_CLIENT_ID"):
+            headers.update({
+                "CF-Access-Client-Id": values["CLOUDFLARE_ACCESS_CLIENT_ID"],
+                "CF-Access-Client-Secret": values.get("CLOUDFLARE_ACCESS_CLIENT_SECRET", ""),
+            })
+        try:
+            response = await client.get(values["MOYAI_PUBLIC_URL"] + "/broker/health", headers=headers)
+            response.raise_for_status()
+        except httpx.HTTPError:
+            raise InstallationError("The public broker route is unavailable; execution was not resumed.") from None
+        if any(response.headers.get(name) != identities["broker"].get(name) for name in (
+            "X-Moyai-Core", "X-Moyai-Role", "X-Moyai-Build", "X-Moyai-Owner",
+        )):
+            raise InstallationError("The public broker route does not reach the verified broker owner.")
+
+
+def ingress(environment: dict[str, str], *, ready: bool) -> None:
+    """Publish only a nonsecret marker on the proxy's dedicated volume."""
+    directory = state_path(environment).parent / "ingress"
+    directory.mkdir(exist_ok=True, mode=0o755)
+    os.chmod(directory, 0o755)
+    marker = directory / "ready"
+    if ready:
+        marker.touch(mode=0o644)
+    else:
+        marker.unlink(missing_ok=True)
 
 
 async def activate(environment: dict[str, str], state: dict, values: dict[str, str]) -> dict:
+    ingress(environment, ready=False)
     if state.get("upgrade"):
         raise InstallationError("Complete the pending maintenance upgrade before opening ingress.")
     await health(values)
@@ -119,6 +152,7 @@ async def activate(environment: dict[str, str], state: dict, values: dict[str, s
         write_state(environment, state)
     if status["paused"]:
         raise InstallationError("The installation is in maintenance; inspect and resume that operation explicitly.")
+    ingress(environment, ready=True)
     return {"installation": "active", "revision": state["revision"], "model_execution": "not_checked"}
 
 
@@ -131,6 +165,7 @@ async def begin_upgrade(args: argparse.Namespace, environment: dict[str, str], s
     status = await control(values, "status")
     if status["paused"]:
         raise InstallationError("Finish the existing maintenance operation before starting an upgrade.")
+    ingress(environment, ready=False)
     intent = uuid4().hex
     state["upgrade"] = {
         "source": state["revision"], "target": args.revision, "intent": intent, "phase": "requesting_drain",
@@ -156,6 +191,7 @@ async def apply_upgrade(environment: dict[str, str], state: dict, values: dict[s
         or upgrade.get("target") != values["MOYAI_BUILD_SHA"]
     ):
         raise InstallationError("Use the recorded target image after the source installation has drained.")
+    ingress(environment, ready=False)
     status = await control(values, "status")
     if status["state"] != "drained" or status["generation"] != upgrade["generation"] or status["workers"]:
         raise InstallationError("The source worker must be stopped at the recorded drained generation.")
@@ -273,6 +309,7 @@ async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dic
     if args.command == "status":
         return await control(values, "status")
     if args.command == "pause":
+        ingress(environment, ready=False)
         await control(values, "request")
         async with asyncio.timeout(args.timeout):
             while True:
@@ -283,6 +320,7 @@ async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dic
     if args.command == "resume":
         if state["phase"] != "initialized" or state["revision"] != values["MOYAI_BUILD_SHA"]:
             raise InstallationError("Resume requires the prepared image revision.")
+        ingress(environment, ready=False)
         await health(values)
         upgrade = state.get("upgrade")
         if upgrade:
@@ -299,6 +337,9 @@ async def dispatch(args: argparse.Namespace, environment: dict[str, str]) -> dic
             state["last_upgrade"] = state.pop("upgrade")
             state["last_upgrade"]["phase"] = "completed"
             write_state(environment, state)
+        if status["paused"]:
+            raise InstallationError("The worker did not confirm resume; ingress remains closed.")
+        ingress(environment, ready=True)
         return status
     raise InstallationError("Unsupported installation command.")
 

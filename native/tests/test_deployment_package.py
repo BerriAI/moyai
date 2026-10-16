@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from moyai import deployment
@@ -320,3 +321,100 @@ async def test_standalone_offline_upgrade_retains_keys_and_records_revision(inst
     assert state["last_upgrade"]["phase"] == "completed"
     assert state["last_upgrade"]["source"] == "1" * 40
     assert "upgrade" not in state
+
+
+@pytest.mark.parametrize("fault", [None, "unavailable", "redirect", "build", "owner", "role", "core"])
+async def test_health_requires_the_public_route_to_reach_the_verified_broker(
+    install_environment, monkeypatch, fault,
+):
+    install_environment.update(
+        MOYAI_INSTALL_TOPOLOGY="split",
+        CLOUDFLARE_ACCESS_CLIENT_ID="synthetic-access-id",
+        CLOUDFLARE_ACCESS_CLIENT_SECRET="synthetic-access-secret",
+    )
+    _, values = prepared(install_environment)
+    public_calls = []
+
+    def respond(request):
+        public = request.url.host == "workspace.example.test"
+        role = "broker" if public else request.url.host
+        headers = {
+            "X-Moyai-Core": "pydantic-v1", "X-Moyai-Role": role,
+            "X-Moyai-Build": values["MOYAI_BUILD_SHA"], "X-Moyai-Owner": role + "-owner",
+        }
+        if public:
+            public_calls.append(request)
+            assert request.url.path == "/broker/health"
+            assert request.headers["CF-Access-Client-Id"] == "synthetic-access-id"
+            assert request.headers["CF-Access-Client-Secret"] == "synthetic-access-secret"
+            if fault in {"unavailable", "redirect"}:
+                return httpx.Response(502 if fault == "unavailable" else 302)
+            if fault:
+                headers["X-Moyai-" + fault.title()] = "different"
+        else:
+            assert "CF-Access-Client-Secret" not in request.headers
+        return httpx.Response(200, headers=headers)
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(deployment.httpx, "AsyncClient", lambda **kwargs: client(
+        **kwargs, transport=httpx.MockTransport(respond),
+    ))
+    if fault:
+        with pytest.raises(InstallationError, match="public broker"):
+            await deployment.health(values)
+    else:
+        await deployment.health(values)
+    assert len(public_calls) == 1
+
+
+@pytest.mark.parametrize("command", ["activate", "resume"])
+async def test_broker_unavailable_never_resumes_or_opens_ingress(install_environment, monkeypatch, command):
+    install_environment["MOYAI_INSTALL_TOPOLOGY"] = "split"
+    state, _ = prepared(install_environment)
+    state["phase"] = "initialized"
+    if command == "resume":
+        state["upgrade"] = {"phase": "awaiting_resume", "generation": 4}
+    write_state(install_environment, state)
+    deployment.ingress(install_environment, ready=True)
+    monkeypatch.setattr(deployment, "health", AsyncMock(side_effect=InstallationError("public broker unavailable")))
+    control = AsyncMock()
+    monkeypatch.setattr(deployment, "control", control)
+    with pytest.raises(InstallationError, match="public broker"):
+        await deployment.dispatch(argparse.Namespace(command=command), install_environment)
+    control.assert_not_awaited()
+    assert read_state(install_environment) == state
+    assert not (Path(install_environment["DATA_DIR"]) / "ingress/ready").exists()
+
+
+@pytest.mark.parametrize("command", ["activate", "resume"])
+async def test_ingress_opens_only_after_confirmed_resume(install_environment, monkeypatch, command):
+    install_environment["MOYAI_INSTALL_TOPOLOGY"] = "split"
+    state, _ = prepared(install_environment)
+    state["phase"] = "initialized"
+    if command == "resume":
+        state.update(activation_pending=False, upgrade={"phase": "awaiting_resume", "generation": 0})
+    write_state(install_environment, state)
+    marker = Path(install_environment["DATA_DIR"]) / "ingress/ready"
+    events = []
+
+    async def health(values):
+        assert not marker.exists()
+        events.append("broker-ready")
+
+    async def control(values, operation, **kwargs):
+        assert not marker.exists()
+        events.append(operation)
+        return {
+            "generation": 0, "request_key": "bootstrap", "state": "drained" if operation == "status" else "running",
+            "paused": operation == "status", "counts": {},
+        }
+
+    monkeypatch.setattr(deployment, "health", health)
+    monkeypatch.setattr(deployment, "control", control)
+    await deployment.dispatch(argparse.Namespace(command=command), install_environment)
+    assert events == ["broker-ready", "status", "resume"]
+    assert marker.is_file() and marker.stat().st_mode & 0o777 == 0o644
+    persisted = read_state(install_environment)
+    assert persisted["phase"] == "initialized"
+    assert not persisted["activation_pending"]
+    assert "upgrade" not in persisted

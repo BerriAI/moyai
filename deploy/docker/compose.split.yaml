@@ -5,6 +5,8 @@ services:
       service: setup
     environment:
       MOYAI_INSTALL_TOPOLOGY: split
+    volumes:
+      - moyai-ingress:/data/ingress
   coordinator:
     extends:
       file: compose.common.yaml
@@ -52,10 +54,10 @@ services:
     command: ["/app/native/.venv/bin/python", "-m", "moyai.deployment", "activate"]
     environment:
       MOYAI_INSTALL_TOPOLOGY: split
+    volumes:
+      - moyai-ingress:/data/ingress
     depends_on:
-      worker:
-        condition: service_healthy
-      api:
+      proxy:
         condition: service_healthy
   proxy:
     image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
@@ -63,9 +65,18 @@ services:
       - "${MOYAI_BIND_ADDRESS:-127.0.0.1}:${MOYAI_PORT:-8787}:8080"
     volumes:
       - ./nginx.split.conf:/etc/nginx/conf.d/default.conf:ro
+      - moyai-ingress:/ingress:ro
     depends_on:
-      activate:
-        condition: service_completed_successfully
+      worker:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 volumes:
   moyai-state:
+  moyai-ingress:

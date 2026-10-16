@@ -65,6 +65,13 @@ as separate containers. This mode prepares both canonical product and native
 execution schemas and uses the product's identity, storage, and accounting
 adapters. It starts the coordinator before the other roles and resumes execution
 only after all four report the same release identity.
+The proxy exposes broker routing before activation, while browser and webhook
+requests receive maintenance HTTP 503. Activation checks the public
+`/broker/health` route against the internal broker's build and owner before
+resuming work and opening ingress. `/health` stays available for your load
+balancer during this check. If Cloudflare Access protects the public origin,
+configure `CLOUDFLARE_ACCESS_CLIENT_ID` and `CLOUDFLARE_ACCESS_CLIENT_SECRET`
+with permission to reach the broker routes.
 
 These modes have different identity/schema contracts. Changing `COMPOSE_FILE`
 does not migrate an existing standalone installation into the split topology.
@@ -160,7 +167,10 @@ sh upgrade.sh ghcr.io/berriai/moyai@sha256:THE_CANDIDATE_DIGEST
 For split mode, the helper requests a generation-bound drain from the live worker, waits for
 safe saved boundaries, stops ingress and the four old owners, prepares schemas
 with the new image, and starts matching new roles. It resumes only after their
-health identities match. Existing queued/parked native work remains preserved.
+health identities match and the public broker route reaches the new broker.
+Browser/webhook ingress opens only after resume is confirmed. A separate
+`moyai-ingress` volume shares a nonsecret readiness marker with Nginx; the proxy
+never mounts the private installation state. Existing queued/parked native work remains preserved.
 The helper updates `MOYAI_IMAGE` in `.env` after successful schema preparation.
 It does not switch execution cores, automatically roll back, or bypass unknown
 external effects.
@@ -171,6 +181,12 @@ possibly applied migration or resume command blindly. Use the installed image's
 `status` command while the schemas remain readable. Restore a consistent backup
 or complete a reviewed repair for a partial migration. A changed schema may
 prevent rollback to the old image.
+
+Use the candidate bundle's Compose, proxy configuration, and upgrade helper
+together. Starting the proxy with `--no-deps` during replacement avoids rerunning
+setup and activation jobs after execution has resumed. If public broker
+verification fails after schema preparation, fix the route and use the candidate
+image's `resume` command; it rechecks routing before opening ingress.
 
 For standalone mode, finish all work first. The same helper stops ingress and
 the application, verifies that the application released its runtime lock, and

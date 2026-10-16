@@ -33,10 +33,13 @@ awk -v image="$candidate" '
 mv .env.next .env
 
 if [ "$topology" = split ]; then
-    MOYAI_IMAGE="$candidate" docker compose up -d --wait coordinator broker worker api
+    MOYAI_IMAGE="$candidate" docker compose up -d --no-deps --wait coordinator
+    MOYAI_IMAGE="$candidate" docker compose up -d --no-deps --wait broker api
+    MOYAI_IMAGE="$candidate" docker compose up -d --no-deps --wait worker
+    MOYAI_IMAGE="$candidate" docker compose up -d --no-deps --wait proxy
     MOYAI_IMAGE="$candidate" docker compose run --rm --no-deps setup \
         /app/native/.venv/bin/python -m moyai.deployment resume
 else
     MOYAI_IMAGE="$candidate" docker compose up -d --wait app
+    MOYAI_IMAGE="$candidate" docker compose up -d --no-deps proxy
 fi
-MOYAI_IMAGE="$candidate" docker compose up -d proxy
