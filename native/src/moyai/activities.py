@@ -3,28 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from contextlib import suppress
 
-from pydantic import TypeAdapter
-from pydantic_ai.workspaces import WorkspaceRef
-from pydantic_ai_harness import ModalSandbox
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from .answer_settlement import SNAPSHOT_WARNING
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
 from .images import hydrate
 from .models import now
 from .performance import evidence, record
 from .runtime import current
-from .workspace_recovery import prepare_workspace, save_checkpoint
-
-logger = logging.getLogger(__name__)
-
-SNAPSHOT_WARNING = (
-    "The response was saved, but the computer checkpoint could not be confirmed. "
-    "Keep this computer available; automatic restoration is unavailable."
-)
+from .workspace_recovery import prepare_workspace
 
 
 @activity.defn(name="moyai_prepare_turn_v1")
@@ -71,30 +61,7 @@ async def save_answer(result: CompletedTurn) -> bool:
 @activity.defn(name="moyai_save_computer_v1")
 async def save_computer(turn_id: str, reference: dict | None) -> None:
     runtime = current()
-    if not reference:
-        await runtime.database.settle(turn_id)
-        return
-    ref = TypeAdapter(WorkspaceRef).validate_python(reference)
-    if ref.provider != "modal":
-        # Local workspaces are used only by deterministic supplementary tests.
-        await runtime.database.settle(turn_id)
-        return
-    try:
-        if await save_checkpoint(runtime, turn_id, reference):
-            return
-        backend = ModalSandbox().backend(ref)
-        sandbox = await backend.get_sandbox()
-        image = await sandbox.snapshot_filesystem.aio(timeout=120)
-    except Exception:
-        logger.warning("Computer snapshot settlement failed; the answer remains saved.", exc_info=True)
-        # The received answer is already committed. Never replace it with a save failure.
-        await runtime.database.settle(
-            turn_id,
-            warning="The response was saved, but its computer checkpoint could not be confirmed. "
-                    "Keep this computer available; automatic restoration is unavailable.",
-        )
-        return
-    await runtime.database.settle(turn_id, snapshot=image.object_id)
+    await runtime.database.answers.save_computer(turn_id, reference, product=runtime.product is not None)
 
 
 @activity.defn(name="moyai_settle_answer_v1")

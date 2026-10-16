@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import re
@@ -64,24 +63,16 @@ class Publications:
             raise ToolFailed("This tool is scoped to a different selected repository.")
 
     async def request(self, method: str, path: str, token: str, **kwargs) -> Any:
-        main_loop = asyncio.get_running_loop()
-        async def call(bound):
-            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
-                self.service.check(self.scope, self.grant), main_loop,
-            ))
-            result = await bound.github.request(method, path, token=token, **kwargs)
-            if method == "GET":
-                await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
-                    self.service.check(self.scope, self.grant), main_loop,
-                ))
-            return result
-        return await self.service.source_call(call)
+        return await self.service.execution.call(
+            lambda bound: bound.github.request(method, path, token=token, **kwargs),
+            authorize=lambda: self.service.check(self.scope, self.grant), recheck=method == "GET",
+        )
 
     async def token(self, *, workflows: bool = False) -> str:
         await self.service.check(self.scope, self.grant)
         if self.grant.read_only:
             raise ToolFailed("This selected GitHub connection is read only.")
-        token = await self.service.source_call(lambda bound: bound.github.installation_token(
+        token = await self.service.execution.call(lambda bound: bound.github.installation_token(
             credentials=bound.github.saved_credentials(), repository=self.target, write=True, workflows=workflows,
         ))
         await self.service.check(self.scope, self.grant)
@@ -199,15 +190,10 @@ class Publications:
         tree = (base.get("tree") or {}).get("sha") if isinstance(base, dict) else None
         if not isinstance(tree, str) or not SHA.fullmatch(tree):
             raise ToolFailed("GitHub did not confirm the requested base tree.")
-        main_loop = asyncio.get_running_loop()
-        async def validate(bound):
-            source_request = bound.github.request
-            async def guarded(*args, **kwargs):
-                await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(self.service.check(self.scope, self.grant), main_loop))
-                return await source_request(*args, **kwargs)
-            bound.github.request = guarded
-            await bound.github.validate_tree_paths(token, tree, request.files, self.target)
-        await self.service.source_call(validate)
+        await self.service.execution.call(
+            lambda bound: bound.github.validate_tree_paths(token, tree, request.files, self.target),
+            authorize=lambda: self.service.check(self.scope, self.grant),
+        )
         entries = []
         for index, change in enumerate(request.files):
             sha = None

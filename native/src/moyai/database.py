@@ -16,13 +16,14 @@ from fastapi import HTTPException
 from pydantic import TypeAdapter
 from pydantic_ai import Conversation, ConversationTypeAdapter
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-from sqlalchemy import and_, delete, event, literal, or_, select, text, update
+from sqlalchemy import and_, delete, event, or_, select, text, update
 from sqlalchemy import insert as sql_insert
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .answer_settlement import AnswerSettlement
 from .contracts import (
     Grant,
     GuidanceChanged,
@@ -102,6 +103,7 @@ class Database:
                if settings.postgres_url else {}),
         )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.answers = AnswerSettlement(self)
         if settings.sqlalchemy_url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
             def configure_sqlite(connection, _record):
@@ -753,82 +755,10 @@ class Database:
         deferred: bool = False,
         checkpoint_workspace: bool = False,
     ) -> bool:
-        result_identity = {
-            "conversation": conversation, "output": output, "workspace": workspace,
-            "usage": usage, "deferred": deferred,
-        }
-        if checkpoint_workspace:
-            result_identity["checkpoint_workspace"] = True
-        fingerprint = hashlib.sha256(json.dumps(result_identity, sort_keys=True).encode()).hexdigest()
-        checkpointing = checkpoint_workspace and bool(workspace and workspace.get("provider") == "modal")
-        async with self.sessions.begin() as db:
-            turn = await db.get(Turn, scope.turn_id)
-            session = await db.get(Session, scope.session_id)
-            if turn is None or session is None:
-                raise ValueError("Unknown turn.")
-            if turn.result_fingerprint is not None:
-                if turn.result_fingerprint != fingerprint:
-                    raise ValueError("The completed result for this turn is immutable.")
-                return bool(turn.result_accepted)
-            product_allowed = True
-            if self.product_authority_enabled:
-                try:
-                    await self._check_product_turn(db, turn, scope.product_grant)
-                except PermissionError:
-                    product_allowed = False
-                except HTTPException as error:
-                    if error.status_code not in {401, 403}:
-                        raise
-                    product_allowed = False
-            # This is the first write in the transaction. Stop fences the same
-            # session row first, so whichever transaction wins decides publication.
-            accepted = await db.scalar(update(Session).where(
-                Session.id == scope.session_id,
-                Session.active_turn == turn.id,
-                Session.status == "running",
-                literal(product_allowed),
-            ).values(
-                conversation=self.security.seal(conversation),
-                workspace=json.dumps(workspace) if workspace else session.workspace,
-                workspace_scope=scope.workspace_key if workspace else session.workspace_scope,
-                last_actor_id=scope.actor_id, last_model=scope.model,
-                last_grants=grant_fingerprint(scope.grants),
-                revision=Session.revision + 1, updated_at=now(),
-                status="waiting" if deferred and not checkpointing else "saving",
-            ).returning(Session.id))
-            # Preserve the factual result, even when Stop won the publication race.
-            turn.result = self.security.seal(output)
-            turn.conversation = self.security.seal(conversation)
-            turn.result_fingerprint = fingerprint
-            turn.usage = json.dumps(usage)
-            turn.finished_at = now()
-            if accepted is None:
-                turn.result_accepted = False
-                return False
-            turn.result_accepted = True
-            turn.status = "waiting" if deferred and not checkpointing else "saving"
-            if checkpointing:
-                from .workspace_recovery import pending_checkpoint
-                if turn.preparation is None or workspace is None:
-                    raise ValueError("A checkpoint requires the original prepared workspace.")
-                prepared = TypeAdapter(PreparedTurn).validate_json(self.security.unseal(turn.preparation))
-                prepared.checkpoint_workspace = True
-                prepared.checkpoint_waiting = deferred
-                turn.preparation = self.security.seal(TypeAdapter(PreparedTurn).dump_json(prepared))
-                session.snapshot = pending_checkpoint(scope, workspace, conversation, fingerprint)
-            await db.execute(update(Turn).where(
-                Turn.parent_turn == turn.id, Turn.status == "accepted"
-            ).values(status="included", finished_at=now()))
-            if not deferred:
-                existing = await db.scalar(select(Message.id).where(Message.identity == f"answer:{turn.id}"))
-                if existing is None:
-                    db.add(Message(
-                        session_id=session.id, turn_id=turn.id, role="assistant",
-                        content=self.security.seal(output), identity=f"answer:{turn.id}",
-                    ))
-                if self.product_memory_review is not None:
-                    await self.product_memory_review.enqueue_in(db, turn, session)
-            return True
+        return await self.answers.save_result(
+            scope, conversation=conversation, output=output, workspace=workspace,
+            usage=usage, deferred=deferred, checkpoint_workspace=checkpoint_workspace,
+        )
 
     async def input_images(self, turn_id: str, *, session_id: str | None = None) -> list[InputImage]:
         async with self.sessions() as db:
@@ -843,83 +773,10 @@ class Database:
             ]
 
     async def settle(self, turn_id: str, *, snapshot: str | None = None, warning: str | None = None) -> None:
-        async with self._admission_session(None) as db:
-            session_id = await db.scalar(select(Turn.session_id).where(Turn.id == turn_id))
-            if session_id is None:
-                raise ValueError("Unknown turn.")
-            # Read the mutable settlement intent only after taking Stop's lock.
-            # Otherwise a stale "saving" object can resurrect a stopped approval.
-            await db.execute(update(Session).where(
-                Session.id == session_id,
-            ).values(revision=Session.revision))
-            turn = await db.get(Turn, turn_id)
-            if turn is None:
-                raise ValueError("Unknown turn.")
-            session = await db.get(Session, turn.session_id)
-            if session is None or session.active_turn != turn.id or turn.status != "saving":
-                return
-            self._settle_answer(turn, session, snapshot=snapshot, warning=warning)
-
-    def _settle_answer(
-        self, turn: Turn, session: Session | None, *, snapshot: str | None = None, warning: str | None = None,
-    ) -> None:
-        """Later cleanup cannot downgrade a published answer to failure or Stop."""
-        prepared = TypeAdapter(PreparedTurn).validate_json(
-            self.security.unseal(turn.preparation)
-        ) if turn.preparation else None
-        if prepared and prepared.checkpoint_waiting:
-            stopped = session is None or session.deleted or session.status == "stopped"
-            turn.status = "stopped" if stopped else "waiting"
-            if session is not None and session.active_turn == turn.id:
-                session.save_warning = warning
-                session.status = "stopped" if stopped else "waiting"
-                if stopped:
-                    session.active_turn = None
-            return
-        turn.status = "completed"
-        if session is not None and session.active_turn == turn.id:
-            stopped = session.deleted or session.status == "stopped"
-            if snapshot and not stopped:
-                session.snapshot = snapshot
-            session.save_warning = warning
-            # The accepted answer stays completed, but its bookkeeping cannot
-            # clear a later Stop/deletion or publish a late computer image.
-            session.status = "stopped" if stopped else "idle"
-            session.active_turn = None
+        await self.answers.settle(turn_id, snapshot=snapshot, warning=warning)
 
     async def fail(self, turn_id: str, message: str, *, only_unsettled: bool = False) -> None:
-        async with self._admission_session(None) as db:
-            # Resolve ownership without caching a mutable Turn. Stop, deletion
-            # and answer publication fence the session first; take that same
-            # lock before reading the outcome this failure is allowed to settle.
-            session_id = await db.scalar(select(Turn.session_id).where(Turn.id == turn_id))
-            if session_id is None:
-                return
-            locked = await db.scalar(update(Session).where(
-                Session.id == session_id,
-            ).values(revision=Session.revision).returning(Session.id))
-            if locked is None:
-                return
-            turn = await db.get(Turn, turn_id)
-            if turn is None:
-                return
-            if turn.status in ("completed", "stopped"):
-                return
-            if only_unsettled and turn.status not in ("starting", "running", "saving"):
-                return
-            session = await db.get(Session, session_id)
-            if turn.status == "saving" and turn.result_accepted:
-                self._settle_answer(
-                    turn, session,
-                    warning="The answer was saved, but computer snapshot settlement was interrupted.",
-                )
-                return
-            turn.status = "failed"
-            turn.error = message
-            turn.finished_at = now()
-            if session and session.active_turn == turn.id:
-                session.active_turn = None
-                session.status = "failed"
+        await self.answers.fail(turn_id, message, only_unsettled=only_unsettled)
 
     async def stop(self, actor: User, session_id: str) -> str | None:
         async with self._admission_session(None) as db:
@@ -983,38 +840,7 @@ class Database:
             session.updated_at = now()
 
     async def stopped(self, turn_id: str, conversation: str | None = None) -> None:
-        async with self._admission_session(None) as db:
-            session_id = await db.scalar(select(Turn.session_id).where(Turn.id == turn_id))
-            if session_id is None:
-                return
-            await db.execute(update(Session).where(
-                Session.id == session_id,
-            ).values(revision=Session.revision))
-            turn = await db.get(Turn, turn_id)
-            if turn is None:
-                return
-            session = await db.get(Session, turn.session_id)
-            if session is None or session.active_turn != turn.id:
-                return
-            if turn.status == "saving" and turn.result_accepted:
-                self._settle_answer(
-                    turn, session,
-                    warning="The answer was saved before Stop interrupted computer snapshot settlement.",
-                )
-                return
-            if conversation:
-                session.conversation = self.security.seal(conversation)
-                session.last_actor_id = turn.actor_id
-                session.last_model = turn.model
-                if turn.preparation:
-                    prepared = TypeAdapter(PreparedTurn).validate_json(
-                        self.security.unseal(turn.preparation)
-                    )
-                    session.last_grants = grant_fingerprint(prepared.scope.grants)
-            turn.status = "stopped"
-            turn.finished_at = now()
-            session.active_turn = None
-            session.status = "stopped"
+        await self.answers.stopped(turn_id, conversation)
 
     async def pending_steering(self) -> list[tuple[Turn, Turn]]:
         async with self.sessions() as db:

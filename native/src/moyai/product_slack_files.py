@@ -32,10 +32,10 @@ class FileConnectors:
         return self.service.connectors.slack_installation(connection=connection)
 
     async def slack_bot_token(self):
-        return await self.service.source_call(lambda bound: bound.slack_bot_token())
+        return await self.service.execution.call(lambda bound: bound.slack_bot_token())
 
     async def request(self, *args, **kwargs):
-        return await self.service.source_call(lambda bound: bound.request(*args, **kwargs))
+        return await self.service.execution.call(lambda bound: bound.request(*args, **kwargs))
 
 
 class ProductSlackFiles:
