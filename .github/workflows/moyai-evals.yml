@@ -1,0 +1,92 @@
+name: Moyai agent evals
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  moyai-agent-evals:
+    name: Moyai agent evals
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: eval-only
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LITELLM_API_BASE: ${{ secrets.MOYAI_EVAL_LITELLM_API_BASE }}
+      LITELLM_API_KEY: ${{ secrets.MOYAI_EVAL_LITELLM_API_KEY }}
+      MOYAI_EVAL_AGENT_MODEL: ${{ vars.MOYAI_EVAL_AGENT_MODEL }}
+      MOYAI_EVAL_JUDGE_MODEL: ${{ vars.MOYAI_EVAL_JUDGE_MODEL }}
+      MOYAI_TEST_POSTGRES: postgresql://postgres:eval-only@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check eval configuration
+        id: eval-config
+        run: |
+          if [[ -z "$LITELLM_API_BASE" || -z "$LITELLM_API_KEY" ]]; then
+            echo "::notice::Moyai agent eval skipped because the LiteLLM secrets are not configured"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$MOYAI_EVAL_AGENT_MODEL" || -z "$MOYAI_EVAL_JUDGE_MODEL" ]]; then
+            echo "::error::Moyai eval model variables must be configured"
+            exit 1
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v6
+        if: steps.eval-config.outputs.enabled == 'true'
+        with:
+          python-version: '3.13'
+      - name: Run Harbor evaluation
+        if: steps.eval-config.outputs.enabled == 'true'
+        env:
+          PYTHONPATH: .:evals:native/src:native/tests
+        run: |
+          uv run --project native --python 3.13 --with harbor==0.24.0 --with openai==3.29.0 harbor run \
+            -p evals/tasks/deepseek_support_live \
+            -a moyai_harbor.agent:MoyaiAgent \
+            -k 3 -n 1 -o evals/jobs -y
+      - name: Require at least two passing trials
+        if: steps.eval-config.outputs.enabled == 'true'
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          jobs = [path for path in Path("evals/jobs").iterdir() if path.is_dir()]
+          if not jobs:
+              raise SystemExit("No Harbor job directory was produced")
+          job = max(jobs, key=lambda path: path.stat().st_mtime)
+          trials = [
+              path for path in job.iterdir()
+              if path.is_dir() and path.name.startswith("deepseek_support_live__")
+          ]
+          passed = 0
+          for trial in trials:
+              reward_path = trial / "verifier" / "reward.txt"
+              try:
+                  reward = float(reward_path.read_text().strip())
+              except (OSError, ValueError):
+                  reward = 0.0
+              passed += reward == 1.0
+          print(f"Harbor reward 1: {passed}/{len(trials)} trials; required at least 2/3")
+          if len(trials) != 3 or passed < 2:
+              sys.exit(1)
+          PY
+      - name: Upload Harbor jobs
+        if: always() && steps.eval-config.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: moyai-harbor-jobs
+          path: evals/jobs/
+          if-no-files-found: warn
