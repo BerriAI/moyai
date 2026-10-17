@@ -4,6 +4,7 @@ import math
 import shlex
 from collections.abc import Mapping, Sequence
 
+from harbor.environments.base import BaseEnvironment
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.workspaces import (
@@ -14,7 +15,6 @@ from pydantic_ai.workspaces import (
     WorkspaceRef,
 )
 
-from harbor.environments.base import BaseEnvironment
 from moyai.contracts import RunScope
 
 

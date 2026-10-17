@@ -11,8 +11,9 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.trajectories.agent import Agent as TrajectoryAgent
 from harbor.models.trajectories.step import Step
 from harbor.models.trajectories.trajectory import Trajectory
-from turn_runner import run_moyai_turn
-from workspace import HarborWorkspace
+
+from moyai_harbor.turn_runner import run_moyai_turn
+from moyai_harbor.workspace import HarborWorkspace
 
 
 class MoyaiAgent(BaseAgent):
@@ -28,22 +29,47 @@ class MoyaiAgent(BaseAgent):
         await environment.exec(f"mkdir -p {shlex.quote(str(log_dir))}", cwd="/workspace")
         log_file = log_dir / "stub_requests.jsonl"
         server_log = log_dir / "stub_server.log"
+        hosts = await environment.exec(
+            "grep -q '^127\\.0\\.0\\.1[[:space:]].*api\\.deepseek\\.com' /etc/hosts "
+            "|| printf '\\n127.0.0.1 api.deepseek.com\\n' >> /etc/hosts",
+            cwd="/workspace",
+        )
+        if hosts.return_code != 0:
+            raise RuntimeError("Could not route the provider host to the local stub.")
+        route = await environment.exec(
+            "getent hosts api.deepseek.com | awk 'NR==1 {print $1}'",
+            cwd="/workspace",
+        )
+        if route.return_code != 0 or route.stdout.strip() != "127.0.0.1":
+            raise RuntimeError("The provider hostname does not resolve exclusively to the local stub.")
         command = (
             "nohup python3 /eval/stub.py "
             f"--log-path {shlex.quote(str(log_file))} "
             "--response-path /eval/stub_response.json "
+            "--cert /usr/local/share/ca-certificates/api.deepseek.com.crt "
+            "--key /etc/ssl/private/api.deepseek.com.key "
             f"> {shlex.quote(str(server_log))} 2>&1 </dev/null &"
         )
-        await environment.exec(command, cwd="/workspace", timeout_sec=10)
+        launch = await environment.exec(command, cwd="/workspace", timeout_sec=10)
         for _ in range(20):
             health = await environment.exec(
-                "curl -fsS http://127.0.0.1:8787/healthz",
+                "curl --noproxy '*' -fsS https://api.deepseek.com/healthz",
                 cwd="/workspace",
                 timeout_sec=5,
             )
             if health.return_code == 0:
                 return
-        raise RuntimeError("The Harbor provider stub did not become ready.")
+        diagnostics = await environment.exec(
+            f"cat {shlex.quote(str(server_log))}; "
+            "printf '\\nresolved='; getent hosts api.deepseek.com | awk 'NR==1 {print $1}'",
+            cwd="/workspace",
+        )
+        detail = (
+            f"launch={launch.return_code} {launch.stderr or launch.stdout or ''}\n"
+            f"health={health.return_code} {health.stderr or health.stdout or ''}\n"
+            f"{diagnostics.stdout}"
+        )[-2000:]
+        raise RuntimeError(f"The Harbor provider stub did not become ready: {detail}")
 
     async def run(
         self,

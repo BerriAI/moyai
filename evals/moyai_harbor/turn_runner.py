@@ -26,12 +26,17 @@ from test_product_identity import google_cookie, request, settings_for
 from moyai.agent import inference_models, make_agent
 from moyai.models import SlackThread, Turn
 from moyai.product_connections import ProductConnections
+from moyai.product_continuation import ProductContinuationService
+from moyai.product_continuation_workspace import ProductWorkspaceCompatibility
 from moyai.product_credential_tools import capability as credential_capability
+from moyai.product_history import ProductHistoryAdapter
+from moyai.product_inference import ProductInferenceService
 from moyai.product_schema import migrate_product_schema
 from moyai.product_secrets import ProductSecrets
 from moyai.product_slack import ProductSlack, ProductSlackAuthority
 from moyai.runtime import configure
 from moyai.settings import Settings
+from moyai.skill_invocations import SkillInvocations
 from moyai.storage import ObjectStore, encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
@@ -116,11 +121,16 @@ async def seed_slack_source(
     product: Any,
     bot_credentials: dict[str, Any],
 ) -> None:
+    schema = f'"{product.adapter.schema}"'
+
+    def table(name: str) -> str:
+        return f'{schema}."{name}"'
+
     async with product.source.begin() as connection:
-        await connection.execute(text("""CREATE TABLE IF NOT EXISTS moyai.connections(
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('connections')}(
             provider TEXT PRIMARY KEY,encrypted TEXT NOT NULL,label TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT '')"""))
-        await connection.execute(text("""CREATE TABLE IF NOT EXISTS moyai.provider_secrets(
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('provider_secrets')}(
             id TEXT PRIMARY KEY,provider TEXT NOT NULL,label TEXT NOT NULL,scope TEXT NOT NULL,
             owner_id TEXT NOT NULL,root_id TEXT NOT NULL DEFAULT '',encrypted TEXT NOT NULL,
             created_at TEXT NOT NULL,revoked_at TEXT NOT NULL DEFAULT '',client_id TEXT NOT NULL,
@@ -128,43 +138,61 @@ async def seed_slack_source(
             lifetime TEXT NOT NULL DEFAULT 'persistent',expires_at TEXT NOT NULL DEFAULT '',
             invalid_reason TEXT NOT NULL DEFAULT '',revision INTEGER NOT NULL DEFAULT 1,
             UNIQUE(owner_id,client_id))"""))
-        await connection.execute(text("""CREATE TABLE IF NOT EXISTS moyai.credential_audit(
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('credential_audit')}(
             id BIGSERIAL PRIMARY KEY,actor_id TEXT NOT NULL,secret_id TEXT NOT NULL,
             action TEXT NOT NULL,run_id TEXT NOT NULL,created_at TEXT NOT NULL)"""))
-        await connection.execute(text("""CREATE TABLE IF NOT EXISTS moyai.connection_policies(
-            provider TEXT PRIMARY KEY,enabled BOOLEAN NOT NULL DEFAULT TRUE,
-            read_only BOOLEAN NOT NULL DEFAULT FALSE,checked_at TEXT NOT NULL DEFAULT '',
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('connection_policies')}(
+            provider TEXT PRIMARY KEY,enabled BIGINT NOT NULL DEFAULT 1,
+            read_only BIGINT NOT NULL DEFAULT 0,checked_at TEXT NOT NULL DEFAULT '',
             check_status TEXT NOT NULL DEFAULT 'unknown')"""))
-        await connection.execute(text("""CREATE TABLE IF NOT EXISTS moyai.connection_audit(
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('connection_audit')}(
             id BIGSERIAL PRIMARY KEY,provider TEXT NOT NULL)"""))
-        await connection.execute(text("""CREATE TABLE IF NOT EXISTS moyai.personal_slack_grants(
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('personal_slack_grants')}(
             owner_id TEXT PRIMARY KEY)"""))
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('user_roles')}(
+            email TEXT PRIMARY KEY,role TEXT NOT NULL CHECK(role IN ('admin','member')),
+            revision INTEGER NOT NULL,updated_by TEXT NOT NULL,updated_at TEXT NOT NULL)"""))
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('user_role_audit')}(
+            id BIGSERIAL PRIMARY KEY,email TEXT NOT NULL,previous_role TEXT NOT NULL,
+            role TEXT NOT NULL,actor TEXT NOT NULL,created_at TEXT NOT NULL)"""))
+        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('access_identities')}(
+            issuer TEXT NOT NULL,subject TEXT NOT NULL,email TEXT NOT NULL,
+            user_id TEXT NOT NULL REFERENCES {table('users')}(id),created_at TEXT NOT NULL,
+            PRIMARY KEY(issuer,subject),UNIQUE(issuer,user_id),UNIQUE(issuer,email))"""))
         await connection.execute(text(
-            "ALTER TABLE moyai.users ADD COLUMN IF NOT EXISTS profile_eligible BOOLEAN NOT NULL DEFAULT FALSE"
+            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_eligible BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         await connection.execute(text(
-            "ALTER TABLE moyai.users ADD COLUMN IF NOT EXISTS profile_checked_at TEXT NOT NULL DEFAULT ''"
+            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_checked_at TEXT NOT NULL DEFAULT ''"
         ))
         await connection.execute(text(
-            "ALTER TABLE moyai.users ADD COLUMN IF NOT EXISTS profile_conflict BOOLEAN NOT NULL DEFAULT FALSE"
+            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_conflict BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         await connection.execute(text(
-            "ALTER TABLE moyai.users ADD COLUMN IF NOT EXISTS profile_next_check BIGINT NOT NULL DEFAULT 0"
+            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_next_check BIGINT NOT NULL DEFAULT 0"
         ))
         await connection.execute(text(
-            "ALTER TABLE moyai.users ADD COLUMN IF NOT EXISTS link_status TEXT NOT NULL DEFAULT ''"
+            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS link_status TEXT NOT NULL DEFAULT ''"
         ))
         await connection.execute(text(
-            "ALTER TABLE moyai.users ADD COLUMN IF NOT EXISTS link_method TEXT NOT NULL DEFAULT ''"
+            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS link_method TEXT NOT NULL DEFAULT ''"
         ))
-        await connection.execute(text("""INSERT INTO moyai.users(
+        await connection.execute(text(f"""INSERT INTO {table('users')}(
             id,kind,email,name,linked_user_id,created_at,updated_at
         ) VALUES ('slack:TTEST0001:UTEST0001','slack','','Slack UTEST0001',NULL,'2026-01-01','2026-01-01')
         ON CONFLICT (id) DO NOTHING"""))
-        await connection.execute(text("""INSERT INTO moyai.connection_policies(provider,enabled,read_only)
-            VALUES ('slack',TRUE,FALSE) ON CONFLICT (provider) DO UPDATE SET enabled=TRUE"""))
+        await connection.execute(text(f"""INSERT INTO {table('users')}(
+            id,kind,email,name,linked_user_id,created_at,updated_at
+        ) VALUES (:id,'google','admin@example.test','Product admin',NULL,'2026-01-01','2026-01-01')
+        ON CONFLICT (id) DO NOTHING"""), {"id": product.user_id})
+        await connection.execute(text(f"""INSERT INTO {table('user_roles')}(
+            email,role,revision,updated_by,updated_at
+        ) VALUES ('admin@example.test','admin',1,'eval','2026-01-01')
+        ON CONFLICT (email) DO NOTHING"""))
+        await connection.execute(text(f"""INSERT INTO {table('connection_policies')}(provider,enabled,read_only)
+            VALUES ('slack',1,0) ON CONFLICT (provider) DO UPDATE SET enabled=1"""))
         encrypted = product.adapter.legacy_security.encrypt(json.dumps(bot_credentials))
-        await connection.execute(text("""INSERT INTO moyai.connections(
+        await connection.execute(text(f"""INSERT INTO {table('connections')}(
             provider,encrypted,label,updated_at
         ) VALUES ('slack',:encrypted,'Eval Slack','2026-01-01')
         ON CONFLICT (provider) DO UPDATE SET encrypted=EXCLUDED.encrypted,
@@ -182,26 +210,41 @@ async def run_moyai_turn(
     agent_model: str,
     trial: int,
 ) -> dict[str, Any]:
-    root_dir = EVALS / "out" / "runner" / f"{case['id']}-{trial}-{uuid4().hex[:8]}"
+    root_dir = EVALS / "jobs" / "runner" / f"{case['id']}-{trial}-{uuid4().hex[:8]}"
     root_dir.mkdir(parents=True, exist_ok=True)
     async with product_database_state(root_dir) as product:
-        await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai")
+        source_schema = "moyai_eval_source"
+        async with product.source.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{source_schema}"'))
+        product.adapter.schema = source_schema
+        await migrate_product_schema(
+            product.source, schema=product.schema, source_schema=source_schema,
+        )
         await product.database.start()
-        cookie, _ = google_cookie(product.adapter, sub=product.subject)
-        principal = await product.adapter.authenticate(request(cookie))
-        async with product.database.sessions.begin() as db:
-            product.actor = await product.adapter.project_native_user(db, principal)
         source_settings = settings_for(
             root_dir,
             data_dir=root_dir / "legacy-store",
+            moyai_database_url=product.settings.database_url,
+            moyai_database_schema=source_schema,
             slack_bot_enabled=True,
             slack_thread_chat_enabled=True,
             slack_session_users="UTEST0001",
             slack_signing_secret="synthetic-eval-signing-secret",
-            public_url="http://127.0.0.1:8787",
+            public_url="https://moyai.invalid",
         )
         legacy_security = ProductSecurity(source_settings)
-        store = Store(source_settings.data_dir, source_settings.agent_model)
+        store = Store(
+            source_settings.data_dir,
+            source_settings.agent_model,
+            database_url=product.settings.database_url,
+            database_schema=source_schema,
+            database_initialize=True,
+            schema_mode="auto",
+            database_pool_size=source_settings.moyai_database_pool_size,
+            application_instance=source_settings.moyai_runtime_role != "standalone",
+            runtime_role=source_settings.moyai_runtime_role,
+            runtime_settings=source_settings,
+        )
         product_services = SimpleNamespace(
             identity=product.adapter,
             security=legacy_security,
@@ -221,6 +264,10 @@ async def run_moyai_turn(
             },
         }
         await seed_slack_source(product, bot_credentials)
+        cookie, _ = google_cookie(product.adapter, sub=product.subject)
+        principal = await product.adapter.authenticate(request(cookie))
+        async with product.database.sessions.begin() as db:
+            product.actor = await product.adapter.project_native_user(db, principal)
         connections = ProductConnections(product_services, product.database)
         connections.connectors.save("slack", bot_credentials, "Eval Slack")
         settings: Settings = product.settings
@@ -246,6 +293,9 @@ async def run_moyai_turn(
             stores=stores,
             product=product_services,
             product_identity=product.adapter,
+            product_history=ProductHistoryAdapter(
+                product.adapter, product.source, schema=source_schema,
+            ),
             product_connections=connections,
             product_automations=None,
             product_memory_review=None,
@@ -254,17 +304,29 @@ async def run_moyai_turn(
             product_secrets=None,
             client=None,
         )
+        runtime.skill_invocations = SkillInvocations(runtime)
+        runtime.product_workspace = ProductWorkspaceCompatibility(runtime)
+        runtime.product_continuations = ProductContinuationService(
+            runtime, workspace=runtime.product_workspace,
+        )
         secrets_service = ProductSecrets(runtime)
         runtime.product_secrets = secrets_service
         runtime.database.product_connections = connections
         runtime.database.product_identity = product.adapter
         runtime.database.security = runtime.security
-        secret_row = seed_credentials(
+        product_settings = product.adapter.settings.model_copy(update={
+            "agent_model": agent_model,
+            "litellm_api_base": settings.gateway_url,
+            "litellm_api_key": settings.gateway_key.get_secret_value(),
+        })
+        product_inference = ProductInferenceService(product.database, product_settings, store)
+        runtime.product_inference = product_inference
+        runtime.database.product_inference = product_inference
+        seed_credentials(
             store,
             secrets_service.credentials,
             credentials,
         )
-        await copy_seed_credential(product, secret_row)
         models = inference_models(settings)
         runtime.models = models
         service = ProductSlack(runtime)
@@ -272,13 +334,16 @@ async def run_moyai_turn(
         configure(runtime)
         converter = encrypted_converter(runtime.security, objects)
         try:
+            await product_inference.start(recovery=False)
             async with await WorkflowEnvironment.start_local(
                 plugins=[PydanticAIPlugin()],
                 data_converter=converter,
             ) as temporal:
                 runtime.client = temporal.client
-                skills = root_dir / "skills"
-                skills.mkdir()
+                skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
+                if skills.return_code != 0:
+                    raise RuntimeError("Could not prepare the workspace skill directory.")
+                credentials = credential_capability(secrets_service.execution)
                 runtime.agent, runtime.durability = make_agent(
                     settings,
                     runtime.database,
@@ -286,11 +351,11 @@ async def run_moyai_turn(
                     objects,
                     models=models,
                     workspace=workspace,
-                    skills_directory=str(skills),
-                    product_capabilities=[credential_capability(secrets_service.execution)],
+                    skills_directory="skills",
+                    product_capabilities=[credentials],
                 )
                 async with make_worker(runtime):
-                    return await execute_turn(
+                    result = await execute_turn(
                         case,
                         trial=trial,
                         thread=thread,
@@ -298,20 +363,12 @@ async def run_moyai_turn(
                         runtime=runtime,
                         temporal=temporal,
                     )
+                    result["offered_tool_names"] = sorted(credentials.get_toolset().tools)
+                    return result
         finally:
+            await product_inference.close()
             await stores.close()
             store.close()
-
-
-async def copy_seed_credential(product: Any, row: dict[str, Any]) -> None:
-    async with product.source.begin() as connection:
-        await connection.execute(text("""INSERT INTO moyai.provider_secrets(
-            id,provider,label,scope,owner_id,root_id,encrypted,created_at,revoked_at,client_id,
-            name,format,env_var,lifetime,expires_at,invalid_reason,revision
-        ) VALUES (
-            :id,:provider,:label,:scope,:owner_id,:root_id,:encrypted,:created_at,:revoked_at,:client_id,
-            :name,:format,:env_var,:lifetime,:expires_at,:invalid_reason,:revision
-        )"""), row)
 
 
 async def execute_turn(
@@ -400,8 +457,12 @@ async def execute_turn(
     if completed is None:
         raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
     reply = next((
-        item["text"] for item in reversed(posted)
-        if "text" in item and item["text"] != "Moyai received your message."
+        "\n\n".join(
+            block["text"]["text"] for block in item.get("blocks", [])
+            if block.get("type") == "section" and isinstance(block.get("text"), dict)
+        )
+        for item in reversed(posted)
+        if any(block.get("type") == "section" for block in item.get("blocks", []))
     ), "")
     prompt = runtime.security.unseal(completed.prompt).decode()
     return {

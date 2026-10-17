@@ -40,7 +40,6 @@ dev = [
     "PyJWT[crypto]>=2.10,<3",
     "psycopg[binary,pool]>=3.2,<4",
     "pytest-split>=0.11,<0.12",
-    "harbor==0.24.0",
 ]
 
 [project.scripts]
@@ -82,3 +81,4 @@ extend-immutable-calls = ["fastapi.Depends"]
 include = ["src"]
 extraPaths = [".."]
 typeCheckingMode = "standard"
+
