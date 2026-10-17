@@ -17,6 +17,7 @@ import logo from "./assets/moyai-logo.png"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { Home } from "./home"
+import { MoyaiBrand } from "./brand"
 import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
@@ -292,7 +293,7 @@ function App() {
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
     {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-      <a href="#" className="brand"><span>Moyai</span><small>LiteLLM</small></a>
+      <MoyaiBrand />
       <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <Button variant="ghost" className="rail-palette-trigger" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={16} /><span>Search sessions & commands</span><span className="key-hint">⌘K</span></Button>
       <span className="rail-section-label">Workspace</span>

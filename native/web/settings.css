@@ -15,14 +15,12 @@
   gap: 16px;
   min-height: 0;
   min-width: 0;
-  padding: 24px 16px 12px;
+  padding: 12px 12px 8px;
   background: var(--ui-subtle);
   border-inline-end: 1px solid var(--ui-border);
 }
-.native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; }
-.native-settings .ns-brand { display: flex; align-items: center; gap: 12px; padding-inline: 8px; font-size: 22px; font-weight: 500; }
-.native-settings .ns-brand img { flex: none; object-fit: contain; }
-.native-settings .ns-brand small { margin-top: -3px; font-size: 11px; }
+.native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.native-settings .ns-brand-row > .moyai-brand { flex: 1; }
 .native-settings .ns-back { justify-content: flex-start; padding-inline: 8px; color: var(--ui-muted); }
 .native-settings .ns-navigation { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding-bottom: 12px; }
 .native-settings .ns-nav-title { padding: 0 8px 12px; font-size: 16px; font-weight: 450; }
@@ -132,8 +130,6 @@
 @media (max-width: 850px) {
   .native-settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .native-settings .ns-rail { padding: 12px 20px; border-inline-end: 0; border-bottom: 1px solid var(--ui-border); gap: 8px; }
-  .native-settings .ns-brand { font-size: 18px; padding: 0; }
-  .native-settings .ns-brand img { width: 28px; height: 28px; }
   .native-settings .ns-nav-toggle { display: inline-flex; }
   .native-settings .ns-back { align-self: flex-start; }
   .native-settings .ns-navigation { display: none; flex: none; max-height: 50dvh; padding-top: 12px; }
