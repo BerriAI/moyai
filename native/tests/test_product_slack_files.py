@@ -1,7 +1,9 @@
 """Local attachment protocol checks; never contact Slack or send messages."""
 
 import io
+from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 import test_product_slack as slack_tests
@@ -91,3 +93,54 @@ async def test_original_file_copy_is_scoped_and_never_overwrites_edited_copy(sla
     with pytest.raises((ToolFailed, PermissionError, HTTPException)):
         await function(replace(ctx, deps=replace(scope, session_id="different-session")), row.id)
     assert await workspace.read_bytes(result["path"]) == b"User edits"
+
+
+async def test_real_file_reader_downloads_inspects_and_retains_before_reuse(slack, actor, monkeypatch):
+    content = b"Slack attachment bytes.\n"
+    file_id = "F12345678"
+    url = "https://files.slack.com/files-pri/TTEST0001-F12345678/notes.txt"
+    calls = []
+
+    async def request(method, endpoint, *, headers, params, allowed_errors):
+        assert method == "GET" and endpoint == "https://slack.com/api/files.info"
+        assert headers == {"Authorization": "Bearer synthetic-bot-token", "Accept-Encoding": "identity"}
+        assert params == {"file": file_id} and allowed_errors == ("missing_scope",)
+        calls.append("metadata")
+        return {"ok": True, "file": {
+            "id": file_id, "name": "notes.txt", "size": len(content),
+            "mimetype": "text/plain", "url_private_download": url,
+        }}
+
+    async def chunks(size):
+        assert size == 64 * 1024
+        yield content[:10]
+        yield content[10:]
+
+    @asynccontextmanager
+    async def response(target, *, headers, allow_redirects):
+        assert target == url and not allow_redirects
+        assert headers == {"Authorization": "Bearer synthetic-bot-token", "Accept-Encoding": "identity"}
+        calls.append("download")
+        yield SimpleNamespace(
+            status=200, headers={"Content-Length": str(len(content))},
+            content=SimpleNamespace(iter_chunked=chunks),
+        )
+
+    @asynccontextmanager
+    async def client(*, timeout, auto_decompress):
+        assert timeout.total == 45 and not auto_decompress
+        yield SimpleNamespace(get=response)
+
+    monkeypatch.setattr(slack.service.connectors, "request", request)
+    monkeypatch.setattr("app.slack_files.aiohttp.ClientSession", client)
+    principal = await slack.service.product.identity.require_current(slack.grant)
+    event = {"files": [{"id": file_id}]}
+    first = await slack.service.files.prepare(actor, principal, event, provenance())
+    second = await slack.service.files.prepare(actor, principal, event, provenance())
+    assert first == second and calls == ["metadata", "download"]
+    assert len(first["uploads"]) == 1 and not first["images"]
+    assert "Slack attachment bytes." in first["context"]
+    async with slack.runtime.database.sessions() as db:
+        original = await db.get(Upload, first["uploads"][0])
+        assert original.name == "notes.txt" and original.media_type == "text/plain"
+        assert await slack.runtime.objects.get(original.digest) == content

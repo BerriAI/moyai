@@ -13,7 +13,7 @@ import aiohttp
 from .audio import AUDIO_TYPES, AudioTranscriber, audio_type
 from .attachments import filename, inspect_file
 from .connector_errors import ConnectorError
-from .db import drain
+from .db import database, drain
 from .slack_canvas import CanvasFormatError, inspect_canvas, is_canvas
 
 
