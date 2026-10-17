@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .models import Delivery, SlackThread, Turn, new_id, now
 from .progress import turn_progress
+from .slack_messages import session_url, thread_message
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -33,6 +34,16 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
         ).where(Turn.status == "running").order_by(Turn.created_at).limit(100))).all()
     cutoff = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
     for turn, thread in pairs:
+        source_run_id = ""
+        public_url = runtime.settings.public_url
+        if product:
+            from .product_slack_models import ProductSlackBinding
+            async with runtime.database.sessions() as db:
+                binding = await db.get(ProductSlackBinding, turn.session_id)
+            source_run_id = binding.source_run_id or "" if binding else ""
+            if runtime.product_slack:
+                public_url = runtime.product_slack.settings.public_url
+        url = session_url(public_url, turn.session_id, source_run_id)
         primary = anchor_identity(turn.id, product)
         prefix = f"product-slack:{turn.id}:progress:" if product else f"slack-commentary:{turn.id}:"
         async with runtime.database.sessions() as db:
@@ -48,8 +59,10 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
                 async with runtime.database.sessions.begin() as db:
                     db.add(Delivery(
                         id=new_id(), identity=primary, session_id=turn.session_id, turn_id=turn.id,
-                        destination=json.dumps({"channel": thread.channel_id, "thread_ts": thread.thread_ts}),
-                        content=runtime.security.seal("Moyai is working."),
+                        destination=json.dumps({
+                            "channel": thread.channel_id, "thread_ts": thread.thread_ts, "rich_reply": True,
+                        }),
+                        content=runtime.security.seal(thread_message("Moyai is working.", url)),
                     ))
             except IntegrityError:
                 pass
@@ -61,16 +74,15 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
         latest = messages[-1]
         identity = prefix + hashlib.sha256(latest["id"].encode()).hexdigest()[:32]
         message = slack_text(latest["text"][:2400])
-        if runtime.settings.public_url:
-            message += f"\n<{runtime.settings.public_url.rstrip('/')}/#{turn.session_id}|Open Moyai>"
         try:
             async with runtime.database.sessions.begin() as db:
                 db.add(Delivery(
                     id=new_id(), identity=identity, session_id=turn.session_id, turn_id=turn.id,
                     destination=json.dumps({
                         "channel": thread.channel_id, "thread_ts": thread.thread_ts, "progress": True,
+                        "rich_reply": True,
                     }),
-                    content=runtime.security.seal({"text": message} if product else message),
+                    content=runtime.security.seal(thread_message(message, url)),
                 ))
         except IntegrityError:
             pass

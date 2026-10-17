@@ -44,6 +44,7 @@ from .models import (
 from .product_connections import ProductConnections
 from .product_identity import ProductGrant, ProductPrincipal
 from .product_slack_models import ProductSlackBinding
+from .slack_messages import navigation_action, pr_cards, session_url, thread_message, without_pr_references
 
 if TYPE_CHECKING:
     from .product_identity import ProductIdentityAdapter
@@ -580,6 +581,11 @@ class ProductSlack:
                     binding.paused or (turn.finished_at and turn.finished_at <= binding.delivery_after)
                 ))
                 for key, content in parts:
+                    if key == "accepted":
+                        content = thread_message(content["text"], session_url(
+                            self.settings.public_url, thread.session_id,
+                            binding.source_run_id or "" if binding else "",
+                        ))
                     db.add(Delivery(
                         id=new_id(), identity=f"product-slack:{turn.id}:{key}",
                         session_id=thread.session_id, turn_id=turn.id,
@@ -617,10 +623,9 @@ class ProductSlack:
             }.get(turn.status, "")
             if turn.status == "completed":
                 text_value = self.runtime.security.unseal(turn.result).decode() if turn.result else "Task completed."
-            source = binding.source_run_id
-            route = "run=" + source if source and re.fullmatch(r"[0-9a-f]{32}", source) else turn.session_id
-            url = self.settings.public_url.rstrip("/") + "/#" + route
-            content: dict[str, Any] = {"text": slack_text(text_value) + "\n<" + url + "|Open Moyai>"}
+            url = session_url(self.settings.public_url, turn.session_id, binding.source_run_id or "")
+            cards = pr_cards(text_value, url) if turn.status == "completed" else []
+            content: dict[str, Any] = {"text": slack_text(text_value)}
             controls = []
             if turn.status == "waiting" and turn.conversation:
                 conversation = ConversationTypeAdapter.validate_json(self.runtime.security.unseal(turn.conversation))
@@ -654,15 +659,11 @@ class ProductSlack:
                         "\n<" + self.settings.public_url.rstrip("/") + "/api/files/" + artifact.id
                         + "|" + html.escape(artifact.name, quote=False).replace("|", "¦") + ">"
                     )
-            parts = split_reply(content["text"], limit=3000)
+            visible = without_pr_references(content["text"], cards)
+            parts = split_reply(visible, limit=2900) if visible.strip() else [""]
             await self.queue_batch(turn, thread, [
-                (f"{turn.status}:{index}", {
-                    **({"blocks": [
-                        {"type": "section", "text": {"type": "mrkdwn", "text": part}},
-                        {"type": "actions", "elements": controls},
-                    ]} if index == 0 and controls else {}),
-                    "text": part,
-                })
+                (f"{turn.status}:{index}", thread_message(part, url, cards=cards, controls=controls)
+                 if index == 0 else {"text": part})
                 for index, part in enumerate(parts)
             ])
 
@@ -677,6 +678,8 @@ class ProductSlack:
         actions = payload.get("actions")
         if not isinstance(team, str) or team != bot["team_id"] or not isinstance(user, str) or not ID.fullmatch(user):
             raise HTTPException(403, "Invalid Slack interaction identity.")
+        if navigation_action(payload):
+            return
         if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
             raise HTTPException(422, "Choose one current approval.")
         action, turn_id = actions[0].get("action_id"), actions[0].get("value")
@@ -784,7 +787,8 @@ class ProductSlack:
         try:
             response = await client.post("chat.update" if reply_ts else "chat.postMessage", headers={"Authorization": "Bearer " + token}, json={
                 "channel": destination["channel"], **content,
-                **({"ts": reply_ts, "blocks": content.get("blocks", [])} if reply_ts else {
+                **({"ts": reply_ts, "blocks": content.get("blocks", []),
+                    "attachments": content.get("attachments", [])} if reply_ts else {
                     "thread_ts": destination["thread_ts"], "unfurl_links": False, "unfurl_media": False,
                 }),
                 "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},

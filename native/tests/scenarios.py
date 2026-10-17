@@ -69,7 +69,24 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
             part.tool_name for message in messages for part in message.parts
             if isinstance(part, ToolReturnPart)
         }
-        if scenario == "question":
+        if scenario == "swarm":
+            offered = {tool.name for tool in info.function_tools}
+            assert {"swarm_board", "swarm_claim_lead", "swarm_publish", "swarm_assign"} <= offered
+            assert "delegate_task" not in offered
+            board = next((
+                part.content for message in messages for part in message.parts
+                if isinstance(part, ToolReturnPart) and part.tool_name == "swarm_board"
+            ), None)
+            if board is None:
+                calls = [("swarm_board", {})]
+            elif not board["you"]["coordinator"]:
+                calls = [
+                    ("swarm_claim_lead", {"plan": "Coordinate the independent checks."}),
+                    ("swarm_publish", {"message": "Observed and verified the native test result."}),
+                ]
+            else:
+                calls = []
+        elif scenario == "question":
             calls = [("ask_user_question", {
                 "questions": [{
                     "header": "Choice", "question": "Which output should I create?",

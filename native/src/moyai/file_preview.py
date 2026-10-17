@@ -186,9 +186,16 @@ class FilePreviewService:
         async with self.runtime.database.sessions() as db:
             await self.runtime.database.allowed_session(db, session_id, current)
             row = await db.get(Artifact if kind == "artifact" else Upload, resource_id)
-            # An unattached upload or a file from another allowed session is
-            # still not a member of the requested session.
-            if row is None or row.session_id != session_id:
+            if row is None:
+                raise HTTPException(404, "File not found in this session.")
+            if row.session_id != session_id and (
+                kind != "artifact"
+                or not await self.runtime.database.swarms.shared_artifact(
+                    db, current, session_id, row.session_id,
+                )
+            ):
+                # Ordinary allowed sessions and input uploads do not imply
+                # cross-session access. Swarms explicitly share saved outputs.
                 raise HTTPException(404, "File not found in this session.")
             return FileRecord(row.id, kind, session_id, row.name, row.media_type, row.size, row.digest)
 
