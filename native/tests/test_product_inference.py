@@ -181,6 +181,17 @@ async def test_workflow_retry_with_new_run_id_cannot_repeat_paid_activity(infere
         await interceptor.execute_activity(value)
     assert denied.value.non_retryable and denied.value.type == "MoyaiInferenceAdmissionDenied"
     assert len(calls) == len(await requests(inference)) == 1
+    # Continue-As-New reuses activity IDs for genuinely new work. A new logical
+    # agent segment must be admitted, while a reset of that segment must not.
+    inference.scope.history_segment = 1
+    info.workflow_run_id = "continued-execution"
+    await interceptor.execute_activity(value)
+    assert len(calls) == len(await requests(inference)) == 2
+    info.workflow_run_id = "reset-of-continued-execution"
+    with pytest.raises(ApplicationError) as denied:
+        await interceptor.execute_activity(value)
+    assert denied.value.type == "MoyaiInferenceAdmissionDenied"
+    assert len(calls) == len(await requests(inference)) == 2
 
 
 async def test_distinct_sdk_calls_are_distinct_paid_requests(inference):

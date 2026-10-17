@@ -104,6 +104,10 @@ async def test_existing_user_gets_complete_while_writer_still_owns_lock(
     read_product: ReadProduct, writer_kind: Literal["canonical", "identity"],
 ) -> None:
     product = read_product
+    # Finish lazy application setup before measuring the one-connection pools.
+    # Health does not authenticate or project this user: the first authenticated
+    # reads must still complete while the writer owns its lock.
+    assert (await product.client.get("/health")).status_code == 200
     async with product.writer.begin() as writer:
         if writer_kind == "canonical":
             await writer.execute(text(

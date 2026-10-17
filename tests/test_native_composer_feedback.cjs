@@ -28,7 +28,7 @@ async function uploads() {
   return { queue, calls, changes, revoked };
 }
 
-test('fresh and ASAP turns are chat messages; only queued-next input behind live work goes in the queue', async () => {
+test('ASAP messages waiting behind a question remain visibly queued', async () => {
   const { waitsBehindActive } = await conversationModule;
   const turn = { id: 'next', status: 'queued', mode: 'when_idle' };
   assert.equal(waitsBehindActive(turn), false);
@@ -37,8 +37,8 @@ test('fresh and ASAP turns are chat messages; only queued-next input behind live
   for (const status of ['starting', 'running', 'saving', 'waiting', 'stopping']) {
     const active = { id: 'previous', status };
     assert.equal(waitsBehindActive(turn, active), true);
-    assert.equal(waitsBehindActive({ ...turn, mode: 'asap' }, active), false);
-    assert.equal(waitsBehindActive(turn, active, true), false);
+    assert.equal(waitsBehindActive({ ...turn, mode: 'asap' }, active), status === 'waiting');
+    assert.equal(waitsBehindActive(turn, active, true), status === 'waiting');
   }
   assert.equal(waitsBehindActive({ ...turn, status: 'steering' }, { id: 'previous', status: 'running' }), false);
 });

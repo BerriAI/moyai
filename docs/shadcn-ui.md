@@ -22,20 +22,25 @@ belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
-The meteor is an actual cratered mesh, generated offline with
-`uv run --script scripts/assets/generate_moyai_meteor.py`; generation is not a
-runtime or normal build step. Its pinned script dependencies produce the bundled
-GLB with matte material, baked vertex shading and embedded mineral surface maps.
-Use cool gray lighting and a restrained rim light; avoid a CSS glow around the silhouette.
-The face occupies the front plane of the wider asteroid. Large craters extend
-around its flanks; cavity shading, blue-violet mineral tint, roughness/metalness
-maps and small reflective facets give the stone depth. A static studio environment
-supplies reflections that respond to rotation without an animation loop.
-The Three.js viewer remains lazy,
-supports drag and keyboard rotation, and disposes its geometry, materials and
-textures, reflection target and shadow maps on unmount. Embedded images use TextureLoader so the existing
-content security policy can load them through `img-src`. The supplied reference
-image is the lightweight fallback.
+This variant keeps the original meteor's frontal photograph and irregular oval
+outline, while using the supplied full Meshy geometry for the sides and back.
+`scripts/assets/build_original_profile.mjs` fits that geometry to the reference
+outline and embeds a second UV set for the front image. Generation runs offline.
+See [the original-profile asset notes](../scripts/assets/original-profile.md).
+
+`frontend/moyai-original-surface.ts` owns the view-dependent reference layer.
+At Home rotation it displays the original photograph; as the rock turns, that
+layer fades to the underlying textured 3D stone. By about 40 degrees, only the
+physical surface remains, avoiding stretched front-photo details in profile.
+This is an intentional hybrid presentation, not a recovered scan of the image.
+Keep the projection's 8.6-unit camera distance aligned with the viewer.
+
+The Three.js viewer remains lazy and supports drag and keyboard rotation.
+It disposes shared geometry, materials, textures (including an unmounted model's
+embedded reference image), the reflection target and shadow
+maps once on unmount. Embedded images use TextureLoader so the existing content
+security policy can load them through `img-src`. The original reference image
+remains the lightweight loading/WebGL fallback.
 
 ```sh
 npm ci

@@ -62,10 +62,7 @@ class Publications:
         session = await self.database.allowed_session(db, self.scope.session_id, actor)
         if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
             raise ToolFailed("This publication was stopped or superseded.")
-        current = await self.database.resolve_grants(
-            db, actor.id, [item.id for item in self.scope.grants],
-            shared_session=session.visibility == "shared", surface=session.surface,
-        )
+        current = await self.database.scope_grants(db, self.scope, session)
         if self.grant not in current or self.grant.read_only:
             raise ToolFailed("Current GitHub write access is required.")
 
@@ -356,7 +353,7 @@ class Publications:
 
     async def approve_lifecycle(self, ctx: RunContext[RunScope], request: LifecycleAccess) -> dict:
         from .product_github_workflows import parse
-        if not ctx.tool_call_approved or ctx.run_id != self.scope.turn_id or self.scope.surface not in {"web", "slack"}:
+        if not ctx.tool_call_approved or ctx.run_id != self.scope.root_run_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
             raise ToolFailed("Only explicit requester approval may grant PR lifecycle access.")
         row = await self.operation(ctx, "request_pr_lifecycle_access", request)
         if row.turn_id != self.scope.turn_id:
@@ -431,7 +428,7 @@ class Publications:
         return await self.finish(row, result)
 
     async def approve(self, ctx: RunContext[RunScope], request: PRWrite) -> dict:
-        if not ctx.tool_call_approved or ctx.run_id != self.scope.turn_id or self.scope.surface not in {"web", "slack"}:
+        if not ctx.tool_call_approved or ctx.run_id != self.scope.root_run_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
             raise ToolFailed("Only an explicit native approval in the requester's direct chat may grant PR access.")
         row = await self.operation(ctx, "request_pull_request_write_access", request)
         if row.turn_id != self.scope.turn_id:

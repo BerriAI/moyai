@@ -1,12 +1,13 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { finishOriginalSurface } from './moyai-original-surface'
 
-/** The cratered meteor, with a bounded render lifecycle owned by the home view. */
+/** The textured Moyai model, with a bounded render lifecycle owned by the home view. */
 export function mountSculpture(host: HTMLElement | null) {
   if (!host) return () => {}
   let disposed = false, frame = 0, dragging = false, pointer = -1
-  const initialYaw = .40, initialPitch = .10
+  const initialYaw = 0, initialPitch = 0
   let lastX = 0, lastY = 0, yaw = initialYaw, pitch = initialPitch, velocity = 0
   let renderer: THREE.WebGLRenderer
   try { renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true }) }
@@ -28,7 +29,8 @@ export function mountSculpture(host: HTMLElement | null) {
   studio.dispose(); pmrem.dispose()
   scene.environment = environment.texture
   scene.environmentIntensity = .16
-  camera.position.set(0, .15, 8.6)
+  // The model is centered and normalized offline for this home-screen framing.
+  camera.position.set(0, 0, 8.6)
   camera.lookAt(0, 0, 0)
   scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .45))
   for (const [color, power, x, y, z] of [[0xf0f2f8, 3.8, 3, 5, 5], [0x7a9be6, 2.4, -4, 0, -2], [0x9b86d8, .95, 3, 1, -3], [0x829ee8, .9, -4, -2, 3]]) {
@@ -51,7 +53,7 @@ export function mountSculpture(host: HTMLElement | null) {
     if (disposed || !host?.isConnected) { cleanup(); return }
     if (!ready || !visible || document.hidden) return
     if (!dragging && !motion.matches && Math.abs(velocity) > .0001) { yaw += velocity; velocity *= .93 }
-    pivot.rotation.set(pitch, yaw, -.14)
+    pivot.rotation.set(pitch, yaw, 0)
     renderer.render(scene, camera)
     if (!dragging && !motion.matches && Math.abs(velocity) > .0001) schedule()
   }
@@ -84,20 +86,23 @@ export function mountSculpture(host: HTMLElement | null) {
   function visibility() { velocity = 0; schedule() }
   function release(object: THREE.Object3D) {
     const textures = new Set<THREE.Texture>()
+    const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>()
     object.traverse(child => {
       const mesh = child as THREE.Mesh
-      mesh.geometry?.dispose()
+      if (mesh.geometry) geometries.add(mesh.geometry)
       if (mesh.material) for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+        materials.add(material)
         if (material instanceof THREE.MeshStandardMaterial) {
-          for (const texture of [material.map, material.normalMap, material.roughnessMap, material.metalnessMap]) {
+          for (const texture of [material.map, material.normalMap, material.roughnessMap, material.metalnessMap, material.emissiveMap]) {
             if (texture) textures.add(texture)
           }
-        }
-        material.dispose()
+        } else if (material instanceof THREE.MeshBasicMaterial && material.map) textures.add(material.map)
       }
       if (child instanceof THREE.DirectionalLight) child.shadow.dispose()
     })
     textures.forEach(texture => texture.dispose())
+    materials.forEach(material => material.dispose())
+    geometries.forEach(geometry => geometry.dispose())
   }
   function cleanup() {
     if (disposed) return
@@ -107,7 +112,8 @@ export function mountSculpture(host: HTMLElement | null) {
     canvas.removeEventListener('pointerup', up); canvas.removeEventListener('lostpointercapture', up)
     canvas.removeEventListener('pointercancel', up); canvas.removeEventListener('keydown', key)
     canvas.removeEventListener('webglcontextlost', lost)
-    release(scene); environment.dispose(); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
+    release(scene)
+    environment.dispose(); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
   }
   function lost(e: Event) { e.preventDefault(); cleanup() }
   const observer = new IntersectionObserver(entries => { visible = entries[0].isIntersecting; schedule() })
@@ -128,9 +134,12 @@ export function mountSculpture(host: HTMLElement | null) {
   })
   loader.load('/static/models/moyai.glb', gltf => {
     if (disposed || !host.isConnected) { release(gltf.scene); cleanup(); return }
-    gltf.scene.traverse(child => {
-      if (child instanceof THREE.Mesh) { child.castShadow = true; child.receiveShadow = true }
-    })
+    const meshes: THREE.Mesh[] = []
+    gltf.scene.traverse(child => { if (child instanceof THREE.Mesh) meshes.push(child) })
+    for (const mesh of meshes) {
+      mesh.castShadow = true; mesh.receiveShadow = true
+      finishOriginalSurface(mesh)
+    }
     pivot.add(gltf.scene); ready = true; host.append(canvas); host.classList.add('sculpture-ready'); resize()
   }, undefined, cleanup)
   return cleanup

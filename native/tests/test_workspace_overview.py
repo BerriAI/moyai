@@ -19,10 +19,12 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord,
 from sqlalchemy import func, select
 from temporalio.testing import WorkflowEnvironment
 from test_application_boundaries import sign_in
+from test_delegation_temporal import dispatching
 from test_images_and_computer import image_bytes
 from test_sidebar import member_client
 
 from moyai.contracts import NewMessage, NewSession
+from moyai.delegation_models import DelegatedSession
 from moyai.models import Session, SessionLink, SubagentLabel, Turn, User, new_id
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
@@ -358,22 +360,24 @@ async def test_real_temporal_delegate_is_inspectable_through_workspace_api(runti
     )
     async with environment:
         runtime.client = environment.client
-        async with make_worker(runtime):
+        async with make_worker(runtime), dispatching(runtime):
             result = await asyncio.wait_for(runtime.client.execute_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id,
                 task_queue=runtime.settings.temporal_queue,
             ), 45)
     assert result["status"] == "completed"
-    children = await runtime.stores.steps.list_runs(parent_run_id=turn.id)
-    assert len(children) == 1 and ":" in children[0].run_id
+    async with runtime.database.sessions() as db:
+        children = list(await db.scalars(select(DelegatedSession).where(DelegatedSession.parent_turn_id == turn.id)))
+    assert len(children) == 1
     async with sign_in(runtime) as client:
         path = f"/api/sessions/{session.id}"
         overview = (await client.get(f"{path}/workspace")).json()
-        assert overview["subagents"][0]["id"] == children[0].run_id
-        assert overview["subagents"][0]["status"] == "completed"
-        detail = await client.get(f"{path}/subagents/{children[0].run_id}")
+        assert overview["subagents"][0]["id"] == children[0].initial_turn_id
+        assert overview["subagents"][0]["status"] == "idle"
+        assert overview["subagents"][0]["session_id"] == children[0].session_id
+        detail = await client.get(f"/api/sessions/{children[0].session_id}/messages")
         assert detail.status_code == 200, detail.text
-        assert detail.json()["output"] == "native-child-result"
+        assert detail.json()[-1]["content"] == "native-child-result"
         assert overview["files"][0]["name"] == "proof.txt"
         assert (await client.get(overview["files"][0]["url"])).content == (
             b"Written by the native file capability.\n"

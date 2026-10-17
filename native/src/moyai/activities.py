@@ -11,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 
 from .answer_settlement import SNAPSHOT_WARNING
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
+from .history_handoff import HISTORY_ACTIVITIES
 from .images import hydrate
 from .runtime import current
 from .workspace_recovery import prepare_workspace
@@ -50,6 +51,9 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
                     if mission is None:
                         raise PermissionError("Swarm goal is unavailable.")
                     generated_goal = runtime.security.unseal(mission.goal).decode()
+        if prepared.scope.delegation_generated:
+            # An agent-written assignment cannot select skills on the user's behalf.
+            return prepared
         if generated_goal is None:
             prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, prepared.scope)
         else:
@@ -127,6 +131,6 @@ async def steering_receipt(turn_id: str, enqueue_id: str | None) -> None:
 
 ACTIVITIES = [
     prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
-    prepare_steering, steering_receipt,
+    prepare_steering, steering_receipt, *HISTORY_ACTIVITIES,
 ]
 

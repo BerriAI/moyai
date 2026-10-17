@@ -27,6 +27,14 @@ class Grant:
     policy: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Policy context, independent of the conversation's display/ACL context."""
+
+    visibility: str = "private"
+    surface: str = "web"
+
+
 @dataclass
 class RunScope:
     session_id: str
@@ -39,6 +47,24 @@ class RunScope:
     product_grant: ProductGrant | None = None
     swarm_id: str | None = None
     swarm_name: str | None = None
+    delegation_depth: int = 0
+    delegation_generated: bool = False
+    # Chosen by the workflow and carried into tool activities. Old payloads
+    # must retain SDK delegation and its shared parent computer.
+    interactive_delegation: bool = False
+    execution_context: ExecutionContext | None = None
+    history_segment: int = 0
+    # Recorded by the workflow, so old activity inputs keep the original stream.
+    workflow_public_events: bool = False
+
+    @property
+    def root_run_id(self) -> str:
+        """One logical turn can contain several SDK runs across Temporal histories."""
+        return self.turn_id if not self.history_segment else f"{self.turn_id}:segment:{self.history_segment}"
+
+    @property
+    def authority(self) -> ExecutionContext:
+        return self.execution_context or ExecutionContext(self.visibility, self.surface)
 
     @property
     def grants_key(self) -> str:
@@ -61,9 +87,9 @@ class RunScope:
         actor_segment = self.actor_id if re.fullmatch(
             r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", self.actor_id,
         ) else "identity-" + hashlib.sha256(self.actor_id.encode()).hexdigest()
-        if self.surface == "slack":
+        if self.authority.surface == "slack":
             return f"slack/{self.session_id}/{actor_segment}/{self.grants_key}"
-        return f"{self.visibility}/{actor_segment}/{self.grants_key}"
+        return f"{self.authority.visibility}/{actor_segment}/{self.grants_key}"
 
     @property
     def workspace_key(self) -> str:
@@ -130,6 +156,7 @@ class NewMessage(BaseModel):
     mode: Literal["asap", "when_idle"] = "when_idle"
     connections: list[str] = Field(default_factory=list, max_length=30)
     attachments: list[str] = Field(default_factory=list, max_length=8)
+    reply_to: str | None = Field(default=None, min_length=1, max_length=36)
 
     @model_validator(mode="after")
     def nonblank_prompt(self) -> NewMessage:

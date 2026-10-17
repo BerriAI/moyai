@@ -24,7 +24,7 @@ type Query = { key: string; start: number; end: number; text: string }
 type Props = {
   value: string; onChange: (value: string) => void; onSend: (value: string) => void
   onPaste?: React.ClipboardEventHandler<HTMLElement>
-  placeholder: string; shared?: boolean; disabled?: boolean
+  placeholder: string; shared?: boolean; disabled?: boolean; sessionId?: string
 }
 const CLIPBOARD_TYPE = "application/x-moyai-message"
 
@@ -66,7 +66,7 @@ export const SkillComposer = React.forwardRef<HTMLDivElement, Props>(function Sk
   }}><InlineComposer {...props} inputRef={ref} /><HistoryPlugin /></LexicalComposer>
 })
 
-function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared = false, disabled = false, inputRef }: Props & { inputRef: React.ForwardedRef<HTMLDivElement> }) {
+function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared = false, disabled = false, sessionId, inputRef }: Props & { inputRef: React.ForwardedRef<HTMLDivElement> }) {
   const [editor] = useLexicalComposerContext()
   const input = useRef<HTMLDivElement | null>(null), latest = useRef({ onChange, onSend })
   const bindInput = useCallback((node: HTMLDivElement | null) => {
@@ -75,7 +75,7 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
     else if (inputRef) inputRef.current = node
   }, [inputRef])
   latest.current = { onChange, onSend }
-  const id = useId(), auth = csrfToken(), scope = `${auth}:${shared}`
+  const id = useId(), auth = csrfToken(), scope = `${auth}:${shared}:${sessionId || ""}`
   const [focused, setFocused] = useState(false), [dismissed, setDismissed] = useState(false)
   const [query, setQuery] = useState<Query | null>(null), [version, setVersion] = useState(0), [active, setActive] = useState(0)
   const [empty, setEmpty] = useState(!value)
@@ -111,7 +111,7 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
       const rows = new Map<string, ComposerSkill>()
       let offset = 0
       do {
-        const page = await api<SkillPage>(`/skills?shared=${shared}&offset=${offset}&limit=100`, "GET", undefined, controller.signal)
+        const page = await api<SkillPage>(`/skills?shared=${shared}&offset=${offset}&limit=100${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`, "GET", undefined, controller.signal)
         if (controller.signal.aborted || csrfToken() !== auth) return
         for (const skill of page.skills) rows.set(skill.reference, skill)
         if (!page.has_more) break

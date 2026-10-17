@@ -2,6 +2,21 @@
 
 [Install Moyai](../README.md#run-locally) · [Documentation](README.md)
 
+## Answering questions
+
+Question cards use the chat's compact typography and numbered vertical options.
+Click a single choice to submit it immediately, or write a response and press
+Enter. Shift+Enter adds a new line. Number keys activate a focused question's
+options; arrow keys move between single choices without submitting. Digits typed
+in the response field remain text. For multi-select questions, choose the
+checkboxes and press Enter when finished. Multiple questions submit once every
+question is answered. Accompanying approvals and credential requests retain
+their explicit Continue step.
+
+If sending fails, your answer and keyboard focus are preserved so you can retry.
+If the answer was accepted but refreshing fails, **Refresh conversation** reloads
+the conversation without sending the answer again.
+
 ## Attachments and the computer
 
 The native interface reuses Moyai's navigation style, home constellation and
@@ -96,8 +111,16 @@ answers and downloads and does not restart cancelled work.
 
 **Workspace** opens an overlay of pull requests, subagents and outputs. Uploaded
 sources and saved outputs are also available in the Files tab.
-Subagents come from native Harness run lineage, with persistent display names;
-only their requester can inspect their answers and recorded steps. Saving a
+New ordinary subagents open as full private conversations: select one under
+**Workspace → Subagents**, then message, queue a follow-up, use **Send now**,
+answer questions, or stop it with the normal session controls. **Parent chat**
+returns to the conversation that delegated the work. Each child retains its
+history and has its own computer. In the left sidebar, children nest beneath their
+parent in a collapsible group. Select a child to open its full conversation, or
+choose **Open in side chat** from its row, menu, or Workspace entry to chat with
+the same child in the right panel. The parent stays open and keeps its draft.
+Older SDK subagents retain their requester-only answer and recorded-steps panels.
+See [Subagent chats](subagent-chats.md) for lifecycle and migration details. Saving a
 file with `save_artifact` adds an output, and `attach_link` adds a PR, external
 output or source. PR links in the public transcript also appear as mentioned PRs.
 
@@ -110,7 +133,7 @@ GitHub patches are labelled; this is a read-only viewer.
 
 Queued messages appear above the composer. **Edit** loads their text into that
 same composer and keeps attachments; Save/Cancel restore the unsent draft.
-**Steer now** promotes the existing message through the native Temporal signal
+**Send now** promotes the existing message through the native Temporal signal
 and Pydantic `AgentRun.enqueue` path. A message already admitted cannot be edited.
 
 New tasks and their delegated agents have no fixed model-request-count limit.
@@ -334,6 +357,19 @@ not implemented by this adapter.
 - **Send now** uses the native pending-message mechanism. A changed requester,
   model or connection set becomes a follow-up rather than inheriting an active
   run's authority.
+- When Moyai asks one ordinary clarification question, its requester can type
+  an answer in the main composer or use the question form. Multiple questions,
+  approvals and credential requests retain their dedicated forms. Other
+  participants can queue context but cannot answer for the requester.
+- Required questions wait for an explicit answer. The agent can mark a
+  preference question optional; its persisted deadline defaults to 90 seconds
+  (`MOYAI_OPTIONAL_QUESTION_TIMEOUT`, 5–900 seconds). An unanswered optional
+  question returns “no answer received” to the agent, which must state its
+  assumption. No option is selected and no permission is granted by timeout.
+- Applying a question answer reserves the resumed turn ahead of queued
+  follow-ups. Those messages remain saved until the deferred tool result has
+  been processed. Deploy the API and coordinator changes together; older
+  coordinators do not dispatch a reserved queued resume turn.
 - **Stop** revokes unstarted work before requesting Temporal cancellation.
   Failed cancellation RPCs are reconciled. Native foreground-command cancellation
   is exercised by the tests. Already returned background process handles and

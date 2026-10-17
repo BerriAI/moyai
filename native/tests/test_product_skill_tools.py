@@ -154,7 +154,7 @@ async def test_private_skills_never_release_into_shared_chat_even_to_admin(skill
     assert (await ctx.skills.read(private.scope, private.scope.turn_id, skill_id=created["id"]))["id"] == created["id"]
 
 
-@pytest.mark.parametrize("kind", ["delegated", "slack", "forged_visibility", "revoked", "stopped"])
+@pytest.mark.parametrize("kind", ["delegated", "delegated_session", "slack", "forged_visibility", "revoked", "stopped"])
 async def test_untrusted_or_stale_execution_cannot_write(skills, kind):
     ctx = skills
     scope, run_id = ctx.scope, ctx.scope.turn_id
@@ -163,6 +163,8 @@ async def test_untrusted_or_stale_execution_cannot_write(skills, kind):
     await EffectReceipts(ctx.product.database).reserve(scope, receipt, "skill_create", {})
     if kind == "delegated":
         run_id = "delegate"
+    elif kind == "delegated_session":
+        scope = replace(scope, delegation_generated=True)
     elif kind == "slack":
         scope = replace(scope, surface="slack")
     elif kind == "forged_visibility":

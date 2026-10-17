@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from "react"
+import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -17,6 +17,7 @@ import logo from "./assets/moyai-logo.png"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { Home } from "./home"
+import { MoyaiBrand } from "./brand"
 import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
@@ -31,11 +32,14 @@ import type { OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
 import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
 import { TurnProgress } from "./turn-progress"
+import { useWorkProgress } from "./use-work-progress"
+import { orderedWorkMessages, workSegments } from "./work-timeline"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
+import { QuestionChoices, type Question } from "./question-choices"
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
@@ -43,18 +47,17 @@ const ProductHistory = React.lazy(() => import("./product-history").then(module 
 const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
 
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
-type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request"; url?: string }
+type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
 type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing" }
-type SessionInventory = { sessions: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
+type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
-type Question = { header: string; question: string; multi_select?: boolean; options: { label: string; description?: string }[] }
 const settingsDestinations = [
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
   { page: "connections", label: "Connections" }, { page: "secrets", label: "Secrets" },
@@ -186,6 +189,9 @@ function App() {
           }
           rows.set(sessionKey(row), { ...row, unread })
         }
+        for (const row of next.ancestors ?? []) {
+          if (!rows.has(sessionKey(row))) rows.set(sessionKey(row), row)
+        }
         if (next.notice) notices.add(next.notice)
         hasMore = Boolean(next.has_more && next.next_cursor)
         if (!hasMore || next.next_cursor === cursor) break
@@ -289,7 +295,7 @@ function App() {
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
     {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-      <a href="#" className="brand"><span>Moyai</span><small>LiteLLM</small></a>
+      <MoyaiBrand />
       <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <Button variant="ghost" className="rail-palette-trigger" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={16} /><span>Search sessions & commands</span><span className="key-hint">⌘K</span></Button>
       <span className="rail-section-label">Workspace</span>
@@ -301,6 +307,13 @@ function App() {
       <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
         hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
         onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
+        onOpenSideChat={row => {
+          const host = nativeSelected && nativeSelected !== row.id ? nativeSelected : row.parent_session_id
+          if (!host) return
+          setWorkspaceRequest(previous => ({ sessionId: host, tab: "side-chat", child: { id: row.id, title: row.title }, sequence: (previous?.sequence ?? 0) + 1 }))
+          if (nativeSelected !== host) location.hash = host
+          setMobileNav(false)
+        }}
         onOpenPullRequest={(sessionId, url) => { setWorkspaceRequest(previous => ({ sessionId, url, tab: "pull-request", sequence: (previous?.sequence ?? 0) + 1 })); location.hash = sessionId; setMobileNav(false) }} />
       <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Settings" onClick={() => navigateSettings("overview")}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => {
         try { const result = await api<{ logout_url?: string }>("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")); if (result.logout_url) navigateAuth(result.logout_url, true) }
@@ -405,6 +418,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   viewNow.current = view
   const sensitiveVersion = useRef(0)
   const [draft, setDraft] = useState("")
+  const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
@@ -434,6 +448,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const composerInput = useRef<HTMLDivElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
+  const followingWork = useRef(true)
+  const followWork = useCallback(() => {
+    if (followingWork.current && transcript.current) transcript.current.scrollTop = transcript.current.scrollHeight
+  }, [])
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
   const loaded = useRef(false)
@@ -447,7 +465,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     resolvedOnce.current = undefined
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
-    setDraft(""); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
@@ -518,12 +536,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       else { setPanelLoading(false); setPanelError(String(reason)) }
     })
   }, [id, auxiliaryPanel, Boolean(view)])
-  const productAccounts = me.product_mode === "existing"
   const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
-  const effectiveConnections = productAccounts ? accountCatalog.scope === accountScope ? accountCatalog.rows : [] : connections
-  const accountBlocked = productAccounts && (Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error)))
+  const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows : []
+  const accountBlocked = Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error))
   useEffect(() => {
-    if (!productAccounts || !view || !visible) return
+    if (!view || !visible) return
     const controller = new AbortController(), scope = accountScope
     setAccountCatalog({ scope, rows: [], loading: true, error: "" })
     const query = new URLSearchParams({ session_id: id })
@@ -531,20 +548,24 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       if (!controller.signal.aborted) setAccountCatalog({ scope, rows, loading: false, error: "" })
     }, reason => { if (!controller.signal.aborted) setAccountCatalog({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
-  }, [productAccounts, accountScope, visible])
+  }, [accountScope, visible])
   useEffect(() => {
-    if (!productAccounts || accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
+    if (accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
     const available = new Set(accountCatalog.rows.filter(row => row.enabled).map(row => row.id))
     const retained = selectedAccounts.filter(account => available.has(account))
     if (retained.length !== selectedAccounts.length) {
       setSelectedAccounts(retained)
       setAccountNotice("Account access changed. Review Context & connections before sending your next message.")
     }
-  }, [productAccounts, accountScope, accountCatalog, selectedAccounts])
+  }, [accountScope, accountCatalog, selectedAccounts])
   useEffect(() => {
     if (!workspaceRequest || sideMode) return
     setWorkspaceOpen(false)
     if (workspaceRequest.tab === "computer") dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+    else if (workspaceRequest.tab === "side-chat" && workspaceRequest.child) dispatchPanel({ type: "open", tab: {
+      id: `side-chat:${workspaceRequest.child.id}`, kind: "side-chat",
+      sessionId: workspaceRequest.child.id, title: workspaceRequest.child.title,
+    } })
     else if (workspaceRequest.url) dispatchPanel({ type: "open", tab: { id: `pr:${workspaceRequest.url.toLowerCase()}`, kind: "pull-request", title: "Pull request", url: workspaceRequest.url } })
   }, [workspaceRequest, sideMode])
   useEffect(() => { if (visible) heading.current?.focus() }, [Boolean(view), visible])
@@ -554,9 +575,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [view?.session.title, sideMode])
   useEffect(() => {
     const element = transcript.current
-    if (element) element.scrollTop = element.scrollHeight
+    if (element) { followingWork.current = true; element.scrollTop = element.scrollHeight }
   }, [messages.length, sendingNow])
   const active = view?.turns.find(turn => turn.id === view.session.active_turn)
+  const work = useWorkProgress(
+    id, `${authorityKey}:${connectionVersion}:${id}:${me.user.id}`,
+    active?.actor_id === me.user.id ? active : undefined, visible && !swarmSpace,
+    () => clearSensitiveNow.current(),
+  )
+  const requestAnswered = Boolean(active && answeredRequest === active.id)
+  const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
   useEffect(() => {
     if (!activeId || endedStreams.current.has(activeId)) return
@@ -598,9 +626,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     return () => { closed = true; stream.close() }
   }, [activeId, id, load])
   useEffect(() => {
-    const element = transcript.current
-    if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 180) element.scrollTop = element.scrollHeight
-  }, [liveText])
+    followWork()
+  }, [liveText, followWork])
 
   async function send(promptOverride?: string) {
     const prompt = promptOverride ?? (editing ? editText : draft)
@@ -613,13 +640,21 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     }
     if ((!prompt.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
     setBusy(true); setError("")
-    const body = { prompt, model, mode, connections: selectedAccounts, attachments: pictures.readyFiles.map(file => file.id) }
+    const body = {
+      prompt, model: answeringQuestion ? active?.model ?? model : model, mode,
+      connections: answeringQuestion ? active?.connections ?? selectedAccounts : selectedAccounts,
+      attachments: pictures.readyFiles.map(file => file.id),
+      ...(answeringQuestion ? { reply_to: active?.id } : {}),
+    }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
+    let accepted = false
     try {
       await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: lastRequest.current.key })
+      accepted = true
+      if (body.reply_to) setAnsweredRequest(body.reply_to)
       setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
-    } catch (e) { setError(String(e)) } finally { setBusy(false) }
+    } catch (e) { setError(accepted && body.reply_to ? "Your response was sent, but the conversation could not be refreshed." : String(e)) } finally { setBusy(false) }
   }
   async function sendNow(turnId: string) {
     if (busy) return
@@ -644,6 +679,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const displayedActivity = mergeActivity(activity, liveText.activity)
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
     turn.id === message.turn_id && waitsBehindActive(turn, active, sendingNow.has(turn.id))))
+  const visibleMessages = orderedWorkMessages(messages.filter(message =>
+    (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
+  const segments = workSegments(visibleMessages, view.turns)
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
@@ -670,12 +708,17 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <ProductHistoryPrefix sessionId={originalSessionId} scopeKey={`${authorityKey}:${connectionVersion}`} active={visible} onOpenSession={openSessionReference} />
         </React.Suspense>}
         <div className="transcript" ref={transcript} hidden={space}
+          onScroll={event => {
+            const element = event.currentTarget
+            followingWork.current = element.scrollHeight - element.scrollTop - element.clientHeight < 180
+          }}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
-          {messages.filter(message => message.role !== "system" && !queued.some(item => item.id === message.id)).map(message => {
+          {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
+            const segment = segments.get(message.id)
             return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
-              <div className="message-author">{message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
+              <div className="message-author">{message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
@@ -684,16 +727,27 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
-            </article>{message.role === "user" && turn?.actor_id === me.user.id && <TurnProgress
-              key={`${authorityKey}:${connectionVersion}:${turn.id}`} sessionId={id} turn={turn} visible={visible}
-              live={liveText.turnId === turn.id ? liveText : undefined}
-              hasSavedAnswer={messages.some(item => item.turn_id === turn.id && item.role === "assistant")}
+            </article>{segment?.turn.actor_id === me.user.id && <TurnProgress
+              key={`${authorityKey}:${connectionVersion}:${segment.id}`} segment={segment} visible={visible && !space}
+              entry={work.entries[segment.turn.id]} request={work.load}
+              live={liveText.turnId === segment.turn.id ? liveText : undefined}
+              onContentChange={followWork}
+              onSubagent={agent => openTab(agent.session_id ? {
+                id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,
+              } : {
+                id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id,
+                name: agent.name, status: agent.status, avatar: agent.avatar,
+              })}
             />}</React.Fragment>
           })}
           {!savedAssistant && liveMessage}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
-          {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} onDone={load} />}
+          {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
+            {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
+            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} />
+          </>}
+          {session.status === "waiting" && !view.can_answer && !view.pending && <p className="notice">Waiting for the original requester’s response. New messages will be queued.</p>}
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
           {view.turns[0]?.error && <p className="error" role="alert">{view.turns[0].error}</p>}
           {!session.active_turn && view.effects?.map(effect => <EffectReview key={effect.id} effect={effect} onDone={load} />)}
@@ -702,6 +756,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
+          {answeringQuestion && <p className="question-reply-hint">Your reply will answer the pending question.</p>}
+          {requestAnswered && <p className="question-reply-hint">Your answer was sent. You can send a follow-up.</p>}
+          {session.status === "waiting" && view.can_answer && !answeringQuestion && !requestAnswered && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
             <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
@@ -711,22 +768,22 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
             <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
-            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={editing ? undefined : pictures.paste} />
+            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} sessionId={id} disabled={busy} placeholder={answeringQuestion ? "Type your answer to the pending question…" : "Describe the work, or type / for skills…"} onPaste={editing ? undefined : pictures.paste} />
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
                 {session.active_turn && <><Choice value={mode} onChange={setMode} label="Delivery timing" options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /><Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button></>}
-                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || session.status === "waiting" || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
+                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
               </div>
             </div>
           </div>
           {accountNotice && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Dismiss</Button></p>}
-          {session.surface !== "slack" && (productAccounts || effectiveConnections.some(item => item.enabled)) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
-            {productAccounts && (accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
-            {productAccounts && accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
+          {session.surface !== "slack" && (me.product_mode === "existing" || effectiveConnections.some(item => item.enabled) || selectedAccounts.length > 0 || accountCatalog.error) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
+            {(accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
+            {accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
             <div className="connection-options">{effectiveConnections.filter(item => item.enabled && (session.visibility === "private" || item.shared)).map(item => <label key={item.id}><Checkbox checked={selectedAccounts.includes(item.id)} onCheckedChange={checked => { setAccountNotice(""); setSelectedAccounts(values => checked ? [...values, item.id] : values.filter(value => value !== item.id)) }} />{item.name}<span className="muted">{item.read_only ? "Read only" : "Can make changes"}</span></label>)}</div>
-            {productAccounts && !accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this session’s visibility and surface. <a href="#settings/connections">Manage Connections</a></p>}
+            {!accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this conversation. <a href="#settings/connections">Manage Connections</a></p>}
           </details>}
           <p className="composer-hint">{pictures.uploading ? "Uploading files…" : "Drop files or paste images · Enter to send · Shift+Enter for a new line"}</p>
         </form>
@@ -734,7 +791,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       {!sideMode && <WorkspaceOverlayContent>
         <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
           onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
-          onSubagent={agent => openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })}
+          onSubagent={agent => {
+            if (agent.session_id) { window.location.hash = agent.session_id; return }
+            openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })
+          }}
+          onSubagentSideChat={agent => {
+            if (agent.session_id) openTab({ id: `side-chat:${agent.session_id}`, kind: "side-chat", sessionId: agent.session_id, title: agent.name })
+          }}
           onOutput={openOutput} />
       </WorkspaceOverlayContent>}
       </div>
@@ -762,6 +825,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
         </div>
         <div className="header-controls">
+          {session.parent_session_id && <Button asChild variant="ghost" size="sm"><a href={`#${session.parent_session_id}`}>Parent chat</a></Button>}
           <Button variant={panelState.visible ? "secondary" : "ghost"} size="icon-sm" aria-label={panelState.visible ? "Hide side panel" : "Open side panel"} title={panelState.visible ? "Hide panel" : "Open panel"} onClick={() => dispatchPanel({ type: panelState.visible ? "hide" : "show" })}><PanelRight size={16} /></Button>
           <WorkspaceOverlayTrigger asChild><WorkspaceMenuKey open={workspaceOpen} sessionFailed={session.status === "failed"}
             aria-label={workspaceOpen ? "Close workspace" : "Open workspace"} /></WorkspaceOverlayTrigger>
@@ -770,6 +834,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         </div>
       </header>
       {chat}
+
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
       <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
         if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); setWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
@@ -853,39 +918,92 @@ function EffectReview({ effect, onDone }: { effect: Effect; onDone: () => Promis
   </form>
 }
 
-function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pending; turnId: string; sessionId: string; onDone: () => Promise<void> }) {
+function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void> }) {
   const [values, setValues] = useState<Record<string, string[]>>({})
   const [custom, setCustom] = useState<Record<string, string>>({})
   const [approvals, setApprovals] = useState<Record<string, boolean>>({})
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const form = useRef<HTMLFormElement>(null)
+  const restoreFocus = useRef<HTMLElement | null>(null)
   const requestKey = useRef(crypto.randomUUID())
+  const submitting = useRef(false)
+  const disabled = busy || submitted
+  useLayoutEffect(() => {
+    if (busy || submitted || !restoreFocus.current) return
+    const target = restoreFocus.current
+    restoreFocus.current = null
+    if (target.isConnected && document.activeElement === document.body) target.focus()
+  }, [busy, submitted])
   const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
   const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
+  const isComplete = (nextValues: typeof values, nextCustom: typeof custom) => questions.every(({ call, questions }) => questions.every(question => {
+    const key = `${call.tool_call_id}:${question.header}`
+    return Boolean(nextCustom[key]?.trim() || nextValues[key]?.length)
+  })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
+  const requiresContinue = pending.approvals.length > 0 || credentials.length > 0
+  async function refreshSubmitted() {
+    setBusy(true); setError("")
+    try { await onDone() }
+    catch { setError("Your response was sent, but the conversation could not be refreshed.") }
+    finally { setBusy(false) }
+  }
+  async function submit(nextValues = values, nextCustom = custom) {
+    if (submitting.current || submitted || unknown) return
+    if (!isComplete(nextValues, nextCustom)) {
+      setError(requiresContinue ? "Complete the remaining questions and approval requests before continuing." : "Answer the remaining questions before continuing.")
+      return
+    }
+    submitting.current = true
+    restoreFocus.current = document.activeElement instanceof HTMLElement && form.current?.contains(document.activeElement)
+      ? document.activeElement : null
+    setBusy(true); setError("")
+    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
+      const key = `${call.tool_call_id}:${question.header}`
+      return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
+    }) }]))
+    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }) }
+    catch (e) {
+      submitting.current = false
+      setError(String(e)); setBusy(false)
+      return
+    }
+    // Once accepted, only refresh the conversation; never reopen this answer.
+    restoreFocus.current = null
+    onAccepted()
+    await refreshSubmitted()
+  }
   return <>
     {credentials.map(call => {
       const requestId = pending.metadata?.[call.tool_call_id]?.request_id
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
-    {(questions.length > 0 || pending.approvals.length > 0) && <form className="pending" onSubmit={async e => {
-    e.preventDefault(); setBusy(true); setError("")
-    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
-      const key = `${call.tool_call_id}:${question.header}`
-      return { header: question.header, selected: custom[key]?.trim() ? [] : values[key] ?? [], custom_answer: custom[key]?.trim() || null }
-    }) }]))
-    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }); await onDone() }
-    catch (e) { setError(String(e)) } finally { setBusy(false) }
-  }}>
-    <h3>Your input is needed</h3>
+    {(questions.length > 0 || pending.approvals.length > 0) && <form ref={form} aria-busy={busy} className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
+    {questions.length
+      ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{disabled && <span className="question-send-status" role="status">{submitted ? "Answer sent" : "Sending…"}</span>}</div>
+      : <h3>Your input is needed</h3>}
     {questions.map(({ call, questions }) => questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
-      return <fieldset key={key}><legend>{question.question}</legend><div className="question-options">{question.options.map(option => <Button type="button" key={option.label} variant={(values[key] ?? []).includes(option.label) && !custom[key] ? "secondary" : "outline"} aria-pressed={(values[key] ?? []).includes(option.label) && !custom[key]} onClick={() => { setCustom(previous => ({ ...previous, [key]: "" })); setValues(previous => ({ ...previous, [key]: question.multi_select ? (previous[key] ?? []).includes(option.label) ? previous[key].filter(item => item !== option.label) : [...previous[key] ?? [], option.label] : [option.label] })) }} title={option.description}>{option.label}</Button>)}</div><Input aria-label={`Custom answer for ${question.header}`} placeholder="Or write your own answer…" value={custom[key] ?? ""} onChange={e => setCustom(previous => ({ ...previous, [key]: e.target.value }))} /></fieldset>
+      return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={disabled}
+        onSelect={selected => {
+          if (submitting.current) return
+          const nextValues = { ...values, [key]: selected }, nextCustom = { ...custom, [key]: "" }
+          setValues(nextValues); setCustom(nextCustom)
+          if (!question.multi_select && !requiresContinue && isComplete(nextValues, nextCustom)) void submit(nextValues, nextCustom)
+        }}
+        onCustomAnswer={value => {
+          if (submitting.current) return
+          setCustom(previous => ({ ...previous, [key]: value }))
+          if (value.trim()) setValues(previous => ({ ...previous, [key]: [] }))
+        }} />
     }))}
-    {pending.approvals.map(call => <fieldset key={call.tool_call_id}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
+    {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={disabled} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
     {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
-    {error && <p className="error" role="alert">{error}</p>}<Button type="submit" disabled={busy || unknown}>{busy ? "Submitting…" : "Continue"}</Button>
+    {error && <p className="error" role="alert">{error}</p>}
+    {submitted && <div className={questions.length ? "question-form-actions" : undefined}><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refreshSubmitted()}>Refresh conversation</Button></div>}
+    {requiresContinue && <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={disabled || unknown || !isComplete(values, custom)}>{submitted ? "Submitted" : busy ? "Submitting…" : "Continue"}</Button></div>}
   </form>}
   </>
 }

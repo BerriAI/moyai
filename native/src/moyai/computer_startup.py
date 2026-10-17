@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, Awaitable, Callable
 from typing import Any, cast
 
 import anyio
@@ -14,7 +14,7 @@ from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Wra
 from pydantic_ai.capabilities.abstract import WrapRunHandler
 from pydantic_ai.durable_exec.temporal import TemporalDurability
 from pydantic_ai.exceptions import ToolFailed
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import AgentStreamEvent, ToolCallPart
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.workspaces import WorkspaceRef
@@ -22,7 +22,9 @@ from pydantic_ai_harness import Coder, RepoContext
 from temporalio import workflow
 
 from .contracts import RunScope
+from .delegation import delegation_mode
 from .effects import EffectReceipts
+from .live_events import PUBLIC_STREAM_VERSION, public_workflow_event, publish_workflow_event
 
 STARTUP_VERSION = "moyai-on-demand-computer-v1"
 COMPUTER_TOOLS = frozenset({
@@ -53,6 +55,32 @@ class OnDemandAcquisition(WrapperCapability[RunScope]):
 
 
 class OnDemandDurability(TemporalDurability[RunScope]):
+    async def wrap_run(
+        self, ctx: RunContext[RunScope], *, handler: WrapRunHandler,
+    ) -> AgentRunResult[Any]:
+        if workflow.in_workflow():
+            ctx.deps.workflow_public_events = workflow.patched(PUBLIC_STREAM_VERSION)
+        return await super().wrap_run(ctx, handler=handler)
+
+    async def wrap_run_event_stream(
+        self, ctx: RunContext[RunScope], *, stream: AsyncIterable[AgentStreamEvent],
+    ) -> AsyncIterable[AgentStreamEvent]:
+        if not workflow.in_workflow() or not ctx.deps.workflow_public_events:
+            async for event in super().wrap_run_event_stream(ctx, stream=stream):
+                yield event
+            return
+        try:
+            async for event in stream:
+                if ctx.run_id == ctx.deps.root_run_id and public_workflow_event(event):
+                    publish_workflow_event(event)
+                # This only changes the public projection. Every original event
+                # still reaches the SDK; persistence and effect receipts remain.
+                yield event
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
+
     def for_agent(self, agent: AbstractAgent[RunScope, Any]) -> AbstractCapability[RunScope]:
         bound = super().for_agent(agent)
         matches: list[AbstractCapability[RunScope]] = []
@@ -129,6 +157,8 @@ class OnDemandRepository(WrapperCapability[RunScope]):
         self, ctx: RunContext[RunScope], *, call: ToolCallPart,
         tool_def: ToolDefinition, args: dict[str, Any],
     ) -> dict[str, Any]:
+        if tool_def.name == "delegate_task" and delegation_mode(ctx.deps) != "legacy":
+            return args  # Only legacy SDK delegates share the parent's computer.
         if tool_def.name not in COMPUTER_TOOLS and not re.fullmatch(r"github_[A-Za-z0-9]{8}_checkout", tool_def.name):
             return args
         async with self.lock:

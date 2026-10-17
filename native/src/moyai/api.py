@@ -28,6 +28,7 @@ from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .file_preview import routes as file_preview_routes
+from .history_handoff import is_turn_run, latest_turn_snapshot
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
 from .live_stream import authorized_events
@@ -35,6 +36,7 @@ from .models import (
     Artifact,
     Connection,
     Effect,
+    Event,
     Message,
     Session,
     SessionPreference,
@@ -119,6 +121,7 @@ def connection_view(connection: Connection) -> dict[str, Any]:
 def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -> FastAPI:
     owned = runtime is None
     runtime = runtime or Runtime(Settings())
+    work_progress = runtime.work_progress
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -137,6 +140,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            work_progress.clear()
             if owned:
                 await runtime.close()
 
@@ -207,7 +211,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         app.include_router(product_skill_routes(runtime.product_skill_catalog))
     if runtime.product_billing is not None:
         from .product_billing_routes import routes as product_billing_routes
-        app.include_router(product_billing_routes(runtime.product_billing))
+        app.include_router(product_billing_routes(runtime.product_billing, runtime=runtime))
     if runtime.product_automations is not None:
         from .product_automations import routes as product_automation_routes
         app.include_router(product_automation_routes(runtime.product_automations))
@@ -223,8 +227,15 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.get("/api/skills")
     async def invocable_skills(
         shared: bool = False, offset: int = Query(0, ge=0, le=10000),
-        limit: int = Query(100, ge=1, le=100), user: User = Depends(actor),
+        limit: int = Query(100, ge=1, le=100), user: User = Depends(actor), session_id: str | None = None,
     ):
+        if session_id is not None:
+            async with runtime.database.sessions() as db:
+                session = await runtime.database.allowed_session(db, session_id, user)
+                context = await runtime.database.execution_context(db, session)
+                if context.surface != "web":
+                    return {"skills": [], "has_more": False, "next_offset": None}
+                shared = context.visibility != "private"
         return await runtime.skill_invocations.listing(user, shared=shared, offset=offset, limit=limit)
 
     @app.middleware("http")
@@ -420,12 +431,27 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 active_turn = await db.get(Turn, row.active_turn, options=[turn_columns])
                 if active_turn is not None:
                     turns.append(active_turn)
+            guidance = dict((await db.execute(select(Event.turn_id, Event.created_at).where(
+                Event.turn_id.in_([turn.id for turn in turns]), Event.kind == "steering_admitted",
+            ).order_by(Event.id))).all())
             result: dict[str, Any] = {
-                "session": session_view(row), "turns": [turn_view(turn) for turn in turns],
+                "session": session_view(row), "turns": [
+                    {**turn_view(turn), "guidance_at": guidance.get(turn.id)} for turn in turns
+                ],
             }
             swarm_member = await runtime.database.swarms.member(db, session_id)
             if swarm_member is not None:
                 result["session"]["swarm_id"] = swarm_member.mission_id
+            from .delegation_models import DelegatedSession
+            delegation = await db.get(DelegatedSession, session_id)
+            if delegation is not None:
+                try:
+                    await runtime.database.allowed_session(db, delegation.parent_session_id, user)
+                except HTTPException as error:
+                    if error.status_code != 404:
+                        raise
+                else:
+                    result["session"]["parent_session_id"] = delegation.parent_session_id
             if reference is not None:
                 result["reference"] = reference
             preference = await db.get(SessionPreference, (user.id, session_id))
@@ -443,7 +469,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 "arguments": json.loads(runtime.security.unseal(effect.arguments)),
             } for effect in unsettled if effect.actor_id == user.id]
         if include_activity and turns and turns[0].actor_id == user.id and turns[0].status != "running":
-            snapshot = await runtime.stores.steps.latest_snapshot(run_id=turns[0].id)
+            snapshot = await latest_turn_snapshot(runtime, turns[0].id)
             if snapshot is not None:
                 result["activity"] = saved_activity(snapshot.messages, turns[0].id)
         if row.status == "waiting" and row.conversation and active_turn is not None:
@@ -453,6 +479,14 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if result["can_answer"]:
                 conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(row.conversation))
                 result["pending"] = TypeAdapter(Any).dump_python(conversation.deferred_tool_requests, mode="json")
+                from .questions import can_reply_with_text
+                result["can_reply_with_text"] = can_reply_with_text(conversation.deferred_tool_requests)
+                async with runtime.database.sessions() as db:
+                    deadline = await db.scalar(select(Event).where(
+                        Event.identity == f"optional-question:{active_turn.id}",
+                    ))
+                if deadline is not None:
+                    result["question_deadline"] = json.loads(runtime.security.unseal(deadline.content))["deadline"]
             elif runtime.product_secrets is not None and user.role == "admin":
                 # Organization access assistance does not confer permission to
                 # answer another requester's questions or approve their tools.
@@ -463,7 +497,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return result
 
     @app.get("/api/sessions/{session_id}/progress/{turn_id}")
-    async def progress(session_id: str, turn_id: str, user: User = Depends(actor)):
+    async def progress(
+        session_id: str, turn_id: str, request: Request,
+        include_activity: bool = False, user: User = Depends(actor),
+    ):
         from .progress import turn_progress
 
         await runtime.database.session(user, session_id)
@@ -473,7 +510,17 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 raise HTTPException(404, "Turn not found.")
             if turn.actor_id != user.id:
                 raise HTTPException(403, "Working activity is visible only to its requester.")
-        return {"messages": await turn_progress(runtime, turn)}
+        result = (
+            await work_progress.read(turn) if include_activity
+            else {"messages": await turn_progress(runtime, turn)}
+        )
+        fresh = await runtime.database.user(user.id)
+        if fresh.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        if runtime.product_identity is not None:
+            await runtime.product_identity.require_request_current(request)
+        await runtime.database.session(fresh, session_id)
+        return result
 
     @app.get("/api/sessions/{session_id}/activity")
     async def session_activity(session_id: str, user: User = Depends(actor)):
@@ -483,7 +530,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 Turn.session_id == session_id,
             ).order_by(Turn.created_at.desc()).limit(1))).first()
         if turn is not None and turn.actor_id == user.id and turn.status != "running":
-            snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id)
+            snapshot = await latest_turn_snapshot(runtime, turn.id)
             if snapshot is not None:
                 return saved_activity(snapshot.messages, turn.id)
         return []
@@ -539,7 +586,14 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
         from .skill_invocations import has_invocations
-        if has_invocations(body.prompt):
+        if body.reply_to is not None:
+            async with runtime.database.sessions() as db:
+                await runtime.database.allowed_session(db, session_id, user)
+                pending = await db.get(Turn, body.reply_to)
+                if pending is None or pending.session_id != session_id:
+                    raise HTTPException(409, "That question is no longer available.")
+            user = await answer_actor(runtime, user, pending)
+        elif has_invocations(body.prompt):
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
             body = body.model_copy(update={"prompt": await runtime.skill_invocations.normalize(body.prompt, user, session)})
@@ -677,7 +731,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                         async for event in native:
                             next_offset = native.offset + 1
                             if isinstance(event, AgentRunResultEvent):
-                                finished = event.result.run_id == turn.id
+                                finished = is_turn_run(event.result.run_id, turn.id)
                             item = public_event(event)
                             if item is not None:
                                 yield f"id: {native.offset}\ndata: " + json.dumps(
@@ -710,11 +764,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def connections(
         user: User = Depends(actor), session_id: str | None = None, shared: bool = False,
     ):
+        surface = "web"
+        if session_id is not None:
+            async with runtime.database.sessions() as db:
+                session = await runtime.database.allowed_session(db, session_id, user)
+                context = await runtime.database.execution_context(db, session)
+                shared, surface = context.visibility == "shared", context.surface
         if runtime.product_connections is not None:
-            surface = "web"
-            if session_id is not None:
-                session = await runtime.database.session(user, session_id)
-                shared, surface = session.visibility == "shared", session.surface
             return await runtime.product_connections.catalog(
                 user.id, shared_session=shared, surface=surface,
             )
@@ -722,7 +778,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             rows = await db.scalars(select(Connection).where(
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
             ))
-            return [connection_view(row) for row in rows]
+            return [connection_view(row) for row in rows if not shared or row.shared]
 
     @app.post("/api/connections")
     async def create_connection(body: ConnectionInput, user: User = Depends(actor)):

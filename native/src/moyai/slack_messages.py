@@ -29,6 +29,8 @@ def session_url(public_url: str, session_id: str, source_run_id: str = "") -> st
 
 
 def button(label: str, url: str, action: str, *, primary: bool = False) -> dict[str, Any]:
+    # Slack only supports green/red button styles, not custom brand colors.
+    # The primary PR action uses green; PR attachments carry our violet.
     return {
         "type": "button", "action_id": action, "text": {"type": "plain_text", "text": label},
         "url": url, **({"style": "primary"} if primary else {}),
@@ -76,12 +78,9 @@ def pr_cards(answer: str, url: str) -> list[dict[str, Any]]:
         if title.startswith(("https://", "http://")):
             title = ""
         heading = f"PR #{pr.number}" + (" · " + title if title else "")
-        actions = [
-            button("View PR", pr.url, "moyai_view_pr", primary=True),
-            button("Review changes", pr.url + "/files", "moyai_review_pr"),
-        ]
+        actions = [button("View PR", pr.url, "moyai_view_pr", primary=True)]
         if url:
-            actions.append(button("Open session", url, "moyai_open_session"))
+            actions.append(button("Open Moyai session", url, "moyai_open_session"))
         cards.append({
             "color": VIOLET, "fallback": f"{pr.repository} #{pr.number}: {pr.url}",
             "blocks": [
@@ -140,6 +139,10 @@ def thread_message(
     """Keep fallback text accessible and all section text inside Slack's limit."""
     from app.slack_format import split_reply
 
+    # Keep one message even for long answers. Its blocks carry the readable
+    # text; the saved conversation remains the source for anything beyond it.
+    if len(text) > 32_000:
+        text = text[:32_000] + "\n\nOpen the Moyai session for the full answer."
     visible = without_pr_references(text, cards)
     parts = split_reply(visible, limit=2900) if visible.strip() or not cards else []
     blocks: list[dict[str, Any]] = [
@@ -148,7 +151,7 @@ def thread_message(
     ]
     actions = list(controls or [])
     if url and not cards:
-        actions.append(button("Open session", url, "moyai_open_session", primary=not controls))
+        actions.append(button("Open session", url, "moyai_open_session"))
     if actions:
         blocks.append({"type": "actions", "elements": actions})
     fallback = text
@@ -156,7 +159,7 @@ def thread_message(
         if card["fallback"].rsplit(": ", 1)[-1].casefold() not in fallback.casefold():
             fallback += "\n\n" + card["fallback"]
     return {
-        "text": fallback + ("\n\nOpen session: " + url if url else ""),
+        "text": fallback[:36_000] + ("\n\nOpen session: " + url if url else ""),
         "blocks": blocks, "attachments": cards or [],
     }
 

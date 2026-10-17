@@ -22,6 +22,7 @@ from sqlalchemy import and_, case, column, false, func, or_, select, table
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased
 
+from .delegation_models import DelegatedSession
 from .models import Message, Session, SessionPreference, SessionRead, Turn, User
 from .product_files import routes as file_routes
 from .product_history import (
@@ -132,6 +133,11 @@ class ProductReadService:
         unread = select(Message.id).where(
             Message.session_id == Session.id, Message.id > SessionRead.message_id,
         ).exists()
+        parent = aliased(Session)
+        parent_access = or_(
+            parent.visibility == "shared",
+            parent.owner_id == reader.user.id if reader.principal is None or reader.principal.individual else false(),
+        )
         query = select(
             Session.id, Session.title, Session.owner_id, Session.visibility, Session.surface, Session.model,
             Session.status, Session.active_turn, Session.archived, Session.deleted, Session.created_at,
@@ -139,7 +145,12 @@ class ProductReadService:
             SessionRead.unread.label("marked_unread"), unread.label("new_messages"),
             (Session.owner_id == reader.user.id).label("created_by_me"),
             (and_(Session.owner_id != reader.user.id, participated)).label("participated"),
-        ).outerjoin(SessionPreference, preference).outerjoin(SessionRead, read)
+            parent.id.label("parent_session_id"),
+        ).outerjoin(SessionPreference, preference).outerjoin(SessionRead, read).outerjoin(
+            DelegatedSession, DelegatedSession.session_id == Session.id,
+        ).outerjoin(parent, and_(
+            parent.id == DelegatedSession.parent_session_id, parent.deleted.is_(False), parent_access,
+        ))
         if self.continuations is not None:
             from .product_continuation_models import ProductContinuation
             query = query.add_columns(ProductContinuation.source_session_id).outerjoin(
@@ -194,11 +205,12 @@ class ProductReadService:
         view = dict(row)
         marked = view.pop("marked_unread")
         new_messages = view.pop("new_messages")
+        view.setdefault("parent_session_id", None)
         view.update({
             "source_format": "moyai-native-v1", "execution_engine": "pydantic-v1",
             "read_only": False, "pinned": bool(view["pinned"]), "folder": view["folder"] or "",
             "unread": bool(marked or new_messages), "workspace": None, "save_warning": None,
-            "parent_session_id": None, "capabilities": {
+            "capabilities": {
                 "read": not view["deleted"], "continue": not view["deleted"],
                 "rename": not view["deleted"], "move": not view["deleted"], "pin": not view["deleted"],
             },
@@ -328,6 +340,41 @@ class ProductReadService:
             if limited or historical_limited else None,
         }
 
+    async def native_ancestors(
+        self, reader: Reader, rows: list[dict[str, Any]], *, archived: bool, scope: NavigationScope,
+    ) -> list[dict[str, Any]]:
+        """Sidebar context is separate from paginated hits and reuses their ACLs."""
+        seen = {row["id"] for row in rows if row["source"] == "native"}
+        pending = {
+            row["parent_session_id"] for row in rows
+            if row["source"] == "native" and row.get("parent_session_id") and not row["pinned"] and not row["folder"]
+        } - seen
+        ancestors: list[dict[str, Any]] = []
+        # Native delegation admits children and grandchildren, never an unbounded tree.
+        for _ in range(2):
+            if not pending:
+                break
+            async with self.runtime.database.sessions() as db:
+                await prepare_history_query(db)
+                query = self.native_query(reader).where(
+                    self.visible(reader), Session.id.in_(pending), Session.archived.is_(archived),
+                )
+                if scope == "mine":
+                    columns = query.selected_columns
+                    query = query.where(or_(
+                        columns.created_by_me, columns.participated, columns.pinned.is_(True),
+                        func.coalesce(columns.folder, "") != "",
+                    ))
+                found = [self.native_view(row) for row in (await db.execute(query)).mappings()]
+            seen.update(pending)
+            ancestors.extend(found)
+            pending = {
+                row["parent_session_id"] for row in found
+                if row.get("parent_session_id") and not row["pinned"] and not row["folder"]
+            } - seen
+        valid = await self.native_recheck(reader, [row["id"] for row in ancestors]) if ancestors else set()
+        return [row for row in ancestors if row["id"] in valid]
+
     @staticmethod
     def cursor_scope(
         reader: Reader, source: Sources, query: str, archived: bool, deleted: bool,
@@ -441,7 +488,18 @@ class ProductReadService:
         next_cursor = base64.urlsafe_b64encode(json.dumps(
             {"v": 1, "scope": cursor_scope, **offsets}, separators=(",", ":"),
         ).encode()).decode().rstrip("=") if has_more else None
-        return {"sessions": chosen, "has_more": has_more, "next_cursor": next_cursor, "sources": states,
+        ancestors: list[dict[str, Any]] = []
+        if not query and not deleted and any(
+            row["source"] == "native" and row.get("parent_session_id") for row in chosen
+        ):
+            try:
+                async with asyncio.timeout(3):
+                    ancestors = await self.native_ancestors(reader, chosen, archived=archived, scope=scope)
+            except (SQLAlchemyError, TimeoutError):
+                notices.append("Some parent conversations are temporarily unavailable. Refresh to retry.")
+            valid = await self.native_recheck(reader, [row["id"] for row in chosen if row["source"] == "native"])
+            chosen = [row for row in chosen if row["source"] != "native" or row["id"] in valid]
+        return {"sessions": chosen, "ancestors": ancestors, "has_more": has_more, "next_cursor": next_cursor, "sources": states,
                 "partial": "unavailable" in states.values(), "notice": " ".join(notices) or None,
                 "search_limits": {
                     "native_messages": SEARCH_ROWS, "native_ciphertext_bytes": SEARCH_BYTES,

@@ -69,6 +69,29 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
             part.tool_name for message in messages for part in message.parts
             if isinstance(part, ToolReturnPart)
         }
+        if scenario == "history_retry":
+            return ModelResponse(parts=[ToolCallPart(
+                "retry_target", {}, tool_call_id=f"retry-{len(messages)}",
+            )])
+        if scenario == "history":
+            if "NEW GUIDANCE" in prompts:
+                return ModelResponse(parts=[TextPart("Guidance preserved after handoff.")])
+            if "load_capability" not in completed:
+                loader = next(tool for tool in info.function_tools if tool.name == "load_capability")
+                key = next(iter(loader.parameters_json_schema["properties"]))
+                return ModelResponse(parts=[ToolCallPart(
+                    "load_capability", {key: "coding"}, tool_call_id="history-load",
+                )])
+            count = sum(
+                isinstance(part, ToolReturnPart) and part.tool_name == "shell"
+                for message in messages for part in message.parts
+            )
+            if count < 6:
+                return ModelResponse(parts=[ToolCallPart(
+                    "shell", {"command": f"printf '{count + 1}\\n' >> handoff-ledger.txt"},
+                    tool_call_id=f"history-append-{count + 1}",
+                )])
+            return ModelResponse(parts=[TextPart("Six effects completed exactly once.")])
         if scenario == "swarm":
             offered = {tool.name for tool in info.function_tools}
             assert {"swarm_board", "swarm_claim_lead", "swarm_publish", "swarm_assign"} <= offered
@@ -86,12 +109,13 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
                 ]
             else:
                 calls = []
-        elif scenario == "question":
+        elif scenario in {"question", "optional_question"}:
             calls = [("ask_user_question", {
                 "questions": [{
                     "header": "Choice", "question": "Which output should I create?",
                     "options": [{"label": "Text"}, {"label": "JSON"}],
-                }]
+                }],
+                **({"required": False} if scenario == "optional_question" else {}),
             })]
         elif scenario == "stream":
             calls = [("delegate_task", {"agent_name": "self", "task": "Return the phrase native-child-result."})]

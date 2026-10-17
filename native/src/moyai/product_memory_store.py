@@ -196,10 +196,7 @@ class ProductMemoryStore:
         return prefs, notes, inputs, repository
 
     async def _connections(self, db: AsyncSession, session: Session) -> None:
-        current = await self.service.database.resolve_grants(
-            db, self.scope.actor_id, [grant.id for grant in self.scope.grants],
-            shared_session=session.visibility == "shared", surface=session.surface,
-        )
+        current = await self.service.database.scope_grants(db, self.scope, session)
         if [(grant.id, grant.revision) for grant in current] != [
             (grant.id, grant.revision) for grant in self.scope.grants
         ]:
@@ -439,7 +436,7 @@ class ProductMemoryStore:
             return MemoryMutation(receipt.version, replayed=True, existed=receipt.existed)
 
     async def _write_guard(self, db: AsyncSession, owner: str, *, saving: bool) -> list[Message]:
-        if self.run_id != self.scope.turn_id or self.scope.surface not in {"web", "slack"}:
+        if self.run_id != self.scope.root_run_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
             raise ToolFailed("Automations and delegated runs may recall personal memory but cannot mutate it.")
         locked = await db.scalar(update(Session).where(
             Session.id == self.scope.session_id, Session.active_turn == self.scope.turn_id,
@@ -456,12 +453,10 @@ class ProductMemoryStore:
         await self._connections(db, session)
         input_id = self.scope.turn_id
         if self.context is not None:
-            from .agent import input_identity
+            from .input_identity import input_identity
             input_id = (self.context.metadata or {}).get("moyai_input_id") or input_identity(self.context)
-        pending = await db.scalar(select(Turn).where(
-            Turn.parent_turn == self.scope.turn_id, Turn.status.in_(["steering", "signal_sent", "accepted"]),
-        ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
-        if pending is not None and pending.id != input_id:
+        pending = await self.service.database.latest_guidance(db, self.scope.turn_id)
+        if pending is not None and pending != input_id:
             raise ToolFailed("New owner guidance arrived before this memory mutation.")
         prefs = await self.service._preferences(db, owner)
         if not prefs["enabled"] or (saving and not prefs["auto_save"]):

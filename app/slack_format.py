@@ -4,24 +4,9 @@ import re
 
 from .file_links import file_link
 
-# Literal examples are context, not recipients. Preserve them in the prompt.
-# re.M anchors quote prefixes; \Z keeps fences open across line endings.
-QUOTED_TEXT = re.compile(r'```[\s\S]*?(?:```|\Z)|`[^`\n]*(?:`|$)|^[ \t]*>>>[\s\S]*|^[ \t]*>[^\n]*', re.MULTILINE)
-
-
-def routing_text(text: str, mention: str) -> tuple[str, str]:
-    parts, visible = [], []
-    end = 0
-    for match in QUOTED_TEXT.finditer(text):
-        plain = text[end:match.start()]
-        visible.append(plain)
-        parts.extend((plain.replace(mention, ''), match[0]))
-        visible.append('\n')
-        end = match.end()
-    plain = text[end:]
-    visible.append(plain)
-    parts.append(plain.replace(mention, ''))
-    return ''.join(visible), ''.join(parts).strip()
+ID = re.compile(r"^[A-Z][A-Z0-9]{7,30}$")
+STAMP = re.compile(r"^\d{10,16}\.\d{1,9}$")
+ASIDE_PREFIXES = ("!aside", "(aside)")
 
 
 def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):

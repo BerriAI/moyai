@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     temporal_queue: str = Field(default="moyai-pydantic-v1", validation_alias="TEMPORAL_TASK_QUEUE")
     temporal_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="TEMPORAL_API_KEY")
     temporal_tls: bool = Field(default=False, validation_alias="TEMPORAL_TLS")
+    compress_temporal_payloads: bool = Field(
+        default=False, validation_alias="MOYAI_COMPRESS_TEMPORAL_PAYLOADS",
+    )
+    history_continue_bytes: int = Field(
+        default=8 * 1024 * 1024, ge=16384, le=20 * 1024 * 1024,
+        validation_alias="MOYAI_HISTORY_CONTINUE_BYTES",
+    )
+    history_continue_events: int = Field(
+        default=8000, ge=100, le=10000, validation_alias="MOYAI_HISTORY_CONTINUE_EVENTS",
+    )
     worker_shutdown_seconds: int = Field(
         default=0, ge=0, le=240, validation_alias="MOYAI_WORKER_SHUTDOWN_SECONDS",
     )
@@ -86,6 +96,9 @@ class Settings(BaseSettings):
     # Replay-only: new turns and delegates have no model-request-count cap.
     model_request_limit: int = Field(default=100, ge=1, le=1000, validation_alias="MOYAI_MODEL_CALL_LIMIT")
     model_timeout_seconds: int = Field(default=300, ge=10, le=900, validation_alias="MOYAI_MODEL_TIMEOUT")
+    optional_question_timeout_seconds: int = Field(
+        default=90, ge=5, le=900, validation_alias="MOYAI_OPTIONAL_QUESTION_TIMEOUT",
+    )
     secure_cookies: bool = Field(default=False, validation_alias="MOYAI_SECURE_COOKIES")
     public_url: str = Field(default="", validation_alias=AliasChoices("MOYAI_PUBLIC_URL", "PUBLIC_URL"))
     slack_signing_secret: SecretStr = Field(default=SecretStr(""), validation_alias="SLACK_SIGNING_SECRET")

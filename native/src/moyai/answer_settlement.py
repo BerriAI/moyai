@@ -166,6 +166,9 @@ class AnswerSettlement:
                 return False
             turn.result_accepted = True
             turn.status = "waiting" if deferred and not checkpointing else "saving"
+            if deferred:
+                from .questions import record_optional_deadline
+                record_optional_deadline(self.database, db, turn)
             if checkpointing:
                 if turn.preparation is None or workspace is None:
                     raise ValueError("A checkpoint requires the original prepared workspace.")

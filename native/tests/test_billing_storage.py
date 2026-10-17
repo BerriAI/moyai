@@ -11,6 +11,7 @@ import pytest_asyncio
 from sqlalchemy import event, insert, text
 from test_product_billing import CLOCK, MAPPINGS, PERIOD, SCOPE, new_row, old_row
 
+from moyai.analytics import report_range
 from moyai.billing_storage import (
     BillingStorageError,
     Storage,
@@ -92,6 +93,33 @@ async def projection(ctx):
             old, new, PERIOD, rules=LegacyBillingRules.from_product(), mappings=MAPPINGS,
             policy=RecoveryPolicy(True, SCOPE), clock=CLOCK,
         )
+
+
+async def test_batched_counterpart_lookup_keeps_aliases_namespaces_and_exact_rows(billing):
+    ctx = billing
+    await seed(ctx, old=[
+        old_row(id="shared-id", gateway_id="legacy-only", cost_receipt_id=""),
+        old_row(id="alias-row", gateway_id="wanted-alias", cost_receipt_id="wanted-alias"),
+    ], new=[
+        new_row(id="shared-id", request_key="native-key", provider_request_id="wanted-alias"),
+    ])
+    await prepare(ctx.engine, ctx.storage)
+    await finish_backfill(ctx)
+    await activate(ctx.engine, ctx.storage)
+    # No rows are selected by date: only counterpart aliases can discover them.
+    outside = report_range("custom", "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z")
+    identities = [f"absent-{index}" for index in range(2100)] + ["wanted-alias", "shared-id"]
+    async with ctx.engine.connect() as connection:
+        await connection.execute(text("SET TRANSACTION READ ONLY"))
+        old = BillingReader(connection, schema=ctx.storage.source_schema, storage=ctx.storage)
+        new = BillingReader(connection, schema=ctx.storage.native_schema, storage=ctx.storage)
+        historical = await old.rows("legacy", outside, matching=identities)
+        current = await new.rows("native", outside, matching=identities)
+    assert {row["id"] for row in historical} == {"shared-id", "alias-row"}
+    assert len(historical) == 2  # Matching both aliases never duplicates a charge.
+    assert len(current) == 1 and current[0]["id"] == "shared-id"
+    assert all(row["cost"] == "0.123400" for row in historical)
+    assert current[0]["cost_usd"] == "0.1234"
 
 
 async def test_exact_projection_survives_backfill_cutover_and_rollback(billing):

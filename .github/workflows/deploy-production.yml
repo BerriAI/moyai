@@ -62,6 +62,8 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - uses: dtolnay/rust-toolchain@1.88.0
+        if: inputs.release_type != 'coordinated'
       - uses: astral-sh/setup-uv@v6
         if: inputs.release_type != 'coordinated'
       - name: Install candidate settings dependencies before loading deployment credentials

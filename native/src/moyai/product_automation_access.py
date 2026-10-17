@@ -94,7 +94,7 @@ class ProductAutomationAccess:
         async with self.service.database.sessions.begin() as db:
             await self.service._writer(db)
             principal, occurrence = await self.source(db, scope)
-            if run_id != scope.turn_id or occurrence:
+            if (run_id != scope.root_run_id or scope.delegation_generated) or occurrence:
                 targets = await self.targets(db, scope)
                 if identity not in targets and (occurrence is None or occurrence.automation_id != identity):
                     raise HTTPException(403, "Read history only for this execution's automation targets.")
@@ -126,7 +126,7 @@ class ProductAutomationAccess:
             await service._writer(db)
             principal, source = await self.source(db, scope, individual=action != "claim_item")
             if action == "claim_item":
-                if run_id != scope.turn_id:
+                if (run_id != scope.root_run_id or scope.delegation_generated):
                     raise HTTPException(403, "The root automation execution owns item claims.")
                 return await self.claim(db, scope, source, request.item_key, effect, attempt)
             identity = request.automation_id
