@@ -22,6 +22,7 @@ from moyai.product_schema import migrate_product_schema
 from moyai.runtime import Runtime, configure
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter
+from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
 from pydantic import SecretStr
@@ -156,6 +157,11 @@ async def run_moyai_turn(
         if product_config is None:
             raise RuntimeError("Could not load the eval's existing-product configuration.")
         settings = Settings.model_validate(product_config.native_overrides())
+        provisioner = NativeStores(settings.model_copy(update={"product_mode": "standalone"}))
+        try:
+            await provisioner.start(provision=True)
+        finally:
+            await provisioner.close()
         runtime = Runtime(settings, product_config=product_config)
         try:
             async with await WorkflowEnvironment.start_local(
