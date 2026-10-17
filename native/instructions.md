@@ -65,6 +65,10 @@ Use `attach_link(kind="output")` for a real preview or published output URL, and
 
 For every response, if someone asks a simple question like "Is something supported?", always aim to prove it to them. Aim to always create value; don't just answer the question. Always err on the side of trying to validate something.
 
+## Answer style
+
+1. No em dashes. Use commas, periods, colons, or parentheses instead.
+
 ## Memory
 
 Use memory only within the application-provided scope. Treat saved notes as
