@@ -11,6 +11,13 @@ answered section; stopped or failed work without an answer stays expanded.
 Saved activity remains available after reload. The feed belongs to the original
 requester, including in shared conversations.
 
+Expand an action count, such as **11 actions**, then select a row to open its
+input and output in the right panel. The selected action updates while it runs;
+**Refresh action** reloads its saved details. The same panel opens actions from
+subagents and side chats. Credential, memory and capability-loading payloads
+remain private. Long inputs and outputs show a labelled preview of the first
+100,000 characters.
+
 The feed supports both historical SDK delegates and interactive child chats.
 For a child chat it reads only the original delegated assignment and generated
 answer continuations. Later unrelated private follow-ups are not copied into

@@ -93,6 +93,13 @@ async function handle(req,res,next) {
     }
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
+    if(url.pathname.includes('/actions/')) {
+      const key=decodeURIComponent(url.pathname.split('/actions/')[1]);
+      if(state.actionHolds?.[key])await state.actionHolds[key];
+      if(state.actionError)return json({detail:'Could not load action.'},state.actionError);
+      const value=state.actionDetails?.[key];
+      return value ? json(value) : json({detail:'Action not found.'},404);
+    }
     if(url.pathname.endsWith('/progress/'+turnId))return json(state.workProgress||{messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
@@ -1492,4 +1499,100 @@ test('chat links remain accented and underlined while plain inline code stays ne
   assert.notEqual(await code.evaluate(el=>getComputedStyle(el).color),linkColor);
   assert.equal(await linkedCode.evaluate(el=>getComputedStyle(el).color),linkColor);
   assert.equal(await link.evaluate(el=>getComputedStyle(el).textDecorationLine),'underline');
+});
+
+function actionFixture() {
+  const created_at='2026-10-17T10:00:00Z', finished_at='2026-10-17T10:00:02Z';
+  const tools=[{id:'shell-call',name:'shell',status:'completed',created_at,finished_at},
+    {id:'read-call',name:'read_file',status:'running',created_at,finished_at:null}];
+  const detail=(tool,input,output)=>({...tool,input,output,restricted:false,input_truncated:false,output_truncated:false});
+  return {
+    workProgress:{messages:[],tools,subagents:[{id:'child:run',parent_id:turnId,name:'Kepler',avatar:0,depth:0,status:'completed',created_at,updated_at:finished_at,
+      tools:[{...tools[0],id:'child-call'}],messages:[],messages_limited:false,tools_limited:false}]},
+    actionDetails:{'shell-call':detail(tools[0],JSON.stringify({command:'ls -la\nprintf "<script>alert(1)</script>"'}),'README.md\nnative/\nfrontend/'),
+      'read-call':detail(tools[1],JSON.stringify({path:'README.md'}),null),
+      'child-call':detail({...tools[0],id:'child-call'},JSON.stringify({command:'pwd'}),'/workspace/moyai')},
+  };
+}
+
+for(const width of [1440,768,320])test(`action count opens actual input and output in the shared panel at ${width}px`,async t=>{
+  reset(actionFixture());const page=await pageFor(t,'#'+sessionId,width);
+  const group=page.getByRole('button',{name:'2 actions',exact:true});
+  await group.waitFor();assert.equal(await group.innerText(),'2 actions');
+  assert.equal(state.requests.some(row=>row.path.includes('/actions/')),false,'details are lazy');
+  await group.click();
+  const shell=page.getByRole('button',{name:'Open Run command action',exact:true});
+  await shell.focus();await page.keyboard.press('Enter');
+  const panel=page.getByRole('region',{name:'Action details',exact:true});
+  await panel.getByText('README.md\nnative/\nfrontend/',{exact:true}).waitFor();
+  assert.match(await panel.locator('pre[aria-label="Input"]').innerText(),/ls -la/);
+  assert.equal(await page.getByRole('tab',{name:'Action',exact:true}).count(),1);
+  assert.equal(await page.locator('.work-tool-action[aria-label="Open Run command action"]').getAttribute('aria-pressed'),'true');
+  assert.equal(await panel.locator('script').count(),0);
+  await page.locator('.panel-tab-actions').getByRole('button',{name:'Hide side panel',exact:true}).click();
+  await page.getByRole('button',{name:'Open Read file action',exact:true}).click();
+  await panel.getByText('Running…',{exact:true}).waitFor();
+  state.actionDetails['read-call']={...state.actionDetails['read-call'],status:'completed',finished_at:'2026-10-17T10:00:03Z',output:'# Moyai\nA workspace for agents.'};
+  await panel.getByText('# Moyai\nA workspace for agents.',{exact:true}).waitFor();
+  assert.equal(await panel.getByText('README.md\nnative/\nfrontend/',{exact:true}).count(),0);
+  assert.equal(await page.getByRole('tab',{name:'Action',exact:true}).count(),1,'reuse the action tab');
+  if(process.env.MOYAI_ACTION_SCREENSHOTS)await page.screenshot({path:path.resolve(`.data/actions-${width}.png`)});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+
+test('subagent actions use their identity and failures retry without stale output',async t=>{
+  reset(actionFixture());const page=await pageFor(t);
+  const agent=page.locator('.work-agent');
+  await agent.locator('.work-agent-heading .work-detail-toggle').click();
+  await agent.getByRole('button',{name:'1 action',exact:true}).click();
+  state.actionError=503;
+  await agent.getByRole('button',{name:'Open Run command action',exact:true}).click();
+  const panel=page.getByRole('region',{name:'Action details',exact:true});
+  await panel.getByRole('alert').waitFor();
+  assert.equal(await panel.locator('pre').count(),0);
+  state.actionError=undefined;await panel.getByRole('button',{name:'Retry',exact:true}).click();
+  await panel.getByText('/workspace/moyai',{exact:true}).waitFor();
+  assert.ok(state.requests.some(row=>row.path.endsWith('/actions/child-call')&&row.query==='?agent_id=child%3Arun'));
+  state.actionError=403;
+  await panel.getByRole('button',{name:'Refresh action',exact:true}).click();
+  await panel.waitFor({state:'hidden'});
+  assert.equal(await page.getByText('/workspace/moyai',{exact:true}).count(),0);
+});
+
+test('switching action discards a late response and saved work remains inspectable',async t=>{
+  const fixture=actionFixture();
+  reset({...fixture,status:'completed',messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect.'},
+    {id:2,turn_id:turnId,role:'assistant',content:'Finished inspection.'}]});
+  let release;state.actionHolds={'shell-call':new Promise(resolve=>{release=resolve;})};t.after(()=>release());
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Worked',exact:true}).click();
+  await page.getByRole('button',{name:'2 actions',exact:true}).click();
+  await page.getByRole('button',{name:'Open Run command action',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/actions/shell-call')));
+  await page.getByRole('button',{name:'Open Read file action',exact:true}).click();
+  const panel=page.getByRole('region',{name:'Action details',exact:true});
+  await panel.getByRole('heading',{name:'Read file',exact:true}).waitFor();
+  await panel.getByText('Running…',{exact:true}).waitFor();
+  release();delete state.actionHolds;
+  await page.waitForTimeout(150);
+  assert.equal(await panel.getByText('README.md\nnative/\nfrontend/',{exact:true}).count(),0);
+  await page.reload();
+  await page.getByRole('button',{name:'Worked',exact:true}).click();
+  await page.getByRole('button',{name:'2 actions',exact:true}).click();
+  await page.getByRole('button',{name:'Open Run command action',exact:true}).click();
+  await panel.getByText('README.md\nnative/\nfrontend/',{exact:true}).waitFor();
+});
+
+test('side-chat actions open in the parent panel',async t=>{
+  const fixture=actionFixture(),child='c'.repeat(32);
+  reset({...fixture,createdSession:true,sessionOverrides:{[child]:{title:'Delegate chat'}},
+    workspace:{links:[],files:[],sources:[],subagents:[{id:'delegate',session_id:child,name:'Kepler',avatar:0,status:'completed',can_inspect:true}]}});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  await page.getByRole('button',{name:'Open Kepler in side chat',exact:true}).click();
+  const side=page.locator('.side-conversation');
+  await side.getByRole('button',{name:'2 actions',exact:true}).click();
+  await side.getByRole('button',{name:'Open Run command action',exact:true}).click();
+  await page.getByRole('region',{name:'Action details',exact:true}).getByText('README.md\nnative/\nfrontend/',{exact:true}).waitFor();
+  assert.ok(state.requests.some(row=>row.path===`/api/sessions/${child}/progress/${turnId}/actions/shell-call`));
 });

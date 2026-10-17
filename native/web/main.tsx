@@ -27,10 +27,11 @@ import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
 import { FilesPanel, OutputPanel } from "./output"
 import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
-import type { OutputResource, WorkspaceTab } from "./workspace-types"
+import type { ActionSelection, OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
 import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
-import { TurnProgress } from "./turn-progress"
+import { TurnProgress, toolLabel } from "./turn-progress"
+import { ActionPanel } from "./action-panel"
 import { useWorkProgress } from "./use-work-progress"
 import { orderedWorkMessages, workSegments } from "./work-timeline"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
@@ -406,7 +407,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </section></main>
 }
 
-function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
   const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages !== undefined ? resolved : null)
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
   const [plan, setPlan] = useState<Plan[]>([])
@@ -694,6 +695,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
+  function openAction(action: ActionSelection) {
+    if (sideMode && onOpenAction) { onOpenAction(action); return }
+    openTab({ id: "action", kind: "action", title: "Action", action })
+  }
+  const selectedTab = panelState.visible ? panelState.tabs.find(tab => tab.id === panelState.activeId) : undefined
   function openOutput(resource: OutputResource, sourceSessionId = id) {
     openTab({
       id: `output:${sourceSessionId}:${resource.kind}:${resource.id ?? resource.url}`,
@@ -741,6 +747,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               entry={work.entries[segment.turn.id]} request={work.load}
               live={liveText.turnId === segment.turn.id ? liveText : undefined}
               onContentChange={followWork}
+              selectedAction={selectedTab?.kind === "action" ? selectedTab.action : undefined}
+              onAction={(tool, agent) => openAction({ sessionId: id, turnId: segment.turn.id, toolId: tool.id, agentId: agent?.id, name: toolLabel(tool.name) })}
               onSubagent={agent => openTab(agent.session_id ? {
                 id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,
               } : {
@@ -842,6 +850,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
 
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
       <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
+        if (tab.kind === "action") return <ActionPanel
+          key={JSON.stringify([authorityKey, connectionVersion, me.user.id, me.csrf, tab.action])}
+          action={tab.action} active={activeTab} onDenied={() => clearSensitiveNow.current()} />
         if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); setWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
         if (tab.kind === "subagent") return <SubagentPanel sessionId={id} agent={{ id: tab.runId, name: tab.name, status: tab.status, avatar: tab.avatar }} active={activeTab} onOpenFile={openOutput} />
         if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
@@ -851,7 +862,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         if (tab.kind === "activity") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{panelLoading ? "Loading activity…" : session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}</>
         if (tab.kind === "plan") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!plan.length && <div className="panel-empty"><Check /><p>{panelLoading ? "Loading plan…" : "Moyai’s task plan will appear here."}</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>
         if (tab.kind === "side-chat") return tab.sessionId
-          ? <Conversation key={`${me.user.id}:${tab.sessionId}`} id={tab.sessionId} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refreshList} workspaceRequest={null} pullRequests={[]} onPRUpdated={onPRUpdated} sideMode visible={activeTab} onOpenFile={openOutput} onTitle={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
+          ? <Conversation key={`${me.user.id}:${tab.sessionId}`} id={tab.sessionId} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refreshList} workspaceRequest={null} pullRequests={[]} onPRUpdated={onPRUpdated} sideMode visible={activeTab} onOpenFile={openOutput} onOpenAction={openAction} onTitle={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
           : <SideChatPicker parentId={id} defaultModel={me.default_model} individual={me.user.individual !== false} onCreated={refreshList} onSelect={selected => dispatchPanel({ type: "replace", id: tab.id, tab: { id: `side-chat:${selected.id}`, kind: "side-chat", sessionId: selected.id, title: selected.title } })} />
         return null
       }}</PanelTabs>
