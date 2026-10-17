@@ -170,6 +170,33 @@ async def test_link_discovery_updates_without_updated_at_and_deduplicates_across
     assert len(calls) == 1
 
 
+async def test_delegated_pr_contexts_are_batched_and_keep_shared_account_restrictions(runtime, actor):
+    from moyai.delegation import DelegationService
+
+    await add_connection(runtime, actor)
+    parent = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    turn = await runtime.database.submit(actor, parent.id, NewMessage(prompt="Delegate", request_key="parent"))
+    await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+    children = [
+        await DelegationService(runtime.database).start(prepared.scope, str(i), "Shared task")
+        for i in range(3)
+    ]
+    statements = []
+
+    def track(_conn, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    event.listen(runtime.database.engine.sync_engine, "before_cursor_execute", track)
+    try:
+        scopes = await PullRequestService(runtime).contexts(actor, [child["session_id"] for child in children])
+    finally:
+        event.remove(runtime.database.engine.sync_engine, "before_cursor_execute", track)
+    assert len(scopes) == 3
+    assert all(scope.credentials == () for scope in scopes.values())
+    assert len(statements) == 3  # Actor, joined session/authority, connection batch.
+
+
 async def test_available_connections_shared_session_rules_and_rotation(runtime, actor):
     private = await runtime.database.create_session(actor, NewSession(visibility="private"))
     shared = await runtime.database.create_session(actor, NewSession(visibility="shared"))

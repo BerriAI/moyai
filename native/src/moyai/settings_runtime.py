@@ -114,11 +114,11 @@ class SettingsSkills(AbstractCapability[RunScope]):
 
     async def catalog(self, scope: RunScope) -> list[dict[str, Any]]:
         await self.database.authorize_scope(scope)
-        if scope.surface == "slack":
+        if scope.authority.surface == "slack":
             return []
         async with self.database.sessions() as db:
             visible = SettingSkill.scope_key == "shared"
-            if scope.visibility == "private":
+            if scope.authority.visibility == "private":
                 visible = or_(visible, SettingSkill.scope_key == scope.actor_id)
             rows = await db.scalars(select(SettingSkill).where(
                 visible, SettingSkill.enabled.is_(True),

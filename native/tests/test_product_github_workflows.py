@@ -538,6 +538,20 @@ async def test_closed_external_pr_has_separate_task_lifecycle_consent(publicatio
         await later.authority(81, branch_write=False, lifecycle=True)
 
 
+@pytest.mark.parametrize("kind", ["content", "lifecycle"])
+async def test_generated_child_cannot_grant_external_pr_authority(publication, kind):
+    f = publication
+    publisher = Publications(f.service, replace(f.scope, delegation_generated=True), f.grant)
+    f.ctx.tool_call_approved = True
+    values = {"repository_id": 123, "number": 81, "head_sha": "a" * 40, "request_key": "child-consent"}
+    with pytest.raises(ToolFailed, match="explicit"):
+        if kind == "lifecycle":
+            await publisher.approve_lifecycle(f.ctx, LifecycleAccess(**values))
+        else:
+            await publisher.approve(f.ctx, PRWrite(**values))
+    assert not f.provider.calls
+
+
 async def test_revoked_lifecycle_grant_blocks_the_durable_dispatch_claim(publication):
     f = publication
     pr = {

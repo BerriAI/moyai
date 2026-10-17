@@ -18,8 +18,10 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 from test_bundled_skills_startup import scripted_model
+from test_delegation_temporal import dispatching
 
 from moyai.agent import make_agent
+from moyai.delegation import VERSION as DELEGATION_VERSION
 from moyai.request_limits import VERSION, UnlimitedModelRequests
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
@@ -72,7 +74,7 @@ async def test_parent_and_delegate_cross_previous_request_caps(runtime, active, 
         plugins=[PydanticAIPlugin()], data_converter=converter,
     ) as environment:
         runtime.client = environment.client
-        async with make_worker(runtime):
+        async with make_worker(runtime), dispatching(runtime):
             handle = await runtime.client.start_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
             )
@@ -119,7 +121,10 @@ async def test_pre_change_failure_history_replays_with_original_caps(runtime, ac
     ) as environment:
         runtime.client = environment.client
         with monkeypatch.context() as previous:
-            previous.setattr(workflow, "patched", lambda identity: False if identity == VERSION else original(identity))
+            previous.setattr(
+                workflow, "patched",
+                lambda identity: False if identity in {VERSION, DELEGATION_VERSION} else original(identity),
+            )
             async with make_worker(runtime):
                 handle = await runtime.client.start_workflow(
                     TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,

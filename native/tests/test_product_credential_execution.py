@@ -118,6 +118,21 @@ async def test_native_request_resolves_once_and_resumes_with_only_handle(credent
         assert "synthetic-signing-material" not in repr(value)
 
 
+@pytest.mark.parametrize("private_parent", [False, True])
+async def test_private_child_does_not_expand_personal_credential_visibility(credentials, private_parent):
+    from moyai.delegation import DelegationService
+
+    f = credentials
+    _, _, prepared = await authority.active_turn(f.product, private=private_parent)
+    child = await DelegationService(f.product.database).start(prepared.scope, "child", "Bounded work")
+    secret = {"lifetime": "persistent", "scope": "personal", "owner_id": f.product.actor.id}
+    async with f.product.database.sessions() as db:
+        assert await f.service.visible(db, secret, f.product.actor.id, child["session_id"]) is private_parent
+        assert await f.service.visible(
+            db, {**secret, "scope": "organization"}, f.product.actor.id, child["session_id"],
+        )
+
+
 async def test_resolution_rejects_stale_generation_changed_input_and_stopped_turn(credentials):
     f = credentials
     pending = await wait_for_credential(f)

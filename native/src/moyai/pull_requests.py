@@ -25,6 +25,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, or_, select
 
+from .contracts import ExecutionContext
+from .delegation_authority import saved_authority
+from .delegation_models import DelegatedSession
 from .links import PR_MENTION, LinkInput
 from .models import Connection, Message, Session, SessionLink, User
 
@@ -155,19 +158,27 @@ class PullRequestService:
         if fresh.auth_version != user.auth_version:
             raise HTTPException(401, "Sign in to continue.")
         async with self.runtime.database.sessions() as db:
-            sessions = list(await db.scalars(select(Session).where(
+            sessions = (await db.execute(select(Session, DelegatedSession).outerjoin(
+                DelegatedSession, DelegatedSession.session_id == Session.id,
+            ).where(
                 Session.id.in_(ids), Session.deleted.is_(False),
                 or_(Session.owner_id == user.id, Session.visibility == "shared"),
-            )))
+            ))).all()
             connections = list(await db.scalars(select(Connection).where(
                 Connection.kind == "github", Connection.enabled.is_(True),
                 or_(Connection.owner_id == user.id, Connection.shared.is_(True)),
             ).order_by(Connection.id)))
+            contexts = {
+                session.id: (await saved_authority(self.runtime.database, db, link)).context
+                if link is not None else ExecutionContext(session.visibility, session.surface)
+                for session, link in sessions
+            }
         result = {}
-        for session in sessions:
+        for session, _ in sessions:
+            context = contexts[session.id]
             permitted = []
             for connection in connections:
-                if session.surface == "slack" or (session.visibility == "shared" and not connection.shared):
+                if context.surface == "slack" or (context.visibility == "shared" and not connection.shared):
                     continue
                 try:
                     policy = json.loads(connection.policy)

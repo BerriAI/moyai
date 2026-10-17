@@ -95,8 +95,10 @@ async def authorize(runtime: Runtime, session_id: str, user: User) -> Session:
             Turn.session_id == session_id
         ).order_by(Turn.created_at.desc()).limit(1))
         if session.workspace and context:
+            policy = await runtime.database.execution_context(db, session)
             grants = await runtime.database.resolve_grants(
-                db, user.id, json.loads(context.connections), shared_session=session.visibility == "shared",
+                db, user.id, json.loads(context.connections), shared_session=policy.visibility == "shared",
+                surface=policy.surface,
             )
             scope = RunScope(session.id, context.id, user.id, context.model, grants, session.visibility, session.surface)
             if session.workspace_scope != scope.workspace_key:

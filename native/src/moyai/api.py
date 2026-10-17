@@ -35,6 +35,7 @@ from .models import (
     Artifact,
     Connection,
     Effect,
+    Event,
     Message,
     Session,
     SessionPreference,
@@ -223,8 +224,15 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.get("/api/skills")
     async def invocable_skills(
         shared: bool = False, offset: int = Query(0, ge=0, le=10000),
-        limit: int = Query(100, ge=1, le=100), user: User = Depends(actor),
+        limit: int = Query(100, ge=1, le=100), user: User = Depends(actor), session_id: str | None = None,
     ):
+        if session_id is not None:
+            async with runtime.database.sessions() as db:
+                session = await runtime.database.allowed_session(db, session_id, user)
+                context = await runtime.database.execution_context(db, session)
+                if context.surface != "web":
+                    return {"skills": [], "has_more": False, "next_offset": None}
+                shared = context.visibility != "private"
         return await runtime.skill_invocations.listing(user, shared=shared, offset=offset, limit=limit)
 
     @app.middleware("http")
@@ -426,6 +434,16 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             swarm_member = await runtime.database.swarms.member(db, session_id)
             if swarm_member is not None:
                 result["session"]["swarm_id"] = swarm_member.mission_id
+            from .delegation_models import DelegatedSession
+            delegation = await db.get(DelegatedSession, session_id)
+            if delegation is not None:
+                try:
+                    await runtime.database.allowed_session(db, delegation.parent_session_id, user)
+                except HTTPException as error:
+                    if error.status_code != 404:
+                        raise
+                else:
+                    result["session"]["parent_session_id"] = delegation.parent_session_id
             if reference is not None:
                 result["reference"] = reference
             preference = await db.get(SessionPreference, (user.id, session_id))
@@ -453,6 +471,14 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if result["can_answer"]:
                 conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(row.conversation))
                 result["pending"] = TypeAdapter(Any).dump_python(conversation.deferred_tool_requests, mode="json")
+                from .questions import can_reply_with_text
+                result["can_reply_with_text"] = can_reply_with_text(conversation.deferred_tool_requests)
+                async with runtime.database.sessions() as db:
+                    deadline = await db.scalar(select(Event).where(
+                        Event.identity == f"optional-question:{active_turn.id}",
+                    ))
+                if deadline is not None:
+                    result["question_deadline"] = json.loads(runtime.security.unseal(deadline.content))["deadline"]
             elif runtime.product_secrets is not None and user.role == "admin":
                 # Organization access assistance does not confer permission to
                 # answer another requester's questions or approve their tools.
@@ -539,7 +565,14 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
         from .skill_invocations import has_invocations
-        if has_invocations(body.prompt):
+        if body.reply_to is not None:
+            async with runtime.database.sessions() as db:
+                await runtime.database.allowed_session(db, session_id, user)
+                pending = await db.get(Turn, body.reply_to)
+                if pending is None or pending.session_id != session_id:
+                    raise HTTPException(409, "That question is no longer available.")
+            user = await answer_actor(runtime, user, pending)
+        elif has_invocations(body.prompt):
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
             body = body.model_copy(update={"prompt": await runtime.skill_invocations.normalize(body.prompt, user, session)})
@@ -710,11 +743,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def connections(
         user: User = Depends(actor), session_id: str | None = None, shared: bool = False,
     ):
+        surface = "web"
+        if session_id is not None:
+            async with runtime.database.sessions() as db:
+                session = await runtime.database.allowed_session(db, session_id, user)
+                context = await runtime.database.execution_context(db, session)
+                shared, surface = context.visibility == "shared", context.surface
         if runtime.product_connections is not None:
-            surface = "web"
-            if session_id is not None:
-                session = await runtime.database.session(user, session_id)
-                shared, surface = session.visibility == "shared", session.surface
             return await runtime.product_connections.catalog(
                 user.id, shared_session=shared, surface=surface,
             )
@@ -722,7 +757,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             rows = await db.scalars(select(Connection).where(
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
             ))
-            return [connection_view(row) for row in rows]
+            return [connection_view(row) for row in rows if not shared or row.shared]
 
     @app.post("/api/connections")
     async def create_connection(body: ConnectionInput, user: User = Depends(actor)):
