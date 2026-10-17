@@ -217,6 +217,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     from .product_routes import routes as product_routes
     app.include_router(product_routes(runtime, actor))
     app.include_router(settings_routes(runtime, actor))
+    from .swarm_routes import routes as swarm_routes
+    app.include_router(swarm_routes(runtime, actor))
 
     @app.get("/api/skills")
     async def invocable_skills(
@@ -421,6 +423,9 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             result: dict[str, Any] = {
                 "session": session_view(row), "turns": [turn_view(turn) for turn in turns],
             }
+            swarm_member = await runtime.database.swarms.member(db, session_id)
+            if swarm_member is not None:
+                result["session"]["swarm_id"] = swarm_member.mission_id
             if reference is not None:
                 result["reference"] = reference
             preference = await db.get(SessionPreference, (user.id, session_id))
@@ -456,6 +461,19 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                     {"request_id": item["request_id"]} for item in requests["requests"]
                 ]
         return result
+
+    @app.get("/api/sessions/{session_id}/progress/{turn_id}")
+    async def progress(session_id: str, turn_id: str, user: User = Depends(actor)):
+        from .progress import turn_progress
+
+        await runtime.database.session(user, session_id)
+        async with runtime.database.sessions() as db:
+            turn = await db.get(Turn, turn_id)
+            if turn is None or turn.session_id != session_id:
+                raise HTTPException(404, "Turn not found.")
+            if turn.actor_id != user.id:
+                raise HTTPException(403, "Working activity is visible only to its requester.")
+        return {"messages": await turn_progress(runtime, turn)}
 
     @app.get("/api/sessions/{session_id}/activity")
     async def session_activity(session_id: str, user: User = Depends(actor)):
@@ -536,6 +554,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if turn is None or turn.actor_id != user.id:
                 raise HTTPException(404, "Message not found.")
             session = await runtime.database.allowed_session(db, turn.session_id, user)
+            await runtime.database.swarms.editable_input(db, turn)
             prompt = await runtime.skill_invocations.normalize(body.prompt, user, session)
             changed = await db.scalar(update(Turn).where(
                 Turn.id == turn.id, Turn.status == "queued"
@@ -558,6 +577,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if turn is None or turn.actor_id != user.id:
                 raise HTTPException(404, "Message not found.")
             await runtime.database.allowed_session(db, turn.session_id, user)
+            await runtime.database.swarms.editable_input(db, turn)
             changed = await db.scalar(update(Turn).where(
                 Turn.id == turn.id, Turn.status == "queued"
             ).values(status="stopped", finished_at=now()).returning(Turn.id))

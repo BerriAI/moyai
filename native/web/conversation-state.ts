@@ -5,9 +5,11 @@ export type Session = SidebarSession & {
   visibility: string; surface: string; model: string; active_turn: string | null
   read_marker_key?: string; completion_marker?: string; save_warning?: string
   workspace?: { id: string; provider: string }
+  swarm_id?: string
 }
 export type Turn = {
   id: string; actor_id: string; status: string; mode?: string; connections: string[]; error?: string
+  created_at?: string; finished_at?: string | null
   usage: { requests?: number; input_tokens?: number; output_tokens?: number }
 }
 export type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; attachments?: UploadedFile[] }

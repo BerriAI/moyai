@@ -14,6 +14,7 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -22,11 +23,28 @@ from sqlalchemy.exc import IntegrityError
 
 from .contracts import NewMessage
 from .models import Delivery, Session, SlackInbox, SlackThread, Turn, User, new_id, now
+from .slack_messages import navigation_action, pr_cards, saved_message, session_url, thread_message
 
 if TYPE_CHECKING:
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
+
+
+def verify_signature(runtime: Runtime, raw: bytes, headers) -> None:
+    secret = runtime.settings.slack_signing_secret.get_secret_value()
+    if not secret or not runtime.settings.slack_team_id:
+        raise HTTPException(503, "Slack bot ingress is not configured.")
+    stamp = headers.get("x-slack-request-timestamp", "")
+    try:
+        recent = abs(time.time() - int(stamp)) <= 300
+    except ValueError:
+        recent = False
+    expected = "v0=" + hmac.new(
+        secret.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256
+    ).hexdigest()
+    if not recent or not hmac.compare_digest(expected, headers.get("x-slack-signature", "")):
+        raise HTTPException(401, "Invalid Slack signature.")
 
 
 def routes(runtime: Runtime) -> APIRouter:
@@ -37,24 +55,10 @@ def routes(runtime: Runtime) -> APIRouter:
 
     @router.post("/hooks/slack")
     async def receive(request: Request):
-        secret = runtime.settings.slack_signing_secret.get_secret_value()
-        if not secret or not runtime.settings.slack_team_id:
-            raise HTTPException(503, "Slack bot ingress is not configured.")
         raw = await request.body()
         if len(raw) > 256 * 1024:
             raise HTTPException(413, "Event is too large.")
-        stamp = request.headers.get("x-slack-request-timestamp", "")
-        try:
-            recent = abs(time.time() - int(stamp)) <= 300
-        except ValueError:
-            recent = False
-        expected = "v0=" + hmac.new(
-            secret.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256
-        ).hexdigest()
-        if not recent or not hmac.compare_digest(
-            expected, request.headers.get("x-slack-signature", "")
-        ):
-            raise HTTPException(401, "Invalid Slack signature.")
+        verify_signature(runtime, raw, request.headers)
         body = json.loads(raw)
         if body.get("type") == "url_verification":
             return {"challenge": body.get("challenge", "")}
@@ -69,6 +73,27 @@ def routes(runtime: Runtime) -> APIRouter:
         except IntegrityError:
             pass  # Slack delivery retries acknowledge the same persisted event.
         return {"accepted": True}
+
+    @router.post("/hooks/slack/interactions")
+    async def interact(request: Request):
+        raw = await request.body()
+        if len(raw) > 65536:
+            raise HTTPException(413, "Interaction is too large.")
+        verify_signature(runtime, raw, request.headers)
+        try:
+            values = parse_qs(raw.decode(), strict_parsing=True)
+            if len(values["payload"]) != 1:
+                raise ValueError()
+            payload = json.loads(values["payload"][0])
+            if not isinstance(payload, dict) or not isinstance(payload.get("team"), dict):
+                raise TypeError()
+        except (ValueError, TypeError, KeyError, UnicodeDecodeError):
+            raise HTTPException(400, "Invalid Slack interaction.") from None
+        if payload["team"].get("id") != runtime.settings.slack_team_id:
+            raise HTTPException(403, "This Slack workspace is not connected.")
+        if not navigation_action(payload):
+            raise HTTPException(409, "This Slack action requires the Moyai session.")
+        return {"ok": True}
 
     return router
 
@@ -147,6 +172,8 @@ async def mark_inbox(runtime: Runtime, identity: str, status: str) -> None:
 
 
 async def stage_deliveries(runtime: Runtime) -> None:
+    from app.slack_format import slack_text
+
     async with runtime.database.sessions() as db:
         pairs = (await db.execute(select(Turn, SlackThread).join(
             SlackThread, SlackThread.session_id == Turn.session_id
@@ -170,23 +197,30 @@ async def stage_deliveries(runtime: Runtime) -> None:
             text = turn.error or "This task stopped before it completed."
         if not text:
             text = "This task completed without a text answer."
-        link = (
-            f"{runtime.settings.public_url.rstrip('/')}/#{turn.session_id}"
-            if runtime.settings.public_url else ""
-        )
-        text = text[:3500] + ("\n\nOpen conversation: " + link if link else "")
+        link = session_url(runtime.settings.public_url, turn.session_id)
+        # Standalone publishes the answer before its checkpoint finishes saving.
+        cards = pr_cards(text, link) if turn.status in {"saving", "completed"} else []
+        content = thread_message(slack_text(text[:3500]), link, cards=cards)
         try:
             async with runtime.database.sessions.begin() as db:
                 db.add(Delivery(
                     id=new_id(), identity=identity, session_id=turn.session_id, turn_id=turn.id,
-                    destination=json.dumps({"channel": thread.channel_id, "thread_ts": thread.thread_ts}),
-                    content=runtime.security.seal(text),
+                    destination=json.dumps({
+                        "channel": thread.channel_id, "thread_ts": thread.thread_ts, "rich_reply": True,
+                    }),
+                    content=runtime.security.seal(content),
                 ))
         except IntegrityError:
             pass
 
 
 async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery) -> None:
+    from .slack_progress import claim_delivery, reply_target, skip_obsolete
+    if await skip_obsolete(runtime, delivery, product=False):
+        return
+    ready, reply_ts = await reply_target(runtime, delivery, product=False)
+    if not ready:
+        return
     async with runtime.database.sessions.begin() as db:
         turn = await db.get(Turn, delivery.turn_id)
         actor = await db.get(User, turn.actor_id) if turn else None
@@ -194,16 +228,17 @@ async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Del
         if actor is None or not actor.enabled or session is None or session.deleted:
             await db.execute(update(Delivery).where(Delivery.id == delivery.id).values(status="suppressed"))
             return
-        claimed = await db.scalar(update(Delivery).where(
-            Delivery.id == delivery.id, Delivery.status == "pending"
-        ).values(status="sending", claimed_at=now()).returning(Delivery.id))
-    if claimed is None:
+    if not await claim_delivery(runtime, delivery, product=False):
         return
     destination = json.loads(delivery.destination)
+    content = saved_message(runtime.security.unseal(delivery.content), destination)
     try:
-        response = await client.post("chat.postMessage", json={
-            **destination, "text": runtime.security.unseal(delivery.content).decode(),
-            "unfurl_links": False, "unfurl_media": False,
+        response = await client.post("chat.update" if reply_ts else "chat.postMessage", json={
+            "channel": destination["channel"],
+            **({"ts": reply_ts} if reply_ts else {
+                "thread_ts": destination["thread_ts"], "unfurl_links": False, "unfurl_media": False,
+            }),
+            **content,
             "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
         })
         response.raise_for_status()
@@ -267,6 +302,8 @@ async def pump(runtime: Runtime) -> None:
         ).order_by(SlackInbox.created_at).limit(10))).all())
     for item in inbox:
         await admit_one(runtime, item)
+    from .slack_progress import stage_progress
+    await stage_progress(runtime)
     await stage_deliveries(runtime)
     async with runtime.database.sessions() as db:
         deliveries = list((await db.scalars(select(Delivery).where(

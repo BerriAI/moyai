@@ -21,12 +21,14 @@ import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { WorkspaceOverview, SubagentPanel } from "./workspace"
+import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
 import { FilesPanel, OutputPanel } from "./output"
 import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
 import type { OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
-import { applyLiveEvent, emptyLiveTranscript, liveCommentary, mergeActivity, type LiveEvent } from "./live-transcript"
+import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
+import { TurnProgress } from "./turn-progress"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
@@ -400,6 +402,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   viewNow.current = view
   const sensitiveVersion = useRef(0)
   const [draft, setDraft] = useState("")
+  const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
   const [accountRevision, setAccountRevision] = useState(0)
@@ -631,9 +634,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   if (!view) return <div className="center" role="status">{error || "Opening conversation…"}</div>
   const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
   const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
-  const commentary = liveCommentary(liveText, savedAssistant)
-  const liveMessage = commentary ? <article className="message assistant live-message" data-turn-id={liveText.turnId}>
-    <div className="message-author">Moyai</div><div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{commentary}</Markdown></div>
+  const finalText = liveFinalAnswer(liveText)
+  const liveMessage = !savedAssistant && finalText ? <article className="message assistant live-message" data-turn-id={liveText.turnId}>
+    <div className="message-author">Moyai</div><div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{finalText}</Markdown></div>
   </article> : null
   const displayedActivity = mergeActivity(activity, liveText.activity)
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
@@ -651,17 +654,22 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     const titles = { "side-chat": "Side chat", computer: "Computer", files: "Files", activity: "Activity", plan: "Plan" }
     openTab({ id: kind === "side-chat" ? `side-chat:new:${crypto.randomUUID()}` : kind, kind, title: titles[kind] })
   }
-  const chat = <section className="chat file-drop-zone" id={chatId} {...fileDrop.handlers}>
+  // Questions and effect reviews remain in the conversation where they can be answered.
+  const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
+    && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
+  const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
         {fileDrop.dragging && <FileDropOverlay />}
-        {originalSessionId && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>
+        {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
+          space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
+        {originalSessionId && !space && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>
           <ProductHistoryPrefix sessionId={originalSessionId} scopeKey={`${authorityKey}:${connectionVersion}`} active={visible} onOpenSession={openSessionReference} />
         </React.Suspense>}
-        <div className="transcript" ref={transcript}
+        <div className="transcript" ref={transcript} hidden={space}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
-          {messages.filter(message => !queued.some(item => item.id === message.id)).map(message => {
+          {messages.filter(message => message.role !== "system" && !queued.some(item => item.id === message.id)).map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
-            return <React.Fragment key={message.id}>{message.role === "assistant" && message.turn_id === liveText.turnId && liveMessage}<article className={`message ${message.role}`}>
+            return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
               <div className="message-author">{message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
@@ -671,7 +679,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
-            </article></React.Fragment>
+            </article>{message.role === "user" && turn?.actor_id === me.user.id && <TurnProgress
+              key={`${authorityKey}:${connectionVersion}:${turn.id}`} sessionId={id} turn={turn} visible={visible}
+              live={liveText.turnId === turn.id ? liveText : undefined}
+              hasSavedAnswer={messages.some(item => item.turn_id === turn.id && item.role === "assistant")}
+            />}</React.Fragment>
           })}
           {!savedAssistant && liveMessage}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}

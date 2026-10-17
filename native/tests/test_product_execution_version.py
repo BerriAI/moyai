@@ -53,7 +53,7 @@ def test_execution_protocol_changes_all_native_contracts_but_preserves_legacy(
     assert config is not None
     settings = config.legacy_settings()
     legacy = settings.model_copy(update={"moyai_core": "legacy"})
-    assert native_contract.NATIVE_PROTOCOL_REVISION == 2
+    assert native_contract.NATIVE_PROTOCOL_REVISION == 3
     current, unchanged = fingerprints(settings), fingerprints(legacy)
     monkeypatch.setattr(native_contract, "NATIVE_PROTOCOL_REVISION", 1)
     assert all(new != old for new, old in zip(current, fingerprints(settings), strict=True))
@@ -78,11 +78,7 @@ async def test_v13_to_v14_adds_only_receipt_and_preserves_data_and_drain(
     )
     previous = await receipts(product.source, product.schema)
     assert len(previous) == 13
-    # Qualify the historical receipt-only step even when newer releases add
-    # physical migrations after it.
-    target_index = [version for version, _ in MIGRATIONS].index(EXECUTION_COMPATIBILITY_SCHEMA_VERSION)
-    historical_migrations = MIGRATIONS[:target_index + 1]
-    assert historical_migrations[-1] == (EXECUTION_COMPATIBILITY_SCHEMA_VERSION, frozenset())
+    assert dict(MIGRATIONS)[EXECUTION_COMPATIBILITY_SCHEMA_VERSION] == frozenset()
     async with product.database.sessions.begin() as db:
         db.add(User(
             id="retained", username="retained", display_name="Retained", password="unused",
@@ -94,9 +90,7 @@ async def test_v13_to_v14_adds_only_receipt_and_preserves_data_and_drain(
             "UPDATE moyai_product_drain_state SET generation=8,paused=false"
         ))
     with pytest.raises(ProductSchemaError, match="version/manifest differs"):
-        await verify_product_schema(
-            product.source, schema=product.schema, version=EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
-        )
+        await verify_product_schema(product.source, schema=product.schema)
     assert await receipts(product.source, product.schema) == previous
 
     writes: list[str] = []
@@ -130,13 +124,15 @@ async def test_v13_to_v14_adds_only_receipt_and_preserves_data_and_drain(
     assert set(current) == {*previous, EXECUTION_COMPATIBILITY_SCHEMA_VERSION}
     assert all(current[version] == receipt for version, receipt in previous.items())
     assert current[EXECUTION_COMPATIBILITY_SCHEMA_VERSION][0] == previous[GIT_OPERATION_SCHEMA_VERSION][0]
-    manifests = {version: current[version][0] for version, _ in historical_migrations}
+    manifests = {version: receipt[0] for version, receipt in current.items()}
     target = {
         "schema": product.schema,
         "app": manifests,
         "harness": {"sdk_version": "2.55.0", "harness_version": "0.55.0"},
     }
-    old_target = {**target, "app": {version: manifests[version] for version, _ in historical_migrations[:-1]}}
+    old_target = {**target, "app": {
+        version: manifest for version, manifest in manifests.items() if version != EXECUTION_COMPATIBILITY_SCHEMA_VERSION
+    }}
     assert migration_plan({**old_target, "state": "receipted"}, target)["apply"]
     with pytest.raises(ValueError, match="incomplete or incompatible"):
         migration_plan({**target, "state": "receipted"}, old_target)

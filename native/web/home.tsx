@@ -9,10 +9,7 @@ import logo from "./assets/moyai-logo.png"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { NewConversation, Session, Turn } from "./conversation-state"
-
-declare global {
-  interface Window { MoyaiSpace?: { mount(canvas: HTMLCanvasElement, options?: { anchor?: HTMLElement }): () => void } }
-}
+import { SwarmSetup, validWorkerCount, type SwarmOptions } from "./swarm"
 
 type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
 export function homeSubmission(prompt: string, model: string, privateSession: boolean, attachments: string[], selected: string[], available: HomeConnection[]) {
@@ -28,6 +25,8 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   onCreated: () => Promise<void>; onStarted: (conversation: NewConversation) => void
 }) {
   const [draft, setDraft] = useState("")
+  const [swarmMode, setSwarmMode] = useState(false)
+  const [swarm, setSwarm] = useState<SwarmOptions>({ workers: 20, budget_seconds: 0, worker_models: [] })
   const [model, setModel] = useState(defaultModel)
   const [privateSession, setPrivateSession] = useState(false)
   const isPrivate = individual && privateSession
@@ -81,12 +80,23 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 
   async function send(prompt = draft) {
     if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!prompt.trim() && !pictures.files.length)) return
+    if (swarmMode && !validWorkerCount(swarm.workers)) return
     submitting.current = true
     setBusy(true); setError("")
     const auth = csrfToken(), attachments = pictures.readyFiles
     try {
       const submission = homeSubmission(prompt, model, isPrivate, attachments.map(file => file.id), selectedAccounts, accounts)
-      if (admission.current?.signature !== submission.signature) admission.current = { signature: submission.signature, request: crypto.randomUUID() }
+      const signature = JSON.stringify([submission.signature, swarmMode ? swarm : null])
+      if (admission.current?.signature !== signature) admission.current = { signature, request: crypto.randomUUID() }
+      if (swarmMode) {
+        const result = await api<{ session: Session; turn: Turn }>("/swarms", "POST", {
+          ...submission.body, ...swarm, visibility: submission.visibility, request_key: admission.current.request,
+        })
+        if (!mounted.current || csrfToken() !== auth) return
+        onStarted({ ...result, prompt, attachments })
+        await onCreated()
+        return
+      }
       if (!admission.current.session) {
         admission.current.session = await api<Session>("/sessions", "POST", { model, visibility: submission.visibility })
       }
@@ -109,8 +119,12 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
       <h1>What are we working on?</h1>
       <p className="home-description">From the first spark to the final commit. Make it happen with Moyai.</p>
       <div className="home-sculpture" ref={sculpture}><img src={logo} alt="Moyai" /></div>
-      <div className="home-mode">Chat</div>
+      <div className="home-mode-options" aria-label="Session mode">
+        <Button type="button" variant={!swarmMode ? "secondary" : "ghost"} aria-pressed={!swarmMode} disabled={busy} onClick={() => setSwarmMode(false)}>Chat</Button>
+        <Button type="button" variant={swarmMode ? "secondary" : "ghost"} aria-pressed={swarmMode} disabled={busy} onClick={() => setSwarmMode(true)}>Swarm</Button>
+      </div>
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
+        {swarmMode && <SwarmSetup value={swarm} onChange={setSwarm} models={models} disabled={busy} />}
         <label className="check-label home-privacy"><Checkbox checked={isPrivate} disabled={!individual || busy} onCheckedChange={value => { setSkipAccounts(false); setPrivateSession(Boolean(value)) }} />Private session · Only you</label>
         {!individual && <p className="home-privacy-hint">This shared sign-in creates shared sessions. Use an individual sign-in for private work.</p>}
         <p className="home-privacy-hint">{isPrivate ? "Your conversation, files and computer stay private." : "Workspace members can see messages, images, files and the computer, including browser sign-ins, and take turns controlling it."}</p>
@@ -121,7 +135,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
           <div className="composer-actions">
             <AttachButton add={pictures.add} disabled={busy} />
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>
-              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
+              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (swarmMode && !validWorkerCount(swarm.workers)) || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
             </div>
           </div>
         </div>

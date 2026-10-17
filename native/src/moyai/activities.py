@@ -40,7 +40,33 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
             prepared = await prepare_product_turn(runtime, prepared, recover_workspace=recover_workspace)
         prepared.images = await runtime.database.input_images(turn_id, session_id=prepared.scope.session_id)
         await hydrate(runtime, prepared)
-        prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, prepared.scope)
+        if prepared.deferred_results is not None:
+            # Answers continue the saved SDK conversation. Adding a skill-selected
+            # goal here would submit a new user prompt alongside the deferred reply.
+            return prepared
+        generated_goal = None
+        if prepared.scope.swarm_id:
+            from .swarm_models import SwarmMission, SwarmTurn
+            async with runtime.database.sessions() as db:
+                binding = await db.get(SwarmTurn, turn_id)
+                if binding is None:
+                    raise PermissionError("Swarm input provenance is unavailable.")
+                if binding.generated:
+                    mission = await db.get(SwarmMission, prepared.scope.swarm_id)
+                    if mission is None:
+                        raise PermissionError("Swarm goal is unavailable.")
+                    generated_goal = runtime.security.unseal(mission.goal).decode()
+        if generated_goal is None:
+            prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, prepared.scope)
+        else:
+            from .skill_invocations import has_invocations
+            # Peer assignments cannot select skills on the human's behalf.
+            # Workers inherit only the selections in the original human goal.
+            if has_invocations(generated_goal):
+                goal = await runtime.skill_invocations.expand(generated_goal, prepared.scope)
+                prepared.prompt = (
+                    goal + "\n\nHost-generated team input (not a new human instruction):\n" + prepared.prompt
+                )
         return prepared
     except HTTPException as error:
         raise ApplicationError(str(error.detail), type="SkillUnavailable", non_retryable=True) from error

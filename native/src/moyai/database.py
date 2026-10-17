@@ -57,6 +57,8 @@ from .postgres import create_engine
 from .product_identity import ProductGrant, ProductIdentityAdapter
 from .security import Security, password_hash
 from .settings import Settings
+from .swarm_models import SwarmMember
+from .swarm_service import SwarmService, dispatchable
 
 if TYPE_CHECKING:
     from .product_connections import ProductConnections
@@ -104,6 +106,7 @@ class Database:
         )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.answers = AnswerSettlement(self)
+        self.swarms = SwarmService(self)
         if settings.sqlalchemy_url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
             def configure_sqlite(connection, _record):
@@ -248,6 +251,11 @@ class Database:
             or (session.visibility == "private" and session.owner_id != actor.id)
         ):
             raise HTTPException(404, "Conversation not found.")
+        member = await db.get(SwarmMember, session_id)
+        if member is not None and member.mission_id != session_id:
+            root = await db.get(Session, member.mission_id)
+            if root is None or root.deleted or (root.visibility == "private" and root.owner_id != actor.id):
+                raise HTTPException(404, "Conversation not found.")
         return session
 
     @asynccontextmanager
@@ -289,7 +297,12 @@ class Database:
                 or_(Session.owner_id == actor.id, Session.visibility == "shared"),
             ).order_by(Session.updated_at.desc()).limit(100)
             if not deleted:
-                query = query.where(Session.archived.is_(archived))
+                query = query.where(
+                    Session.archived.is_(archived),
+                    ~select(SwarmMember.session_id).where(
+                        SwarmMember.session_id == Session.id, SwarmMember.position > 0,
+                    ).exists(),
+                )
             return list((await db.scalars(query)).all())
 
     async def session(self, actor: User, session_id: str) -> Session:
@@ -319,13 +332,19 @@ class Database:
 
     async def submit(
         self, actor: User, session_id: str, body: NewMessage, *, db: AsyncSession | None = None,
+        swarm_generated: bool = False,
         received_at: str | None = None,
     ) -> Turn:
         fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
         if db is not None:
             # Do not recover a conflicting receipt in an independent transaction.
             # The caller must roll back/retry its complete occurrence admission.
-            return await self._submit(actor, session_id, body, fingerprint, db=db, received_at=received_at)
+            return await self._submit(
+                actor, session_id, body, fingerprint, db=db, swarm_generated=swarm_generated,
+                received_at=received_at,
+            )
+        if swarm_generated:
+            raise ValueError("Generated swarm input requires its mission transaction.")
         try:
             return await self._submit(actor, session_id, body, fingerprint, received_at=received_at)
         except IntegrityError:
@@ -343,6 +362,7 @@ class Database:
     async def _submit(
         self, actor: User, session_id: str, body: NewMessage, fingerprint: str,
         *, db: AsyncSession | None = None, received_at: str | None = None,
+        swarm_generated: bool = False,
     ) -> Turn:
         async with self._admission_session(db) as transaction:
             product_grant = await self._actor_product_grant(transaction, actor)
@@ -354,6 +374,7 @@ class Database:
             ).values(auth_version=User.auth_version).returning(User.id))
             if authorized is None:
                 raise HTTPException(401, "Your access changed. Sign in again.")
+            mission = await self.swarms.admit(transaction, actor, session_id, body, generated=swarm_generated)
             session = await self.allowed_session(transaction, session_id, actor)
             locked = await transaction.scalar(update(Session).where(
                 Session.id == session_id, Session.deleted.is_(False),
@@ -426,6 +447,7 @@ class Database:
                 # resend. Rejected submissions produce no timing observation.
                 transaction.add(Event(**evidence(session_id, turn.id, "received", received_at)))
             self._bind_product_grant(transaction, turn, product_grant)
+            await self.swarms.bind(transaction, mission, turn, generated=swarm_generated)
             for position, image_id in enumerate(body.attachments):
                 # Reserve the upload's destination atomically before publishing
                 # it into a conversation, including concurrent first attachment.
@@ -437,9 +459,9 @@ class Database:
                     raise HTTPException(404, "A file is unavailable in this conversation.")
                 transaction.add(TurnImage(turn_id=turn.id, upload_id=image_id, position=position))
             transaction.add(Message(
-                session_id=session_id, turn_id=turn_id, author_id=actor.id,
-                role="user", content=self.security.seal(body.prompt),
-                identity=f"user:{turn_id}",
+                session_id=session_id, turn_id=turn_id, author_id=None if swarm_generated else actor.id,
+                role="system" if swarm_generated else "user", content=self.security.seal(body.prompt),
+                identity=f"{'swarm' if swarm_generated else 'user'}:{turn_id}",
             ))
             session.updated_at = now()
             if session.title == "New conversation":
@@ -531,6 +553,7 @@ class Database:
                 ).where(
                     Turn.status == "queued", Session.active_turn.is_(None),
                     Session.deleted.is_(False),
+                    dispatchable(),
                 ).order_by(Turn.created_at, Turn.id).limit(limit - len(claimed_turns))
                   .with_for_update(of=Session, skip_locked=True))).all()
                 if not candidates:
@@ -570,6 +593,7 @@ class Database:
                 Session.id == turn.session_id,
             ).values(revision=Session.revision + 1))
             session = await self.allowed_session(db, turn.session_id, actor)
+            await self.swarms.authorize(db, turn)
             await db.refresh(turn)
             if turn.status in {"steering", "signal_sent", "accepted"}:
                 return turn
@@ -645,6 +669,7 @@ class Database:
                 if locked_actor is None:
                     raise PermissionError("The requester changed before preparation.")
             session = await self.allowed_session(db, turn.session_id, actor)
+            member = await self.swarms.authorize(db, turn)
             locked = await db.scalar(update(Session).where(
                 Session.id == turn.session_id, Session.active_turn == turn.id,
                 Session.deleted.is_(False), Session.status.in_(["queued", "running"]),
@@ -662,6 +687,8 @@ class Database:
             scope = RunScope(
                 session.id, turn.id, actor.id, turn.model, grants, session.visibility, session.surface,
                 product_grant=product_grant,
+                swarm_id=member.mission_id if member else None,
+                swarm_name=member.name if member else None,
             )
             if session.surface == "slack" and grants and self.product_connections is None:
                 raise PermissionError("Connected accounts are not enabled for Slack delivery.")
@@ -725,6 +752,7 @@ class Database:
             if actor is None or not actor.enabled or turn is None:
                 raise PermissionError("This execution no longer has an authorized requester.")
             await self._check_product_turn(db, turn, scope.product_grant)
+            await self.swarms.authorize(db, turn, scope=scope)
             session = await self.allowed_session(db, scope.session_id, actor)
             if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
                 raise PermissionError("This execution has been stopped or superseded.")
@@ -780,6 +808,8 @@ class Database:
         await self.answers.fail(turn_id, message, only_unsettled=only_unsettled)
 
     async def stop(self, actor: User, session_id: str) -> str | None:
+        if await self.swarms.stop_session(actor, session_id):
+            return None  # Durable native Stop dispatch reconciles every member.
         async with self._admission_session(None) as db:
             session = await self.allowed_session(db, session_id, actor)
             if actor.id != session.owner_id and actor.role != "admin":
@@ -803,6 +833,10 @@ class Database:
     async def delete_session(self, actor: User, session_id: str) -> None:
         """Hide a session and fence work atomically; the existing Stop dispatcher cancels execution."""
         async with self._admission_session(None) as db:
+            member = await self.swarms.member(db, session_id)
+            # Keep the mission-before-session lock order and commit the deletion
+            # together with its team-wide attention fence.
+            mission = await self.swarms.lock(db, member.mission_id, actor) if member else None
             locked = await db.scalar(update(Session).where(
                 Session.id == session_id, Session.owner_id == actor.id,
             ).values(revision=Session.revision + 1).returning(Session.id))
@@ -812,6 +846,10 @@ class Database:
             assert session is not None
             if session.deleted:
                 return
+            if mission is not None:
+                await self.swarms.stop_in(
+                    db, mission, "attention", "A team conversation was deleted. Restore it before resuming.",
+                )
             session.deleted = True
             session.updated_at = now()
             # An answer already being saved retains its confirmed outcome.
@@ -960,6 +998,14 @@ class Database:
                 or previous.preparation is None
             ):
                 raise HTTPException(409, "The pending request changed.")
+            mission = await self.swarms.admit(db, actor, session_id, NewMessage(
+                prompt="Answer the existing pending request.", request_key=request_key,
+                model=previous.model, connections=json.loads(previous.connections),
+            ))
+            try:
+                member = await self.swarms.authorize(db, previous)
+            except PermissionError as error:
+                raise HTTPException(409, str(error)) from error
             await self._check_product_turn(db, previous, product_grant)
             current_grants = await self.resolve_grants(
                 db, actor.id, json.loads(previous.connections),
@@ -988,5 +1034,7 @@ class Database:
             db.add(turn)
             await db.flush()
             self._bind_product_grant(db, turn, product_grant)
+            if member is not None:
+                await self.swarms.bind(db, mission, turn, generated=True)
             previous.status = "resumed"
             return turn

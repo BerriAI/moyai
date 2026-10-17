@@ -41,9 +41,10 @@ The latest Docker installer remains included in both sides of the comparison.
 
 ## Deliberately retained limits
 
-Interactive child-agent chats, full legacy swarm/goal semantics, canonical skill
-save/import conversion, skill learning and desktop recording remain deferred.
-The consolidation does not silently add them or describe them as supported.
+Interactive SDK-delegate chats, legacy swarm checkpoint conversion and mixed CLI
+harnesses, canonical skill save/import conversion, skill learning and desktop
+recording remain deferred. [Native swarms](native-swarms.md) now provide new
+persistent teams and member chats on Pydantic AI; they do not resume legacy swarms.
 Standalone local accounts and existing-product identity remain separate valid
 configurations because merging them would risk replacing an existing user directory.
 

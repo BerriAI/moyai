@@ -12,7 +12,7 @@ function reset(overrides={}) {
   state={signedIn:true, individual:true, mode:'existing', google:true, password:true, access:false, denied:false, status:'running',
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect this repository.'}], requests:[], streams:[], ...overrides};
 }
-function session(id=sessionId) {return {id,title:'Current native work',owner_id:'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving'].includes(state.status)?turnId:null,archived:false,pinned:false};}
+function session(id=sessionId) {return {id,title:'Current native work',owner_id:'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{})};}
 async function handle(req,res,next) {
   const url=new URL(req.url,'http://localhost');
   if(!url.pathname.startsWith('/api/'))return next();
@@ -44,6 +44,10 @@ async function handle(req,res,next) {
   }
   if(url.pathname===`/api/history/sessions/${legacyId}`)return json({session:{...session(legacyId),source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',status:'completed',execution_engine:'legacy',read_only:true}});
   if(url.pathname===`/api/history/sessions/${sessionId}`)return json({session:{...session(),source:'native',url:'/#'+sessionId,read_only:false}});
+  if(state.swarm && url.pathname.startsWith('/api/history/sessions/')) {
+    const id=url.pathname.split('/').at(-1);
+    if(state.swarm.members.some(member=>member.session_id===id))return json({session:{...session(id),source:'native',url:'/#'+id,read_only:false}});
+  }
   if(state.createdSession&&url.pathname==='/api/history/sessions/'+'c'.repeat(32))return json({session:{...session('c'.repeat(32)),source:'native',url:'/#'+'c'.repeat(32),read_only:false}});
   if(url.pathname.startsWith(`/api/product/sessions/${legacyId}/`)) {
     if(url.pathname.endsWith('/messages'))return json({messages:[{id:8,role:'assistant',content:'Historical saved answer'}],has_more:false,next_offset:null});
@@ -66,6 +70,8 @@ async function handle(req,res,next) {
   }
   if(url.pathname.startsWith('/api/sessions/')) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
+    if(url.pathname.endsWith('/swarm'))return json(state.swarm);
+    if(url.pathname.endsWith('/progress/'+turnId))return json({messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
       res.write('event: connected\ndata: {}\n\n'); clients.add(res);
@@ -84,7 +90,7 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/read'))return json({});
     if(req.method==='PATCH')return json({...session(),...data});
     const row=session(url.pathname.split('/')[3]);
-    return json({session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[]});
+    return json({session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,has_unsettled_effects:state.effects?.length>0,effects:state.effects});
   }
   return json({detail:'Fixture endpoint not implemented: '+url.pathname},404);
 }
@@ -102,6 +108,55 @@ before(async()=>{
   await server.listen();base=`http://127.0.0.1:${server.httpServer.address().port}`;browser=await chromium.launch({headless:true});
 });
 after(async()=>{for(const client of clients)client.end();await browser?.close();await server?.close();});
+
+function swarm() {
+  return {id:sessionId,status:'active',reason:'',revision:0,generation:1,round:1,goal:'Check the sum with independent methods.',
+    budget_seconds:0,ends_at:null,leader_id:'worker-1',can_control:true,sequence:0,posts:[],has_more:false,next_after:0,
+    members:[sessionId,'worker-1','worker-2','worker-3'].map((id,index)=>({
+      session_id:id,name:index?'Agent '+index:'Coordinator',model:'test-model',coordinator:index===0,
+      status:'running',active_turn:'turn-'+index,assignment:'',deleted:false,
+    }))};
+}
+
+test('swarm Space and Chat retain drafts and worker navigation opens the full conversation',async t=>{
+  reset({swarm:swarm()});const page=await pageFor(t);
+  const space=page.getByRole('region',{name:'Live swarm space',exact:true});
+  await space.waitFor();
+  assert.equal(await page.locator('.transcript').isVisible(),false);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await composer.fill('Keep this unsent direction.');
+  await page.getByRole('button',{name:'Chat',exact:true}).click();
+  assert.equal(await page.locator('.transcript').isVisible(),true);
+  assert.equal(await composer.innerText(),'Keep this unsent direction.');
+  await page.getByRole('button',{name:'Space',exact:true}).click();
+  assert.equal(await composer.innerText(),'Keep this unsent direction.');
+  await page.getByRole('link',{name:'Agent 2 · Working · Open conversation',exact:true}).click();
+  await page.waitForURL('**/#worker-2');
+  await page.locator('.transcript').waitFor({state:'visible'});
+  assert.equal(await space.count(),0);
+  await page.getByRole('link',{name:'Open mission',exact:true}).click();
+  await page.waitForURL('**/#'+sessionId);
+  await space.waitFor();
+});
+
+for(const attention of ['question','effect'])test(`swarm reveals a pending ${attention} instead of hiding it behind Space`,async t=>{
+  reset({swarm:swarm()});const page=await pageFor(t);
+  await page.getByRole('region',{name:'Live swarm space',exact:true}).waitFor();
+  if(attention==='question') {
+    state.status='waiting';
+    state.pending={calls:[{tool_call_id:'question',tool_name:'ask_user_question',args:{questions:[{
+      header:'Approach',question:'Which method should I use?',options:[{label:'Iterative addition'},{label:'Pairing'}],
+    }]}}],approvals:[]};
+  } else {
+    state.status='idle';
+    state.effects=[{id:'effect-one',turn_id:turnId,tool_name:'shell',arguments:{command:'example requiring review'}}];
+  }
+  await page.getByRole('heading',{name:attention==='question'?'Your input is needed':'An action needs review',exact:true}).waitFor();
+  assert.equal(await page.locator('.transcript').isVisible(),true);
+  await page.getByRole('button',{name:'Space',exact:true}).click();
+  assert.equal(await page.locator('.transcript').isVisible(),true);
+  assert.equal(await page.getByRole('region',{name:'Live swarm space',exact:true}).count(),0);
+});
 
 test('home and inventory render while account/folder reads and decoration are held',async t=>{
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
@@ -138,7 +193,7 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   ];
   reset({status:'completed',skills});
   const page=await pageFor(t,'#',width), input=page.getByRole('textbox',{name:'Message Moyai'});
-  await page.getByRole('checkbox',{name:'Private session · Only you'}).check();
+  await page.getByRole('checkbox',{name:'Private session · Only you',exact:true}).check();
   await input.fill('Please use /team');
   const options=page.getByRole('listbox',{name:'Skills'});
   await options.waitFor();assert.equal(await options.getByRole('option').count(),2);
@@ -255,20 +310,28 @@ for(const width of [1440,768,320])test(`palette keyboard, escaped body search, f
 test('root streaming survives saved-state polling, reconnect replay, per-round retry and final settlement',async t=>{
   reset();const page=await pageFor(t);await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();await waitFor(()=>clients.size>0,'SSE connected');
   emit({type:'text_start',index:0,text:'Unlabelled child text'},0);
-  emit({type:'response_start',run_id:turnId,step:1},1);emit({type:'text_start',index:0,text:'I will inspect.'},2);
-  await page.locator('.live-message').getByText('I will inspect.',{exact:true}).waitFor();
+  emit({type:'response_start',run_id:turnId,step:1},1);emit({type:'text_start',index:0,text:'I will inspect.',phase:'commentary'},2);
+  await page.locator('.turn-progress-latest').getByText('I will inspect.',{exact:true}).waitFor();
   const polls=state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length;
   await waitFor(()=>state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length>polls,'saved poll');
-  assert.equal(await page.locator('.live-message .message-content').innerText(),'I will inspect.');
+  assert.equal(await page.locator('.turn-progress-latest').innerText(),'I will inspect.');
   emit({type:'tool_call',id:'call1',name:'read_file',arguments:{path:'private-tool-detail'}},3);
   await page.locator('.live-action').getByText('Using read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
   for(const client of clients)client.end();await waitFor(()=>state.streams.length===2,'browser reconnect');assert.equal(state.streams[1].last,'3');
   emit({type:'text_delta',index:0,text:'duplicate'},2);emit({type:'response_start',run_id:turnId,step:2},4);emit({type:'text_start',index:0,text:'Wrong attempt'},5);
-  emit({type:'response_start',run_id:turnId,step:2},6);emit({type:'text_start',index:0,text:'Final'},7);emit({type:'text_delta',index:0,text:' answer'},8);
+  emit({type:'response_start',run_id:turnId,step:2},6);emit({type:'text_start',index:0,text:'Final',phase:'final_answer'},7);emit({type:'text_delta',index:0,text:' answer'},8);
   await page.locator('.live-message').getByText('Final answer',{exact:true}).waitFor();assert.equal(await page.getByText(/Unlabelled child text|Wrong attempt|duplicate/).count(),0);
   state.messages.push({id:2,turn_id:turnId,role:'assistant',author_id:null,content:'Final answer'});state.status='completed';emit({},undefined,'finished');
   await page.waitForFunction(()=>document.querySelectorAll('.message.assistant:not(.live-message)').length===1);
-  assert.equal(await page.getByText('Final answer',{exact:true}).count(),1);assert.equal(await page.getByText('I will inspect.',{exact:true}).count(),1);
+  assert.equal(await page.getByText('Final answer',{exact:true}).count(),1);
+  assert.equal(await page.getByText('I will inspect.',{exact:true}).count(),0);
+  await page.getByRole('button',{name:'Worked',exact:true}).click();
+  await page.getByText('I will inspect.',{exact:true}).waitFor();
+  await page.reload();
+  await page.getByText('Final answer',{exact:true}).waitFor();
+  assert.equal(await page.getByText('I will inspect.',{exact:true}).count(),0);
+  await page.getByRole('button',{name:'Worked',exact:true}).click();
+  await page.getByText('I will inspect.',{exact:true}).waitFor();
 });
 
 test('access revocation removes transcript, draft and panel state before reauthorization',async t=>{

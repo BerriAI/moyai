@@ -37,6 +37,8 @@ class RunScope:
     visibility: str = "private"
     surface: str = "web"
     product_grant: ProductGrant | None = None
+    swarm_id: str | None = None
+    swarm_name: str | None = None
 
     @property
     def grants_key(self) -> str:
