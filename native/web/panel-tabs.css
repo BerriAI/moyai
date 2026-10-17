@@ -18,6 +18,11 @@
 .conversation .topbar { min-height: 48px; height: 48px; padding: 6px 16px; gap: 12px; }
 .conversation .topbar .session-heading { display: flex; align-items: center; gap: 10px; }
 .conversation .topbar h1 { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.4; }
+.conversation .topbar h1:has(.session-title-trigger, .session-title-input) { min-width: 0; padding: 3px; margin: -3px; }
+.conversation .topbar h1:has(.session-title-input) { flex: 1; }
+.session-title-trigger { max-width: 100%; height: 32px; padding: 0 4px; font: inherit; justify-content: flex-start; }
+.session-title-trigger > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-title-input { height: 32px; padding: 0 4px; font: inherit; }
 .conversation .topbar .status { flex: none; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation .topbar .privacy-icon { display: inline-flex; align-items: center; color: var(--ui-muted); flex: none; }
 .conversation .header-controls { gap: 2px; }
@@ -101,6 +106,7 @@
   .conversation > .workspace.with-panel > .chat { visibility: hidden; pointer-events: none; }
 }
 @media (max-width: 600px) {
+  .session-title-input { font-size: 16px; }
   .conversation .topbar { min-height: 52px; height: 52px; padding-left: 54px; padding-right: 8px; gap: 4px; }
   .conversation > .workspace { grid-template-rows: 52px minmax(0, 1fr); }
   .conversation .session-heading .privacy-icon { display: none; }
