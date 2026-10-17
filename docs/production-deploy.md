@@ -156,7 +156,11 @@ or feed a mismatched baseline into a new release.
    maintenance responses and own no runtime.
 3. With all owners gone, take exclusive runtime ownership, apply any reviewed
    canonical/native migrations, and verify their receipts. No schema fingerprint
-   or old receipt is rewritten to force compatibility.
+   or old receipt is rewritten to force compatibility. Native maintenance uses
+   this offline boundary for canonical schema upgrades even when the compatibility
+   floor is unchanged; it does not require an additive online migration plan.
+   Schema provisioning does not run the separate
+   [billing history backfill and physical consolidation](billing-storage.md).
 4. Activate coordinator, then broker, then worker and API together with matching
    contracts. The persisted native pause survives worker replacement without
    toggling its drain environment flag. Verify all four roles and ownership,
