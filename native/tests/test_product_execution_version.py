@@ -11,7 +11,6 @@ from app import native_contract
 from app.config import Settings as ProductSettings
 from app.database import runtime_fingerprint
 from app.runtime_compatibility import api_fingerprint, background_fingerprint
-from scripts.release.native_probe import migration_plan
 from sqlalchemy import event, text
 from sqlalchemy.engine import Connection, ExecutionContext
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -130,18 +129,6 @@ async def test_execution_receipt_preserves_data_and_drain(
     assert set(current) == {*previous, after_version}
     assert all(current[version] == receipt for version, receipt in previous.items())
     assert current[after_version][0] == previous[before_version][0]
-    manifests = {version: receipt[0] for version, receipt in current.items()}
-    target = {
-        "schema": product.schema,
-        "app": manifests,
-        "harness": {"sdk_version": "2.55.0", "harness_version": "0.55.0"},
-    }
-    old_target = {**target, "app": {
-        version: manifest for version, manifest in manifests.items() if version != after_version
-    }}
-    assert migration_plan({**old_target, "state": "receipted"}, target)["apply"]
-    with pytest.raises(ValueError, match="incomplete or incompatible"):
-        migration_plan({**target, "state": "receipted"}, old_target)
     await verify_product_schema(
         product.source, schema=product.schema, version=after_version,
     )

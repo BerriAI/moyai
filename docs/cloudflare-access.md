@@ -39,8 +39,9 @@ and machine callers independently of browser login. A valid browser session
 does not prove service-token routing.
 
 The local product authentication suite uses synthetic signed identities. It does
-not certify a live Cloudflare policy or tunnel. Follow [production deployment](production-deploy.md)
-for application upgrades and Cloudflare's [Access documentation](https://developers.cloudflare.com/cloudflare-one/access-controls/)
+not certify a live Cloudflare policy or tunnel. Managed application upgrade
+runbooks are maintained in a private repository. Follow Cloudflare's
+[Access documentation](https://developers.cloudflare.com/cloudflare-one/access-controls/)
 for edge changes. Rotate connector and application service credentials separately;
 do not regenerate product encryption keys when rotating edge credentials.
 

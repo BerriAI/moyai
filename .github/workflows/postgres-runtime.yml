@@ -34,5 +34,5 @@ jobs:
         with:
           python-version: '3.13'
       - run: uv sync --frozen --extra postgres-migration
-      - run: uv run --frozen --extra postgres-migration pytest -q tests --ignore=tests/release --tb=short
+      - run: uv run --frozen --extra postgres-migration pytest -q tests --tb=short
       - run: uv run --frozen --extra postgres-migration pytest --postgres-backend -q tests/test_database_boundaries.py tests/test_message_snapshot_pool.py --tb=short
