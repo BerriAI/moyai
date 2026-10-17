@@ -156,6 +156,7 @@ async def test_workspace_opens_child_as_session_and_exposes_parent_link(runtime,
         assert response.json()["session"]["parent_session_id"] == parent.id
         transcript = await client.get(f"/api/sessions/{child['session_id']}/messages")
         assert "Independent task" in json.dumps(transcript.json())
+        assert transcript.json()[0]["source"] == "delegation"
 
 
 async def test_saved_child_artifact_is_previewable_from_parent_but_uploads_are_not(runtime, actor, active):

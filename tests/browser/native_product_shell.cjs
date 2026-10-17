@@ -83,11 +83,12 @@ async function handle(req,res,next) {
       res.on('close',()=>clients.delete(res));return;
     }
     if(url.pathname.endsWith('/messages')) {
+      const messages=state.messagesBySession?.[url.pathname.split('/')[3]]||state.messages;
       if(req.method==='POST') {
-        state.messages.push({id:state.messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
+        messages.push({id:messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
         return json({id:'turn-skill',actor_id:'viewer',status:'completed'});
       }
-      return json(state.messages);
+      return json(messages);
     }
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname.endsWith('/activity'))return json([]);
@@ -449,6 +450,7 @@ test('source collisions and identically named legacy folders survive paged inven
 for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and sends to its own session at ${width}px`,async t=>{
   const childId='d'.repeat(32);
   reset({status:'idle',sessionOverrides:{[childId]:{title:'Curie',parent_session_id:sessionId}},
+    messagesBySession:{[childId]:[{id:1,turn_id:'child-turn',role:'system',source:'delegation',author_id:null,content:'Evaluate the triangle side count.'}]},
     workspace:{links:[],files:[],sources:[],subagents:[{id:'child-turn',session_id:childId,parent_id:turnId,
       name:'Curie',avatar:1,status:'idle',can_inspect:true,depth:0,started_at:''}],subagents_limited:false}});
   const page=await pageFor(t,'#'+sessionId);
@@ -457,6 +459,8 @@ for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and 
   await page.getByRole('button',{name:/Curie/}).click();
   await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
   assert.equal(new URL(page.url()).hash,'#'+childId);
+  await page.getByText('Parent agent',{exact:true}).waitFor();
+  await page.getByText('Evaluate the triangle side count.',{exact:true}).waitFor();
   const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
   await composer.fill('Follow up with this subagent only.');
   await composer.press('Enter');

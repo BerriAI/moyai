@@ -143,6 +143,8 @@ class DelegationService:
             if message is not None:
                 message.role = "system"
                 message.author_id = None
+                message.identity = f"delegation:{turn.id}"
+                message.content = database.security.seal(task)
             db.add(DelegatedSession(
                 session_id=child.id, parent_session_id=parent.id, parent_turn_id=scope.turn_id,
                 initial_turn_id=turn.id, actor_id=actor.id, tool_call_id=call_id,

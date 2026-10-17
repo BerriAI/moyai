@@ -667,10 +667,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         <div className="transcript" ref={transcript} hidden={space}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
-          {messages.filter(message => message.role !== "system" && !queued.some(item => item.id === message.id)).map(message => {
+          {messages.filter(message => (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)).map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
-              <div className="message-author">{message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
+              <div className="message-author">{message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>

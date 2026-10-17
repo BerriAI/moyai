@@ -330,7 +330,9 @@ class Database:
                 "id": row.id, "turn_id": row.turn_id, "role": row.role,
                 "author_id": row.author_id, "content": self.security.unseal(row.content).decode(),
                 "created_at": row.created_at,
-                "attachments": pictures.get(row.turn_id, []) if row.role == "user" else [],
+                **({"source": "delegation"} if row.identity.startswith("delegation:") else {}),
+                "attachments": pictures.get(row.turn_id, [])
+                if row.role == "user" or row.identity.startswith("delegation:") else [],
             } for row in rows]
 
     async def submit(
