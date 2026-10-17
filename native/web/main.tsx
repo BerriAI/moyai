@@ -56,7 +56,7 @@ type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 const settingsDestinations = [
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
@@ -144,7 +144,7 @@ function App() {
     const controller = new AbortController(), key = routeKey
     // A native UUID can itself be an alias. Only the authenticated read adapter
     // may supply that mapping; ordinary session reads still enforce native ACLs.
-    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false`, "GET", undefined, controller.signal).then(value => {
+    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false&include_messages=true`, "GET", undefined, controller.signal).then(value => {
       const session = value.reference
       if (controller.signal.aborted || currentRoute() !== selected) return
       if (session.id !== selected || session.source !== "native") throw new Error("The session reference changed. Reopen the conversation.")
@@ -408,8 +408,8 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
 }
 
 function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
-  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : null)
-  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : [])
+  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages !== undefined ? resolved : null)
+  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
   const [plan, setPlan] = useState<Plan[]>([])
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState("")
@@ -478,10 +478,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     try {
       const cached = resolvedOnce.current
       resolvedOnce.current = undefined
-      const [next, history] = await Promise.all([
-        cached ? Promise.resolve(cached) : api<View>(`/sessions/${id}?include_activity=false`, "GET", undefined, signal),
-        api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal),
-      ])
+      const next = cached ?? await api<View>(`/sessions/${id}?include_activity=false&include_messages=true`, "GET", undefined, signal)
+      // Older servers can omit the transcript during a rolling deployment.
+      const history = next.messages ?? await api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal)
       if (signal?.aborted || version !== loadVersion.current) return
       viewNow.current = next
       setView(next); setMessages(history)

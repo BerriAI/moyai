@@ -128,6 +128,8 @@ async function handle(req,res,next) {
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
     const row=session(url.pathname.split('/')[3]);
     const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
+      result.messages=state.messagesBySession?.[row.id]||state.messages;
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
   }
@@ -489,6 +491,32 @@ test('resolved conversation opens without plan/activity reads; plan loads only w
   release();await page.locator('.plan-row').filter({hasText:'Review the measurements'}).waitFor();
 });
 
+test('conversation bootstrap renders messages without a second transcript request',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holds:{[`/api/sessions/${sessionId}/messages`]:held}});
+  const page=await pageFor(t);
+  await page.getByText('Inspect this repository.',{exact:true}).waitFor({timeout:3000});
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).isVisible(),true);
+  const reads=state.requests.filter(req=>req.method==='GET'&&req.path.startsWith(`/api/sessions/${sessionId}`));
+  assert.equal(reads.filter(req=>req.path===`/api/sessions/${sessionId}`).length,1);
+  assert.ok(reads.some(req=>req.query.includes('resolve=true')&&req.query.includes('include_messages=true')));
+  assert.equal(reads.filter(req=>req.path.endsWith('/messages')).length,0);
+});
+
+test('an empty bootstrap transcript does not trigger a redundant history read',async t=>{
+  reset({status:'idle',messages:[]});
+  const page=await pageFor(t);
+  await page.getByText('Start with a task or a question.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(req=>req.method==='GET'&&req.path.endsWith('/messages')).length,0);
+});
+
+test('an older server without bootstrap messages still opens the conversation',async t=>{
+  reset({status:'idle',omitInitialMessages:true});
+  const page=await pageFor(t);
+  await page.getByText('Inspect this repository.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(req=>req.method==='GET'&&req.path.endsWith('/messages')).length,1);
+});
+
 for(const width of [1440,768,320])test(`inline skills keep surrounding text, icon and scoped identity through send/reload at ${width}px`,async t=>{
   const skills=[
     {id:'personal-team',name:'team',description:'Investigate a bug with a team.',scope:'personal',reference:'personal:team',icon:'👥'},
@@ -619,8 +647,9 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
   emit({type:'text_start',index:0,text:'Unlabelled child text'},0);
   emit({type:'response_start',run_id:turnId,step:1},1);emit({type:'text_start',index:0,text:'I will inspect.',phase:'commentary'},2);
   await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).waitFor();
-  const polls=state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length;
-  await waitFor(()=>state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length>polls,'saved poll');
+  const savedPolls=()=>state.requests.filter(req=>req.method==='GET'&&req.path===`/api/sessions/${sessionId}`&&req.query.includes('include_messages=true')).length;
+  const polls=savedPolls();
+  await waitFor(()=>savedPolls()>polls,'saved poll');
   assert.equal(await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).count(),1);
   emit({type:'tool_call',id:'call1',name:'read_file',arguments:{path:'private-tool-detail'}},3);
   await page.locator('.live-action').getByText('Using read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
