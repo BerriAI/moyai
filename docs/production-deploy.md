@@ -38,9 +38,10 @@ commit's CI without changing services. Inspect the saved release receipt for
 During the planned maintenance window, run the same selected candidate with
 **preflight_only: false**. Every run performs preflight again; a later main commit
 is a new candidate. The `preserve` core option is valid when the source already
-uses Pydantic. Preserving a retired core fails before mutation. Native releases
-currently require maintenance; rolling/API/coordinated modes are retained in
-source tooling for historical compatibility checks and cannot deploy native roles.
+uses Pydantic. Preserving a retired core fails before mutation. Native background
+releases and schema changes require maintenance. Compatible native API/UI updates
+can use the API-only procedure below. The all-role `rolling` and `coordinated`
+modes still reject native services.
 
 The workflow uses the `moyai-production` GitHub environment, restricted to main,
 with these existing inputs:
@@ -54,6 +55,43 @@ with these existing inputs:
 
 Keep credentials in protected environment settings. Database credentials remain
 on the services. Merging a PR does not dispatch this workflow.
+
+## Compatible API/UI updates
+
+Select **api**, **preserve**, and initially **preflight_only: true** on the chosen
+main commit. Native API preflight requires the exact commit's Docker, native
+runtime, PostgreSQL runtime and release-controller CI. It verifies all four
+running role identities, their health, native application/Harness receipts and
+the unpaused maintenance generation. The API must be diskless, use the reviewed
+Docker entrypoint without command overrides, and have a 300-second shutdown
+allowance. Render private services use TCP checks: the native Uvicorn listener
+opens only after application lifespan startup completes. The release CI tests
+this socket boundary and shutdown draining; post-switch probes additionally
+verify HTTP readiness and the exact native process identity.
+
+The candidate must have exactly the same canonical schema revision, native
+migration manifests, framework versions and API/background compatibility
+contracts as the running cluster. A new schema migration, core change, or
+incompatible protocol must use maintenance; the API path never provisions,
+migrates, pauses or resumes execution.
+
+Run **api**, **preserve**, **preflight_only: false** after inspecting the receipt.
+Only the API build and deployment change. Render warms the replacement and
+switches traffic; the controller verifies its build, core and process identity,
+then waits for the previous API owner to retire. Coordinator, broker and worker
+builds, owners, contracts and native receipts must remain unchanged. Their
+background execution stays admitted throughout the replacement.
+
+This supports compatible API/UI releases, not a full-cluster blue/green switch.
+Render draining is bounded; long-lived connections may reconnect. Qualify real
+traffic, authenticated requests, streams and active tasks through the actual
+application before treating an installation as uninterrupted.
+
+A confirmed startup failure can retain the verified old API and restore its
+saved build label. An explicitly unhealthy candidate can trigger one verified
+API rollback while native receipts and background owners remain unchanged.
+Ambiguous writes, unknown readiness, changed contracts or background failures
+stop for inspection without a speculative retry or rollback.
 
 ## Maintenance sequence
 

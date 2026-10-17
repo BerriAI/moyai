@@ -47,7 +47,8 @@ MEMORY_REVIEW_SCHEMA_VERSION = "2026-10-15-product-memory-review-v11"
 DRAIN_SCHEMA_VERSION = "2026-10-15-product-drain-v12"
 GIT_OPERATION_SCHEMA_VERSION = "2026-10-15-product-git-operations-v13"
 EXECUTION_COMPATIBILITY_SCHEMA_VERSION = "2026-10-16-product-execution-v14"
-SWARM_SCHEMA_VERSION = "2026-10-16-native-swarms-v15"
+BILLING_STORAGE_SCHEMA_VERSION = "2026-10-16-product-billing-storage-v15"
+SWARM_SCHEMA_VERSION = "2026-10-16-native-swarms-v16"
 PRODUCT_SCHEMA_VERSION = SWARM_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
@@ -116,6 +117,9 @@ MIGRATIONS = (
     (GIT_OPERATION_SCHEMA_VERSION, GIT_OPERATION_TABLES),
     # A durable release barrier: v13 candidates cannot resume the new workflow commands.
     (EXECUTION_COMPATIBILITY_SCHEMA_VERSION, frozenset()),
+    # Passive tables only. Explicit billing_storage commands install mirrors,
+    # backfill records and select the read source after exact validation.
+    (BILLING_STORAGE_SCHEMA_VERSION, frozenset({"moyai_billing_records", "moyai_billing_storage"})),
     (SWARM_SCHEMA_VERSION, SWARM_TABLES),
 )
 
@@ -133,6 +137,8 @@ def _schema(value: str | None) -> str:
 
 
 def _is_identity(table: str, column: str) -> bool:
+    if table == "moyai_billing_records":
+        return False  # Shared historical identifiers retain their original unrestricted text.
     return (table == "moyai_users" and column == "id") or column in IDENTITY_COLUMNS
 
 
@@ -153,6 +159,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "product_memory_review_models",
         "product_drain_models",
         "product_github_models",
+        "billing_storage_models",
         "swarm_models",
     ):
         import_module(f"{__package__}.{module}")
@@ -212,6 +219,21 @@ async def _verify(
     for table in metadata.sorted_tables:
         if not await _has_table(connection, schema, table.name):
             raise ProductSchemaError(f"Required native table is missing: {table.name}.")
+        if table.name == "moyai_inference_usage":
+            kind = await connection.scalar(text(
+                "SELECT relkind::text FROM pg_class WHERE oid=to_regclass(:name)"
+            ), {"name": f'"{schema}"."{table.name}"'})
+            if kind == "v":
+                from .billing_storage import Storage, _state
+                from .billing_storage_cutover import verify_consolidated
+                source = await connection.scalar(text(
+                    f'SELECT source_schema FROM "{schema}".moyai_billing_storage WHERE id=1'
+                ))
+                if not isinstance(source, str):
+                    raise ProductSchemaError("Consolidated billing source receipt is missing.")
+                storage = Storage(source, schema)
+                await verify_consolidated(connection, storage, await _state(connection, storage))
+                continue
         columns = await connection.run_sync(
             lambda conn, name=table.name: inspect(conn).get_columns(name, schema=schema)
         )

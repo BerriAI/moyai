@@ -10,7 +10,7 @@ import json
 
 from .database import DatabaseError, identifier
 
-SCHEMA_REVISION = 21
+SCHEMA_REVISION = 22
 # Physical additive expansions can keep this contract after a reviewed online
 # manifest step. Incompatible changes advance it and require maintenance.
 SCHEMA_COMPATIBILITY_REVISION = 20

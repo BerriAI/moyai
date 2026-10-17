@@ -206,6 +206,53 @@ def test_startup_failure_does_not_wait_for_listener_grace(tmp_path):
     assert not (tmp_path / 'events.jsonl').exists()
 
 
+def test_tcp_listener_stays_closed_until_application_startup_completes(tmp_path):
+    # Render private services only perform TCP health checks. Binding before
+    # native lifespan admission finishes would switch traffic prematurely.
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1', 0))
+        port = reservation.getsockname()[1]
+    gate = tmp_path / 'admit'
+    events = tmp_path / 'startup.jsonl'
+    probe = PROBE.replace(
+        "record('owner_acquired')",
+        "record('startup_waiting')\n"
+        "    while not Path(sys.argv[4]).exists():\n"
+        "        await asyncio.sleep(0.01)\n"
+        "    record('owner_acquired')",
+    ).replace("port=0", f"port={port}")
+    process = subprocess.Popen(
+        [sys.executable, '-u', '-c', probe, str(events), '0', '1', str(gate)],
+        cwd=Path(__file__).resolve().parents[1], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not events.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(.01)
+        assert 'startup_waiting' in events.read_text()
+        for _ in range(5):
+            with pytest.raises(OSError):
+                socket.create_connection(('127.0.0.1', port), timeout=.1)
+            time.sleep(.02)
+        gate.touch()
+        while time.monotonic() < deadline:
+            if '"event": "ready"' in events.read_text():
+                break
+            time.sleep(.01)
+        with urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response:
+            assert json.load(response) == {'status': 'ok'}
+        observed = [json.loads(line)['event'] for line in events.read_text().splitlines()]
+        assert observed.index('owner_acquired') < observed.index('ready')
+    finally:
+        process.terminate()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
+
+
 async def test_late_event_loop_does_not_extend_http_drain_budget(monkeypatch):
     import render_start
     server = RenderOverlapServer(uvicorn.Config('unused:app', timeout_graceful_shutdown=240))

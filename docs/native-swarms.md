@@ -126,7 +126,7 @@ accepts `budget_seconds`. All endpoints use ordinary sign-in, CSRF, and origin
 protection.
 
 Existing-product deployments require the additive
-`2026-10-16-native-swarms-v15` schema migration and native protocol revision 3
+`2026-10-16-native-swarms-v16` schema migration and native protocol revision 3
 through the guarded maintenance release. Earlier migration receipts remain
 unchanged. API, coordinator, worker, and broker owners must agree on the new
 contract before resuming execution. Do not run an older worker against the new

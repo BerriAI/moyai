@@ -174,11 +174,17 @@ async def test_explicit_width_migration_preserves_existing_rows_and_foreign_keys
         assert (await db.get(User, "old-native-id")).display_name == "Existing"
         widths = (await db.execute(text(
             "SELECT character_maximum_length FROM information_schema.columns "
-            "WHERE table_schema=:schema AND "
+            "WHERE table_schema=:schema AND table_name<>'moyai_billing_records' AND "
             "((table_name='moyai_users' AND column_name='id') OR column_name IN "
             "('actor_id','owner_id','author_id','user_id','last_actor_id','scope_key'))"
         ), {"schema": product.schema})).scalars().all()
         assert widths and all(width == 512 for width in widths)
+        # Historical billing identities were unrestricted text. They are not
+        # native authorization identities and must not be truncated at import.
+        assert await db.scalar(text(
+            "SELECT data_type FROM information_schema.columns WHERE table_schema=:schema "
+            "AND table_name='moyai_billing_records' AND column_name='actor_id'"
+        ), {"schema": product.schema}) == "text"
 
 
 async def test_rendered_long_index_names_verify_but_wrong_columns_do_not(admitted_product):
