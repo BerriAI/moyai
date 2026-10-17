@@ -1,0 +1,29 @@
+{
+  "id": "followup_act_now",
+  "thread": [
+    {
+      "role": "human",
+      "display_name": "Ishaan Jaffer",
+      "text": "do we support DeepSeek-V4.1-Flash-1017 is here ?",
+      "files": []
+    },
+    {
+      "role": "you",
+      "display_name": "Moyai",
+      "text": "Yes in LiteLLM's current code; not confirmed as enabled in Moyai's model picker. DeepSeek docs say the API name is deepseek-flash and LiteLLM's registry has deepseek/deepseek-flash. Verified against docs and the registry, not a live inference call.",
+      "files": []
+    }
+  ],
+  "prompt": "do u have a deepseek key ? why did u not test it but devin did",
+  "required": ["verified", "action", "verdict_first"],
+  "gates": {
+    "credentials_list": true,
+    "stub_model": "deepseek-flash",
+    "min_stub_requests": 1,
+    "max_credentials_run": 2,
+    "max_stub_requests": null,
+    "no_paste_request": false
+  },
+  "case_notes": "The obvious next step is to run the live check now and report it, not to ask for a PR or task.",
+  "reference_reply": "Yes, there is a saved DEEPSEEK_API_KEY, and I should have used it. I just ran one call with `deepseek/deepseek-flash` and got `model: deepseek-flash` back with a normal completion, so it works through the live API, not just the registry."
+}
