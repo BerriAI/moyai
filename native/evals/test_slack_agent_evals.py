@@ -675,34 +675,34 @@ async def test_real_slack_agent_reply_evals(admitted_product: Any, tmp_path: Pat
             plugins=[PydanticAIPlugin()], data_converter=converter,
         ) as environment:
             runtime.client = environment.client
-            async with make_worker(runtime):
-                for case in CASES:
-                    for trial in range(1, REPEATS + 1):
-                        provider.requests.clear()
-                        counter += 1
-                        try:
-                            workspace = case_workspace(tmp_path, case, trial)
-                            skills = tmp_path / "skills"
-                            skills.mkdir(exist_ok=True)
-                            allocations: list[str] = []
-                            runtime.agent, runtime.durability = make_agent(
-                                settings,
-                                runtime.database,
-                                stores,
-                                objects,
-                                models=models,
-                                workspace=lazy_local_workspace(workspace, allocations),
-                                skills_directory=str(skills),
-                                product_capabilities=[credential_capability(secrets.execution)],
-                            )
+            for case in CASES:
+                for trial in range(1, REPEATS + 1):
+                    provider.requests.clear()
+                    counter += 1
+                    try:
+                        workspace = case_workspace(tmp_path, case, trial)
+                        skills = tmp_path / "skills"
+                        skills.mkdir(exist_ok=True)
+                        allocations: list[str] = []
+                        runtime.agent, runtime.durability = make_agent(
+                            settings,
+                            runtime.database,
+                            stores,
+                            objects,
+                            models=models,
+                            workspace=lazy_local_workspace(workspace, allocations),
+                            skills_directory=str(skills),
+                            product_capabilities=[credential_capability(secrets.execution)],
+                        )
+                        async with make_worker(runtime):
                             result = await run_trial(
                                 case=case, trial=trial, service=service, runtime=runtime, env=environment,
                                 judge_client=judge_client, judge_model=judge_model, provider=provider,
                                 file_url=provider.file_url, counter=counter,
                             )
-                        except Exception as error:  # noqa: BLE001 - preserve a failure record for every trial
-                            result = failed_trial(case, trial, error, provider.requests.copy())
-                        report_trials.append(result)
+                    except Exception as error:  # noqa: BLE001 - preserve a failure record for every trial
+                        result = failed_trial(case, trial, error, provider.requests.copy())
+                    report_trials.append(result)
         await stores.close()
         store.close()
     case_counts = {
