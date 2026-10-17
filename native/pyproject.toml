@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Moyai built on Pydantic AI Harness, Modal, Temporal, and LiteLLM."
 requires-python = ">=3.12"
 dependencies = [
-    "agentchat @ git+https://github.com/BerriAI/agentchat.git@c2e7435fc3819569dc3c9f13747f017ec60b0956",
+    "agentchat @ git+https://github.com/BerriAI/agentchat.git@611d544cd1f8ba226468abcaad81df9160a30627",
     "pydantic-ai[temporal]==2.55.0",
     "openai==3.29.0",
     "pydantic-ai-harness[coder,modal,skills,github,linear,notion,slack,temporal,playwright,code-mode]==0.55.0",
@@ -85,4 +85,3 @@ extend-immutable-calls = ["fastapi.Depends"]
 include = ["src"]
 extraPaths = [".."]
 typeCheckingMode = "standard"
-
