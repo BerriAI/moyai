@@ -35,8 +35,13 @@ MAX_DEPTH = 2  # Like Coder: root, child, grandchild.
 BUSY = ("queued", "starting", "running", "saving", "steering", "signal_sent", "accepted")
 
 
-def enabled() -> bool:
-    return not workflow.in_workflow() or workflow.patched(VERSION)
+def enabled(scope: RunScope) -> bool:
+    # Keep marker evaluation at its original hook sites for recorded histories.
+    # Activities cannot evaluate workflow patches; they use the serialized
+    # decision, with missing state retaining historical SDK delegation.
+    if workflow.in_workflow():
+        scope.interactive_delegation = workflow.patched(VERSION)
+    return scope.interactive_delegation
 
 
 class DelegationService:
@@ -220,7 +225,7 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
 
     def get_instructions(self):
         def instructions(ctx: RunContext[RunScope]) -> str:
-            if not enabled() or ctx.deps.swarm_id:
+            if not enabled(ctx.deps) or ctx.deps.swarm_id:
                 return ""
             return (
                 "Delegating to self creates a persistent subagent conversation. "
@@ -236,7 +241,7 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
     async def prepare_tools(
         self, ctx: RunContext[RunScope], tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
-        if enabled() and ctx.deps.delegation_depth >= MAX_DEPTH:
+        if enabled(ctx.deps) and ctx.deps.delegation_depth >= MAX_DEPTH:
             return [tool for tool in tool_defs if tool.name != "delegate_task"]
         return tool_defs
 
@@ -244,7 +249,7 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
         self, ctx: RunContext[RunScope], *, call: ToolCallPart, tool_def: ToolDefinition,
         args: dict[str, Any], handler: WrapToolExecuteHandler,
     ) -> Any:
-        if call.tool_name != "delegate_task" or not enabled():
+        if call.tool_name != "delegate_task" or not enabled(ctx.deps):
             return await handler(args)
         if (
             ctx.run_id != ctx.deps.turn_id or not call.tool_call_id

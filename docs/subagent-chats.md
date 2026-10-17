@@ -47,6 +47,8 @@ human messages use normal session admission.
 Old SDK-run delegates remain inspectable in their original panels. They are not
 silently converted into new conversations, and in-flight recorded workflows keep
 their original delegation path through the Temporal version marker.
+The workflow carries that decision into its activities; older activity payloads
+retain the SDK's shared parent computer setup.
 
 Existing-product deployments require the additive
 `2026-10-16-interactive-delegation-v18` migration and native protocol revision 5

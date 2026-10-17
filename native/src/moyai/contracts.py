@@ -41,6 +41,9 @@ class RunScope:
     swarm_name: str | None = None
     delegation_depth: int = 0
     delegation_generated: bool = False
+    # Chosen by the workflow and carried into tool activities. Old payloads
+    # must retain SDK delegation and its shared parent computer.
+    interactive_delegation: bool = False
 
     @property
     def grants_key(self) -> str:
