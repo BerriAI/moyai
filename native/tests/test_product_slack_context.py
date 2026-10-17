@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -10,6 +11,7 @@ from app.connector_errors import ConnectorError
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
+from moyai.contracts import NewSession
 from moyai.models import Turn
 from moyai.product_slack_models import ProductSlackBinding
 from moyai.skill_invocations import has_invocations
@@ -254,6 +256,12 @@ async def test_personal_slack_uses_only_bot_access_for_this_thread(ingress, acto
 async def test_root_mention_keeps_its_own_unfurl_without_repeating_the_request(ingress, monkeypatch):
     service, runtime = ingress.service, ingress.runtime
     message = {**mention_message(), "ts": ROOT_TS, "attachments": root_message()["attachments"]}
+    message["blocks"] = [{"type": "rich_text", "elements": [{
+        "type": "rich_text_section", "elements": [
+            {"type": "user", "user_id": "UBOT00001"},
+            {"type": "text", "text": " do we support this?"},
+        ],
+    }]}]
 
     async def request(method, url, **kwargs):
         return {"ok": True, "messages": [message], "has_more": False}
@@ -265,6 +273,51 @@ async def test_root_mention_keeps_its_own_unfurl_without_repeating_the_request(i
 
     assert DEEPSEEK_URL in prepared.prompt and "DeepSeek-V4.1-Flash-1017" in prepared.prompt
     assert prepared.prompt.count("do we support this?") == 1
+
+
+async def test_historical_continuation_admits_enriched_input_before_outer_submit(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+    source = service.store.create_run(
+        "Historical thread", "", "demo", [], chat_enabled=True, user_id="google:owner",
+    )
+    service.store.execute(
+        "INSERT INTO slack_threads(team_id,channel,thread_ts,run_id,started_ts) VALUES(?,?,?,?,?)",
+        (TEAM, CHANNEL, ROOT_TS, source["id"], ROOT_TS),
+    )
+    admitted, calls = [], []
+
+    async def lookup(db, source_id, principal) -> None:
+        assert source_id == source["id"]
+
+    async def continue_for_admission(db, actor, principal, source_id, body, *, surface, provenance):
+        # Real historical continuation submits during bind(), before ingress's
+        # final submit. Keep that ordering while using the local native database.
+        assert source_id == source["id"] and surface == "slack"
+        assert DEEPSEEK_URL in body.prompt and "DeepSeek-V4.1-Flash-1017" in body.prompt
+        session = await runtime.database.create_session(actor, NewSession(visibility="shared"), db=db)
+        session.surface = surface
+        turn = await runtime.database.submit(actor, session.id, body, db=db)
+        admitted.append((turn.id, body.prompt))
+        return {"id": session.id}
+
+    async def request(method, url, **kwargs):
+        assert url == "https://slack.com/api/conversations.replies"
+        calls.append(url)
+        return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
+
+    monkeypatch.setattr(runtime, "product_continuations", SimpleNamespace(
+        lookup=lookup, continue_for_admission=continue_for_admission,
+    ))
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(envelope(mention_message()))
+
+    async with runtime.database.sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 1
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+    assert admitted == [(turn.id, prepared.prompt)]
+    assert prepared.prompt.count("do we support this?") == 1
+    assert len(calls) == 1
 
 
 async def test_revoked_authority_during_read_does_not_admit_thread_content(ingress, monkeypatch):
