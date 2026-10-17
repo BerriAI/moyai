@@ -11,6 +11,7 @@ from test_product_authority import demote
 
 from moyai.models import ProductTurnAuthority, Session, Turn
 from moyai.product_schema import (
+    BILLING_STORAGE_SCHEMA_VERSION,
     EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
     SWARM_SCHEMA_VERSION,
     SWARM_TABLES,
@@ -48,7 +49,7 @@ async def test_swarm_schema_preserves_prior_receipts_and_requires_explicit_provi
         product.source, schema=product.schema, source_schema="moyai",
     ) == SWARM_SCHEMA_VERSION
     after = await receipt_rows(product)
-    assert set(after) == {*before, SWARM_SCHEMA_VERSION}
+    assert set(after) == {*before, BILLING_STORAGE_SCHEMA_VERSION, SWARM_SCHEMA_VERSION}
     assert all(after[key] == value for key, value in before.items())
     await verify_product_schema(product.source, schema=product.schema)
     await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai")
