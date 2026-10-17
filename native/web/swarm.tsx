@@ -1,7 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 import { ExternalLink, Pause, Play, Square } from "lucide-react"
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
@@ -108,7 +106,6 @@ export function SwarmPanel({ sessionId, visible = true, onChanged, space = false
   const [data, setData] = useState<SwarmView | null>(null)
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
-  const [expanded, setExpanded] = useState(true)
   const version = useRef(0), mounted = useRef(true), busyNow = useRef(false)
   const changed = useRef(onChanged); changed.current = onChanged
   useEffect(() => {
@@ -156,17 +153,12 @@ export function SwarmPanel({ sessionId, visible = true, onChanged, space = false
   const active = data.status === "active", workers = data.members.filter(member => !member.coordinator)
   return <section className="swarm-panel" aria-label="Swarm mission">
     <div className="swarm-heading">
-      <Button className="swarm-heading-title" variant="ghost" size="sm" aria-expanded={space || expanded} onClick={() => {
-        if (space) { onSpaceChange?.(false); setExpanded(false) } else setExpanded(value => !value)
-      }}>Swarm <span>{workers.length} workers</span></Button>
+      <span className="swarm-heading-title">Swarm <span>{workers.length} workers</span></span>
       <span className="swarm-state" data-state={data.status}>{data.status === "attention" ? "Needs attention" : data.status}</span>
       <span className="swarm-meta">Round {data.round}</span>
       <SwarmWindow data={data} visible={visible} busy={busy} onChange={seconds => void control("time", seconds)} />
       <div className="swarm-toolbar">
-        {onSpaceChange && <AgentViewSwitch space={space} disabled={spaceBlocked} onChange={value => {
-          if (!value) setExpanded(true)
-          onSpaceChange(value)
-        }} />}
+        {onSpaceChange && <AgentViewSwitch space={space} disabled={spaceBlocked} onChange={onSpaceChange} />}
         {sessionId !== data.id && <a className="swarm-mission-link" href={`#${data.id}`} aria-label="Open mission"><ExternalLink size={13} /><span>Mission</span></a>}
         {data.can_control && <div className="swarm-controls">
         <Button size="sm" variant="ghost" aria-label={active ? "Pause team" : "Resume team"} disabled={busy} onClick={() => void control(active ? "pause" : "resume")}>
@@ -180,29 +172,8 @@ export function SwarmPanel({ sessionId, visible = true, onChanged, space = false
     {data.reason && <p className="notice" role="status">{data.reason}</p>}
     {!active && data.members.some(member => member.status === "waiting") &&
       <p className="notice">Pending questions and approvals are saved. Resume the team before answering.</p>}
-    {(space || expanded) && <div className={`swarm-details${space ? " swarm-space-details" : ""}`}>
-      {space ? <SwarmSpace data={data} sessionId={sessionId} visible={visible} onConversation={() => { setExpanded(true); onSpaceChange?.(false) }} /> : <>
-      <div className="swarm-roster" aria-label="Swarm members">{data.members.map(member => <a
-        key={member.session_id} href={`#${member.session_id}`} aria-current={member.session_id === sessionId ? "page" : undefined}
-        className="swarm-member">
-        <strong>{member.name}{member.session_id === data.leader_id && <span className="swarm-lead">Lead</span>}</strong>
-        <span>{member.deleted ? "Deleted" : member.status === "waiting" ? "Needs input" : member.status}</span>
-        <small title={member.model}>{member.model}</small>
-      </a>)}</div>
-      <details><summary>Shared goal</summary><p className="swarm-goal">{data.goal}</p></details>
-      <details className="swarm-board" open>
-        <summary>Team chat · {data.sequence > 50 ? "latest 50 updates" : `${data.posts.length} updates`}</summary>
-        <div className="swarm-feed" role="log" aria-live="off">
-          {data.posts.filter(post => post.kind !== "goal").map(post => <article key={post.id} className="swarm-post">
-            <div><strong>{post.author}</strong><span className="muted">{post.kind === "human" ? "Direction" : post.kind}</span>
-              <time dateTime={post.created_at}>{new Date(post.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></div>
-            <div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{post.content}</Markdown></div>
-            {post.kind === "result" && post.author_session_id && <a href={`#${post.author_session_id}`}>Open full conversation</a>}
-          </article>)}
-          {!data.posts.some(post => post.kind !== "goal") && <p className="muted">The team’s real findings and assignments will appear here.</p>}
-        </div>
-      </details>
-      </>}
+    {space && <div className="swarm-details swarm-space-details">
+      <SwarmSpace data={data} sessionId={sessionId} visible={visible} onConversation={() => onSpaceChange?.(false)} />
     </div>}
   </section>
 }

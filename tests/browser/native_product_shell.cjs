@@ -322,6 +322,58 @@ test('twenty workers and their coordinator fit the desktop orbits together',asyn
   assert.equal(await page.getByRole('button',{name:'Next agents',exact:true}).count(),0);
 });
 
+for(const width of [1440,768,320])test(`Workspace owns the swarm roster and opens each agent's Chat at ${width}px`,async t=>{
+  const team=swarm();
+  team.members=Array.from({length:21},(_,index)=>({
+    session_id:index?'worker-'+index:sessionId,name:index?'Agent '+index:'Coordinator',
+    model:'test-model',coordinator:index===0,status:index===5?'failed':'idle',
+    active_turn:null,assignment:'',deleted:false,
+  }));
+  const members=team.members.map((member,index)=>({
+    id:'swarm:'+member.session_id,session_id:member.session_id,parent_id:sessionId,
+    name:member.name,avatar:index%4,status:member.status,can_inspect:true,depth:0,started_at:'',
+    role:index===0?'coordinator':index===1?'lead':'worker',
+  }));
+  reset({status:'idle',swarm:team,sessionOverrides:{'worker-20':{title:'Agent 20'}},
+    workspace:{links:[],files:[],sources:[],subagents:[],subagents_limited:false,swarm_members:members}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('button',{name:'Chat',exact:true}).click();
+  assert.equal(await page.locator('.swarm-roster,.swarm-board').count(),0);
+  assert.equal(await page.locator('.transcript').isVisible(),true);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await composer.fill('Keep this unsent direction.');
+  const key=page.getByRole('button',{name:'Open workspace',exact:true});
+  await key.locator('.workspace-orbit-alert').waitFor();
+  await key.click();
+  const dialog=page.getByRole('dialog',{name:'Workspace resources',exact:true});
+  const agents=dialog.getByRole('region',{name:'Agents',exact:true});
+  assert.equal(await agents.locator('.workspace-agent-action').count(),21);
+  const filter=agents.getByRole('searchbox',{name:'Filter agents',exact:true});
+  await filter.fill('no matching agent');
+  await agents.getByText('No agents match your search.',{exact:true}).waitFor();
+  await filter.fill('lead');
+  assert.equal(await agents.locator('.workspace-agent-action').count(),1);
+  await agents.getByRole('button',{name:/^Agent 1 Lead/}).waitFor();
+  await filter.fill('coordinator');
+  await agents.getByRole('button',{name:/^Coordinator /}).click();
+  await dialog.waitFor({state:'hidden'});
+  assert.equal(await composer.innerText(),'Keep this unsent direction.');
+  await key.click();
+  await filter.fill('Agent 20');
+  await agents.getByRole('button',{name:/^Agent 20 /}).click();
+  await page.waitForURL('**/#worker-20');
+  await page.getByRole('heading',{name:'Agent 20',exact:true}).waitFor();
+  assert.equal(await page.locator('.transcript').isVisible(),true);
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  await page.getByRole('searchbox',{name:'Filter agents',exact:true}).fill('coordinator');
+  await page.getByRole('region',{name:'Agents',exact:true}).getByRole('button',{name:/^Coordinator /}).click();
+  await page.waitForURL('**/#'+sessionId);
+  await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
+  assert.equal(await page.locator('.transcript').isVisible(),true);
+  assert.equal(await page.getByRole('region',{name:'Live swarm space',exact:true}).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
 for(const attention of ['question','effect'])test(`swarm reveals a pending ${attention} instead of hiding it behind Space`,async t=>{
   reset({swarm:swarm()});const page=await pageFor(t);
   await page.getByRole('region',{name:'Live swarm space',exact:true}).waitFor();
@@ -1017,7 +1069,7 @@ for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and 
   const page=await pageFor(t,'#'+sessionId);
   await page.setViewportSize({width,height:900});
   await page.getByRole('button',{name:'Open workspace',exact:true}).click();
-  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Curie idle',exact:true}).click();
+  await page.getByRole('region',{name:'Agents',exact:true}).getByRole('button',{name:'Curie idle',exact:true}).click();
   await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
   assert.equal(new URL(page.url()).hash,'#'+childId);
   await page.getByText('Parent agent',{exact:true}).waitFor();
@@ -1085,7 +1137,7 @@ test('workspace subagent action opens the right-panel conversation without leavi
       name:'Curie',avatar:1,status:'idle',can_inspect:true,depth:0,started_at:''}],subagents_limited:false}});
   const page=await pageFor(t,'#'+sessionId);
   await page.getByRole('button',{name:'Open workspace',exact:true}).click();
-  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Open Curie in side chat',exact:true}).click();
+  await page.getByRole('region',{name:'Agents',exact:true}).getByRole('button',{name:'Open Curie in side chat',exact:true}).click();
   const panel=page.getByRole('complementary',{name:'Session panel',exact:true});
   await panel.getByRole('heading',{name:'Curie',exact:true}).waitFor();
   await panel.getByText('Saved child result.',{exact:true}).waitFor();

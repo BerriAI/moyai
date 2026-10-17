@@ -105,14 +105,14 @@ async function pageFor(t, width = 1440, handler) {
 }
 
 for (const width of [1440, 768, 320]) {
-  test(`swarm roster and controls remain usable at ${width}px`, async t => {
+  test(`swarm Chat stays compact with usable controls at ${width}px`, async t => {
     const page = await pageFor(t, width);
     const panel = page.getByRole("region", { name: "Swarm mission", exact: true });
     await panel.waitFor();
-    assert.equal(await panel.locator(".swarm-member").count(), 21);
+    assert.equal(await panel.locator(".swarm-member").count(), 0);
     assert.equal(await panel.getByRole("button", { name: "Pause team", exact: true }).count(), 1);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-    assert.equal(await panel.locator(".swarm-member").first().getAttribute("href"), "#mission-one");
+    assert.equal(await panel.locator(".swarm-details").count(), 0);
     await page.getByRole("spinbutton", { name: "Swarm workers", exact: true }).fill("3");
     assert.equal(await page.getByLabel("Selected workers").textContent(), "3");
   });
@@ -196,7 +196,7 @@ for (const width of [1440, 768, 320]) {
     assert(reachable.has("worker-20"));
     await page.getByRole("button", { name: "Chat", exact: true }).click();
     assert.equal(await space.count(), 0);
-    assert.equal(await page.locator(".swarm-member").count(), 21);
+    assert.equal(await page.locator(".swarm-member").count(), 0);
   });
 }
 
@@ -224,7 +224,7 @@ test("space refreshes public replies and leadership, and coordinator links open 
   await page.getByRole("dialog", { name: "Coordinator details", exact: true })
     .getByRole("link", { name: "Open thread", exact: true }).click();
   assert.equal(await page.getByRole("region", { name: "Live swarm space", exact: true }).count(), 0);
-  assert.equal(await page.locator(".swarm-member").count(), 21);
+  assert.equal(await page.locator(".swarm-member").count(), 0);
 });
 
 test("space clears protected previews when access is revoked", async t => {
@@ -247,9 +247,24 @@ test("the coordinator's team update returns to its conversation", async t => {
   const page = await pageFor(t, 1440, route => route.fulfill({ json: state }));
   await page.getByRole("button", { name: "Space", exact: true }).click();
   await page.locator(".swarm-space-feed > summary").click();
-  await page.getByRole("link", { name: /Coordinator final synthesis/ }).click();
+  await page.getByRole("link", { name: "Coordinator · Open thread", exact: true }).click();
   assert.equal(await page.getByRole("region", { name: "Live swarm space", exact: true }).count(), 0);
-  assert.equal(await page.locator(".swarm-member").count(), 21);
+  assert.equal(await page.locator(".swarm-member").count(), 0);
+});
+
+test("Space retains every recent public update and its full text", async t => {
+  const state = mission();
+  state.posts = Array.from({ length: 12 }, (_, index) => ({
+    ...state.posts[0], id: `post-${index}`, sequence: index + 1,
+    content: index === 0 ? "Oldest update " + "detail ".repeat(400) + "COMPLETE_END" : `Update ${index}`,
+  }));
+  const page = await pageFor(t, 1440, route => route.fulfill({ json: state }));
+  assert.equal(await page.locator(".swarm-space-feed").count(), 0);
+  await page.getByRole("button", { name: "Space", exact: true }).click();
+  assert.equal(await page.locator(".swarm-space-feed article").count(), 0);
+  await page.locator(".swarm-space-feed > summary").click();
+  await page.getByText(/COMPLETE_END/).waitFor();
+  assert.equal(await page.locator(".swarm-space-feed article").count(), 12);
 });
 
 test("owner controls use current revision and preserve the same mission", async t => {
@@ -274,7 +289,7 @@ test("owner controls use current revision and preserve the same mission", async 
   await page.waitForFunction(() => document.querySelector('[aria-label="Change swarm work window"]')?.textContent.includes("30 minutes"));
   assert.deepEqual(writes.map(body => body.action), ["pause", "resume", "time"]);
   assert.equal(writes[2].budget_seconds, 1800);
-  assert.equal(await page.locator(".swarm-member").first().getAttribute("href"), "#mission-one");
+  assert.equal(await page.locator(".swarm-roster").count(), 0);
 });
 
 test("shared viewers can inspect the team but receive no mutation controls", async t => {
@@ -284,7 +299,8 @@ test("shared viewers can inspect the team but receive no mutation controls", asy
   assert.equal(await page.getByRole("button", { name: "Stop team", exact: true }).count(), 0);
   assert.equal(await page.getByRole("button", { name: "Change work window", exact: true }).count(), 0);
   assert.equal(await page.getByRole("combobox", { name: "Change swarm work window", exact: true }).count(), 0);
-  assert.equal(await page.locator('.swarm-member[href="#worker-1"]').count(), 1);
+  await page.getByRole("button", { name: "Space", exact: true }).click();
+  await page.getByRole("button", { name: "Agent 1 · Working · View details", exact: true }).waitFor();
 });
 
 test("late data from a previous mission cannot replace the current roster", async t => {
@@ -302,9 +318,10 @@ test("late data from a previous mission cannot replace the current roster", asyn
   });
   await page.waitForFunction(() => Boolean(window.swarmFixture));
   await page.evaluate(() => window.swarmFixture.setId("mission-two"));
-  await page.getByText("Second mission coordinator", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Space", exact: true }).click();
+  await page.getByRole("button", { name: "Second mission coordinator · Working · View details", exact: true }).waitFor();
   release();
   await page.waitForTimeout(100);
-  assert.equal(await page.getByText("Second mission coordinator", { exact: true }).count(), 1);
+  assert.equal(await page.getByRole("button", { name: "Second mission coordinator · Working · View details", exact: true }).count(), 1);
   assert.equal(await page.locator('.swarm-member[href="#mission-one"]').count(), 0);
 });

@@ -16,12 +16,13 @@ import "./workspace.css"
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type AttachmentKind = "pull_request" | "output"
 type Link = { id?: string; kind: AttachmentKind | "source"; url: string; title: string; origin: "attached" | "mentioned"; can_remove: boolean }
-export type Subagent = { id: string; parent_id: string; session_id?: string | null; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number; model?: string | null; task?: string | null }
+export type Subagent = { id: string; parent_id: string; session_id?: string | null; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number; model?: string | null; task?: string | null; role?: "coordinator" | "lead" | "worker" }
 type PanelAgent = Pick<Subagent, "id" | "name" | "status" | "avatar"> & Partial<Pick<Subagent, "can_inspect">>
 type WorkspaceData = {
   links: Link[]; files: { id: string; name: string; url: string; size: number; media_type?: string }[]
   sources: { id: string; name: string; media_type: string; url: string; size?: number }[]
   subagents: Subagent[]; subagents_limited: boolean
+  swarm_members?: Subagent[]
 }
 type AgentDetail = { id: string; name: string; output: string; steps: { kind: string; tool?: string; timestamp: string }[] }
 type OverviewProps = {
@@ -30,7 +31,8 @@ type OverviewProps = {
   onSubagent: (agent: Subagent) => void; onOutput: (output: OutputResource) => void
   onSubagentSideChat?: (agent: Subagent) => void
 }
-const statusText: Record<string, string> = { completed: "Ready", running: "Working", failed: "Failed", waiting: "Needs input", interrupted: "Interrupted", stopped: "Stopped", starting: "Starting", queued: "Queued" }
+const statusText: Record<string, string> = { completed: "Ready", running: "Working", failed: "Failed", waiting: "Needs input", interrupted: "Interrupted", stopped: "Stopped", starting: "Starting", queued: "Queued", deleted: "Deleted" }
+const workspaceAgents = (data: WorkspaceData | null | undefined) => data ? [...(data.swarm_members ?? []), ...data.subagents] : []
 const isAccessError = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status)
 const message = (error: unknown) => error instanceof Error ? error.message : "The request could not be completed."
 const avatarIndex = (value: number) => Number.isFinite(value) ? Math.abs(Math.trunc(value)) % 4 : 0
@@ -110,7 +112,7 @@ export function WorkspaceResourceProvider({ id, visible, expanded, children }: {
 export const WorkspaceMenuKey = forwardRef<HTMLButtonElement, React.ComponentProps<typeof WorkspaceKey> & { sessionFailed: boolean }>(
   function WorkspaceMenuKey({ sessionFailed, ...props }, ref) {
     const resource = useContext(WorkspaceResourceContext)
-    return <WorkspaceKey {...props} ref={ref} alert={sessionFailed || resource?.data?.subagents.some(agent => agent.status === "failed")} />
+    return <WorkspaceKey {...props} ref={ref} alert={sessionFailed || workspaceAgents(resource?.data).some(agent => agent.status === "failed")} />
   },
 )
 
@@ -131,6 +133,7 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
   const [linkKind, setLinkKind] = useState<AttachmentKind | null>(null)
   const [url, setUrl] = useState(""), [title, setTitle] = useState("")
   const [formError, setFormError] = useState(""), [busy, setBusy] = useState(false)
+  const [agentQuery, setAgentQuery] = useState("")
   const mounted = useRef(false), write = useRef<AbortController | null>(null)
   const opener = useRef<HTMLElement | null>(null), root = useRef<HTMLDivElement>(null)
   const base = `/sessions/${encodeURIComponent(id)}`
@@ -139,7 +142,7 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
     return () => { mounted.current = false; write.current?.abort() }
   }, [])
   useEffect(() => {
-    if (error && !data) { setLinkKind(null); setUrl(""); setTitle("") }
+    if (error && !data) { setLinkKind(null); setUrl(""); setTitle(""); setAgentQuery("") }
   }, [error, data])
   function add(kind: AttachmentKind, trigger: HTMLElement) { opener.current = trigger; setUrl(""); setTitle(""); setFormError(""); setLinkKind(kind) }
   async function mutate(path: string, method: string, body?: object) {
@@ -173,6 +176,8 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
     if (!prs.some(link => link.url.toLowerCase() === summary.url.toLowerCase())) prs.push({ kind: "pull_request", url: summary.url, title: summary.title, origin: "mentioned", can_remove: false })
   }
   const outputLinks = data?.links.filter(link => link.kind === "output") ?? []
+  const agents = workspaceAgents(data)
+  const matchingAgents = agents.filter(agent => `${agent.name} ${agent.role ?? ""} ${statusText[agent.status] ?? agent.status}`.toLowerCase().includes(agentQuery.trim().toLowerCase()))
   const outputs: OutputResource[] = data ? [
     ...data.files.map(file => ({ ...file, kind: "artifact" as const })),
     ...data.sources.map(file => ({ ...file, kind: "upload" as const })),
@@ -192,11 +197,13 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
         })}
         {!prs.length && <p className="workspace-picker-empty">Attach a PR or mention its GitHub URL in chat.</p>}
       </section>
-      <section aria-label="Subagents">{heading("Subagents", data.subagents.length)}
-        {data.subagents.map(agent => <div className="workspace-picker-row" key={agent.id}><Button type="button" className="workspace-resource-action workspace-agent-action" variant="ghost" disabled={!agent.can_inspect} title={agent.can_inspect ? agent.name : `${agent.name}: details are available only to the requester`} onClick={() => onSubagent(agent)}>
-          <AgentAvatar avatar={agent.avatar} /><span><strong>{agent.name}</strong><small className={agent.status === "failed" ? "workspace-status-failed" : agent.status === "waiting" ? "workspace-status-input" : undefined}>{statusText[agent.status] ?? agent.status}{agent.depth > 0 ? " · Nested subagent" : ""}{!agent.can_inspect ? " · Requester-only details" : ""}</small></span><ChevronRight size={15} aria-hidden="true" />
+      <section aria-label="Agents">{heading("Agents", agents.length)}
+        {(agents.length > 8 || agentQuery.length > 0) && <Input className="workspace-agent-search" type="search" aria-label="Filter agents" placeholder="Find an agent…" value={agentQuery} onChange={event => setAgentQuery(event.currentTarget.value)} />}
+        {matchingAgents.map(agent => <div className="workspace-picker-row" key={agent.id}><Button type="button" className="workspace-resource-action workspace-agent-action" variant="ghost" disabled={!agent.can_inspect} title={agent.can_inspect ? agent.name : `${agent.name}: conversation unavailable`} onClick={() => onSubagent(agent)}>
+          <AgentAvatar avatar={agent.avatar} /><span><strong>{agent.name}</strong><small className={agent.status === "failed" ? "workspace-status-failed" : agent.status === "waiting" ? "workspace-status-input" : undefined}>{agent.role === "lead" ? "Lead · " : agent.role === "coordinator" ? "Coordinator · " : ""}{statusText[agent.status] ?? agent.status}{agent.depth > 0 ? " · Nested subagent" : ""}{!agent.can_inspect ? agent.role ? " · Unavailable" : " · Requester-only details" : ""}</small></span><ChevronRight size={15} aria-hidden="true" />
         </Button>{agent.can_inspect && agent.session_id && onSubagentSideChat && <Button type="button" size="icon-sm" variant="ghost" aria-label={`Open ${agent.name} in side chat`} title="Open in side chat" onClick={() => onSubagentSideChat(agent)}><PanelRightOpen size={16} /></Button>}</div>)}
-        {!data.subagents.length && <p className="workspace-picker-empty">Delegated work appears here when subagents start.</p>}
+        {!agents.length && <p className="workspace-picker-empty">Agents appear here when a swarm starts or work is delegated.</p>}
+        {agents.length > 0 && !matchingAgents.length && <p className="workspace-picker-empty">No agents match your search.</p>}
         {data.subagents_limited && <p className="workspace-picker-empty">Showing recent subagent work.</p>}
       </section>
       <section aria-label="Outputs">{heading("Outputs", outputs.length + outputLinks.length, "output")}

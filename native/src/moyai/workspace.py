@@ -18,6 +18,7 @@ from sqlalchemy.orm import load_only
 from .delegation_models import DelegatedSession
 from .links import PR_MENTION, LinkInput, save_link
 from .models import Artifact, Message, Session, SessionLink, SubagentLabel, Turn, Upload, User
+from .swarm_models import SwarmMember, SwarmMission
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -184,6 +185,42 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                     mentioned.append({**item.model_dump(), "origin": "mentioned", "can_remove": False})
         subagents, truncated = await native_subagents(runtime, session_id, turns, user)
         async with runtime.database.sessions() as db:
+            swarm_members = []
+            membership = await db.get(SwarmMember, session_id)
+            if membership is not None:
+                await runtime.database.allowed_session(db, membership.mission_id, user)
+                mission = await db.get(SwarmMission, membership.mission_id, options=[
+                    load_only(SwarmMission.id, SwarmMission.leader_id),
+                ])
+                if mission is None:
+                    raise HTTPException(404, "Swarm not found.")
+                members = (await db.execute(select(SwarmMember, Session).join(
+                    Session, Session.id == SwarmMember.session_id,
+                ).where(SwarmMember.mission_id == mission.id).options(
+                    load_only(SwarmMember.session_id, SwarmMember.name, SwarmMember.position),
+                    load_only(
+                        Session.id, Session.owner_id, Session.visibility, Session.deleted,
+                        Session.status, Session.active_turn, Session.model, Session.created_at,
+                    ),
+                ).order_by(SwarmMember.position))).all()
+                queued = set(await db.scalars(select(Turn.session_id).join(
+                    SwarmMember, SwarmMember.session_id == Turn.session_id,
+                ).where(SwarmMember.mission_id == mission.id, Turn.status == "queued").distinct()))
+                for member, child in members:
+                    inspectable = not child.deleted and (
+                        child.visibility == "shared" or child.owner_id == user.id
+                    )
+                    swarm_members.append({
+                        "id": f"swarm:{child.id}", "parent_id": mission.id,
+                        "session_id": child.id if inspectable else None,
+                        "name": member.name, "avatar": member.position % 4,
+                        "role": "coordinator" if member.position == 0 else
+                        "lead" if child.id == mission.leader_id else "worker",
+                        "status": "deleted" if child.deleted else
+                        "queued" if not child.active_turn and child.id in queued else child.status,
+                        "can_inspect": inspectable, "depth": 0, "started_at": child.created_at,
+                        "model": child.model if inspectable else None,
+                    })
             children = (await db.execute(select(DelegatedSession, Session, Turn.prompt).join(
                 Session, Session.id == DelegatedSession.session_id,
             ).join(
@@ -207,6 +244,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         return {
             "links": attached + mentioned, "files": files, "sources": sources,
             "subagents": subagents, "subagents_limited": truncated or recent_limited,
+            "swarm_members": swarm_members,
         }
 
     @router.get("/api/sessions/{session_id}/subagents/{run_id}")

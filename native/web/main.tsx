@@ -45,7 +45,7 @@ const ProductHistory = React.lazy(() => import("./product-history").then(module 
 const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
 
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
-type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
+type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat" | "chat"; url?: string; child?: { id: string; title: string } }
 
 type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing" }
 type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
@@ -329,6 +329,10 @@ function App() {
         : nativeSelected
         ? <Conversation key={`${scopeKey}:${nativeSelected}`} id={nativeSelected} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refresh} workspaceRequest={workspaceRequest?.sessionId === nativeSelected ? workspaceRequest : null} pullRequests={prStates[nativeSelected] ?? []} onPRUpdated={() => setPrRefresh(value => value + 1)}
           originalSessionId={originalId || undefined} authorityKey={routeScope}
+          onOpenAgentChat={sessionId => {
+            setWorkspaceRequest(previous => ({ sessionId, tab: "chat", sequence: (previous?.sequence ?? 0) + 1 }))
+            location.hash = sessionId; setMobileNav(false)
+          }}
           resolved={nativeRoute?.key === routeKey ? nativeRoute.view : undefined}
           initial={initialConversation?.scope === scopeKey && initialConversation.value.session.id === nativeSelected ? initialConversation.value : undefined}
           onSession={session => { setCurrentSession(session); setInitialConversation(previous => previous?.value.session.id === (session?.id ?? nativeSelected) ? null : previous) }} />
@@ -405,7 +409,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </section></main>
 }
 
-function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAgentChat, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAgentChat?: (sessionId: string) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
   const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : null)
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : [])
   const [plan, setPlan] = useState<Plan[]>([])
@@ -417,7 +421,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const sensitiveVersion = useRef(0)
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
-  const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
+  const [swarmSpace, setSwarmSpace] = useState<boolean | null>(workspaceRequest?.tab === "chat" ? false : null)
   const [hasSubagents, setHasSubagents] = useState(false)
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
@@ -557,7 +561,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   useEffect(() => {
     if (!workspaceRequest || sideMode) return
     setWorkspaceOpen(false)
-    if (workspaceRequest.tab === "computer") dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+    if (workspaceRequest.tab === "chat") setSwarmSpace(false)
+    else if (workspaceRequest.tab === "computer") dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
     else if (workspaceRequest.tab === "side-chat" && workspaceRequest.child) dispatchPanel({ type: "open", tab: {
       id: `side-chat:${workspaceRequest.child.id}`, kind: "side-chat",
       sessionId: workspaceRequest.child.id, title: workspaceRequest.child.title,
@@ -675,7 +680,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
   function openSubagent(agent: Subagent) {
-    if (agent.session_id) { window.location.hash = agent.session_id; return }
+    setWorkspaceOpen(false)
+    if (agent.session_id) {
+      if (agent.session_id === id) setSwarmSpace(false)
+      else if (onOpenAgentChat) onOpenAgentChat(agent.session_id)
+      else window.location.hash = agent.session_id
+      return
+    }
     openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })
   }
   function openOutput(resource: OutputResource, sourceSessionId = id) {

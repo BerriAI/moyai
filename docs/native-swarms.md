@@ -35,7 +35,8 @@ The elected worker lead is the central sun; before the election, the coordinator
 occupies the center. Numbered planets show each member's current status.
 Select a planet to read its assignment, selected model and latest public finding
 or saved reply among the latest 50 board posts, then open its conversation.
-The collapsed **Team updates** feed retains the six latest public updates.
+The collapsed **Team updates** feed retains the latest 50 public updates and
+their complete text, including assignments and human directions.
 Narrow screens and large teams page the orbits so every member stays reachable.
 Updates refresh with the existing three-second mission poll; they are not private
 reasoning or a token stream. Faint connections indicate active work, not messages.
@@ -53,13 +54,20 @@ A finite work window appears as time remaining in the compact swarm header.
 Owners can select that label to change the window; completed or stopped teams
 show the configured duration. Unlimited teams show **No time limit**.
 
-Select a member or reply to open its conversation. **Chat** restores the roster,
-full recent board, and mission conversation without discarding the composer draft.
+**Workspace → Agents** is the single roster for swarm members and ordinary
+subagents. It includes the coordinator, worker lead, current status and links
+to each available conversation; larger lists can be filtered by name or role.
+The same swarm roster is available from any member conversation. Opening an
+agent from Workspace selects its Chat view.
+
+**Chat** shows the conversation and compact team controls, without a separate
+agent grid or board panel. Switching views preserves the composer draft.
+The shared goal and full recent board remain available in **Space**.
 Questions, credential requests, and unsettled effects open the conversation for
 review instead of being hidden behind Space. Team controls remain available in
 both views, subject to the same owner permissions.
 
-The team shares a public board, not a filesystem. Open a member from the roster
+The team shares a public board, not a filesystem. Open a member from Workspace
 to inspect its full answer, activity, files, questions, and computer, or to send
 it a direct instruction. Member conversations retain the mission's visibility.
 Saved artifact links can also be previewed from another conversation in the same

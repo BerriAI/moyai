@@ -183,7 +183,7 @@ test('workspace floats within chat across live ratio changes without resizing it
     assert.deepEqual(box.body, box.chat, 'The floating menu must not reserve chat space');
   }
   assert.deepEqual(await content.locator('section').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))),
-    ['Pull requests', 'Subagents', 'Outputs']);
+    ['Pull requests', 'Agents', 'Outputs']);
   assert(await content.evaluate(element => element.scrollHeight > element.clientHeight), 'One contained scrolling overlay');
 });
 

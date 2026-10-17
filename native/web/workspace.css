@@ -20,6 +20,7 @@
 .workspace-picker .workspace-picker-heading > button { flex: none; height: 26px; width: 26px; min-height: 26px; padding: 0; }
 .workspace-picker .workspace-picker-row { display: flex; align-items: center; min-width: 0; gap: 2px; border-radius: 8px; }
 .workspace-picker .workspace-picker-row:is(:hover, :focus-within) { background: var(--ui-secondary); }
+.workspace-agent-search[data-slot="input"] { margin: 6px 0 8px; width: 100%; font-size: 13px; }
 .workspace-picker .workspace-resource-action {
   display: flex;
   align-items: center;
