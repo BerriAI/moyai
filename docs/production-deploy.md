@@ -181,6 +181,15 @@ recorded intent. Inspect the receipt and actual processes before another action;
 uncertainty does not prove rollback. Retain database backups, both encryption
 keys, object populations and Temporal histories together.
 
+Completed steering inputs use the terminal `included` state. They do not require
+their own workflow checkpoint; their parent turn and any unsettled effects or
+model requests remain independently checked. For older v1 workers, the release
+helper corrects the known terminal-state enumeration inside its maintenance CLI
+process before running status or a guarded control command. It does not edit
+installed files, saved turns or receipts, and rejects unknown maintenance
+contracts. Running an older installed CLI directly retains its original
+classification, so recovery must use the qualified release helper.
+
 Concurrent members have separate intents under `batches[].deployments`. Peers
 already requested can continue replacing after a failure. Inspect every member;
 an unconfirmed POST must not be retried, and a partially staged baseline must not
