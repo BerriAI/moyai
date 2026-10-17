@@ -1,13 +1,12 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
-import { finishOriginalSurface } from './moyai-original-surface'
 
 /** The textured Moyai model, with a bounded render lifecycle owned by the home view. */
 export function mountSculpture(host: HTMLElement | null) {
   if (!host) return () => {}
   let disposed = false, frame = 0, dragging = false, pointer = -1
-  const initialYaw = 0, initialPitch = 0
+  const initialYaw = .6, initialPitch = -.1
   let lastX = 0, lastY = 0, yaw = initialYaw, pitch = initialPitch, velocity = 0
   let renderer: THREE.WebGLRenderer
   try { renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true }) }
@@ -83,7 +82,11 @@ export function mountSculpture(host: HTMLElement | null) {
     else pitch = Math.max(-.65, Math.min(.65, pitch + (e.key === 'ArrowUp' ? -.12 : .12)))
     schedule()
   }
-  function visibility() { velocity = 0; schedule() }
+  function visibility() {
+    velocity = 0
+    host?.classList.toggle('sculpture-floating', visible && !document.hidden && !motion.matches)
+    schedule()
+  }
   function release(object: THREE.Object3D) {
     const textures = new Set<THREE.Texture>()
     const geometries = new Set<THREE.BufferGeometry>(), materials = new Set<THREE.Material>()
@@ -113,10 +116,10 @@ export function mountSculpture(host: HTMLElement | null) {
     canvas.removeEventListener('pointercancel', up); canvas.removeEventListener('keydown', key)
     canvas.removeEventListener('webglcontextlost', lost)
     release(scene)
-    environment.dispose(); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
+    environment.dispose(); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready', 'sculpture-floating')
   }
   function lost(e: Event) { e.preventDefault(); cleanup() }
-  const observer = new IntersectionObserver(entries => { visible = entries[0].isIntersecting; schedule() })
+  const observer = new IntersectionObserver(entries => { visible = entries[0].isIntersecting; visibility() })
   const resizeObserver = new ResizeObserver(resize)
   observer.observe(host); resizeObserver.observe(host)
   canvas.addEventListener('pointerdown', down); canvas.addEventListener('pointermove', move)
@@ -138,7 +141,6 @@ export function mountSculpture(host: HTMLElement | null) {
     gltf.scene.traverse(child => { if (child instanceof THREE.Mesh) meshes.push(child) })
     for (const mesh of meshes) {
       mesh.castShadow = true; mesh.receiveShadow = true
-      finishOriginalSurface(mesh)
     }
     pivot.add(gltf.scene); ready = true; host.append(canvas); host.classList.add('sculpture-ready'); resize()
   }, undefined, cleanup)

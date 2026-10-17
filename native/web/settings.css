@@ -12,24 +12,24 @@
 .native-settings .ns-rail {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 8px;
   min-height: 0;
   min-width: 0;
   padding: 12px 12px 8px;
   background: var(--ui-subtle);
   border-inline-end: 1px solid var(--ui-border);
 }
-.native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 40px; }
 .native-settings .ns-brand-row > .moyai-brand { flex: 1; }
 .native-settings .ns-back { justify-content: flex-start; padding-inline: 8px; color: var(--ui-muted); }
 .native-settings .ns-navigation { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding-bottom: 12px; }
-.native-settings .ns-nav-title { padding: 0 8px 12px; font-size: 16px; font-weight: 450; }
+.native-settings .ns-nav-title { padding: 0 8px 12px; font-size: 11px; font-weight: 400; letter-spacing: .18em; text-transform: uppercase; }
 .native-settings .ns-navigation a { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 7px 8px; border-radius: 7px; color: var(--ui-muted); }
 .native-settings .ns-navigation a svg { flex: none; }
 .native-settings .ns-navigation a:hover { background: var(--ui-secondary); color: var(--ui-foreground); }
 .native-settings .ns-navigation a[aria-current="page"] { background: var(--ui-secondary); color: var(--ui-foreground); font-weight: 500; box-shadow: inset 2px 0 var(--ui-primary); }
 .native-settings .ns-nav-group { margin-top: 20px; }
-.native-settings .ns-nav-group h2 { margin: 0 8px 6px; color: var(--ui-muted); font-size: 11px; font-weight: 500; letter-spacing: .04em; }
+.native-settings .ns-nav-group h2 { margin: 0 8px 6px; color: var(--ui-muted); font-size: 11px; font-weight: 400; letter-spacing: .14em; text-transform: uppercase; }
 .native-settings .ns-account { margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--ui-border); overflow-wrap: anywhere; }
 .native-settings .ns-account small { font-size: 11px; }
 .native-settings .ns-nav-toggle { display: none; }
@@ -129,8 +129,9 @@
 }
 @media (max-width: 850px) {
   .native-settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .native-settings .ns-rail { padding: 12px 20px; border-inline-end: 0; border-bottom: 1px solid var(--ui-border); gap: 8px; }
+  .native-settings .ns-rail { padding: 12px; border-inline-end: 0; border-bottom: 1px solid var(--ui-border); gap: 8px; }
   .native-settings .ns-nav-toggle { display: inline-flex; }
+  .native-settings .ns-brand-row > .sidebar-toggle { display: none; }
   .native-settings .ns-back { align-self: flex-start; }
   .native-settings .ns-navigation { display: none; flex: none; max-height: 50dvh; padding-top: 12px; }
   .native-settings .ns-navigation.open { display: block; }
@@ -138,10 +139,16 @@
   .native-settings .ns-breadcrumb { min-height: 48px; padding: 12px 24px; }
   .native-settings .ns-content { padding: 28px 24px 48px; }
 }
+@media (min-width: 851px) {
+  .native-settings.ns-sidebar-collapsed { grid-template-columns: 52px minmax(0, 1fr); }
+  .native-settings.ns-sidebar-collapsed .ns-rail { padding: 12px 8px 8px; }
+  .native-settings.ns-sidebar-collapsed .ns-rail > :not(.ns-brand-row),
+  .native-settings.ns-sidebar-collapsed .moyai-brand { display: none; }
+  .native-settings.ns-sidebar-collapsed .ns-brand-row { justify-content: center; }
+}
 @media (max-width: 600px) {
   .native-settings-dialog .ns-credential-variable { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .native-settings-dialog .ns-credential-variable > button { justify-self: end; }
-  .native-settings .ns-rail { padding-inline: 16px; }
   .native-settings .ns-content { padding: 24px 16px 40px; }
   .native-settings .ns-breadcrumb { padding-inline: 16px; }
   .native-settings .ns-page-heading { margin-bottom: 24px; }

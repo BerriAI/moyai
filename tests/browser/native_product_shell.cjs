@@ -369,7 +369,7 @@ for(const width of [1440,768,320])test(`space home respects reduced motion and k
   assert.equal(await page.locator('.home-composer').getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
 });
 
-test('reference meteor shaders render front, side and back and restore Home after remount',async t=>{
+test('textured rock renders front, side and back and restores Home after remount',async t=>{
   reset({status:'idle'});
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
   t.after(()=>page.close());
@@ -392,7 +392,7 @@ test('reference meteor shaders render front, side and back and restore Home afte
   await painted();const back=await canvas.screenshot();
   assert.equal(front.equals(side),false);assert.equal(side.equals(back),false);
   await canvas.press('Home');await painted();
-  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the reference view.');
+  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the initial view.');
   await page.getByRole('link',{name:'idle Current native work',exact:true}).click();
   await canvas.waitFor({state:'detached'});
   await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).click();
@@ -401,19 +401,40 @@ test('reference meteor shaders render front, side and back and restore Home afte
   assert.deepEqual(errors,[]);
 });
 
-test('decode animation settles on input and can be paused without losing the draft',async t=>{
-  reset({status:'idle'});const page=await pageFor(t,'');
-  await page.emulateMedia({reducedMotion:'no-preference'});
+test('decode animation plays once and stays settled after editing a draft',async t=>{
+  reset({status:'idle'});
+  const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'no-preference'});
+  t.after(()=>page.close());
+  await page.goto(base+'/');
   await page.waitForFunction(()=>document.querySelector('.decode-headline')?.classList.contains('decoded'));
+  const settled=['> what are we','  working on?▌'];
+  await page.waitForTimeout(4500);
+  assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
+  assert.equal(await page.locator('.home-header').count(),0);
   const input=page.getByRole('textbox',{name:'Message Moyai'});
-  await input.fill('Keep this draft while the headline pauses.');
-  await page.getByRole('button',{name:'Pause headline animation',exact:true}).click();
-  await page.waitForTimeout(2700);
-  assert.equal(await input.innerText(),'Keep this draft while the headline pauses.');
-  assert.deepEqual(await page.locator('.decode-text').allTextContents(),['> what are we','  working on?▌']);
+  await input.fill('Keep this draft.');
+  assert.equal(await input.innerText(),'Keep this draft.');
+  await input.fill('');
+  await page.waitForTimeout(400);
+  assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
   assert.equal(await page.locator('.decode-caret').evaluate(el=>getComputedStyle(el).animationName),'none');
-  await page.getByRole('button',{name:'Resume headline animation',exact:true}).click();
-  assert.equal(await input.innerText(),'Keep this draft while the headline pauses.');
+});
+
+for(const width of [1440,320])test(`selected chat keeps its highlight while actions hide at ${width}px`,async t=>{
+  reset({status:'idle'});const page=await pageFor(t,'#'+sessionId,width);
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  const row=page.locator(`[data-session-key="native:${sessionId}"]`);
+  await row.getByRole('link').click();
+  if(width<760 && !(await row.isVisible()))await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.mouse.move(width-2,2);
+  assert.ok((await row.getAttribute('class')).includes('selected'));
+  assert.notEqual(await row.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)');
+  assert.equal(await row.locator('.session-row-actions').evaluate(el=>getComputedStyle(el).opacity),'0');
+  await row.hover();
+  assert.equal(await row.locator('.session-row-actions').evaluate(el=>getComputedStyle(el).opacity),'1');
+  await row.getByRole('link').press('Tab');
+  await page.mouse.move(width-2,2);
+  assert.equal(await row.locator('.session-row-actions').evaluate(el=>getComputedStyle(el).opacity),'1');
 });
 
 test('sidebar PR icons retain multi-PR selection without numeric badges',async t=>{
@@ -771,12 +792,48 @@ for(const recovery of ['retry','skip'])test(`home connection failures support ${
   assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,recovery==='retry'?['organization']:[]);
 });
 
-test('home and Settings share the same wordmark position and typography',async t=>{
-  reset();const page=await pageFor(t,'');
+for(const width of [1440,768])test(`sidebar collapses to an accessible rail without losing drafts at ${width}px`,async t=>{
+  reset({status:'idle'});const page=await pageFor(t,'',width);
+  const draft=page.getByRole('textbox',{name:'Message Moyai'}), sidebar=page.locator('.app > .sidebar');
+  await draft.fill('Keep this draft while I hide the sidebar.');
+  const expanded=await sidebar.boundingBox();
+  await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+  const reopen=page.getByRole('button',{name:'Open sidebar',exact:true});
+  assert.equal((await sidebar.boundingBox()).width,52);
+  assert.equal(await reopen.getAttribute('aria-expanded'),'false');
+  assert.equal(await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).isVisible(),false);
+  assert.equal(await draft.innerText(),'Keep this draft while I hide the sidebar.');
+  assert.equal(await reopen.evaluate(el=>el===document.activeElement),true);
+  await reopen.press('Enter');
+  assert.equal((await sidebar.boundingBox()).width,expanded.width);
+  assert.equal(await draft.innerText(),'Keep this draft while I hide the sidebar.');
+  if(width>850) {
+    await page.getByRole('button',{name:'Settings',exact:true}).click();
+    await page.getByRole('heading',{name:'Settings',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+    assert.equal((await page.locator('.ns-rail').boundingBox()).width,52);
+    assert.equal(await page.getByRole('button',{name:'Back to workspace',exact:true}).isVisible(),false);
+    await page.getByRole('button',{name:'Open sidebar',exact:true}).press('Enter');
+    assert.equal((await page.locator('.ns-rail').boundingBox()).width,expanded.width);
+    await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+    await draft.waitFor();
+  }
+  await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+  await page.setViewportSize({width:320,height:1000});
+  await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).isVisible(),true);
+  assert.equal(await page.getByRole('button',{name:'Open sidebar',exact:true}).isVisible(),false);
+  await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  assert.equal(await sidebar.isVisible(),false);
+});
+
+for(const width of [1440,768,320])test(`home and Settings share the same wordmark position and typography at ${width}px`,async t=>{
+  reset();const page=await pageFor(t,'',width);
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
   const brand=page.locator('.moyai-brand');await brand.waitFor();await page.evaluate(()=>document.fonts.ready);
   const metrics=()=>brand.evaluate(el=>{
-    const bounds=el.getBoundingClientRect(), style=getComputedStyle(el), subtitle=getComputedStyle(el.querySelector('small'));
-    return {x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,font:style.font,spacing:style.letterSpacing,transform:style.textTransform,subtitle:subtitle.font};
+    const bounds=el.querySelector('span').getBoundingClientRect(), style=getComputedStyle(el), subtitle=getComputedStyle(el.querySelector('small'));
+    return {x:bounds.x,y:bounds.y,height:bounds.height,font:style.font,spacing:style.letterSpacing,transform:style.textTransform,subtitle:subtitle.font};
   });
   const home=await metrics();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
@@ -835,6 +892,7 @@ for(const width of [1440,768,320])test(`unified sidebar routes history and limit
   await row.waitFor();assert.equal(await row.locator('a').getAttribute('href'),'#run='+legacyId);
   assert.equal(await row.locator('a').getAttribute('aria-current'),'page');
   assert.equal(await row.getByRole('button').count(),1);
+  await row.hover();
   await row.getByRole('button',{name:'Session actions for Saved earlier investigation'}).click();
   const menu=page.getByRole('menu',{name:'Session actions for Saved earlier investigation'});
   assert.deepEqual(await menu.getByRole('menuitem').allTextContents(),['Open history','Copy session link']);

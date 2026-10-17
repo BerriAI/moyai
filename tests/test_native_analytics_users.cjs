@@ -165,8 +165,8 @@ test('methodology remains available but collapsed once, outside the compact row'
   assert.equal((html.match(/<details\b/g) || []).length, 1);
   assert.doesNotMatch(html, /<details\b[^>]*\bopen(?:=|>|\s)/);
   assert.match(html, /Coverage and calculations/);
-  assert.match(html, /Only authoritative response amounts are included/);
-  assert.match(html, /Authoritative linked-session cost per verified merge/);
+  assert.doesNotMatch(html, /Only authoritative response amounts are included/);
+  assert.match(html, /Cost per merged PR uses spend from sessions linked to merged PRs/);
 });
 
 test('one search filters usage and PR columns together by genuine identity fields', () => {

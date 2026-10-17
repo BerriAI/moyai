@@ -415,7 +415,7 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             ))
             return {"secrets": [secret_view(row, user) for row in rows],
                     "capabilities": capabilities(user)["secrets"],
-                    "reason": "Values are encrypted and never returned. Agent access is not enabled."}
+                    "reason": ""}
 
     @router.post("/secrets", status_code=201)
     async def create_secret(body: SecretInput, user: User = Depends(actor)):

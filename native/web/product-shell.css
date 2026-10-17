@@ -6,13 +6,13 @@
 .login-password label { display: grid; gap: 8px; }
 .live-action > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
 .live-action > button { margin-inline-start: auto; flex-shrink: 0; }
-.restore-sidebar { position: fixed; z-index: 45; inset: 8px auto auto 8px; }
 @media (min-width: 601px) {
-  .app.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
-  .app.sidebar-collapsed > .sidebar { display: none; }
-  .sidebar-collapsed .topbar { padding-inline-start: 48px; }
+  .app.sidebar-collapsed:not(.settings-open) { grid-template-columns: 52px minmax(0, 1fr); }
+  .app.sidebar-collapsed > .sidebar { padding: 12px 8px 8px; }
+  .app.sidebar-collapsed > .sidebar > :not(.sidebar-brand-row),
+  .app.sidebar-collapsed > .sidebar .moyai-brand { display: none; }
+  .app.sidebar-collapsed .sidebar-brand-row { justify-content: center; }
 }
 @media (max-width: 600px) {
-  .restore-sidebar { display: none; }
   .login-password input { font-size: 16px; }
 }

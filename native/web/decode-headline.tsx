@@ -21,23 +21,24 @@ export const DecodeHeadline = memo(function DecodeHeadline({ paused }: { paused:
   const root = useRef<HTMLHeadingElement>(null)
   const [frame, setFrame] = useState(() => paused || matchMedia("(prefers-reduced-motion: reduce)").matches
     ? finished : decodeFrame(0))
+  const completed = useRef(frame.done)
+  const tick = useRef(0)
 
   useEffect(() => {
     const motion = matchMedia("(prefers-reduced-motion: reduce)")
     let timer: ReturnType<typeof setTimeout> | undefined
-    let visible = false, tick = 0
+    let visible = false
     const stop = () => clearTimeout(timer)
     const step = () => {
-      const next = decodeFrame(tick++)
+      const next = decodeFrame(tick.current++)
       setFrame(next)
-      if (next.done) tick = 0
-      timer = setTimeout(step, next.done ? 2400 : 60)
+      completed.current = next.done
+      if (!next.done) timer = setTimeout(step, 60)
     }
     const sync = () => {
       stop()
-      if (paused || motion.matches) { setFrame(finished); return }
-      if (document.hidden || !visible) return
-      tick = 0
+      if (paused || motion.matches) { completed.current = true; setFrame(finished); return }
+      if (completed.current || document.hidden || !visible) return
       step()
     }
     const observer = new IntersectionObserver(entries => {

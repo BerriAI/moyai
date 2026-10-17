@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useR
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -13,11 +13,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
-import logo from "./assets/moyai-logo.png"
+import logo from "./assets/moyai-meteor-poster.webp"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { Home } from "./home"
-import { MoyaiBrand } from "./brand"
+import { MoyaiBrand, SidebarToggle } from "./brand"
 import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
@@ -295,7 +295,7 @@ function App() {
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
     {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-      <MoyaiBrand />
+      <div className="sidebar-brand-row"><MoyaiBrand /><SidebarToggle collapsed={sidebarHidden} onToggle={toggleSidebar} /></div>
       <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <Button variant="ghost" className="rail-palette-trigger" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={16} /><span>Search sessions & commands</span><span className="key-hint">⌘K</span></Button>
       <span className="rail-section-label">Workspace</span>
@@ -322,10 +322,9 @@ function App() {
     </aside>}
     <main className="main">
       {!settingsOpen && <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>}
-      {!settingsOpen && sidebarHidden && <Button className="restore-sidebar" variant="outline" size="icon-sm" aria-label="Show sidebar" onClick={() => setSidebarHidden(false)}><PanelLeft size={16} /></Button>}
       {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
       {settingsOpen
-        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} /></React.Suspense>
+        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} sidebarCollapsed={sidebarHidden} onToggleSidebar={toggleSidebar} /></React.Suspense>
         : historical && !nativeSelected
         ? <React.Suspense fallback={<div className="center muted">Opening saved history…</div>}><ProductHistory key={`${routeScope}:${selected}`} sessionId={originalId} scopeKey={routeScope} onOpenSession={openHistorySession} onStartNewNative={newSession} /></React.Suspense>
         : nativeSelected

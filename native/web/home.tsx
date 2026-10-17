@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUp, Globe, LockKeyhole, Pause, Play } from "lucide-react"
+import { ArrowUp, Globe, LockKeyhole } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -25,7 +25,6 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   onCreated: () => Promise<void>; onStarted: (conversation: NewConversation) => void
 }) {
   const [draft, setDraft] = useState("")
-  const [animateHeadline, setAnimateHeadline] = useState(true)
   const [model, setModel] = useState(defaultModel)
   const [privateSession, setPrivateSession] = useState(false)
   const isPrivate = individual && privateSession
@@ -92,15 +91,11 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
     {fileDrop.dragging && <FileDropOverlay />}
-    <div className="home-header"><span className="home-crumb">NEW SESSION</span><div className="home-header-actions">
-      <Button type="button" variant="ghost" size="icon-sm" aria-label={animateHeadline ? "Pause headline animation" : "Resume headline animation"} aria-pressed={!animateHeadline} onClick={() => setAnimateHeadline(value => !value)}>{animateHeadline ? <Pause size={13} /> : <Play size={13} />}</Button>
-      <span className="home-visibility">{isPrivate ? "Private" : "Public"}</span>
-    </div></div>
     <SpaceBackdrop />
     <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
     <div className="home-content">
       <p className="home-eyebrow">A space for your next big idea</p>
-      <DecodeHeadline paused={!animateHeadline || busy || Boolean(draft)} />
+      <DecodeHeadline paused={busy || Boolean(draft)} />
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         {error && <p className="error" role="alert">{error}</p>}
         {productMode === "existing" && catalog.scope === accountScope && catalog.error && !skipAccounts && <div className="home-connection-error" role="alert">

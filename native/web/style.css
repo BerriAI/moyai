@@ -1,3 +1,4 @@
+@font-face { font-family: "Manrope"; src: url("./assets/fonts/manrope-variable.ttf") format("truetype"); font-weight: 200 800; font-style: normal; font-display: swap; }
 @font-face { font-family: "Share Tech Mono"; src: url("./assets/fonts/share-tech-mono.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; }
 @layer base {
   *, ::before, ::after { border: 0 solid var(--ui-border); }
@@ -15,7 +16,7 @@ h2 { font-size: 22px; font-weight: 500; }
 h3 { font-size: 16px; font-weight: 550; }
 input, textarea { color: var(--ui-foreground); }
 label { display: grid; gap: 8px; }
-pre, code { font-family: var(--ui-font); font-size: 12px; }
+pre, code { font-family: var(--ui-font-mono); font-size: 12px; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; }
 small { display: block; color: var(--ui-muted); font-size: 12px; font-weight: 400; }
 fieldset { border: 0; padding: 0; margin: 20px 0; min-width: 0; }
@@ -40,7 +41,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .session-indicator.working { background: var(--ui-success); }
 .session-indicator.waiting { background: var(--ui-warning); }
 .session-row .session-menu-trigger { opacity: 0; }
-.session-row:hover .session-menu-trigger, .session-row:focus-within .session-menu-trigger, .session-row.selected .session-menu-trigger { opacity: 1; }
+.session-row:hover .session-menu-trigger, .session-row:has(:focus-visible) .session-menu-trigger { opacity: 1; }
 .session-row a:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
 .rail-caption > div, .session-group-heading { display: flex; align-items: center; min-width: 0; }
 .session-group { margin-bottom: 12px; }

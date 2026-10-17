@@ -6,6 +6,7 @@
   min-width: 0;
   gap: 8px;
   padding-inline: 6px;
+  font-family: var(--ui-font-mono);
   font-size: 18px;
   line-height: 1.25;
   font-weight: 400;
@@ -14,6 +15,10 @@
 }
 .moyai-brand small { margin-top: 0; line-height: 16px; font-size: 10px; letter-spacing: .14em; }
 .moyai-brand:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; border-radius: 4px; }
+.sidebar-brand-row { display: flex; align-items: center; gap: 4px; min-height: 40px; }
+.sidebar-brand-row > .moyai-brand { flex: 1; }
+.sidebar-toggle { flex: none; color: var(--ui-muted); }
+@media (max-width: 600px) { .sidebar > .sidebar-brand-row > .sidebar-toggle { display: none; } }
 @media (hover: none), (pointer: coarse), (max-width: 600px) {
   .moyai-brand { min-height: 44px; }
 }

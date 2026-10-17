@@ -11,11 +11,11 @@ import { api, ApiError, csrfToken } from "./api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
-import { MoyaiBrand } from "./brand"
+import { MoyaiBrand, SidebarToggle } from "./brand"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
-type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void }
+type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void; sidebarCollapsed: boolean; onToggleSidebar: () => void }
 type Capabilities = { read?: boolean; create?: boolean; update?: boolean; delete?: boolean; roles?: boolean; preferences?: boolean; review?: boolean; reason?: string; runtime_available?: boolean; shared?: boolean; run?: boolean; agent_access?: boolean }
 type Collection = { capabilities?: Capabilities; reason?: string }
 type Skill = { id: string; name: string; description: string; content: string; scope: string; enabled: boolean; editable: boolean; updated_at?: string }
@@ -247,8 +247,7 @@ function SecretsPage({ user }: { user: SettingsUser }) {
   return <LoadState resource={resource}>{data => {
     const rows = data.secrets.filter(row => contains(search, row.name, row.description) && (scope === "all" || row.scope === scope))
     const editable = (row: Secret) => row.editable !== false && (row.scope === "personal" || user.role === "admin")
-    return <><p className="ns-notice"><Shield size={16} />Secret values are never returned to this page. Enter a new value only to replace one.</p><CapabilityNote {...data} />
-      {data.capabilities?.agent_access === false && <p className="ns-muted">Saved secrets are not automatically passed to the agent. Use Connections for supported services.</p>}
+    return <><p className="ns-notice"><Shield size={16} />Saved secrets are encrypted and are not automatically passed to the agent. Use Connections for supported services.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Secret scope" value={scope} onChange={setScope} options={scopeOptions.filter(item => item.value !== "bundled")} />}
         action={data.capabilities?.create && <Button onClick={() => setEditor("new")}><Plus />Add secret</Button>} />
       {rows.length ? <RecordTable label="Saved secrets" headings={["Name", "Scope", "Value", "Updated", "Actions"]}>{rows.map(row => <TableRow key={row.id}>
@@ -906,7 +905,7 @@ function SettingsLink({ page, navigate, children, ...props }: { page: string; na
   }}>{children}</a>
 }
 
-export function SettingsPage({ user, page, productMode = "standalone", onNavigate, onBack }: SettingsPageProps) {
+export function SettingsPage({ user, page, productMode = "standalone", onNavigate, onBack, sidebarCollapsed, onToggleSidebar }: SettingsPageProps) {
   const current = !page || page === "settings" ? "overview" : page === "spend" ? "usage" : page
   const destination = destinations.find(item => item.id === current)
   const [navOpen, setNavOpen] = useState(false)
@@ -922,10 +921,10 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
   }, [current, title])
   const navigate = (value: string) => { setNavOpen(false); onNavigate(value) }
   const navLink = (value: string, label: string, icon: React.ReactNode) => <SettingsLink page={value} navigate={navigate} aria-current={current === value ? "page" : undefined}>{icon}<span>{label}</span></SettingsLink>
-  return <div className="native-settings">
+  return <div className={`native-settings ${sidebarCollapsed ? "ns-sidebar-collapsed" : ""}`}>
     <a className="ns-skip" href="#native-settings-content" onClick={event => { event.preventDefault(); heading.current?.focus() }}>Skip to settings content</a>
     <aside className="ns-rail">
-      <div className="ns-brand-row"><MoyaiBrand onClick={event => { if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onBack() } }} /><Button className="ns-nav-toggle" size="icon" variant="ghost" aria-label="Toggle settings navigation" aria-expanded={navOpen} aria-controls="native-settings-navigation" onClick={() => setNavOpen(value => !value)}><Menu /></Button></div>
+      <div className="ns-brand-row"><MoyaiBrand onClick={event => { if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onBack() } }} /><SidebarToggle collapsed={sidebarCollapsed} onToggle={onToggleSidebar} /><Button className="ns-nav-toggle" size="icon" variant="ghost" aria-label="Toggle settings navigation" aria-expanded={navOpen} aria-controls="native-settings-navigation" onClick={() => setNavOpen(value => !value)}><Menu /></Button></div>
       <Button className="ns-back" variant="ghost" onClick={onBack}><ArrowLeft size={16} />Back to workspace</Button>
       <nav id="native-settings-navigation" className={navOpen ? "ns-navigation open" : "ns-navigation"} aria-label="Settings">
         <p className="ns-nav-title">Settings</p>{navLink("overview", "Overview", <LayoutGrid size={17} aria-hidden="true" />)}
