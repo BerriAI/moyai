@@ -1,5 +1,3 @@
-.home-mode-options { display: flex; justify-content: center; width: max-content; max-width: 100%; gap: 4px; margin: 0 auto 16px; padding: 4px; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-subtle); }
-.home-mode-options > button { min-width: 76px; }
 .swarm-setup { min-width: 0; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 12px; padding: 20px; margin: 0 0 20px; }
 .swarm-setup legend { float: left; width: 100%; padding: 0; margin: 0 0 16px; font-size: 14px; line-height: 20px; font-weight: 500; }
 .swarm-setup p { margin: 16px 0 0; font-size: 13px; line-height: 20px; }

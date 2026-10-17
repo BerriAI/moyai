@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUp, ArrowUpRight, Code2, Pause, Play, Search, Sparkles } from "lucide-react"
+import { ArrowUp, Globe, LockKeyhole, Pause, Play } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { DecodeHeadline } from "./decode-headline"
 import { SpaceBackdrop } from "./space-backdrop"
@@ -11,7 +10,6 @@ import meteorPoster from "./assets/moyai-meteor-poster.webp"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { NewConversation, Session, Turn } from "./conversation-state"
-import { SwarmSetup, validWorkerCount, type SwarmOptions } from "./swarm"
 
 type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
 export function homeSubmission(prompt: string, model: string, privateSession: boolean, attachments: string[], selected: string[], available: HomeConnection[]) {
@@ -28,8 +26,6 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 }) {
   const [draft, setDraft] = useState("")
   const [animateHeadline, setAnimateHeadline] = useState(true)
-  const [swarmMode, setSwarmMode] = useState(false)
-  const [swarm, setSwarm] = useState<SwarmOptions>({ workers: 20, budget_seconds: 0, worker_models: [] })
   const [model, setModel] = useState(defaultModel)
   const [privateSession, setPrivateSession] = useState(false)
   const isPrivate = individual && privateSession
@@ -37,19 +33,15 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   const [error, setError] = useState("")
   const pictures = useAttachments(setError)
   const fileDrop = useFileDrop(pictures.add, setError, busy)
-  const [selectedAccounts, setSelectedAccounts] = useState<string[]>([])
-  const selectedNow = useRef(selectedAccounts)
-  selectedNow.current = selectedAccounts
-  const accountsInitialized = useRef(false)
-  const [accountsVersion, setAccountsVersion] = useState(0), [accountNotice, setAccountNotice] = useState("")
-  const [skipAccounts, setSkipAccounts] = useState(false)
+  const [accountsVersion, setAccountsVersion] = useState(0)
+  const [skippedScope, setSkippedScope] = useState("")
   const [catalog, setCatalog] = useState<{ scope: string; rows: HomeConnection[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
   const accountScope = `${isPrivate ? "private" : "shared"}:${connectionVersion}:${accountsVersion}`
   const accounts = catalog.scope === accountScope ? catalog.rows : []
-  const accountsReady = productMode !== "existing" || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error
-    && !accountNotice && selectedAccounts.every(id => accounts.some(row => row.id === id && row.enabled && (isPrivate || row.shared))))
+  const skipAccounts = skippedScope === accountScope
+  const selectedAccounts = skipAccounts ? [] : accounts.map(row => row.id)
+  const accountsReady = productMode !== "existing" || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error)
   const sculpture = useRef<HTMLDivElement>(null)
-  const input = useRef<HTMLDivElement>(null)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
   const mounted = useRef(true)
@@ -71,9 +63,6 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     void api<HomeConnection[]>(`/connections?shared=${!isPrivate}`, "GET", undefined, controller.signal).then(rows => {
       if (controller.signal.aborted) return
       const eligible = rows.filter(row => row.enabled && (isPrivate || row.shared))
-      const next = accountsInitialized.current ? selectedNow.current.filter(id => eligible.some(row => row.id === id)) : eligible.map(row => row.id)
-      if (accountsInitialized.current && next.length !== selectedNow.current.length) setAccountNotice("Account access changed. Review your selections before starting this session.")
-      accountsInitialized.current = true; selectedNow.current = next; setSelectedAccounts(next)
       setCatalog({ scope, rows: eligible, loading: false, error: "" })
     }, reason => { if (!controller.signal.aborted) setCatalog({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
@@ -81,23 +70,13 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 
   async function send(prompt = draft) {
     if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!prompt.trim() && !pictures.files.length)) return
-    if (swarmMode && !validWorkerCount(swarm.workers)) return
     submitting.current = true
     setBusy(true); setError("")
     const auth = csrfToken(), attachments = pictures.readyFiles
     try {
       const submission = homeSubmission(prompt, model, isPrivate, attachments.map(file => file.id), selectedAccounts, accounts)
-      const signature = JSON.stringify([submission.signature, swarmMode ? swarm : null])
+      const signature = submission.signature
       if (admission.current?.signature !== signature) admission.current = { signature, request: crypto.randomUUID() }
-      if (swarmMode) {
-        const result = await api<{ session: Session; turn: Turn }>("/swarms", "POST", {
-          ...submission.body, ...swarm, visibility: submission.visibility, request_key: admission.current.request,
-        })
-        if (!mounted.current || csrfToken() !== auth) return
-        onStarted({ ...result, prompt, attachments })
-        await onCreated()
-        return
-      }
       if (!admission.current.session) {
         admission.current.session = await api<Session>("/sessions", "POST", { model, visibility: submission.visibility })
       }
@@ -115,51 +94,43 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     {fileDrop.dragging && <FileDropOverlay />}
     <div className="home-header"><span className="home-crumb">NEW SESSION</span><div className="home-header-actions">
       <Button type="button" variant="ghost" size="icon-sm" aria-label={animateHeadline ? "Pause headline animation" : "Resume headline animation"} aria-pressed={!animateHeadline} onClick={() => setAnimateHeadline(value => !value)}>{animateHeadline ? <Pause size={13} /> : <Play size={13} />}</Button>
-      <span className="home-visibility">{isPrivate ? "Private" : "Shared"}</span>
+      <span className="home-visibility">{isPrivate ? "Private" : "Public"}</span>
     </div></div>
     <SpaceBackdrop />
     <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
     <div className="home-content">
       <p className="home-eyebrow">A space for your next big idea</p>
       <DecodeHeadline paused={!animateHeadline || busy || Boolean(draft)} />
-      <div className="home-mode-options" aria-label="Session mode">
-        <Button type="button" variant={!swarmMode ? "secondary" : "ghost"} aria-pressed={!swarmMode} disabled={busy} onClick={() => setSwarmMode(false)}>Chat</Button>
-        <Button type="button" variant={swarmMode ? "secondary" : "ghost"} aria-pressed={swarmMode} disabled={busy} onClick={() => setSwarmMode(true)}>Swarm</Button>
-      </div>
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
-        {swarmMode && <SwarmSetup value={swarm} onChange={setSwarm} models={models} disabled={busy} />}
-        <label className="check-label home-privacy"><Checkbox checked={isPrivate} disabled={!individual || busy} onCheckedChange={value => { setSkipAccounts(false); setPrivateSession(Boolean(value)) }} />Private session · Only you</label>
-        {!individual && <p className="home-privacy-hint">This shared sign-in creates shared sessions. Use an individual sign-in for private work.</p>}
-        <p className="home-privacy-hint">{isPrivate ? "Your conversation, files and computer stay private." : "Workspace members can see messages, images, files and the computer, including browser sign-ins, and take turns controlling it."}</p>
         {error && <p className="error" role="alert">{error}</p>}
+        {productMode === "existing" && catalog.scope === accountScope && catalog.error && !skipAccounts && <div className="home-connection-error" role="alert">
+          <span className="error">{catalog.error}</span>
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setAccountsVersion(value => value + 1)}>Retry connections</Button>
+          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setSkippedScope(accountScope)}>Continue without connections</Button>
+        </div>}
         <div className="composer home-composer">
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <SkillComposer ref={input} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
+          <SkillComposer value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
           <div className="composer-actions">
-            <AttachButton add={pictures.add} disabled={busy} />
+            <div className="home-composer-tools">
+              <AttachButton add={pictures.add} disabled={busy} compact />
+              <Button type="button" variant="ghost" size="sm" className="home-privacy-toggle" aria-label="Private session" aria-pressed={isPrivate} disabled={!individual || busy}
+                title={!individual ? "Private sessions require an individual sign-in." : isPrivate ? "Private · Only you. Click to share with your workspace." : "Public · Shared with your workspace. Click to make private."}
+                onClick={() => { setSkippedScope(""); setPrivateSession(value => !value) }}>
+                {isPrivate ? <LockKeyhole /> : <Globe />}{isPrivate ? "Private" : "Public"}
+              </Button>
+            </div>
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>
-              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (swarmMode && !validWorkerCount(swarm.workers)) || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
+              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
             </div>
           </div>
         </div>
-        {productMode === "existing" && <details className="account-selection"><summary>Context & connections · {selectedAccounts.length} selected</summary>
-          {(catalog.scope !== accountScope || catalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
-          {catalog.error && <p className="error" role="alert">{catalog.error}<Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setSkipAccounts(false); setAccountsVersion(value => value + 1) }}>Retry accounts</Button><Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => { accountsInitialized.current = true; selectedNow.current = []; setSelectedAccounts([]); setAccountNotice(""); setSkipAccounts(true) }}>Use no accounts for this session</Button></p>}
-          {accountNotice && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Selections reviewed</Button></p>}
-          <div className="connection-options">{accounts.map(account => <label key={account.id}><Checkbox disabled={busy} checked={selectedAccounts.includes(account.id)} onCheckedChange={checked => {
-            const next = checked ? [...new Set([...selectedNow.current, account.id])] : selectedNow.current.filter(id => id !== account.id)
-            accountsInitialized.current = true; selectedNow.current = next; setSelectedAccounts(next); setAccountNotice(""); setSkipAccounts(false)
-          }} />{account.name}<span className="muted">{account.read_only ? "Read only" : "Can make changes"}</span></label>)}</div>
-          {!catalog.loading && !catalog.error && !accounts.length && <p className="muted">No accounts are available for this session. <a href="#settings/connections">Manage Connections</a>.</p>}
-          {skipAccounts && <p className="muted" role="status">This session will start without connected accounts.</p>}
-        </details>}
-        <div className="home-composer-hint"><span>{pictures.uploading ? "Uploading files…" : "Your own cloud workspace"}</span><span>Drop files or paste images · Enter to send</span></div>
+        <div className="home-composer-hint">
+          {pictures.uploading && <span role="status">Uploading files…</span>}
+          {productMode === "existing" && !accountsReady && !catalog.error && <span role="status">Loading connections…</span>}
+          <span>Drop files or paste images · Enter to send</span>
+        </div>
       </form>
-      <div className="suggestions">{[
-        { icon: Search, title: "Investigate a bug", detail: "Find the signal in the noise.", prompt: "Help me investigate a bug. " },
-        { icon: Code2, title: "Explore a codebase", detail: "Get the lay of the land.", prompt: "Help me explore a codebase. " },
-        { icon: Sparkles, title: "Build something", detail: "Turn an idea into working software.", prompt: "Help me build " },
-      ].map(item => <button key={item.title} type="button" onClick={() => { setDraft(item.prompt); input.current?.focus() }}><item.icon size={19} /><span>{item.title}<small>{item.detail}</small></span><ArrowUpRight size={15} /></button>)}</div>
     </div>
   </section>
 }

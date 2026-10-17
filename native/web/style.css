@@ -26,8 +26,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .app.settings-open { grid-template-columns: minmax(0, 1fr); }
 .panel-body:has(> .pr-view) { padding: 0; }
 .sidebar { background: var(--ui-subtle); border-right: 1px solid var(--ui-border); display: flex; flex-direction: column; gap: 20px; padding: 24px 16px 12px; min-height: 0; }
-.brand { display: flex; gap: 12px; align-items: center; font-size: 22px; font-weight: 500; padding: 0 8px; }
-.brand img { width: 36px; height: 36px; object-fit: contain; }
 .new-chat { min-height: 44px; justify-content: flex-start; border: 1px solid var(--ui-control-border); }
 .rail-caption { display: flex; align-items: center; justify-content: space-between; color: var(--ui-muted); padding-left: 10px; margin-bottom: -12px; font-size: 12px; }
 .session-list { overflow: auto; flex: 1; min-height: 0; scrollbar-gutter: stable; padding-right: 6px; }
@@ -175,7 +173,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .connection-row > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .mobile-menu { display: none; }
 .key-hint { margin-left: auto; color: var(--ui-muted); font-size: 11px; white-space: nowrap; }
-.brand small { font-size: 11px; margin-top: -3px; }
 .rail-caption { padding-top: 20px; border-top: 1px solid var(--ui-border); }
 .rail-caption > span { display: flex; gap: 12px; align-items: center; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

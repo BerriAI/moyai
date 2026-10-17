@@ -26,7 +26,7 @@ function Fixture() {
   const [space, setSpace] = useState(false);
   window.swarmFixture = { setId, setSpace };
   if (location.search === '?home') return <Home models={['test-model']} defaultModel="test-model"
-    onCreated={async () => {}} onStarted={value => { window.startedSwarm = value; }} />;
+    onCreated={async () => {}} onStarted={value => { window.startedConversation = value; }} />;
   return <main>
     <SwarmSetup value={options} onChange={setOptions} models={['openai/test','anthropic/test']} disabled={false} />
     <output aria-label="Selected workers">{options.workers}</output>
@@ -136,29 +136,24 @@ test("custom worker counts accept whole numbers and preserve invalid drafts for 
   }
 });
 
-test("home sends exactly the typed count and blocks invalid counts through Enter and Send", async t => {
+test("home starts a normal conversation for a request to create a swarm", async t => {
   const writes = [];
   const page = await pageFor(t, 1440, async route => {
-    if (route.request().method() === "POST") writes.push(route.request().postDataJSON());
-    await route.fulfill({ json: { session: { id: "created-team" }, turn: { id: "initial-turn" } } });
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (request.method() === "POST") writes.push({ path, body: request.postDataJSON() });
+    await route.fulfill({ json: path === "/api/sessions" ? { id: "created-chat" } : { id: "initial-turn" } });
   });
   await page.goto(address + "?home");
-  await page.getByRole("button", { name: "Swarm", exact: true }).click();
-  const input = page.getByRole("spinbutton", { name: "Swarm workers", exact: true });
+  assert.equal(await page.getByRole("button", { name: "Swarm", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("spinbutton", { name: "Swarm workers", exact: true }).count(), 0);
   const prompt = page.getByRole("textbox", { name: "Message Moyai", exact: true });
-  await prompt.fill("Verify a larger team roster.");
-  for (const value of ["", "0", "1", "-1", "2.5"]) {
-    await input.fill(value);
-    assert.equal(await page.getByRole("button", { name: "Send message", exact: true }).isEnabled(), false);
-    await prompt.press("Enter");
-  }
-  assert.equal(writes.length, 0);
-  await input.fill("21");
-  await page.getByRole("button", { name: "Send message", exact: true }).click();
-  await page.waitForFunction(() => Boolean(window.startedSwarm));
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].workers, 21);
-  assert.equal(writes[0].prompt, "Verify a larger team roster.");
+  await prompt.fill("Create a swarm with 21 workers to investigate this bug.");
+  await prompt.press("Enter");
+  await page.waitForFunction(() => Boolean(window.startedConversation));
+  assert.deepEqual(writes.map(row => row.path), ["/api/sessions", "/api/sessions/created-chat/messages"]);
+  assert.equal(writes[0].body.visibility, "shared");
+  assert.equal(writes[1].body.prompt, "Create a swarm with 21 workers to investigate this bug.");
+  assert.equal(writes[1].body.workers, undefined);
 });
 
 for (const width of [1440, 768, 320]) {

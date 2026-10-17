@@ -4,19 +4,6 @@
   padding: 12px 12px 8px;
 }
 
-.sidebar > .brand {
-  min-height: 40px;
-  gap: 8px;
-  padding-inline: 6px;
-  font-size: 18px;
-  line-height: 1.25;
-  justify-content: space-between;
-  font-weight: 400;
-  letter-spacing: .18em;
-  text-transform: uppercase;
-}
-.sidebar > .brand img { width: 32px; height: 32px; }
-.sidebar > .brand small { margin-top: 0; line-height: 16px; font-size: 10px; letter-spacing: .14em; }
 .sidebar > .new-chat { border: 0; border-radius: 9px; }
 .sidebar .rail-section-label { margin: 12px 10px 0; color: var(--ui-muted); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; }
 .sidebar .rail-palette-trigger { border: 1px solid var(--ui-border); border-radius: 9px; min-height: 36px; }
@@ -272,7 +259,6 @@
   .sidebar .session-parent > a { padding-inline-start: 48px; }
   .sidebar .session-parent .session-row-meta { padding-inline-start: 61px; }
   .sidebar .session-children { padding-inline-start: 52px; }
-  .sidebar > .brand,
   .sidebar > .new-chat,
   .sidebar > .rail-button { height: 44px; min-height: 44px; }
   .sidebar > .account > button,

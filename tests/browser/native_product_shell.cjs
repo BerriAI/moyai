@@ -29,7 +29,10 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.mode});
   if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;return json(session('c'.repeat(32)));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
-  if(url.pathname==='/api/connections')return json(state.connectionsBySession?.[url.searchParams.get('session_id')]||state.connections||[]);
+  if(url.pathname==='/api/connections') {
+    if(state.connectionError && url.searchParams.has('shared'))return json({detail:'Connections temporarily unavailable.'},503);
+    return json(state.connectionsBySession?.[url.searchParams.get('session_id')]||state.connections||[]);
+  }
   if(url.pathname==='/api/session-folders')return json([]);
   if(url.pathname==='/api/pull-requests/statuses')return json(state.prStatuses||{});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
@@ -359,8 +362,11 @@ for(const width of [1440,768,320])test(`space home respects reduced motion and k
   await page.getByRole('textbox',{name:'Message Moyai'}).fill('A draft that must survive animation.');
   assert.equal(await page.locator('.decode-headline').evaluate(el=>el.getBoundingClientRect().height),geometry.height);
   assert.equal(await page.locator('.home').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
-  assert.equal(await page.getByRole('checkbox',{name:'Private session · Only you',exact:true}).isVisible(),true);
-  assert.equal(await page.getByRole('button',{name:'Swarm',exact:true}).isVisible(),true);
+  assert.equal(await page.getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
+  assert.equal(await page.getByRole('button',{name:'Swarm',exact:true}).count(),0);
+  assert.equal(await page.locator('.home .account-selection, .home .suggestions, .home-mode-options').count(),0);
+  assert.equal(await page.getByText('Drop files or paste images · Enter to send',{exact:true}).isVisible(),true);
+  assert.equal(await page.locator('.home-composer').getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
 });
 
 test('reference meteor shaders render front, side and back and restore Home after remount',async t=>{
@@ -490,7 +496,7 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   ];
   reset({status:'completed',skills,sessionOverrides:{['c'.repeat(32)]:{title:'Skill draft session'}}});
   const page=await pageFor(t,'#',width), input=page.getByRole('textbox',{name:'Message Moyai'});
-  await page.getByRole('checkbox',{name:'Private session · Only you',exact:true}).check();
+  await page.getByRole('button',{name:'Private session',exact:true}).click();
   await input.fill('Please use /team');
   const options=page.getByRole('listbox',{name:'Skills'});
   await options.waitFor();assert.equal(await options.getByRole('option').count(),2);
@@ -713,7 +719,7 @@ test('access revocation removes transcript, draft and panel state before reautho
 test('capability-driven product/standalone login and shared session admission',async t=>{
   reset({signedIn:false,individual:false});const page=await pageFor(t,'');await page.getByRole('button',{name:'Continue with Google'}).waitFor();
   assert.equal(await page.getByLabel('Username',{exact:true}).count(),0);await page.getByLabel('Workspace password',{exact:true}).fill('synthetic-password');await page.getByRole('button',{name:'Sign in',exact:true}).click();
-  const privateChoice=page.getByRole('checkbox',{name:'Private session · Only you'});await privateChoice.waitFor();assert.equal(await privateChoice.isEnabled(),false);assert.equal(await privateChoice.isChecked(),false);
+  const privateChoice=page.getByRole('button',{name:'Private session',exact:true});await privateChoice.waitFor();assert.equal(await privateChoice.isEnabled(),false);assert.equal(await privateChoice.getAttribute('aria-pressed'),'false');
   await page.getByRole('textbox',{name:'Message Moyai'}).fill('A shared task');await page.getByRole('button',{name:'Send message',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/sessions'&&req.method==='POST'));assert.equal(state.requests.find(req=>req.path==='/api/sessions'&&req.method==='POST').body.visibility,'shared');
   const login=state.requests.find(req=>req.path==='/api/login');assert.equal(login.body.username,undefined);
@@ -721,14 +727,63 @@ test('capability-driven product/standalone login and shared session admission',a
 });
 
 for(const privateSession of [false,true])test(`individual home defaults to shared with private opt-in: ${privateSession}`,async t=>{
-  reset();const page=await pageFor(t,'');
-  const privateChoice=page.getByRole('checkbox',{name:'Private session · Only you'});
-  await privateChoice.waitFor();assert.equal(await privateChoice.isEnabled(),true);assert.equal(await privateChoice.isChecked(),false);
-  await page.getByText(/Workspace members can see messages/).waitFor();
-  if(privateSession)await privateChoice.check();
-  await page.getByRole('textbox',{name:'Message Moyai'}).fill('A new task');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  reset({connections:[
+    {id:'organization',name:'Team account',enabled:true,shared:true,read_only:true},
+    {id:'personal',name:'Personal account',enabled:true,shared:false,read_only:true},
+    {id:'disabled',name:'Disabled account',enabled:false,shared:true,read_only:true},
+  ]});const page=await pageFor(t,'');
+  const privateChoice=page.getByRole('button',{name:'Private session',exact:true});
+  await privateChoice.waitFor();assert.equal(await privateChoice.isEnabled(),true);assert.equal(await privateChoice.getAttribute('aria-pressed'),'false');
+  assert.equal(await page.getByText(/Workspace members can see messages/).count(),0);
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('A new task');
+  await privateChoice.press('Space');assert.equal(await privateChoice.getAttribute('aria-pressed'),'true');
+  await privateChoice.press('Space');assert.equal(await privateChoice.getAttribute('aria-pressed'),'false');
+  if(privateSession)await privateChoice.click();
+  assert.equal(await input.innerText(),'A new task');
+  assert.equal(await privateChoice.innerText(),privateSession?'Private':'Public');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/sessions'&&req.method==='POST'));
   assert.equal(state.requests.find(req=>req.path==='/api/sessions'&&req.method==='POST').body.visibility,privateSession?'private':'shared');
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,privateSession?['organization','personal']:['organization']);
+});
+
+for(const recovery of ['retry','skip'])test(`home connection failures support ${recovery} without a picker`,async t=>{
+  reset({connectionError:true,connections:[{id:'organization',name:'Team account',enabled:true,shared:true,read_only:true}]});
+  const page=await pageFor(t,'');
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Keep my draft while connections recover.');
+  const send=page.getByRole('button',{name:'Send message',exact:true});
+  await page.getByRole('alert').getByText('Error: Connections temporarily unavailable.',{exact:true}).waitFor();
+  assert.equal(await send.isEnabled(),false);
+  await input.press('Enter');
+  assert.equal(state.requests.some(req=>req.path==='/api/sessions'&&req.method==='POST'),false);
+  if(recovery==='retry') {
+    state.connectionError=false;
+    await page.getByRole('button',{name:'Retry connections',exact:true}).click();
+  } else {
+    await page.getByRole('button',{name:'Continue without connections',exact:true}).click();
+  }
+  assert.equal(await input.innerText(),'Keep my draft while connections recover.');
+  await send.click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,recovery==='retry'?['organization']:[]);
+});
+
+test('home and Settings share the same wordmark position and typography',async t=>{
+  reset();const page=await pageFor(t,'');
+  const brand=page.locator('.moyai-brand');await brand.waitFor();await page.evaluate(()=>document.fonts.ready);
+  const metrics=()=>brand.evaluate(el=>{
+    const bounds=el.getBoundingClientRect(), style=getComputedStyle(el), subtitle=getComputedStyle(el.querySelector('small'));
+    return {x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,font:style.font,spacing:style.letterSpacing,transform:style.textTransform,subtitle:subtitle.font};
+  });
+  const home=await metrics();
+  await page.getByRole('button',{name:'Settings',exact:true}).click();
+  await page.getByRole('heading',{name:'Settings',exact:true}).waitFor();
+  assert.equal(await brand.count(),1);assert.equal(await brand.locator('img').count(),0);
+  assert.deepEqual(await metrics(),home);
+  await brand.click();await page.locator('.home-composer').waitFor();
 });
 
 test('product Users editor exposes roles only and sends the captured optimistic revision',async t=>{

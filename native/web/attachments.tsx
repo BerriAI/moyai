@@ -114,10 +114,10 @@ export function FileDropOverlay() {
   return <div className="file-drop-overlay" role="status"><Upload size={28} /><strong>Drop files to attach</strong><span>Up to 8 files · 20 MB each · Images up to 8 MB</span></div>
 }
 
-export function AttachButton({ add, disabled }: { add: (files: File[]) => Promise<void>; disabled?: boolean }) {
+export function AttachButton({ add, disabled, compact = false }: { add: (files: File[]) => Promise<void>; disabled?: boolean; compact?: boolean }) {
   const input = useRef<HTMLInputElement>(null)
   return <>
     <input ref={input} className="visually-hidden" type="file" multiple disabled={disabled} aria-label="Attach files" onChange={event => { void add(Array.from(event.target.files ?? [])); event.target.value = "" }} />
-    <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => input.current?.click()}><Paperclip size={16} />Attach</Button>
+    <Button type="button" variant="ghost" size={compact ? "icon-sm" : "sm"} aria-label="Attach" title="Attach files" disabled={disabled} onClick={() => input.current?.click()}><Paperclip size={16} />{!compact && "Attach"}</Button>
   </>
 }
