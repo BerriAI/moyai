@@ -32,6 +32,7 @@ jobs:
           python-version: '3.13'
       - run: uv sync --frozen
       - run: uv run ruff check src tests
+      - run: uv run ruff check --select F821 ../app
       - run: uv run pyright
       # This product behavior must survive runtime replacements. An explicit
       # node also fails collection if its regression test is silently removed.

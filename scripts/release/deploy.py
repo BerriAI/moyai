@@ -24,11 +24,12 @@ import urllib.parse
 import urllib.request
 
 from scripts.release.errors import ReleaseError
+from scripts.release.context import DeploymentContext, SOURCE_REPOSITORY
 from scripts.release.ssh_diagnostics import failure as ssh_failure
 from scripts.release.ssh_connections import ConnectionFailure, SSHConnections
 
 ROOT = Path(__file__).resolve().parent
-REPOSITORY = 'BerriAI/moyai'
+REPOSITORY = SOURCE_REPOSITORY
 COORDINATOR = 'srv-db41eiqj9qps73fpuan0'
 WORKER = 'srv-db4s0b142hec73epgpt0'
 BROKER = 'srv-db4tlsajnfac738gigb0'
@@ -99,16 +100,23 @@ class API:
 
 
 class GitHub:
-    def __init__(self, api: API, run_id: str, dispatch_sha: str):
+    def __init__(self, api: API, run_id: str, dispatch_sha: str, *, verify_main=False):
         self.api, self.run_id, self.dispatch_sha = api, run_id, dispatch_sha
         self.prefix = '/repos/' + REPOSITORY
+        self.verify_main = verify_main
 
     def candidate(self) -> str:
-        # checkout and workflow_dispatch both refer to this immutable commit.
-        # Resolving main again could deploy code newer than the release tooling.
+        # This is the Moyai checkout, not the private workflow's GITHUB_SHA.
+        # Main is only an ancestry boundary; never replace the selected SHA.
         sha = self.dispatch_sha
         if not re.fullmatch('[0-9a-f]{40}', sha):
             raise ReleaseError('The main workflow dispatch did not provide a full commit SHA.')
+        if self.verify_main:
+            comparison = self.api.call('GET', self.prefix + f'/compare/{sha}...main')
+            if (comparison.get('status') not in {'ahead', 'identical'}
+                    or comparison.get('base_commit', {}).get('sha') != sha
+                    or comparison.get('merge_base_commit', {}).get('sha') != sha):
+                raise ReleaseError('The selected Moyai commit is not on main; no production changes made.')
         return sha
 
     def forward_from(self, previous: str, selected: str):
@@ -121,7 +129,9 @@ class GitHub:
         for page in range(1, 21):
             query = urllib.parse.urlencode({'head_sha': sha, 'event': 'workflow_dispatch',
                                            'per_page': 100, 'page': page})
-            runs = self.api.call('GET', self.prefix + '/actions/workflows/deploy-production.yml/runs?' + query)['workflow_runs']
+            # Repository-level history still works after the old workflow is
+            # removed. Preserve its identity filter for historical failed runs.
+            runs = self.api.call('GET', self.prefix + '/actions/runs?' + query)['workflow_runs']
             for run in runs:
                 if (run.get('head_sha') == sha and run.get('head_branch') == 'main'
                         and run.get('event') == 'workflow_dispatch'
@@ -524,6 +534,9 @@ class Release:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source-sha', help='Full Moyai main commit; required when the workflow runs in moyai-ops.')
+    parser.add_argument('--check-source', action='store_true',
+                        help='Validate local checkout and workflow identity only; no credentials, CI or Render calls.')
     parser.add_argument('--receipt', type=Path, default=Path('release-receipt.json'))
     parser.add_argument('--release-type', choices=['coordinated', 'api', 'rolling', 'maintenance'], default='coordinated')
     parser.add_argument('--core', choices=['preserve', 'pydantic'], default='preserve',
@@ -538,10 +551,13 @@ def main():
         raise ReleaseError('Explicit core selection requires a maintenance release; no changes made.')
     if args.consolidate_billing and args.release_type != 'maintenance':
         raise ReleaseError('Billing consolidation requires a maintenance release; no changes made.')
-    if os.environ.get('GITHUB_REPOSITORY') != REPOSITORY or os.environ.get('GITHUB_REF') != 'refs/heads/main':
-        raise ReleaseError('Production deployment may only run from main in BerriAI/moyai.')
     if args.release_type == 'coordinated' and os.environ.get('MOYAI_API_SERVICE_ID'):
         raise ReleaseError('The dedicated API topology requires API releases or a separately planned maintenance transition. No changes made.')
+    context = DeploymentContext.from_environment(args.source_sha)
+    context.validate_checkout(ROOT.parents[1])
+    if args.check_source:
+        print(json.dumps(context.receipt(), sort_keys=True))
+        return
     key = os.environ.pop('RENDER_DEPLOY_SSH_KEY', '')
     if not key:
         raise ReleaseError('RENDER_DEPLOY_SSH_KEY is missing; no production changes made.')
@@ -555,7 +571,7 @@ def main():
         key_path.chmod(0o600)
         render = API('https://api.render.com/v1', os.environ.pop('RENDER_DEPLOY_API_KEY', ''))
         github = GitHub(API('https://api.github.com', os.environ.pop('GH_TOKEN', '')),
-                        os.environ['GITHUB_RUN_ID'], os.environ.get('GITHUB_SHA', ''))
+                        context.run_id, context.source_sha, verify_main=context.repository != REPOSITORY)
         if args.release_type == 'maintenance':
             from scripts.release.maintenance_deploy import MaintenanceRelease
             from scripts.release.maintenance_probe import SSHMaintenanceProbe
@@ -589,6 +605,7 @@ def main():
                                  preflight_only=args.preflight)
         else:
             release = Release(render, github, SSHProbe(key_path), args.receipt, preflight_only=args.preflight)
+        release.record.update(context.receipt())
         try:
             release.run()
         finally:
@@ -598,6 +615,8 @@ def main():
                     output.write(f"Status: **{release.record['status']}**\n\nLast phase: {release.record['phase']}\n\n")
                     if 'commit' in release.record:
                         output.write(f"Commit: `{release.record['commit']}`\n\n")
+                    output.write(f"Workflow: `{context.repository}@{context.workflow_sha}` "
+                                 f"(run `{context.run_id}`)\n\n")
                     if release.record['status'] not in {'success', 'preflight_passed'}:
                         output.write('Inspect the release-receipt artifact and Render before retrying. Follow docs/production-deploy.md for this release type.\n')
 
