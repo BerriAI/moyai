@@ -186,12 +186,32 @@ def main(argv: list[str] | None = None) -> None:
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
+    receipts = commands.add_parser("receipts")
+    receipts.add_argument("--host", default="127.0.0.1")
+    receipts.add_argument("--port", type=int, default=8788)
     commands.add_parser("check")
     commands.add_parser("verify")
     provision = commands.add_parser("provision")
     provision.add_argument("--apply", action="store_true", required=True)
     args = parser.parse_args(argv)
     try:
+        if args.command == "receipts":
+            import uvicorn
+            from pydantic import ValidationError
+
+            from .charge_receipt_server import ReceiptServerSettings, create_receipt_application
+
+            try:
+                settings = cast(ReceiptServerSettings, cast(type[BaseSettings], ReceiptServerSettings)())
+            except ValidationError:
+                raise ProductDeploymentError("Configure the receipt listener's database, native schema, and secret.") from None
+            settings.check_listener(args.host)
+            uvicorn.run(
+                create_receipt_application(settings), host=args.host, port=args.port,
+                workers=1, proxy_headers=False, limit_concurrency=32,
+                timeout_graceful_shutdown=15,
+            )
+            return
         config = load_product_config()
         if config is None:
             raise ProductConfigurationError("This entrypoint requires MOYAI_CORE=pydantic.")

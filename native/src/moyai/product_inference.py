@@ -20,6 +20,7 @@ from uuid import uuid4
 
 import anyio
 import httpx2 as httpx
+import jwt
 from sqlalchemy import Integer, String, func, select
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,6 +54,7 @@ class ProductInferenceRequest(Base):
     actor_id: Mapped[str] = mapped_column(String(512), index=True)
     authority_version: Mapped[str] = mapped_column(String(64))
     model: Mapped[str] = mapped_column(String(200))
+    purpose: Mapped[str] = mapped_column(String(100), default="unknown")
     gateway_scope: Mapped[str] = mapped_column(String(64))
     key_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), index=True)
@@ -154,6 +156,42 @@ class ProductInferenceService:
         if self.remote:
             self.started = True
             return
+        if self.settings.litellm_charge_receipts_enabled:
+            from .billing_storage_models import BillingStorageState
+
+            async with self.database.sessions() as db:
+                storage = await db.get(BillingStorageState, 1)
+                if storage is None or storage.phase != "consolidated":
+                    raise InferenceAdmissionError("Consolidate billing storage before enabling charge receipts.")
+            try:
+                async with (
+                    httpx.AsyncClient(timeout=5, follow_redirects=False) as client,
+                    client.stream(
+                        "GET",
+                        self.settings.litellm_api_base.rstrip("/").removesuffix("/v1")
+                        + "/billing/receipts/capabilities",
+                        headers={
+                            "Authorization": "Bearer " + self.settings.litellm_api_key,
+                            "Accept-Encoding": "identity",
+                        },
+                    ) as response,
+                ):
+                    if response.status_code != 200 or response.headers.get("content-encoding", "identity") != "identity":
+                        raise ValueError
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(body) + len(chunk) > 4096:
+                            raise ValueError
+                        body.extend(chunk)
+                capability = json.loads(body)
+                if (
+                    not isinstance(capability, dict) or capability.get("version") != 1
+                    or capability.get("required") is not True
+                    or capability.get("gateway_scope") != self.scope()[0]
+                ):
+                    raise ValueError
+            except (httpx.HTTPError, ValueError):
+                raise InferenceAdmissionError("The configured gateway does not confirm required charge receipts.") from None
         self.slots = PostgresModelSlots(self.settings.max_concurrent_model_requests, self.store.database)
         await asyncio.to_thread(self.slots.check)
         self.recovery = ProductInferenceRecovery(self)
@@ -280,6 +318,7 @@ class ProductInferenceService:
                     session_id=scope.session_id, turn_id=scope.turn_id, actor_id=scope.actor_id,
                     authority_version=scope.product_grant.authority_version,
                     model=capture.values["model"], gateway_scope=gateway, key_hash=key_hash,
+                    purpose=scope.surface,
                     status="dispatching", created_at=capture.values["created_at"],
                     next_attempt_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
                     owner_pid=owner_pid, owner_started=owner_started,
@@ -288,6 +327,15 @@ class ProductInferenceService:
             # These server-owned headers carry only the allocated request ID.
             request.headers["x-litellm-call-id"] = request_id
             request.headers["x-litellm-spend-logs-metadata"] = json.dumps({"moyai_request_id": request_id})
+            if self.settings.litellm_charge_receipt_secret:
+                issued = int(datetime.now(UTC).timestamp())
+                request.headers["x-litellm-billing-context"] = jwt.encode({
+                    "version": 1, "sub": request_id, "aud": "litellm-charge-receipts",
+                    "iat": issued, "exp": issued + 300,
+                    "gateway_scope": gateway, "key_hash": key_hash,
+                    "method": request.method, "route": request.url.path,
+                    "body_sha256": hashlib.sha256(request.content).hexdigest(),
+                }, self.settings.litellm_charge_receipt_secret, algorithm="HS256")
             capture.admission = admission
             current = asyncio.current_task()
             assert current is not None
@@ -359,12 +407,17 @@ class ProductInferenceService:
             row.gateway_id = capture.gateway_call_id or row.gateway_id
             stable = {"id", "request_key", "session_id", "turn_id", "actor_id", "model", "provider",
                       "provider_scope", "created_at", "receipt_key", "cost_usd", "cost_status", "cost_source"}
+            if row.cost_source == "gateway_receipt":
+                stable.update({
+                    "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
+                    "cache_write_tokens", "reasoning_tokens", "response_model",
+                })
             for name, value in values.items():
                 if name not in stable:
                     setattr(usage, name, value)
             if values.get("coverage_error") == "duplicate_provider_receipt":
                 row.recovery_error, row.next_attempt_at = "duplicate_provider_receipt", None
-            cost = values.get("cost_usd")
+            cost = None if self.settings.litellm_charge_receipts_enabled else values.get("cost_usd")
             if row.cost_usd is None and cost is not None:
                 receipt_key = hashlib.sha256(
                     f"{row.gateway_scope}/{row.key_hash}/{row.gateway_id or row.id}".encode()

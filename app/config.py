@@ -169,6 +169,27 @@ class Settings(BaseSettings):
     litellm_api_base: str = ""
     litellm_api_key: str = ""
     litellm_spend_recovery_enabled: bool = True
+    litellm_charge_receipts_enabled: bool = False
+    litellm_charge_receipt_secret: str = Field(default="", repr=False)
+    litellm_charge_receipt_pool_size: int = Field(default=2, ge=1, le=8)
+
+    @model_validator(mode="after")
+    def validate_charge_receipts(self):
+        secret = self.litellm_charge_receipt_secret
+        if secret and (
+            len(secret) < 32 or not secret.isascii()
+            or any(character.isspace() for character in secret)
+        ):
+            raise ValueError("The charge receipt secret requires at least 32 non-whitespace ASCII characters.")
+        if self.litellm_charge_receipts_enabled:
+            if self.litellm_spend_recovery_enabled:
+                raise ValueError("Charge receipt mode requires LITELLM_SPEND_RECOVERY_ENABLED=false.")
+            if not secret:
+                raise ValueError("Charge receipt mode requires a secret of at least 32 characters.")
+            if self.moyai_core != "pydantic" or not self.moyai_database_url:
+                raise ValueError("Charge receipt mode requires native PostgreSQL accounting.")
+        return self
+
     model_context_limits: dict[str, ModelContextLimits] = Field(default_factory=dict)
     session_titles_enabled: bool = True
     session_title_model: str = Field(default="openai/gpt-4.1-nano", min_length=1, max_length=200)
