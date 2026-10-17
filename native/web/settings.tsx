@@ -945,7 +945,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
                       : current === "personal-slack" ? <ProductPersonalSlack individual={user.individual !== false} heading="Your connection" />
                       : current === "secrets" ? productMode === "existing" ? <ProductSecretsPage user={user} /> : <SecretsPage user={user} />
                         : current === "users" ? <UsersPage user={user} />
-                          : current === "performance" || current === "usage" ? <AnalyticsPage kind={current} headingRef={heading} />
+                          : current === "performance" || current === "usage" ? <AnalyticsPage kind={current} productMode={productMode} headingRef={heading} />
                             : <div className="ns-empty"><p>This settings page does not exist.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview<ArrowRight /></Button></div>}
         </div>
       </div>

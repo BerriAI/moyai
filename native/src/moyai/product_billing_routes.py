@@ -27,6 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .analytics import ReportRange, csv_export, report_range
+from .analytics_identity import ReportIdentities, report_identities
 from .product_billing import (
     LOOKUP_CHUNK,
     MAX_RECORDS,
@@ -97,6 +98,13 @@ def _totals(charges: list[BillingCharge]) -> dict[str, Any]:
         "pricing_status": ("partial" if partial else "priced") if actual is not None else "unpriced" if charges else "empty",
         "sessions": len({row.session_id for row in charges if row.session_id}),
         "unattributed_charges": sum(row.actor_id is None or row.session_id is None for row in charges),
+        "unpriced_requests": known - priced,
+        "token_samples": sum(row.total_tokens is not None for row in charges),
+        "usage_samples": len(charges),
+        "token_coverage": (
+            sum(all(getattr(row, name) is not None for name in
+                    ("input_tokens", "output_tokens", "total_tokens")) for row in charges) / len(charges)
+        ) if charges else None,
     }
     for name in TOKEN_FIELDS:
         values = [getattr(row, name) for row in charges if getattr(row, name) is not None]
@@ -209,14 +217,14 @@ class ProductBillingService:
             # are only SELECTs; do not change pooled writer connection PRAGMAs.
             yield BillingReader(connection, schema=schema, max_records=self.max_records)
 
-    async def _labels(self, reader: BillingReader) -> dict[str, dict[str, Any]]:
+    async def _labels(self, reader: BillingReader, mappings: IdentityMappings) -> dict[str, dict[str, Any]]:
         users = await reader.table("users", ("id", "kind", "name", "email"), ("id", "kind"))
         values = list((await reader.connection.execute(select(users).limit(self.max_records + 1))).mappings())
         if len(values) > self.max_records:
             raise BillingReadError("too_many_accounting_identities")
         result = {}
         for row in values:
-            person = self.mappings.resolve(SourceRef("legacy", row["id"]), actor=True)
+            person = mappings.resolve(SourceRef("legacy", row["id"]), actor=True)
             if person:
                 result[person.id] = {
                     "id": person.id, "name": row.get("name") or person.id,
@@ -270,6 +278,35 @@ class ProductBillingService:
             )
         }
 
+    async def _root_cohorts(
+        self, old: BillingReader, new: BillingReader, charges: tuple[BillingCharge, ...],
+    ) -> dict[SourceRef, tuple[str, str]]:
+        """Use explicit source lineage for root-model/status filters, never equal IDs."""
+        references: dict[str, dict[str, set[SourceRef]]] = {"legacy": defaultdict(set), "native": defaultdict(set)}
+        for charge in charges:
+            for item in charge.observations:
+                root = item.session_family_source if item.source.engine == "legacy" else None
+                identity = root.id if root else (
+                    item.session_source.id if item.source.engine == "legacy" else item.turn_id
+                )
+                if identity:
+                    references[item.source.engine][identity].add(item.source)
+        result = {}
+        for engine, reader, name in (("legacy", old, "runs"), ("native", new, "moyai_turns")):
+            by_id = references[engine]
+            if not by_id:
+                continue
+            table = await reader.table(name, ("id", "model", "status"), ("id", "model", "status"))
+            identities = sorted(by_id)
+            for offset in range(0, len(identities), LOOKUP_CHUNK):
+                rows = (await reader.connection.execute(select(table).where(
+                    table.c.id.in_(identities[offset:offset + LOOKUP_CHUNK]),
+                ))).mappings()
+                for row in rows:
+                    for source in by_id[row["id"]]:
+                        result[source] = (row["model"], row["status"])
+        return result
+
     async def infrastructure(self, period: ReportRange) -> dict[str, Any]:
         whole_days = period.start.time() == datetime.min.time() and period.end.time() == datetime.min.time()
         if self.infrastructure_reporter is None or not whole_days:
@@ -301,10 +338,14 @@ class ProductBillingService:
         self, *, preset: str = "7d", start: str | None = None, end: str | None = None,
         user_id: str | None = None, model: str | None = None, limit: int = 100, offset: int = 0,
         personal: bool = False, all_details: bool = False, viewer_id: str | None = None,
+        root_model: str | None = None, turn_status: str | None = None,
+        include_root_cohorts: bool = False,
+        identities: ReportIdentities | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 500 or not 0 <= offset <= self.max_records * 2:
             raise HTTPException(422, "Choose a valid report page.")
         period = _period(preset, start, end)
+        mappings = identities.accounting_mappings(self.mappings) if identities is not None else self.mappings
         async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
             async with self._reader(self.source_engine, self.schema) as old:
                 async with self._reader(self.native_engine, self.native_schema) as new:
@@ -317,12 +358,21 @@ class ProductBillingService:
                     old.billing_connection = new.connection
                     policy = self.recovery_policy() if callable(self.recovery_policy) else self.recovery_policy
                     projection = await read_product_billing(
-                        old, new, period, rules=self.rules, mappings=self.mappings, policy=policy,
+                        old, new, period, rules=self.rules, mappings=mappings, policy=policy,
                         clock=datetime.now(UTC), native_bindings=self.native_bindings, links=self.observation_links,
                     )
-                labels = await self._labels(old)
+                    cohorts = await self._root_cohorts(old, new, projection.charges) if (
+                        root_model is not None or turn_status is not None or include_root_cohorts
+                    ) else {}
+                labels = await self._labels(old, mappings)
             charges = [row for row in projection.charges if
-                       (user_id is None or row.actor_id == user_id) and (model is None or row.model == model)]
+                       (user_id is None or row.actor_id == user_id) and (model is None or row.model == model)
+                       and (root_model is None and turn_status is None or any(
+                           item.source in cohorts
+                           and (root_model is None or cohorts[item.source][0] == root_model)
+                           and (turn_status is None or cohorts[item.source][1] == turn_status)
+                           for item in row.observations
+                       ))]
             by_user: dict[str | None, list[BillingCharge]] = defaultdict(list)
             by_session: dict[tuple[str | None, str | None], list[BillingCharge]] = defaultdict(list)
             by_model: dict[str | None, list[BillingCharge]] = defaultdict(list)
@@ -361,7 +411,8 @@ class ProductBillingService:
                     )
             infra = (
                 None if personal else _unavailable_infrastructure("not_attributed_to_selected_filter")
-                if user_id is not None or model is not None else await self.infrastructure(period)
+                if any(value is not None for value in (user_id, model, root_model, turn_status))
+                else await self.infrastructure(period)
             )
             # Infrastructure may have awaited a worker thread. Re-read privacy
             # in fresh snapshots at the detail release boundary.
@@ -376,7 +427,8 @@ class ProductBillingService:
             infra_estimate = Decimal(infra["estimated"]) if infra and infra["estimated"] is not None else None
             def visible_row(row: BillingCharge) -> bool:
                 return tuple(item.source for item in row.observations) in visible
-            details = [_public_charge(row) for row in reversed(charges) if visible_row(row)]
+            visible_charges = [row for row in reversed(charges) if visible_row(row)]
+            detail_page = visible_charges if all_details else visible_charges[offset:offset + limit]
             return {
                 "scope": "personal" if personal else "organization",
                 "start": period.start.date().isoformat(), "end": (period.end - timedelta(microseconds=1)).date().isoformat(),
@@ -392,8 +444,9 @@ class ProductBillingService:
                     "run_id": session, "session_id": session, "title": "Session", **_totals(values),
                 } for (actor, session), values in by_session.items() if any(visible_row(row) for row in values)],
                 "models": [{"model": key, **_totals(values)} for key, values in by_model.items()],
-                "request_details": details if all_details else details[offset:offset + limit],
-                "request_total": len(details), "limit": limit, "offset": offset,
+                "request_details": [_public_charge(row) for row in detail_page],
+                "request_total": len(visible_charges), "limit": limit, "offset": offset,
+                "root_models": sorted({value[0] for value in cohorts.values() if value[0]}),
                 "identities": [],  # Account mutation/linking belongs to product identity.
                 "infrastructure": infra,
                 "cost_summary": {
@@ -407,12 +460,18 @@ class ProductBillingService:
                     "undated_charges": len(undated),
                     "private_details_omitted": sum(not visible_row(row) for row in charges),
                     "source_observations": sum(len(row.observations) for row in charges),
+                    "legacy_observations": sum(
+                        item.source.engine == "legacy" for row in charges for item in row.observations
+                    ),
+                    "native_observations": sum(
+                        item.source.engine == "native" for row in charges for item in row.observations
+                    ),
                     "deduplicated_observations": sum(max(0, len(row.observations) - 1) for row in charges),
                     "unreconciled_native_observations": sum(
                         any(issue in row.issues for issue in ("native_scope_unbound", "unproven_observation_overlap"))
                         for row in charges
                     ),
-                    "mapping_version": self.mappings.version,
+                    "mapping_version": mappings.version,
                     "complete": all(row.cost_state == "final" and not row.issues for row in charges),
                 },
                 "capabilities": {
@@ -420,9 +479,10 @@ class ProductBillingService:
                 },
                 "methodology": {
                     "cost": "Recorded final USD amounts only. Estimates are separate; unresolved overlaps never add a second charge.",
-                    "identity": "Explicit versioned mappings and saved Slack links; equal IDs across engines are not identity proof.",
+                    "identity": "Explicit versioned mappings, verified product mirrors and saved Slack links; equal IDs across engines are not identity proof.",
                     "dates": "UTC. Date-only end inputs are inclusive; timestamp end inputs are exclusive. Duplicate observations use the broker's request timestamp only after proven linkage.",
                     "model": "Canonical requested inference alias; conflicting aliases remain unattributed.",
+                    "root_model": "Root model and status filters include historical sessions and native turns.",
                     "infrastructure": "Existing product monthly override/allocation rules; rolling intraday ranges stay unavailable.",
                     "execution": "Read-only accounting. Native broker admission is not enabled by these reports.",
                     "privacy": "Financial totals retain private usage. Request and session identifiers follow session privacy; private legacy working sessions never expose detail identifiers.",
@@ -430,7 +490,7 @@ class ProductBillingService:
             }
 
 
-def routes(service: ProductBillingService) -> APIRouter:
+def routes(service: ProductBillingService, *, runtime: Any | None = None) -> APIRouter:
     router = APIRouter(tags=["product-billing"])
 
     async def actor(request: Request) -> Any:
@@ -444,11 +504,18 @@ def routes(service: ProductBillingService) -> APIRouter:
         preset: Literal["24h", "7d", "30d", "custom"] = "7d",
         start: str | None = None, end: str | None = None,
         user_id: str | None = None, model: str | None = None,
+        root_model: str | None = Query(None, max_length=200),
+        turn_status: str | None = Query(None, max_length=30),
+        include_activity: bool = False,
         limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=MAX_RECORDS * 2),
         format: Literal["json", "csv"] = "json",
-        export: Literal["daily", "users", "models", "sessions", "requests"] = "daily",
+        export: Literal["daily", "users", "models", "sessions", "requests", "turns"] = "daily",
     ) -> Any:
         personal = principal.role != "admin"
+        if include_activity and personal:
+            raise HTTPException(403, "Administrator access is required for organization activity.")
+        if export == "turns" and not include_activity:
+            raise HTTPException(422, "Turn exports require include_activity=true.")
         if personal:
             if request.url.path != "/api/spend" or not principal.individual:
                 raise HTTPException(403, "Sign in with an individual account to view personal spending.")
@@ -458,11 +525,39 @@ def routes(service: ProductBillingService) -> APIRouter:
                 raise HTTPException(403, "Another account's spending is unavailable.")
             user_id = own.id
         try:
+            identities = await report_identities(runtime) if runtime is not None else None
+            if identities is not None and not personal:
+                from .analytics_billing import selected_user
+
+                user_id = selected_user(service, identities, user_id)
             value = await service.report(
                 preset=preset, start=start, end=end, user_id=user_id, model=model,
                 limit=limit, offset=offset, personal=personal, all_details=format == "csv" and export == "requests",
                 viewer_id=principal.id,
+                root_model=root_model, turn_status=turn_status,
+                include_root_cohorts=include_activity,
+                identities=identities,
             )
+            activity_export = None
+            if include_activity:
+                if runtime is None or runtime.product_identity is None:
+                    raise HTTPException(503, "Product activity reporting is unavailable.")
+                async with runtime.database.sessions() as db:
+                    native_user = await runtime.product_identity.read_native_user(db, principal)
+                if native_user is None:
+                    raise HTTPException(401, "Sign in to Moyai to view usage activity.")
+                from .analytics_service import report as activity_report
+
+                activity = await activity_report(
+                    runtime, native_user, value["start_at"], value["end_before"], root_model,
+                    turn_status, user_id, limit, offset,
+                    "csv" if format == "csv" and export in {"turns", "users", "daily", "models"} else "json",
+                    preset=preset, export=export, billing=service, billing_data=value, identities=identities,
+                )
+                if isinstance(activity, Response):
+                    activity_export = activity
+                else:
+                    value["activity"] = activity
         except BillingReadError as error:
             bounded = str(error).startswith("too_many_")
             raise HTTPException(
@@ -476,6 +571,9 @@ def routes(service: ProductBillingService) -> APIRouter:
         if not fresh.enabled or (not personal and fresh.role != "admin"):
             raise HTTPException(403, "Your accounting access changed.")
         response.headers["Cache-Control"] = "no-store"
+        if activity_export is not None:
+            activity_export.headers["Cache-Control"] = "no-store"
+            return activity_export
         if format == "csv":
             selected = value["request_details" if export == "requests" else export]
             rows = [{key: item for key, item in row.items() if key not in {"models", "sources", "observed_models"}}

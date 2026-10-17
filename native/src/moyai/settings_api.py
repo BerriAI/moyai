@@ -266,10 +266,12 @@ async def analytics(
     runtime: Any, user: User, start: str | None, end: str | None, model: str | None,
     status: str | None, user_id: str | None, limit: int, offset: int, format: str,
     *, preset: str = "7d", export: str = "turns", service: PullRequestService | None = None,
+    unified_billing: bool = False,
 ) -> Any:
     return await analytics_report(
         runtime, user, start, end, model, status, user_id, limit, offset, format,
         preset=preset, export=export, service=service,
+        billing=getattr(runtime, "product_billing", None) if unified_billing else None,
     )
 
 
@@ -633,6 +635,7 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
     @router.get("/usage")
     @router.get("/performance")
     async def report(
+        request: Request,
         start: str | None = None, end: str | None = None,
         model: str | None = Query(default=None, max_length=200),
         status: str | None = Query(default=None, max_length=30),
@@ -645,6 +648,7 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         return await analytics(
             runtime, user, start, end, model, status, user_id, limit, offset, format,
             preset=preset, export=export, service=analytics_pr_service,
+            unified_billing=request.url.path == "/api/settings/usage",
         )
 
     return router

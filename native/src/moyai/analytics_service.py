@@ -7,13 +7,13 @@ import json
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException, Response
 from sqlalchemy import func, or_, select, tuple_
 
-from . import performance_report
+from . import analytics_billing, performance_report
 from .analytics import (
     ReportRange,
     UsageEvent,
@@ -28,11 +28,14 @@ from .analytics import (
     usage_totals,
     utc,
 )
-from .analytics_identity import report_identities
+from .analytics_identity import ReportIdentities, report_identities
 from .inference_usage import InferenceUsage
 from .models import Effect, ProductTurnAuthority, Session, Turn, User
 from .pr_publications import PRPublication, verified_status
 from .pull_requests import PullRequestService, parse_pr_url
+
+if TYPE_CHECKING:
+    from .product_billing_routes import ProductBillingService
 
 MAX_TURNS = 10_000
 MAX_INFERENCES = 50_000
@@ -311,6 +314,9 @@ async def report(
     runtime: Any, user: User, start: str | None, end: str | None, model: str | None,
     status: str | None, user_id: str | None, limit: int, offset: int, format: str,
     *, preset: str = "7d", export: str = "turns", service: PullRequestService | None = None,
+    billing: ProductBillingService | None = None,
+    billing_data: dict[str, Any] | None = None,
+    identities: ReportIdentities | None = None,
 ) -> Any:
     if user.role != "admin" or not user.enabled:
         raise HTTPException(403, "Administrator access is required.")
@@ -319,9 +325,19 @@ async def report(
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
     lower, upper = period.start.isoformat(), period.end.isoformat()
-    identities = await report_identities(runtime)
+    identities = identities if identities is not None else await report_identities(runtime)
+    people: dict[str, str] = {}
     actor_ids = identities.actors(user_id)
     person = identities.canonical
+    if billing is not None:
+        people = analytics_billing.identity_map(billing, identities)
+        selected = analytics_billing.selected_user(billing, identities, user_id)
+        actor_ids = None if selected is None else {
+            actor for actor, canonical in people.items() if canonical == selected
+        }
+
+        def person(actor_id: str) -> str:
+            return people.get(actor_id, identities.canonical(actor_id))
     users = identities.users
     async with runtime.database.sessions() as db:
         turns = list((await db.execute(filtered(select(*TURN_COLUMNS).where(
@@ -581,6 +597,27 @@ async def report(
             (item for item in events if item.model == entry["model"]),
             unknown_turns=unknown & model_ids, capture_gaps=gaps & model_ids,
         ).view())
+    financial = None
+    private_activity_details = 0
+    if billing is not None:
+        financial = billing_data if billing_data is not None else await analytics_billing.read(
+            billing, identities, viewer_id=user.id, start=lower, end=upper,
+            preset=preset, user_id=user_id, model=model, status=status,
+        )
+        by_user, by_model, users = analytics_billing.apply(
+            financial, identities, billing, summary=summary, series=series, by_user=by_user, users=users,
+        )
+        # Accounting aggregates retain private usage. Adding activity to the
+        # canonical billing API must not disclose another owner's turn IDs.
+        async with runtime.database.sessions() as db:
+            visible_turns = set(await db.scalars(select(Turn.id).join(
+                Session, Session.id == Turn.session_id,
+            ).where(
+                Turn.id.in_([row["id"] for row in rows]),
+                or_(Session.visibility == "shared", Session.owner_id == user.id),
+            )))
+        private_activity_details = sum(row["id"] not in visible_turns for row in rows)
+        rows = [row for row in rows if row["id"] in visible_turns]
     if format == "csv":
         exported = rows if export == "turns" else by_user if export == "users" else series if export == "daily" else by_model
         if export == "users":
@@ -604,7 +641,8 @@ async def report(
     else:
         response = {
             "rows": rows[offset:offset + limit], "summary": summary, "series": series,
-            "by_user": by_user, "by_model": by_model, "models": sorted({row.model for row in turns}),
+            "by_user": by_user, "by_model": by_model,
+            "models": financial["root_models"] if financial is not None else sorted({row.model for row in turns}),
             "users": users, "total": len(rows), "limit": limit, "offset": offset,
             "start": lower, "end": upper, "preset": period.preset, "timezone": "UTC", "currency": "USD",
             "performance": performance_report.summarize(timing, turns, period),
@@ -636,13 +674,36 @@ async def report(
                 "model": "The model filter selects root turns and their PR/session cohort, including child-model attempts. Ledger breakdowns use the actual requested alias. Historical fallback is attributed only to its recorded root model and marked legacy; historical per-request aliases are unavailable.",
                 "cost_per_merged_pr": "Actor inference spend through end across distinct sessions linked to that actor's merged PRs, matching the selected root-turn model filter, divided by verified merge events. Null when linked cost or PR status coverage is incomplete; this is session correlation, not exact per-PR billing.",
             },
-            "capabilities": {"pr_analytics": True, "reported_costs": True},
+            "capabilities": {"pr_analytics": True, "reported_costs": True, "unified_billing": financial is not None},
             "limits": {"max_turns": MAX_TURNS, "max_inferences": MAX_INFERENCES,
                        "max_pr_status_reads": MAX_PR_STATUS_READS,
                        "max_baseline_bytes_per_cohort": MAX_BASELINE_BYTES},
             "cost_note": "Only reported costs are summed. Missing and historical prices remain unpriced; partial subtotals exclude them.",
             "latency_note": "Latency is accepted-to-finished wall time, including tools and waits; it is not model TTFT.",
         }
+        if financial is not None:
+            response["coverage"].update({
+                "legacy_observations": financial["coverage"]["legacy_observations"],
+                "native_observations": financial["coverage"]["native_observations"],
+                "ledger_requests": financial["total"]["observations"],
+                "priced_requests": financial["total"]["priced_requests"],
+                "unpriced_requests": financial["total"]["unpriced_requests"],
+                "unknown_requests": financial["total"]["unknown_requests"],
+                "private_details_omitted": financial["coverage"]["private_details_omitted"],
+                "private_activity_details_omitted": private_activity_details,
+                "activity_legacy_turns": len(totals.legacy_turns),
+                "activity_unknown_request_turns": len(unknown),
+                "activity_capture_gap_turns": len(gaps),
+                "legacy_turns": 0, "unknown_request_turns": 0, "capture_gap_turns": 0,
+            })
+            response["methodology"].update({
+                "cost": financial["methodology"]["cost"],
+                "requests": "Request counts and tokens use the same reconciled historical and native ledger as billing.",
+                "coverage": "Missing prices, estimates and unresolved request identities remain explicit. Historical records are included; absent amounts are never reconstructed from token prices.",
+                "model": financial["methodology"]["root_model"] + " Model breakdowns use the recorded inference alias.",
+                "sessions": response["methodology"]["sessions"] + " Session, turn and PR activity covers the native runtime; spend includes both historical and native billing.",
+            })
+            response["cost_note"] = financial["methodology"]["cost"]
     fresh = await runtime.database.user(user.id)
     if fresh.role != "admin" or fresh.auth_version != user.auth_version:
         raise HTTPException(401, "Your access changed. Sign in again.")
