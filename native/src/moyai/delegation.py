@@ -25,6 +25,7 @@ from temporalio import workflow
 
 from .contracts import Grant, NewMessage, NewSession, RunScope
 from .delegation_models import DelegatedSession, DelegatedTurn
+from .input_identity import input_identity
 from .models import Message, Session, Turn, TurnImage, User
 
 if TYPE_CHECKING:
@@ -79,11 +80,16 @@ class DelegationService:
         await self.database.allowed_session(db, source, actor)
         return True
 
-    async def start(self, scope: RunScope, call_id: str, task: str) -> dict[str, Any]:
+    async def start(
+        self, scope: RunScope, call_id: str, task: str, *, input_id: str | None = None,
+    ) -> dict[str, Any]:
         from .workspace import AGENT_NAMES
 
         database = self.database
-        await database.authorize_scope(scope)
+        # Admission must enforce guidance itself, including direct callers and
+        # retries. Missing historical identity belongs to the original input;
+        # it never opts out of the steering fence.
+        await database.authorize_scope(scope, input_id=input_id or scope.turn_id)
         fingerprint = hashlib.sha256(task.encode()).hexdigest()
         async with database._admission_session(None) as db:
             actor = await db.get(User, scope.actor_id)
@@ -224,9 +230,17 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
         self.service = DelegationService(database)
 
     @durable_operation("start")
-    async def start(self, scope: RunScope, call_id: str, task: str) -> dict[str, Any]:
+    async def start(
+        self, scope: RunScope, call_id: str, task: str, input_id: str | None = None,
+        *, ctx: RunContext[RunScope],
+    ) -> dict[str, Any]:
+        # RunContext is injected through the SDK's public durable-operation
+        # contract, not inferred from the transport's positional arguments.
+        # New calls carry identity explicitly. Pending older calls retain the
+        # identity in their saved context, including accepted steering inputs.
+        source_input = input_id or (ctx.metadata or {}).get("moyai_input_id") or scope.turn_id
         try:
-            return await self.service.start(scope, call_id, task)
+            return await self.service.start(scope, call_id, task, input_id=source_input)
         except (HTTPException, PermissionError) as error:
             return {"error": error.detail if isinstance(error, HTTPException) else str(error)}
 
@@ -276,7 +290,9 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
         if not isinstance(task, str) or not task.strip() or len(task) > 499_800:
             raise ToolFailed("Provide a bounded, nonempty task for this subagent.")
         try:
-            child = await self.start(ctx.deps, call.tool_call_id, task)
+            child = await self.start(
+                ctx.deps, call.tool_call_id, task, input_identity(ctx), ctx=ctx,
+            )
             if "error" in child:
                 raise ToolFailed(str(child["error"]))
             while True:

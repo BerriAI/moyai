@@ -58,6 +58,11 @@ not a change to admitted connection permissions or the connector schema cache.
 Child admission also applies the normal steering fence: accepted newer guidance
 prevents an obsolete delegate call from starting work. Reporting already-admitted
 children remains independent of that fence.
+The input identity travels as an explicit durable-operation argument and is
+validated by admission itself, including direct calls and retries. Older pending
+activities recover it from the SDK-injected run context; if neither carries an
+identity, admission treats the request as the original parent input and still
+checks it against newer guidance.
 
 Existing-product deployments require the additive
 `2026-10-16-interactive-delegation-v18` migration and native protocol revision 5

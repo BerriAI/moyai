@@ -456,7 +456,7 @@ class ProductMemoryStore:
         await self._connections(db, session)
         input_id = self.scope.turn_id
         if self.context is not None:
-            from .agent import input_identity
+            from .input_identity import input_identity
             input_id = (self.context.metadata or {}).get("moyai_input_id") or input_identity(self.context)
         pending = await db.scalar(select(Turn).where(
             Turn.parent_turn == self.scope.turn_id, Turn.status.in_(["steering", "signal_sent", "accepted"]),
