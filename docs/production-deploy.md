@@ -38,10 +38,10 @@ commit's CI without changing services. Inspect the saved release receipt for
 During the planned maintenance window, run the same selected candidate with
 **preflight_only: false**. Every run performs preflight again; a later main commit
 is a new candidate. The `preserve` core option is valid when the source already
-uses Pydantic. Preserving a retired core fails before mutation. Native background
-releases and schema changes require maintenance. Compatible native API/UI updates
-can use the API-only procedure below. The all-role `rolling` and `coordinated`
-modes still reject native services.
+uses Pydantic. Preserving a retired core fails before mutation. Schema, framework
+and incompatible protocol changes require maintenance. Compatible native API/UI
+updates can use the API-only procedure below; compatible four-role updates can
+use the rolling procedure. The historical `coordinated` mode rejects native services.
 
 The workflow uses the `moyai-production` GitHub environment, restricted to main,
 with these existing inputs:
@@ -92,6 +92,43 @@ saved build label. An explicitly unhealthy candidate can trigger one verified
 API rollback while native receipts and background owners remain unchanged.
 Ambiguous writes, unknown readiness, changed contracts or background failures
 stop for inspection without a speculative retry or rollback.
+
+## Compatible four-role rolling updates
+
+Select **rolling**, **preserve**, and initially **preflight_only: true** on the
+chosen main commit. This requires an already-running Pydantic cluster, verified
+canonical/native schemas, four distinct healthy role owners, one registered
+native worker and an unpaused native maintenance generation. Exact-commit
+Docker, native runtime, PostgreSQL runtime and release-controller CI must pass.
+
+The candidate must retain every role compatibility contract, canonical schema
+revision, native application migration manifest and Harness/framework version.
+This path performs no schema migration, global drain, pause or resume. Use
+maintenance when any of those contracts change.
+
+After checking the preflight receipt, run with **preflight_only: false**. The
+controller replaces **worker → broker → coordinator → API**, one role at a time.
+Unaffected owners must stay healthy and identical. The selected role can overlap
+only its own replacement; every old process must retire before the next role.
+Native worker registration must match the exact canonical process identity and
+contracts before a worker is ready. Historical registrations are not live owners.
+Broker maintenance leadership and coordinator leadership must transfer to the
+replacement before advancing. A compatible coordinator joins the existing
+cluster policy without rewriting it.
+
+Render's private-service TCP readiness uses the reviewed native lifespan startup
+gate. HTTP probes then verify the selected build, core, role, process and
+leadership. Native schema receipts and the maintenance generation remain fixed
+throughout. Queued and running work do not need to reach a global zero-work
+boundary for this release.
+
+The platform's shutdown deadline remains finite. Qualify active model/tool
+activities and stream reconnection for the installation's workload; this
+controller does not extend that deadline or replay ambiguous external effects.
+A failed or uncertain deployment stops with its recorded intent. Previously
+updated compatible roles can remain on the new build. Inspect each live build,
+saved environment and owner before recovery; do not blindly retry a lost write
+or feed a mismatched baseline into a new release.
 
 ## Maintenance sequence
 
