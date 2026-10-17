@@ -9,7 +9,7 @@ jobs:
   moyai-agent-evals:
     name: Moyai agent evals
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:18-alpine
@@ -53,10 +53,12 @@ jobs:
         env:
           PYTHONPATH: .:evals:native/src:native/tests
         run: |
-          uv run --project native --python 3.13 --with harbor==0.24.0 --with openai==3.29.0 harbor run \
-            -p evals/tasks/deepseek_support_live \
-            -a moyai_harbor.agent:MoyaiAgent \
-            -k 3 -n 1 -o evals/jobs -y
+          for task in evals/tasks/*/; do
+            uv run --project native --python 3.13 --with harbor==0.24.0 --with openai==3.29.0 harbor run \
+              -p "$task" \
+              -a moyai_harbor.agent:MoyaiAgent \
+              -k 3 -n 1 -o evals/jobs -y
+          done
       - name: Report eval result
         if: always() && steps.eval-config.outputs.enabled == 'true'
         run: |
@@ -66,43 +68,36 @@ jobs:
 
           jobs_root = Path("evals/jobs")
           jobs = [path for path in jobs_root.iterdir() if path.is_dir()] if jobs_root.is_dir() else []
-          job = max(jobs, key=lambda path: path.stat().st_mtime) if jobs else None
-          trials = sorted(
-              (
-                  path for path in job.iterdir()
-                  if path.is_dir() and path.name.startswith("deepseek_support_live__")
-              ),
-              key=lambda path: path.name,
-          )[:3] if job else []
-          passed = 0
-          rows = []
-          for index in range(3):
-              if index < len(trials):
-                  trial = trials[index]
-                  try:
-                      reward = float((trial / "verifier" / "reward.txt").read_text().strip())
-                  except (OSError, ValueError):
+          tasks = sorted(path.name for path in Path("evals/tasks").iterdir() if path.is_dir())
+          summary = ["| Task | Trial | Reward |", "| --- | --- | ---: |"]
+          failed = []
+          for task in tasks:
+              trials = sorted(
+                  (trial for job in jobs for trial in job.iterdir()
+                   if trial.is_dir() and trial.name.startswith(f"{task}__")),
+                  key=lambda path: path.stat().st_mtime,
+              )[-3:]
+              passed = 0
+              for index in range(3):
+                  if index < len(trials):
+                      trial = trials[index]
+                      try:
+                          reward = float((trial / "verifier" / "reward.txt").read_text().strip())
+                      except (OSError, ValueError):
+                          reward = 0.0
+                      label = trial.name
+                  else:
                       reward = 0.0
-                  label = trial.name
-              else:
-                  reward = 0.0
-                  label = f"Trial {index + 1} (missing)"
-              passed += reward == 1.0
-              rows.append(f"| {label} | {reward:g} |")
-
-          summary = [
-              f"passed {passed}/3",
-              "",
-              "| Trial | Reward |",
-              "| --- | ---: |",
-              *rows,
-              "",
-          ]
+                      label = f"Trial {index + 1} (missing)"
+                  passed += reward == 1.0
+                  summary.append(f"| {task} | {label} | {reward:g} |")
+              print(f"{task}: passed {passed}/3")
+              if passed < 2:
+                  failed.append(task)
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
-              stream.write("\n".join(summary))
-          print(f"passed {passed}/3")
-          if passed < 2:
-              print(f"::warning::Moyai eval passed {passed}/3 trials; expected at least 2/3")
+              stream.write("\n".join(summary) + "\n")
+          if failed:
+              print(f"::warning::Moyai evals below 2/3 trials: {', '.join(failed)}")
               raise SystemExit(1)
           PY
       - name: Upload Harbor jobs
