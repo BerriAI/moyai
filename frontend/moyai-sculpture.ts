@@ -1,8 +1,9 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { finishOriginalSurface } from './moyai-original-surface'
 
-/** The cratered meteor, with a bounded render lifecycle owned by the home view. */
+/** The textured Moyai model, with a bounded render lifecycle owned by the home view. */
 export function mountSculpture(host: HTMLElement | null) {
   if (!host) return () => {}
   let disposed = false, frame = 0, dragging = false, pointer = -1
@@ -23,13 +24,12 @@ export function mountSculpture(host: HTMLElement | null) {
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(32, 1, .1, 30)
-  const additionalTextures = new Set<THREE.Texture>()
   const studio = new RoomEnvironment(), pmrem = new THREE.PMREMGenerator(renderer)
   const environment = pmrem.fromScene(studio, .04)
   studio.dispose(); pmrem.dispose()
   scene.environment = environment.texture
   scene.environmentIntensity = .16
-  // Keep the generator's reference projection aligned with the initial view.
+  // The model is centered and normalized offline for this home-screen framing.
   camera.position.set(0, 0, 8.6)
   camera.lookAt(0, 0, 0)
   scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .45))
@@ -93,7 +93,7 @@ export function mountSculpture(host: HTMLElement | null) {
       if (mesh.material) for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
         materials.add(material)
         if (material instanceof THREE.MeshStandardMaterial) {
-          for (const texture of [material.map, material.normalMap, material.roughnessMap, material.metalnessMap]) {
+          for (const texture of [material.map, material.normalMap, material.roughnessMap, material.metalnessMap, material.emissiveMap]) {
             if (texture) textures.add(texture)
           }
         } else if (material instanceof THREE.MeshBasicMaterial && material.map) textures.add(material.map)
@@ -112,7 +112,7 @@ export function mountSculpture(host: HTMLElement | null) {
     canvas.removeEventListener('pointerup', up); canvas.removeEventListener('lostpointercapture', up)
     canvas.removeEventListener('pointercancel', up); canvas.removeEventListener('keydown', key)
     canvas.removeEventListener('webglcontextlost', lost)
-    release(scene); additionalTextures.forEach(texture => texture.dispose())
+    release(scene)
     environment.dispose(); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
   }
   function lost(e: Event) { e.preventDefault(); cleanup() }
@@ -136,65 +136,9 @@ export function mountSculpture(host: HTMLElement | null) {
     if (disposed || !host.isConnected) { release(gltf.scene); cleanup(); return }
     const meshes: THREE.Mesh[] = []
     gltf.scene.traverse(child => { if (child instanceof THREE.Mesh) meshes.push(child) })
-    const reference = meshes.find(mesh => mesh.material instanceof THREE.MeshBasicMaterial && mesh.material.name === 'Reference surface')?.material
-    const stone = meshes.find(mesh => mesh.material instanceof THREE.MeshBasicMaterial && mesh.material.name === 'Inferred back')?.material
-    if (reference instanceof THREE.MeshBasicMaterial && reference.map && stone instanceof THREE.MeshBasicMaterial && stone.map) {
-      const stoneMap = stone.map
-      additionalTextures.add(stoneMap)
-      stoneMap.wrapS = stoneMap.wrapT = THREE.RepeatWrapping
-      reference.onBeforeCompile = shader => {
-        shader.uniforms.moyaiStoneMap = { value: stoneMap }
-        shader.vertexShader = shader.vertexShader.replace('#include <common>', `
-          #include <common>
-          varying vec3 moyaiPosition;
-          varying vec3 moyaiNormal;
-        `).replace('#include <begin_vertex>', `
-          #include <begin_vertex>
-          moyaiPosition = position;
-          moyaiNormal = normal;
-        `)
-        shader.fragmentShader = shader.fragmentShader.replace('#include <common>', `
-          #include <common>
-          uniform sampler2D moyaiStoneMap;
-          varying vec3 moyaiPosition;
-          varying vec3 moyaiNormal;
-        `).replace('#include <map_fragment>', `
-          #ifdef USE_MAP
-            vec3 rockNormal = normalize(moyaiNormal);
-            vec3 weights = pow(abs(rockNormal), vec3(4.0));
-            weights /= max(weights.x + weights.y + weights.z, 0.0001);
-            vec2 stoneScale = vec2(0.68, 0.44);
-            vec3 stoneColor =
-              texture2D(moyaiStoneMap, moyaiPosition.zy * stoneScale).rgb * weights.x +
-              texture2D(moyaiStoneMap, moyaiPosition.xz * stoneScale).rgb * weights.y +
-              texture2D(moyaiStoneMap, moyaiPosition.xy * stoneScale).rgb * weights.z;
-            vec3 photoColor = texture2D(map, vMapUv).rgb;
-            float referenceWeight = smoothstep(0.25, 0.60, rockNormal.z);
-            diffuseColor.rgb *= mix(stoneColor, photoColor, referenceWeight);
-          #endif
-        `)
-      }
-      // Both halves share one continuous surface. Object-space projections avoid
-      // stretching the front photograph over steep sides or a hard equator seam.
-      for (const mesh of meshes) if (mesh.material === stone) mesh.material = reference
-      stone.dispose()
-    }
-    let sheen: THREE.MeshPhysicalMaterial | undefined
     for (const mesh of meshes) {
       mesh.castShadow = true; mesh.receiveShadow = true
-      if (!(mesh.material instanceof THREE.MeshBasicMaterial)) continue
-      // Preserve the reference's photographed color and shadow. A separate,
-      // faint specular layer responds to rotation without washing that out.
-      mesh.material.toneMapped = false
-      sheen ??= new THREE.MeshPhysicalMaterial({
-        color: 0x000000, roughness: .64, metalness: 0, specularIntensity: .14,
-        clearcoat: .18, clearcoatRoughness: .25, transparent: true, opacity: .22,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
-      })
-      const surface = new THREE.Mesh(mesh.geometry, sheen)
-      surface.name = 'Mineral sheen'; surface.receiveShadow = true; surface.renderOrder = 1
-      mesh.add(surface)
+      finishOriginalSurface(mesh)
     }
     pivot.add(gltf.scene); ready = true; host.append(canvas); host.classList.add('sculpture-ready'); resize()
   }, undefined, cleanup)
