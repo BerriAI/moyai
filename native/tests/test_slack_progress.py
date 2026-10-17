@@ -6,12 +6,13 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from sqlalchemy import select
 from test_product_slack import bind
 from test_product_slack import bridge as canonical_bridge
 from test_product_slack import slack as canonical_slack
 
 from moyai.models import Delivery, Turn, User, new_id
-from moyai.slack import deliver_one, reconcile_one
+from moyai.slack import deliver_one, reconcile_one, stage_deliveries
 from moyai.slack_progress import anchor_identity, claim_delivery, stage_progress
 
 bridge = canonical_bridge
@@ -77,8 +78,10 @@ async def test_one_reply_is_edited_from_progress_to_final(runtime, active, slack
     assert requests[-1][1]["blocks"] == []
 
 
-@pytest.mark.parametrize("product", [False, True])
-async def test_late_progress_cannot_overwrite_final(runtime, active, slack, product):
+@pytest.mark.parametrize(("product", "status"), [
+    (False, "saving"), (False, "completed"), (True, "completed"),
+])
+async def test_late_progress_cannot_overwrite_final(runtime, active, slack, product, status):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
     initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
@@ -99,7 +102,7 @@ async def test_late_progress_cannot_overwrite_final(runtime, active, slack, prod
         first = asyncio.create_task(deliver(client, progress))
         await entered.wait()
         async with runtime.database.sessions.begin() as db:
-            (await db.get(Turn, active[1].id)).status = "completed"
+            (await db.get(Turn, active[1].id)).status = status
         await deliver(client, final)
         assert len(requests) == 1
         release.set()
@@ -112,9 +115,11 @@ async def test_late_progress_cannot_overwrite_final(runtime, active, slack, prod
         assert (await db.get(Delivery, late.id)).status == "suppressed"
 
 
-@pytest.mark.parametrize("product", [False, True])
+@pytest.mark.parametrize(("product", "status"), [
+    (False, "saving"), (False, "completed"), (True, "completed"),
+])
 @pytest.mark.parametrize("cancel", [False, True])
-async def test_ambiguous_update_is_reconciled_before_final(runtime, active, slack, product, cancel):
+async def test_ambiguous_update_is_reconciled_before_final(runtime, active, slack, product, status, cancel):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
     initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
@@ -143,7 +148,7 @@ async def test_ambiguous_update_is_reconciled_before_final(runtime, active, slac
         else:
             await task
         async with runtime.database.sessions.begin() as db:
-            (await db.get(Turn, active[1].id)).status = "completed"
+            (await db.get(Turn, active[1].id)).status = status
             saved = await db.get(Delivery, progress.id)
             assert saved.status == "sending"
             saved.claimed_at = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
@@ -155,20 +160,96 @@ async def test_ambiguous_update_is_reconciled_before_final(runtime, active, slac
     assert len(requests) == 3
 
 
-@pytest.mark.parametrize("product", [False, True])
-async def test_fast_answer_skips_unsent_placeholder(runtime, active, slack, product):
+@pytest.mark.parametrize(("product", "status"), [
+    (False, "saving"), (False, "completed"), (True, "completed"),
+])
+async def test_fast_answer_skips_unsent_placeholder(runtime, active, slack, product, status):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
     initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
     final = await queued(runtime, active, product=product, kind="final", text="Yep, I'm here.")
     async with runtime.database.sessions.begin() as db:
-        (await db.get(Turn, active[1].id)).status = "completed"
+        (await db.get(Turn, active[1].id)).status = status
     requests, messages, handle = transport()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
         await deliver(client, initial)
         await deliver(client, final)
     assert len(requests) == len(messages) == 1
     assert requests[0][1]["text"] == "Yep, I'm here."
+
+
+async def test_saving_transition_after_preflight_blocks_progress_at_claim(runtime, active, slack, monkeypatch):
+    from moyai import slack_progress
+
+    await bind(slack, active)
+    initial = await queued(runtime, active, product=False, kind="anchor", text="Received.")
+    late = await queued(runtime, active, product=False, kind="late", text="Stale update.")
+    requests, messages, handle = transport()
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = slack_progress.reply_target
+
+    async def pause_before_claim(runtime, delivery, *, product):
+        result = await original(runtime, delivery, product=product)
+        if delivery.id == late.id:
+            entered.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(slack_progress, "reply_target", pause_before_claim)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await deliver_one(runtime, client, initial)
+        pending = asyncio.create_task(deliver_one(runtime, client, late))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            async with runtime.database.sessions.begin() as db:
+                turn = await db.get(Turn, active[1].id)
+                turn.status = "saving"
+                turn.result = runtime.security.seal("Final verdict.")
+            await stage_deliveries(runtime)
+            async with runtime.database.sessions() as db:
+                final = await db.scalar(select(Delivery).where(
+                    Delivery.identity == f"slack-answer:{active[1].id}",
+                ))
+            assert final is not None
+            await deliver_one(runtime, client, final)
+        finally:
+            release.set()
+            await pending
+    assert len(requests) == 2
+    assert len(messages) == 1
+    assert next(iter(messages.values()))["text"].startswith("Final verdict.")
+    async with runtime.database.sessions.begin() as db:
+        assert (await db.get(Delivery, late.id)).status == "suppressed"
+        (await db.get(Turn, active[1].id)).status = "completed"
+    await stage_deliveries(runtime)
+    async with runtime.database.sessions() as db:
+        answers = list(await db.scalars(select(Delivery).where(
+            Delivery.identity == f"slack-answer:{active[1].id}",
+        )))
+        assert len(answers) == 1 and answers[0].status == "sent"
+
+
+async def test_product_saving_notice_remains_deliverable_before_completion(runtime, active, slack):
+    await bind(slack, active)
+    initial = await queued(runtime, active, product=True, kind="anchor", text="Received.")
+    requests, messages, handle = transport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await slack.service.deliver(client, initial)
+        for status in ("saving", "completed"):
+            async with runtime.database.sessions.begin() as db:
+                turn = await db.get(Turn, active[1].id)
+                turn.status = status
+                turn.result = runtime.security.seal("Final verdict.")
+            await slack.service.stage()
+            async with runtime.database.sessions() as db:
+                notices = list(await db.scalars(select(Delivery).where(
+                    Delivery.turn_id == active[1].id, Delivery.status == "pending",
+                ).order_by(Delivery.created_at)))
+            for notice in notices:
+                await slack.service.deliver(client, notice)
+            expected = "Moyai is saving the work." if status == "saving" else "Final verdict."
+            assert next(iter(messages.values()))["text"].startswith(expected)
+    assert len(messages) == 1 and len(requests) == 3
 
 
 @pytest.mark.parametrize("product", [False, True])

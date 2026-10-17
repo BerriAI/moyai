@@ -99,8 +99,11 @@ def obsolete_notice(delivery: Delivery, status: str, product: bool) -> bool:
     transient = kind in {"accepted", "queued", "running", "saving"} if product else (
         delivery.identity == anchor_identity(delivery.turn_id, False)
     )
+    # Standalone publishes its answer before checkpoint settlement. Product
+    # mode still needs its saving notice until the turn completes.
     return (
-        (transient or destination.get("progress") is True) and status in TERMINAL
+        (transient or destination.get("progress") is True)
+        and (status in TERMINAL or (not product and status == "saving"))
     ) or (kind in {"queued", "running", "saving"} and kind != status)
 
 
