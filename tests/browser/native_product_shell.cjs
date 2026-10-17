@@ -827,6 +827,53 @@ for(const width of [1440,768,320])test(`palette keyboard, escaped body search, f
   await page.keyboard.press('Escape');
 });
 
+for(const width of [1440,768,320])test(`queued turn stays below its preceding saved answer at ${width}px`,async t=>{
+  const nextId='turn-next';
+  reset({
+    turns:[{id:turnId,actor_id:'viewer',status:'running',connections:[],usage:{}},
+      {id:nextId,actor_id:'viewer',status:'queued',mode:'when_idle',connections:[],usage:{}}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'hello'},
+      {id:2,turn_id:nextId,role:'user',author_id:'viewer',content:'Check the next task.'}],
+  });
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.locator('.queued-messages').getByText('Check the next task.',{exact:true}).waitFor();
+  await waitFor(()=>clients.size>0,'SSE connected');
+  emit({type:'response_start',run_id:turnId,step:1},0);
+  emit({type:'text_start',index:0,text:'Hi! What would you like to work on?',phase:'final_answer'},1);
+  await page.locator('.live-message').getByText('Hi! What would you like to work on?',{exact:true}).waitFor();
+  assert.deepEqual(await page.locator('.transcript .message .message-content').allTextContents(),['hello','Hi! What would you like to work on?']);
+  state.messages.push({id:3,turn_id:turnId,role:'assistant',author_id:null,content:'Hi! What would you like to work on?'});
+  state.turns[0].status='completed';state.turns[1].status='running';
+  state.sessionOverrides={[sessionId]:{active_turn:nextId}};
+  emit({},undefined,'finished');
+  await page.locator('.transcript').getByText('Check the next task.',{exact:true}).waitFor();
+  const expected=['hello','Hi! What would you like to work on?','Check the next task.'];
+  assert.deepEqual(await page.locator('.transcript .message .message-content').allTextContents(),expected);
+  assert.equal(await page.locator('.queued-messages').count(),0);
+  assert.equal(await page.locator('.live-message').count(),0,'saved answer replaces its stream exactly once');
+  await page.reload();
+  await page.locator('.transcript').getByText('Check the next task.',{exact:true}).waitFor();
+  assert.deepEqual(await page.locator('.transcript .message .message-content').allTextContents(),expected);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('a streaming answer stays above another requester’s already visible queued input',async t=>{
+  reset({
+    turns:[{id:turnId,actor_id:'viewer',status:'running',connections:[],usage:{}},
+      {id:'other',actor_id:'teammate',status:'queued',mode:'when_idle',connections:[],usage:{}}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'hello'},
+      {id:2,turn_id:'other',role:'user',author_id:'teammate',content:'My next task.'}],
+  });
+  const page=await pageFor(t);
+  await page.locator('.transcript').getByText('My next task.',{exact:true}).waitFor();
+  await waitFor(()=>clients.size>0,'SSE connected');
+  emit({type:'response_start',run_id:turnId,step:1},0);
+  emit({type:'text_start',index:0,text:'Hi there.',phase:'final_answer'},1);
+  await page.locator('.live-message').getByText('Hi there.',{exact:true}).waitFor();
+  assert.deepEqual(await page.locator('.transcript .message .message-content').allTextContents(),['hello','Hi there.','My next task.']);
+  assert.equal(await page.locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
+});
+
 test('root streaming survives saved-state polling, reconnect replay, per-round retry and final settlement',async t=>{
   reset();const page=await pageFor(t);await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();await waitFor(()=>clients.size>0,'SSE connected');
   emit({type:'text_start',index:0,text:'Unlabelled child text'},0);

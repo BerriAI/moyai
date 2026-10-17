@@ -683,15 +683,15 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
   const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
   const finalText = liveFinalAnswer(liveText)
-  const liveMessage = !savedAssistant && finalText ? <article className="message assistant live-message" data-turn-id={liveText.turnId}>
-    <div className="message-author">Moyai</div><div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{finalText}</Markdown></div>
-  </article> : null
+  const liveMessage: Message | null = !savedAssistant && finalText ? {
+    id: -2, turn_id: liveText.turnId, role: "assistant", author_id: null, content: finalText,
+  } : null
   const displayedActivity = mergeActivity(activity, liveText.activity)
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
     turn.id === message.turn_id && waitsBehindActive(turn, active, sendingNow.has(turn.id))))
-  const visibleMessages = orderedWorkMessages(messages.filter(message =>
+  const visibleMessages = orderedWorkMessages((liveMessage ? [...messages, liveMessage] : messages).filter(message =>
     (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
-  const segments = workSegments(visibleMessages, view.turns)
+  const segments = workSegments(visibleMessages.filter(message => message !== liveMessage), view.turns)
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
@@ -732,7 +732,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             const segment = segments.get(message.id)
-            return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
+            return <React.Fragment key={message.id}><article className={`message ${message.role}${message === liveMessage ? " live-message" : ""}`}
+              data-turn-id={message.turn_id}>
               <div className="message-author">{message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
@@ -757,7 +758,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               })}
             />}</React.Fragment>
           })}
-          {!savedAssistant && liveMessage}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>

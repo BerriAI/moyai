@@ -47,9 +47,10 @@ export function rootTurn(turn: Turn | undefined, turns: Turn[]): Turn | undefine
   return turn
 }
 
-/** A promoted queued input takes its place when admitted into the running work. */
+/** Place available output with its execution, without waiting for that execution to finish. */
 export function orderedWorkMessages(messages: Message[], turns: Turn[]): Message[] {
   const result = [...messages]
+  const roots = new Map(turns.map(turn => [turn.id, rootTurn(turn, turns)?.id]))
   const groups = new Map<string, { index: number; message: Message; at: number }[]>()
   messages.forEach((message, index) => {
     if (message.role !== "user" && message.source !== "delegation") return
@@ -67,7 +68,25 @@ export function orderedWorkMessages(messages: Message[], turns: Turn[]): Message
     const ordered = [...group].sort((a, b) => a.at - b.at || a.index - b.index)
     group.forEach((item, index) => { result[item.index] = ordered[index].message })
   }
-  return result
+  // Queued inputs are saved immediately, often before the preceding answer.
+  // Storage order must not put that answer below the next execution's input.
+  // Keep admitted steering in the same execution, in its admission order above.
+  const executions = new Map<string, Message[]>()
+  for (const message of result) {
+    const root = roots.get(message.turn_id)
+    if (!root) continue
+    const execution = executions.get(root) ?? []
+    execution.push(message)
+    executions.set(root, execution)
+  }
+  const emitted = new Set<string>()
+  return result.flatMap(message => {
+    const root = roots.get(message.turn_id)
+    if (!root) return [message]
+    if (emitted.has(root)) return []
+    emitted.add(root)
+    return executions.get(root)!
+  })
 }
 
 /** Keep a distinct activity segment on each side of an admitted steering input. */
