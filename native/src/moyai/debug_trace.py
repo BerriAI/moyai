@@ -41,7 +41,7 @@ def _turn_cost(turn: Turn) -> float | None:
     usage = json.loads(turn.usage)
     if not isinstance(usage, dict):
         return None
-    cost = usage.get("cost", usage.get("cost_usd"))
+    cost = usage.get("cost")
     if isinstance(cost, bool) or not isinstance(cost, (int, float)):
         return None
     return float(cost)
