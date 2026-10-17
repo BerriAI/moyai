@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 DRAIN_VERSION = "moyai-product-maintenance-v1"
-TERMINAL_TURNS = ("completed", "failed", "stopped", "resumed")
+# Included steering inputs are finished; the parent retains its own drain checks.
+TERMINAL_TURNS = ("completed", "failed", "stopped", "resumed", "included")
 SETTLED_REQUESTS = ("completed", "failed", "not_dispatched")
 
 
