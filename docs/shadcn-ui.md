@@ -25,12 +25,17 @@ extractors or imports from a legacy static tree.
 The home sculpture uses the supplied Meshy **Silent Stone Orbit** model, converted
 offline from FBX into `native/web/public/moyai.glb`. Its base color, normal and
 packed metallic/roughness textures use the model's UVs and standard PBR material.
-The optimized asset has 50,150 triangles and 1024px embedded textures; importing
-it is not a runtime or normal build step. See
+The optimized asset has 50,150 triangles and 2048px embedded textures; importing
+and sculpting it is not a runtime or normal build step. See
 [the asset provenance](../scripts/assets/moyai-model.md) for conversion details.
-Keep the model centered and normalized to a 3.5-unit longest side for the viewer's
-camera. Avoid photo-projection shaders or a separate sheen mesh: the supplied
-material already provides the stone's surface detail and lighting response.
+The offline art pass widens the meteor's depth, gives its oval outline a slight
+lean, and varies ridge sizes while protecting the face. Preserve its framing
+against the viewer's camera when editing the geometry.
+`frontend/moyai-surface.ts` adds object-space grain, pitting and mineral glints
+to the supplied PBR material. The baked `_MOYAI_CAVITY` attribute localizes blue
+and violet highlights to authored crater bowls, with faint concavity accents.
+Glints respond to rotation without a continuous animation loop. Avoid a
+photo-projection shader or a separate overlapping sheen mesh.
 
 The Three.js viewer remains lazy and supports drag and keyboard rotation.
 It disposes shared geometry, materials, textures, the reflection target and shadow

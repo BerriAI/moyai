@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { finishMeteorSurface } from './moyai-surface'
 
 /** The textured Moyai model, with a bounded render lifecycle owned by the home view. */
 export function mountSculpture(host: HTMLElement | null) {
@@ -137,6 +138,7 @@ export function mountSculpture(host: HTMLElement | null) {
     gltf.scene.traverse(child => { if (child instanceof THREE.Mesh) meshes.push(child) })
     for (const mesh of meshes) {
       mesh.castShadow = true; mesh.receiveShadow = true
+      finishMeteorSurface(mesh)
     }
     pivot.add(gltf.scene); ready = true; host.append(canvas); host.classList.add('sculpture-ready'); resize()
   }, undefined, cleanup)
