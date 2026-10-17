@@ -62,6 +62,7 @@ async def test_top_level_mention_acknowledges_before_context_preparation(ingress
     monkeypatch.setattr(service.context, "prepare", prepare_context)
 
     message = context_tests.mention_message()
+    message.pop("thread_ts")
     await service.receive_payload(context_tests.envelope(message))
 
     assert len(calls) == 1
