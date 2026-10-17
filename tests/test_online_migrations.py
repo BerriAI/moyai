@@ -105,7 +105,7 @@ def test_candidate_plans_require_contiguous_reviewed_source_digests(monkeypatch)
         online.plan(BASE)
 
 
-def test_performance_expansion_preserves_old_writer_and_matches_initializer(database, tmp_path):
+def test_performance_expansion_preserves_old_writer_and_matches_initializer(database, tmp_path, monkeypatch):
     """Exercise the real 20 -> 21 declaration, not only a synthetic future plan."""
     from app import performance
     url, schema = database
@@ -121,7 +121,7 @@ def test_performance_expansion_preserves_old_writer_and_matches_initializer(data
         conn.execute("INSERT INTO performance_samples(message_id,run_id,kind,persisted_at,first_model_at) "
                      "VALUES(1,'saved','new_chat','2026-10-15T00:00:00+00:00','2026-10-15T00:00:01+00:00')")
         # Same connection remains a live old writer across the additive DDL.
-        plan = online.plan(20)
+        plan = online.plan(20, target_revision=21)
         assert online.apply_plan(conn, schema, plan)['status'] == 'applied'
         assert online.schema_is_compatible(conn, schema, 20, 20)
         assert online.schema_is_compatible(conn, schema, 21, 20)
@@ -136,6 +136,9 @@ def test_performance_expansion_preserves_old_writer_and_matches_initializer(data
             assert actual == set(conn.column_names('performance_samples'))
     finally:
         sqlite.close()
+    # This historical expansion admits a revision-21 reader. Newer physical
+    # revisions may correctly require maintenance rather than an online step.
+    monkeypatch.setattr(schema_migrations, 'SCHEMA_REVISION', 21)
     new = Store(tmp_path / 'new-reader', database_url=url, database_schema=schema, schema_mode='verify')
     try:
         performance.model_dispatched(new, {'id': 'saved', 'active_message_id': 1},
