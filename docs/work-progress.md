@@ -38,6 +38,9 @@ durable: restart reconciles the current state, and ambiguous status calls may
 retry without replaying chat messages. Destination and authorization are checked
 again after refreshing the bot token. A removed or replaced bot connection
 cannot send a cleanup request; Slack's two-minute expiration removes its status.
+Unreachable destinations retire their saved status and retry metadata, so idle
+threads leave the polling queue. Active work remains eligible when its connection
+returns. Transient provider or database failures retain the saved retry state.
 Only generic lifecycle text is sent, never private task focus or tool content.
 
 Existing-product deployments require the additive

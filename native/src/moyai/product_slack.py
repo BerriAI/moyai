@@ -56,6 +56,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class SlackInstallationUnavailable(HTTPException):
+    """The saved bot connection is absent or disabled, not a transient read failure."""
+
+    def __init__(self):
+        super().__init__(503, "The canonical Slack bot is unavailable.")
+
+
 class ProductSlackAuthority:
     """Narrow identity hook for source users enrolled by signed Slack intake.
 
@@ -196,7 +203,7 @@ class ProductSlack:
         rows = self.store.rows("SELECT * FROM connections WHERE provider='slack'")
         bot = self.connectors.slack_installation()
         if not rows or not bot.get("installed") or not self.connectors.policy("slack")["enabled"]:
-            raise HTTPException(503, "The canonical Slack bot is unavailable.")
+            raise SlackInstallationUnavailable()
         value = json.loads(self.product.security.decrypt(rows[0]["encrypted"]))
         bot["authority"] = hashlib.sha256(json.dumps({
             "epoch": authority(value, rows[0]["encrypted"]),

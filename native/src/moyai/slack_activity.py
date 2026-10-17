@@ -55,7 +55,13 @@ class SlackActivityService:
     async def target(self, thread_id: str) -> Target | None:
         """Recheck current work and the original destination; never expose focus text."""
         runtime, product = self.runtime, self.runtime.product_slack
-        bot = await source_database(product.installation) if product else None
+        bot = None
+        if product:
+            from .product_slack import SlackInstallationUnavailable
+            try:
+                bot = await source_database(product.installation)
+            except SlackInstallationUnavailable:
+                return None
         async with runtime.database.sessions() as db:
             thread = await db.get(SlackThread, thread_id)
             if thread is None:
@@ -133,17 +139,28 @@ class SlackActivityService:
                 SlackActivity.thread_id == thread_id, SlackActivity.claim_id == claim,
             ).values(**values))
 
+    async def target_or_retire(self, thread_id: str, claim: str) -> Target | None:
+        target = await self.target(thread_id)
+        if target is None:
+            # No authorized destination remains for a cleanup request. Slack's
+            # TTL clears its display; idle rows must leave the dirty queue.
+            # Active turns remain candidates and can recover when reconnected.
+            await self.write(
+                thread_id, claim, status="", retry_at=0, refreshed_at=0, delivery_version="",
+            )
+        return target
+
     async def sync_one(self, client: httpx.AsyncClient, thread_id: str) -> None:
         claim = await self.claim(thread_id)
         if claim is None:
             return
         try:
-            target = await self.target(thread_id)
+            target = await self.target_or_retire(thread_id, claim)
+            if target is None:
+                return
             async with self.runtime.database.sessions() as db:
                 saved = await db.get(SlackActivity, thread_id)
             assert saved is not None
-            if target is None:
-                return
             stamp = time.time()
             changed = saved.status != target.status
             if not changed:
@@ -165,7 +182,7 @@ class SlackActivityService:
                 return
             # Token refresh can suspend long enough for Stop, pause, revocation,
             # completion, or replacement of the connected workspace.
-            target = await self.target(thread_id)
+            target = await self.target_or_retire(thread_id, claim)
             if target is None:
                 return
             await self.write(
@@ -173,7 +190,7 @@ class SlackActivityService:
                 refreshed_at=0, retry_at=time.time() + 30,
             )
             # Re-read after the durable attempt, immediately before external I/O.
-            current = await self.target(thread_id)
+            current = await self.target_or_retire(thread_id, claim)
             if current != target:
                 await self.write(thread_id, claim, retry_at=0)
                 return

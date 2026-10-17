@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from pydantic import SecretStr
 from sqlalchemy import select
 from test_product_slack import bind
@@ -298,3 +299,130 @@ async def test_status_outage_does_not_block_answer_delivery(slack, active):
         await status
     async with slack.runtime.database.sessions() as db:
         assert (await db.get(Delivery, delivery.id)).status == "sent"
+
+
+@pytest.mark.parametrize("phase", [1, 2, 3], ids=["initial", "after-token-refresh", "before-send"])
+@pytest.mark.parametrize("change", [
+    "replaced", "destination", "bot-disabled", "chat-disabled", "removed", "connection-disabled",
+])
+async def test_unreachable_target_retires_dirty_idle_row_at_every_check(slack, active, monkeypatch, phase, change):
+    runtime, service = slack.runtime, slack.runtime.slack_activity
+    thread = await bind(slack, active)
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Turn, active[1].id)).status = "completed"
+        db.add(SlackActivity(
+            thread_id=thread.id, status="is working…", retry_at=time.time() + 30,
+            delivery_version="old-reply", refreshed_at=time.time(),
+        ))
+    original, checks = service.target, []
+
+    async def target(identity):
+        checks.append(identity)
+        if len(checks) == phase:
+            if change == "removed":
+                slack.service.store.execute("DELETE FROM connections WHERE provider='slack'")
+            elif change == "connection-disabled":
+                slack.service.store.execute(
+                    "INSERT INTO connection_policies(provider,enabled,read_only) VALUES('slack',0,0) "
+                    "ON CONFLICT(provider) DO UPDATE SET enabled=0",
+                )
+            elif change == "bot-disabled":
+                slack.service.settings.slack_bot_enabled = False
+            elif change == "chat-disabled":
+                slack.service.settings.slack_thread_chat_enabled = False
+            else:
+                async with runtime.database.sessions.begin() as db:
+                    binding = await db.get(ProductSlackBinding, thread.session_id)
+                    if change == "replaced":
+                        binding.connection_authority = "replaced"
+                    else:
+                        binding.channel_id = "COTHER001"
+        return await original(identity)
+
+    monkeypatch.setattr(service, "target", target)
+    requests = []
+
+    async def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await service.sync(client)
+        assert len(checks) == phase
+        assert requests == []
+        async with runtime.database.sessions() as db:
+            row = await db.get(SlackActivity, thread.id)
+            checked_at = row.checked_at
+            assert row.status == row.delivery_version == row.claim_id == ""
+            assert row.retry_at == row.refreshed_at == row.claim_until == 0
+        await service.sync(client)
+        assert len(checks) == phase  # Retired idle rows no longer read the installation or claim.
+        async with runtime.database.sessions() as db:
+            assert (await db.get(SlackActivity, thread.id)).checked_at == checked_at
+
+
+async def test_active_work_recovers_after_destination_returns(activity):
+    await activity.service.sync(activity.client)
+    if activity.product:
+        async with activity.runtime.database.sessions.begin() as db:
+            binding = await db.get(ProductSlackBinding, activity.thread.session_id)
+            original = binding.connection_authority
+            binding.connection_authority = "replaced"
+    else:
+        original = activity.runtime.settings.slack_team_id
+        activity.runtime.settings.slack_team_id = "TOTHER001"
+    await activity.service.sync(activity.client)
+    assert (await saved(activity)).status == ""
+    assert len(activity.calls) == 1
+    if activity.product:
+        async with activity.runtime.database.sessions.begin() as db:
+            (await db.get(ProductSlackBinding, activity.thread.session_id)).connection_authority = original
+    else:
+        activity.runtime.settings.slack_team_id = original
+    await activity.service.sync(activity.client)
+    assert [row["status"] for row in activity.calls] == ["is working…", "is working…"]
+
+
+@pytest.mark.parametrize("error", [HTTPException(503, "Temporary read failure"), RuntimeError("Store unavailable")])
+async def test_transient_installation_failure_preserves_dirty_state(slack, active, monkeypatch, error):
+    thread = await bind(slack, active)
+    runtime, service = slack.runtime, slack.runtime.slack_activity
+    retry_at = time.time() + 30
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Turn, active[1].id)).status = "completed"
+        db.add(SlackActivity(thread_id=thread.id, status="is working…", retry_at=retry_at))
+    original = slack.service.installation
+
+    def unavailable():
+        raise error
+
+    monkeypatch.setattr(slack.service, "installation", unavailable)
+    requests = []
+
+    async def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await service.sync(client)
+        async with runtime.database.sessions() as db:
+            row = await db.get(SlackActivity, thread.id)
+            assert row.status == "is working…" and row.retry_at == retry_at
+        assert requests == []
+        monkeypatch.setattr(slack.service, "installation", original)
+        await service.sync(client)
+        assert [row["status"] for row in requests] == [""]
+
+
+async def test_retirement_cannot_clear_another_pollers_claim(activity):
+    claim = await activity.service.claim(activity.thread.id)
+    async with activity.runtime.database.sessions.begin() as db:
+        row = await db.get(SlackActivity, activity.thread.id)
+        row.claim_id, row.status, row.retry_at = "new-owner", "is working…", 123
+        if activity.product:
+            (await db.get(ProductSlackBinding, activity.thread.session_id)).connection_authority = "replaced"
+        else:
+            activity.runtime.settings.slack_team_id = "TOTHER001"
+    assert await activity.service.target_or_retire(activity.thread.id, claim) is None
+    row = await saved(activity)
+    assert (row.claim_id, row.status, row.retry_at) == ("new-owner", "is working…", 123)
