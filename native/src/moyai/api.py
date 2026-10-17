@@ -457,6 +457,19 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 ]
         return result
 
+    @app.get("/api/sessions/{session_id}/progress/{turn_id}")
+    async def progress(session_id: str, turn_id: str, user: User = Depends(actor)):
+        from .progress import turn_progress
+
+        await runtime.database.session(user, session_id)
+        async with runtime.database.sessions() as db:
+            turn = await db.get(Turn, turn_id)
+            if turn is None or turn.session_id != session_id:
+                raise HTTPException(404, "Turn not found.")
+            if turn.actor_id != user.id:
+                raise HTTPException(403, "Working activity is visible only to its requester.")
+        return {"messages": await turn_progress(runtime, turn)}
+
     @app.get("/api/sessions/{session_id}/activity")
     async def session_activity(session_id: str, user: User = Depends(actor)):
         await runtime.database.session(user, session_id)

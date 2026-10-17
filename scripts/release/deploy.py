@@ -345,7 +345,7 @@ class Release:
         env = self.environment(service_id)
         if (env.get('MOYAI_CORE', 'legacy') not in {'legacy', 'pydantic'}
                 or (env.get('MOYAI_CORE') == 'pydantic' and not getattr(self, 'native_release', False))):
-            raise ReleaseError('Native services require the maintenance release with native receipt and drain checks.')
+            raise ReleaseError('Native services require maintenance or a compatible API release with native receipt checks.')
         sha = live[0]['commit']['id']
         if (not re.fullmatch('[0-9a-f]{40}', sha) or env.get('MOYAI_BUILD_SHA') != sha
                 or env.get('MOYAI_RUNTIME_ROLE') != role or env.get('MAINTENANCE_DRAIN') != 'false'
@@ -575,7 +575,8 @@ def main():
                                      preflight_only=args.preflight)
         elif args.release_type == 'api':
             from scripts.release.api_deploy import APIRelease
-            release = APIRelease(render, github, SSHProbe(key_path, source=ROOT / 'api_probe.py'),
+            from scripts.release.native_api_probe import SSHAPIProbe
+            release = APIRelease(render, github, SSHAPIProbe(key_path, connections=connections),
                                  args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
                                  preflight_only=args.preflight)
         else:

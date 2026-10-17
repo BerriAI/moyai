@@ -47,6 +47,11 @@ def snapshot(connection, schema):
 
 
 def probe(options):
+    if os.environ.get('MOYAI_CORE') == 'pydantic':
+        native = globals().get('_native_api_probe')
+        if native is None:
+            from scripts.release import native_api_probe as native
+        return native.probe(options)
     from app.config import Settings
     from app.database import runtime_fingerprint
     from app.runtime_compatibility import api_fingerprint

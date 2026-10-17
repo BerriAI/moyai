@@ -216,6 +216,10 @@ def initialize_infrastructure_costs(store):
 
 def initialize_spend(store):
     with store.connect() as conn:
+        if store.database:
+            from .billing_schema import consolidated_billing_view
+            if consolidated_billing_view(conn, store.database.schema):
+                return
         conn.executescript('''
             CREATE TABLE IF NOT EXISTS model_requests (
                 id TEXT PRIMARY KEY, key_hash TEXT NOT NULL, gateway_id TEXT NOT NULL DEFAULT '',

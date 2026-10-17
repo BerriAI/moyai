@@ -49,3 +49,13 @@ test('tool details merge by call and event type, while the compact action stays 
   assert.equal(state.action, 'Using read file…');
   assert.deepEqual(mergeActivity([call,result],state.activity),[call,result]);
 });
+
+test('phase separates commentary and final text within one response and survives a late phase', async () => {
+  const {emptyLiveTranscript, applyLiveEvent: apply, liveCommentary, liveFinalAnswer} = await loaded;
+  let state = apply(emptyLiveTranscript('root'), {type:'response_start',run_id:'root',step:1}, 0);
+  state = apply(state, {type:'text_start',index:0,text:'Checking.',phase:'commentary'}, 1);
+  state = apply(state, {type:'text_start',index:1,text:'Result'}, 2);
+  state = apply(state, {type:'text_end',index:1,text:'Result.',phase:'final_answer'}, 3);
+  assert.equal(liveCommentary(state,true),'Checking.');
+  assert.equal(liveFinalAnswer(state),'Result.');
+});

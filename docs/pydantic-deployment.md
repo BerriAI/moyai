@@ -59,9 +59,11 @@ compatibility claim. A candidate role fingerprint extends the existing role
 fingerprint with core/dependency versions, native schema, queue, key and object
 formats. Only ordinary coordinator activation publishes these contracts, after
 the release has verified that all four source owners retired. The release never
-edits policy rows directly. Native releases currently use maintenance, including
-same-core upgrades; API-only, coordinated and rolling release paths reject a
-native source until their native migration/drain semantics are qualified.
+edits policy rows directly. Native runtime and schema upgrades use maintenance,
+including same-core changes. A [compatible API-only release](production-deploy.md#compatible-apiui-updates)
+preserves every activated contract, both schemas' receipts and the running
+maintenance generation while replacing only the API. It performs no migration
+or drain. Coordinated and all-role rolling releases still reject a native source.
 
 Native execution protocol 2 records split activity queues, bundled skill startup,
 and on-demand workspace acquisition. It retains the `pydantic-v1` core identity

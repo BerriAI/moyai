@@ -5,12 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: Deploy main at button press; maintenance pauses all four roles for incompatible runtime upgrades
+        description: API replaces only a compatible API/UI; maintenance pauses all four roles for runtime or schema upgrades
         type: choice
         options: [rolling, api, coordinated, maintenance]
         default: maintenance
       execution_core:
-        description: Pydantic selects the reviewed maintenance cutover; preserve keeps the running core for compatible releases
+        description: Use preserve for API releases; pydantic selects the maintenance upgrade
         type: choice
         options: [pydantic, preserve]
         default: pydantic
