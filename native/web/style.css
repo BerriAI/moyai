@@ -136,6 +136,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .panel-tabs { display: flex; gap: 4px; padding: 16px; border-bottom: 1px solid var(--ui-border); }
 .panel-body { padding: 16px; overflow: auto; min-height: 0; flex: 1; }
 .panel-empty { display: flex; align-items: center; text-align: center; flex-direction: column; gap: 16px; color: var(--ui-muted); font-size: 13px; padding: 32px 12px; }
+.activity-toolbar { display: flex; justify-content: flex-end; padding: 0 0 12px; }
 .activity-row { border-bottom: 1px solid var(--ui-border); padding: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
 .activity-row summary { cursor: pointer; color: var(--ui-primary); }
 .activity-row pre { max-height: 320px; overflow: auto; }
