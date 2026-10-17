@@ -30,7 +30,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;return json(session('c'.repeat(32)));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections'||url.pathname==='/api/session-folders')return json([]);
-  if(url.pathname==='/api/pull-requests/statuses')return json({});
+  if(url.pathname==='/api/pull-requests/statuses')return json(state.prStatuses||{});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
       {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId}];
@@ -87,6 +87,7 @@ async function handle(req,res,next) {
     }
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname.endsWith('/activity'))return json([]);
+    if(url.pathname.endsWith('/workspace'))return json(state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/read'))return json({});
     if(req.method==='PATCH') {
       if(state.holdRename)await state.holdRename;
@@ -292,6 +293,91 @@ test('home and inventory render while account/folder reads and decoration are he
   await page.locator(`[data-session-key="native:${sessionId}"]`).waitFor();
   assert.ok(state.requests.some(req=>req.path==='/api/connections'));
   assert.equal(await page.getByText('Opening workspace…',{exact:true}).count(),0);
+});
+
+for(const width of [1440,768,320])test(`space home respects reduced motion and keeps controls reachable at ${width}px`,async t=>{
+  reset({status:'idle'});const page=await pageFor(t,'',width);
+  await page.getByRole('heading',{name:'What are we working on?',exact:true}).waitFor();
+  await page.evaluate(()=>document.fonts.ready);
+  assert.deepEqual(await page.locator('.decode-text').allTextContents(),['> what are we','  working on?▌']);
+  const geometry=await page.locator('.decode-headline').boundingBox();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('A draft that must survive animation.');
+  assert.equal(await page.locator('.decode-headline').evaluate(el=>el.getBoundingClientRect().height),geometry.height);
+  assert.equal(await page.locator('.home').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.equal(await page.getByRole('checkbox',{name:'Private session · Only you',exact:true}).isVisible(),true);
+  assert.equal(await page.getByRole('button',{name:'Swarm',exact:true}).isVisible(),true);
+});
+
+test('decode animation settles on input and can be paused without losing the draft',async t=>{
+  reset({status:'idle'});const page=await pageFor(t,'');
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  await page.waitForFunction(()=>document.querySelector('.decode-headline')?.classList.contains('decoded'));
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Keep this draft while the headline pauses.');
+  await page.getByRole('button',{name:'Pause headline animation',exact:true}).click();
+  await page.waitForTimeout(2700);
+  assert.equal(await input.innerText(),'Keep this draft while the headline pauses.');
+  assert.deepEqual(await page.locator('.decode-text').allTextContents(),['> what are we','  working on?▌']);
+  assert.equal(await page.locator('.decode-caret').evaluate(el=>getComputedStyle(el).animationName),'none');
+  await page.getByRole('button',{name:'Resume headline animation',exact:true}).click();
+  assert.equal(await input.innerText(),'Keep this draft while the headline pauses.');
+});
+
+test('sidebar PR icons retain multi-PR selection without numeric badges',async t=>{
+  const pr=(number,state)=>({url:`https://github.com/example/project/pull/${number}`,repository:'example/project',
+    number,title:`Review change ${number}`,state,draft:false,accessible:true});
+  reset({status:'waiting',prStatuses:{[sessionId]:[pr(12,'open'),pr(13,'open'),pr(14,'merged')]}});
+  const page=await pageFor(t,'');
+  await page.locator('.session-pr-ready').waitFor();
+  assert.equal(await page.locator('.session-pr-ready').innerText(),'PRs ready');
+  assert.equal(await page.locator('.session-pr-merged').innerText(),'PR merged');
+  assert.equal(await page.locator('.session-pr-count').count(),0);
+  assert.equal(await page.locator('.session-pr-ready svg').count(),1);
+  assert.equal(await page.locator('.session-meta-status.needs-input').innerText(),'Needs input');
+  await page.locator('.session-pr-ready').click();
+  await page.getByRole('button',{name:'Review change 12 example/project#12',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Review change 13 example/project#13',exact:true}).waitFor();
+});
+
+test('workspace overlay preserves chat geometry while the side panel resizes it',async t=>{
+  reset({status:'completed',workspaceData:{links:[],files:[],sources:[],subagents_limited:false,
+    subagents:[{id:'agent-one',parent_id:'',name:'Newton',avatar:0,status:'failed',can_inspect:true,started_at:'',depth:0}]}});
+  const page=await pageFor(t);
+  const key=page.getByRole('button',{name:'Open workspace',exact:true});
+  await key.locator('.workspace-orbit-alert').waitFor();
+  assert.equal(await key.getAttribute('aria-expanded'),'false');
+  const before = await Promise.all([page.locator('.chat-content').boundingBox(),page.locator('.composer-wrap').boundingBox()]);
+  await key.click();
+  const dialog=page.getByRole('dialog',{name:'Workspace resources',exact:true});
+  await dialog.waitFor();
+  assert.deepEqual(await Promise.all([page.locator('.chat-content').boundingBox(),page.locator('.composer-wrap').boundingBox()]),before);
+  assert.equal(await dialog.getByText('Failed',{exact:true}).count(),1);
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({state:'detached'});
+  assert.equal(await page.getByRole('button',{name:'Open workspace',exact:true}).locator('.workspace-orbit-alert').count(),1);
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(),before[0]);
+  await page.getByRole('button',{name:'Open side panel',exact:true}).click();
+  await page.getByRole('separator',{name:'Resize chat and side panel',exact:true}).waitFor();
+  assert.ok((await page.locator('.chat-content').boundingBox()).width < before[0].width);
+});
+
+test('workspace attention refresh preserves the active skill picker and draft',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'completed',holds:{[`/api/sessions/${sessionId}/workspace`]:held},
+    skills:[{id:'org-team',name:'team',description:'Team workflow',scope:'organization',reference:'org:team',icon:'code'}],
+    workspaceData:{links:[],files:[],sources:[],subagents_limited:false,
+      subagents:[{id:'agent-one',parent_id:'',name:'Newton',avatar:0,status:'failed',can_inspect:true,started_at:'',depth:0}]}});
+  const page=await pageFor(t,'#'+sessionId,768);
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Use /team');
+  const options=page.getByRole('listbox',{name:'Skills'});await options.waitFor();
+  release();
+  await page.locator('.workspace-orbit-alert').waitFor();
+  assert.equal(await input.innerText(),'Use /team');
+  assert.equal(await options.isVisible(),true);
+  await input.press('Enter');
+  await input.getByLabel('/team skill').waitFor();
+  assert.match(await input.innerText(),/^Use Team /);
 });
 
 test('resolved conversation opens without plan/activity reads; plan loads only when opened',async t=>{

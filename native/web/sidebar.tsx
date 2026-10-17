@@ -14,9 +14,9 @@ type PullRequestSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type OpenPullRequest = (sessionId: string, url: string) => void
 
 const pullRequestStates = {
-  ready: { label: "PR is ready", plural: "Ready pull requests", Icon: GitPullRequest },
+  ready: { label: "PR ready", plural: "Ready pull requests", Icon: GitPullRequest },
   draft: { label: "Draft", plural: "Draft pull requests", Icon: GitPullRequestDraft },
-  merged: { label: "Merged", plural: "Merged pull requests", Icon: GitMerge },
+  merged: { label: "PR merged", plural: "Merged pull requests", Icon: GitMerge },
   closed: { label: "Closed", plural: "Closed pull requests", Icon: GitPullRequestClosed },
 }
 
@@ -32,7 +32,7 @@ function PullRequestIndicator({ session, state, requests, onOpen }: {
   const [open, setOpen] = useState(false)
   const { label, plural, Icon } = pullRequestStates[state]
   const description = `${plural}: ${requests.length}. ${requests.map(pr => `${pr.repository}#${pr.number}: ${pr.title}`).join("; ")}`
-  const content = <><span>{state === "ready" && requests.length > 1 ? "PRs are ready" : label}</span><Icon size={13} aria-hidden="true" /><span className="session-pr-count">{requests.length}</span></>
+  const content = <><Icon size={13} aria-hidden="true" /><span>{requests.length > 1 && state === "ready" ? "PRs ready" : requests.length > 1 && state === "merged" ? "PRs merged" : label}</span></>
   const className = `session-pr-indicator session-pr-${state}`
   if (!onOpen) return <span className={className} title={description}><span className="visually-hidden">{description}</span><span className="session-pr-content" aria-hidden="true">{content}</span></span>
   if (requests.length === 1) return <Button type="button" variant="ghost" size="xs" className={className} title={description} aria-label={description} onClick={() => onOpen(session.id, requests[0].url)}>{content}</Button>
@@ -193,7 +193,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         onDragStart={event => startDrag(event, row)} onDragEnd={clearDrag}
         className={`session-row ${active ? "selected" : ""} ${row.unread ? "unread" : ""} ${dragging === row.id ? "session-dragging" : ""}`}>
       <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
-        <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : ""}`} aria-label={readOnly ? "Read-only history" : row.unread ? "Unread" : row.status} />
+        <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : !readOnly && row.status === "failed" ? "failed" : ""}`} aria-label={readOnly ? "Read-only history" : row.unread ? "Unread" : row.status} />
         <span className="session-title">{row.title}</span>
       </a>
       <div className="session-row-actions">
@@ -207,7 +207,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
       </div>
       <div className="session-row-meta">
         {!readOnly && row.pinned && placements.get(row)?.kind === "folder" && <Pin size={12} aria-label="Pinned session" />}
-        <span className="session-meta-status">{row.deleted ? "Deleted" : readOnly ? "Read-only history" : row.status === "waiting" ? "Needs a response" : ["running", "queued", "saving"].includes(row.status) ? row.status : age(row.updated_at)}</span>
+        <span className={`session-meta-status ${!readOnly && !row.deleted && row.status === "waiting" ? "needs-input" : !readOnly && !row.deleted && row.status === "failed" ? "failed" : ""}`}>{row.deleted ? "Deleted" : readOnly ? "Read-only history" : row.status === "waiting" ? "Needs input" : row.status === "failed" ? "Failed" : ["running", "queued", "saving"].includes(row.status) ? row.status : age(row.updated_at)}</span>
         {!readOnly && <PullRequestIndicators session={row} onOpen={row.deleted ? undefined : onOpenPullRequest} />}
         {row.surface === "slack" && <img className="session-slack-logo" src={slackLogo} width={14} height={14} alt="Slack conversation" title="Slack conversation" />}
       </div>

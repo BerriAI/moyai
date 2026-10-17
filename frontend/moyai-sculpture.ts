@@ -1,11 +1,13 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
-/** The film's sculpture, with a bounded render lifecycle owned by the home view. */
+/** The cratered meteor, with a bounded render lifecycle owned by the home view. */
 export function mountSculpture(host: HTMLElement | null) {
   if (!host) return () => {}
   let disposed = false, frame = 0, dragging = false, pointer = -1
-  let lastX = 0, lastY = 0, yaw = .35, pitch = .06, velocity = 0
+  const initialYaw = .40, initialPitch = .10
+  let lastX = 0, lastY = 0, yaw = initialYaw, pitch = initialPitch, velocity = 0
   let renderer: THREE.WebGLRenderer
   try { renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true }) }
   catch { return () => {} }
@@ -17,14 +19,29 @@ export function mountSculpture(host: HTMLElement | null) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setClearColor(0, 0)
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.35
+  renderer.toneMappingExposure = 1.10
+  renderer.shadowMap.enabled = true
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(32, 1, .1, 30)
+  const studio = new RoomEnvironment(), pmrem = new THREE.PMREMGenerator(renderer)
+  const environment = pmrem.fromScene(studio, .04)
+  studio.dispose(); pmrem.dispose()
+  scene.environment = environment.texture
+  scene.environmentIntensity = .16
   camera.position.set(0, .15, 8.6)
   camera.lookAt(0, 0, 0)
-  scene.add(new THREE.HemisphereLight(0xb8d8ff, 0x111020, 2))
-  for (const [color, power, x, y, z] of [[0xe0edff, 7, -3, 4, 5], [0x8263ff, 9, 3, 1, -3], [0xa4d8ff, 6, -4, 1, -2]]) {
+  scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .45))
+  for (const [color, power, x, y, z] of [[0xf0f2f8, 3.8, 3, 5, 5], [0x7a9be6, 2.4, -4, 0, -2], [0x9b86d8, .95, 3, 1, -3], [0x829ee8, .9, -4, -2, 3]]) {
     const light = new THREE.DirectionalLight(color, power)
     light.position.set(x, y, z); scene.add(light)
+    if (y === 5 || y === -2) {
+      light.castShadow = true
+      light.shadow.mapSize.set(1024, 1024)
+      Object.assign(light.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3, near: .1, far: 20 })
+      light.shadow.camera.updateProjectionMatrix()
+      light.shadow.normalBias = .015
+      light.shadow.bias = -.0005
+    }
   }
   const pivot = new THREE.Group(); scene.add(pivot)
   const motion = matchMedia('(prefers-reduced-motion: reduce)')
@@ -34,7 +51,7 @@ export function mountSculpture(host: HTMLElement | null) {
     if (disposed || !host?.isConnected) { cleanup(); return }
     if (!ready || !visible || document.hidden) return
     if (!dragging && !motion.matches && Math.abs(velocity) > .0001) { yaw += velocity; velocity *= .93 }
-    pivot.rotation.set(pitch, yaw, 0)
+    pivot.rotation.set(pitch, yaw, -.14)
     renderer.render(scene, camera)
     if (!dragging && !motion.matches && Math.abs(velocity) > .0001) schedule()
   }
@@ -58,7 +75,7 @@ export function mountSculpture(host: HTMLElement | null) {
   function key(e: KeyboardEvent) {
     if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home'].includes(e.key)) return
     e.preventDefault(); velocity = 0
-    if (e.key === 'Home') { yaw = .35; pitch = .06 }
+    if (e.key === 'Home') { yaw = initialYaw; pitch = initialPitch }
     else if (e.key === 'ArrowLeft') yaw -= .18
     else if (e.key === 'ArrowRight') yaw += .18
     else pitch = Math.max(-.65, Math.min(.65, pitch + (e.key === 'ArrowUp' ? -.12 : .12)))
@@ -66,11 +83,21 @@ export function mountSculpture(host: HTMLElement | null) {
   }
   function visibility() { velocity = 0; schedule() }
   function release(object: THREE.Object3D) {
+    const textures = new Set<THREE.Texture>()
     object.traverse(child => {
       const mesh = child as THREE.Mesh
       mesh.geometry?.dispose()
-      if (mesh.material) for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) material.dispose()
+      if (mesh.material) for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+        if (material instanceof THREE.MeshStandardMaterial) {
+          for (const texture of [material.map, material.normalMap, material.roughnessMap, material.metalnessMap]) {
+            if (texture) textures.add(texture)
+          }
+        }
+        material.dispose()
+      }
+      if (child instanceof THREE.DirectionalLight) child.shadow.dispose()
     })
+    textures.forEach(texture => texture.dispose())
   }
   function cleanup() {
     if (disposed) return
@@ -80,7 +107,7 @@ export function mountSculpture(host: HTMLElement | null) {
     canvas.removeEventListener('pointerup', up); canvas.removeEventListener('lostpointercapture', up)
     canvas.removeEventListener('pointercancel', up); canvas.removeEventListener('keydown', key)
     canvas.removeEventListener('webglcontextlost', lost)
-    release(scene); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
+    release(scene); environment.dispose(); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
   }
   function lost(e: Event) { e.preventDefault(); cleanup() }
   const observer = new IntersectionObserver(entries => { visible = entries[0].isIntersecting; schedule() })
@@ -92,8 +119,18 @@ export function mountSculpture(host: HTMLElement | null) {
   canvas.addEventListener('webglcontextlost', lost)
   document.addEventListener('visibilitychange', visibility); motion.addEventListener('change', visibility)
   // GLB keeps geometry in the same-origin response; data: buffer fetches violate our CSP.
-  new GLTFLoader().load('/static/models/moyai.glb', gltf => {
+  const loader = new GLTFLoader()
+  loader.register(parser => {
+    // Embedded maps are images, so load through img-src rather than fetching
+    // blob URLs via ImageBitmapLoader, which this app's connect-src disallows.
+    parser.textureLoader = new THREE.TextureLoader()
+    return { name: 'MoyaiEmbeddedImages' }
+  })
+  loader.load('/static/models/moyai.glb', gltf => {
     if (disposed || !host.isConnected) { release(gltf.scene); cleanup(); return }
+    gltf.scene.traverse(child => {
+      if (child instanceof THREE.Mesh) { child.castShadow = true; child.receiveShadow = true }
+    })
     pivot.add(gltf.scene); ready = true; host.append(canvas); host.classList.add('sculpture-ready'); resize()
   }, undefined, cleanup)
   return cleanup

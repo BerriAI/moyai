@@ -5,10 +5,12 @@ description: Build or refine Moyai's native React frontend using its established
 
 # Moyai UI
 
-Preserve the Midnight violet workspace: near-black navy surfaces, lavender actions,
-near-white text, local Geist typography and opaque slate composer panels. The home screen
-uses the deterministic constellation and Moyai sculpture; chat and Settings stay
-quiet for sustained work. Inspect the current screens before changing them.
+Preserve the space workspace: near-black neutral surfaces, lavender actions,
+near-white text, local Share Tech Mono typography and opaque composer panels. The home screen
+uses deterministic stars, the decode headline and interactive Moyai meteor.
+Chats reuse the static stars at lower brightness; Settings stay quiet for sustained
+work. The workspace menu floats without reflowing chat; only the independent side
+panel changes chat proportions. Inspect current screens before changing them.
 
 ## Sources and controls
 
@@ -31,8 +33,8 @@ row while filters/actions retain their intrinsic width; on narrow screens it
 gets its own row. Preserve complete labels or provide explicit expansion.
 
 Use one primary action per context. Colors communicate status alongside text,
-not alone. Green means ready/open, amber needs attention, red means error/closed,
-and purple means merged. Confine PR status fills to badges; keep session rows neutral.
+not alone. Green means ready/open, yellow needs input, red means error/closed,
+and purple means merged. Keep sidebar PR statuses as text and icons, without PR numbers or colored row fills.
 Dialogs need names, labels, errors, cancellation and contained scrolling.
 Tables scroll within their own labelled, keyboard-focusable container. Keep normal
 text contrast at 4.5:1 and meaningful boundaries/focus at 3:1.
@@ -48,6 +50,16 @@ explain their effect and support cancellation. Use 16px mobile inputs, wrapping
 action groups and flexible grid columns. Preserve long-identifier wrapping.
 Respect reduced motion and avoid `transition: all`. Show actionable empty/error
 states, with clear filters or retry where applicable.
+
+## React performance
+
+Apply the relevant client-side guidance from
+[Vercel React Best Practices](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices).
+Keep heavy features such as the Three.js sculpture dynamically imported, isolate
+frequent animation state from form and application state, hoist deterministic
+decorations, and clean up timers, observers and event listeners. Pause decorative
+work offscreen, in background tabs and for reduced motion. Do not add a dependency
+or a Next.js-specific pattern to this Vite app solely to satisfy an example.
 
 ## Verify
 

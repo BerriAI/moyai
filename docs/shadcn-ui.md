@@ -2,8 +2,8 @@
 
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
-`frontend/theme.css`: Midnight violet uses deep navy, lavender actions, near-white
-text and semantic status colors. The retired escaped-template renderer is no longer used.
+`frontend/theme.css`: The space workspace uses near-black neutral surfaces, lavender actions,
+local Share Tech Mono typography and semantic status colors. The retired escaped-template renderer is no longer used.
 
 Use direct React components for buttons, dialogs, forms, selects and menus.
 Preserve labels, focus behavior, portal geometry and permission-driven actions.
@@ -11,10 +11,31 @@ Preserve labels, focus behavior, portal geometry and permission-driven actions.
 adapters supply capability-specific forms. `style.css` and the focused panel,
 sidebar and workspace styles own application layout.
 
+The orbit workspace key uses the shared Button and Radix Dialog behavior, including
+Escape, outside dismissal and the Command/Control-period shortcut. Its resource
+menu floats within the chat area and must not resize the transcript, move the
+composer or change their scroll positions. The independent Computer/resource
+side panel still resizes the chat through its existing split.
+
 Images/fonts belong to `native/web/assets`; public files and the sculpture model
 belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
+
+The meteor is an actual cratered mesh, generated offline with
+`uv run --script scripts/assets/generate_moyai_meteor.py`; generation is not a
+runtime or normal build step. Its pinned script dependencies produce the bundled
+GLB with matte material, baked vertex shading and embedded mineral surface maps.
+Use cool gray lighting and a restrained rim light; avoid a CSS glow around the silhouette.
+The face occupies the front plane of the wider asteroid. Large craters extend
+around its flanks; cavity shading, blue-violet mineral tint, roughness/metalness
+maps and small reflective facets give the stone depth. A static studio environment
+supplies reflections that respond to rotation without an animation loop.
+The Three.js viewer remains lazy,
+supports drag and keyboard rotation, and disposes its geometry, materials and
+textures, reflection target and shadow maps on unmount. Embedded images use TextureLoader so the existing
+content security policy can load them through `img-src`. The supplied reference
+image is the lightweight fallback.
 
 ```sh
 npm ci
