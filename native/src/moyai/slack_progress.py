@@ -106,6 +106,8 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
             if product:
                 # Admission normally reserves this slot; polling also repairs
                 # a crash between admission and acknowledgement staging.
+                if runtime.product_slack is None:
+                    continue
                 await runtime.product_slack.queue(
                     segment, thread, "accepted", {"text": "Moyai received your message."},
                 )

@@ -116,7 +116,7 @@ class WorkProgress:
 
     async def _delegated(self, turn: Turn, *, limit: int) -> tuple[list[AgentProgress], bool]:
         """Read only the assignment's generated turns, never later private chat."""
-        queue = [(turn.id, None, 0)]
+        queue: list[tuple[str, str | None, int]] = [(turn.id, None, 0)]
         found: list[AgentProgress] = []
         visible_sessions: list[str] = []
         seen: set[str] = set()
