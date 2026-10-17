@@ -6,11 +6,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai import Conversation, ConversationTypeAdapter
-from pydantic_ai.workspaces import WorkspaceRef, WorkspaceTimeoutError, WorkspaceUnavailableError
+from pydantic_ai.workspaces import (
+    CommandResult,
+    WorkspaceRef,
+    WorkspaceTimeoutError,
+    WorkspaceUnavailableError,
+)
 
 from moyai.activities import save_computer
 from moyai.contracts import NewMessage
-from moyai.lambda_workspace import LambdaBackend
+from moyai.lambda_workspace import LambdaBackend, LambdaProductComputer
 from moyai.models import Session
 from moyai.settings import Settings
 from moyai.workspace_recovery import checkpoint, prepare_workspace
@@ -20,6 +25,29 @@ REFERENCE = {"provider": "lambda", "id": "lambda:us-east-1:microvm-original"}
 
 def backend():
     return LambdaBackend(Settings(_env_file=None))
+
+
+@pytest.mark.parametrize("method", ["write_bytes", "copy_from_local"])
+async def test_product_binary_transfers_respect_linux_arguments_and_truncate(tmp_path, method):
+    async def execute(command, **kwargs):
+        assert max(len(arg.encode()) for arg in command) < 128 * 1024
+        process = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return CommandResult(exit_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode())
+
+    computer = LambdaProductComputer(Settings(_env_file=None), REFERENCE["id"])
+    computer.backend = SimpleNamespace(run=execute)
+    source, target = tmp_path / "source", tmp_path / "nested" / "quote's binary"
+    data = bytes(range(256)) * 1536
+    for value in (data, b"short", b""):
+        if method == "write_bytes":
+            await computer.write_bytes(value, str(target))
+        else:
+            source.write_bytes(value)
+            await computer.copy_from_local(source, str(target))
+        assert target.read_bytes() == value
 
 
 async def test_concurrent_acquisition_creates_once_and_preserves_identity():

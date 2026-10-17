@@ -29,6 +29,7 @@ from .lambda_control import LambdaControl, LambdaVM, ObservationError
 from .settings import Settings
 
 logger = logging.getLogger(__name__)
+FILE_CHUNK_BYTES = 64 * 1024  # Base64 must remain below Linux's per-argument limit.
 
 class LambdaSandbox(AbstractCapability[RunScope]):
     def __init__(self, settings: Settings):
@@ -98,13 +99,13 @@ class LambdaProductComputer:
             raise RuntimeError("Native workspace file transfer failed")
 
     async def write_bytes(self, raw: bytes, path: str) -> None:
-        for offset in range(0, max(1, len(raw)), 128 * 1024):
-            await self._write(path, raw[offset:offset + 128 * 1024], append=offset > 0)
+        for offset in range(0, max(1, len(raw)), FILE_CHUNK_BYTES):
+            await self._write(path, raw[offset:offset + FILE_CHUNK_BYTES], append=offset > 0)
 
     async def copy_from_local(self, source: Path, destination: str) -> None:
         with source.open("rb") as stream:
             append = False
-            while chunk := stream.read(128 * 1024):
+            while chunk := stream.read(FILE_CHUNK_BYTES):
                 await self._write(destination, chunk, append=append)
                 append = True
             if not append:
