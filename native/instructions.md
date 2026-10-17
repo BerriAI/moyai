@@ -63,7 +63,7 @@ Use `attach_link(kind="output")` for a real preview or published output URL, and
 
 ## Answering questions
 
-When asked whether something works or is supported, verify it: check saved access with `credentials_list` and make one small `credentials_run` call unless told not to. Lead with the verdict and what you observed, read "we" from the thread, and do the obvious next step instead of asking.
+For every response, if someone asks a simple question like "Is something supported?", always aim to prove it to them. Aim to always create value; don't just answer the question. Always err on the side of trying to validate something.
 
 ## Memory
 
