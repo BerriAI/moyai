@@ -75,6 +75,12 @@ async function handle(req,res,next) {
   }
   if(url.pathname.startsWith('/api/sessions/')) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
+    if(url.pathname.endsWith('/answers')&&req.method==='POST') {
+      if(state.answerHold)await state.answerHold;
+      if(state.answerError)return json({detail:'The answer could not be saved. Try again.'},503);
+      state.status='idle';state.pending=undefined;state.answerAccepted=true;
+      return json({id:'resumed-turn',status:'queued'},202);
+    }
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
     if(url.pathname.endsWith('/progress/'+turnId))return json({messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
@@ -88,6 +94,7 @@ async function handle(req,res,next) {
       const messages=state.messagesBySession?.[url.pathname.split('/')[3]]||state.messages;
       if(req.method==='POST') {
         messages.push({id:messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
+        if(data.reply_to){state.status='idle';state.pending=undefined;state.answerAccepted=true;}
         return json({id:'turn-skill',actor_id:'viewer',status:'completed'});
       }
       return json(messages);
@@ -102,6 +109,7 @@ async function handle(req,res,next) {
       if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
       return json({updated:true});
     }
+    if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
     const row=session(url.pathname.split('/')[3]);
     const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(state.holdSessionRead)await state.holdSessionRead;
@@ -310,7 +318,7 @@ for(const attention of ['question','effect'])test(`swarm reveals a pending ${att
     state.status='idle';
     state.effects=[{id:'effect-one',turn_id:turnId,tool_name:'shell',arguments:{command:'example requiring review'}}];
   }
-  await page.getByRole('heading',{name:attention==='question'?'Your input is needed':'An action needs review',exact:true}).waitFor();
+  await page.getByRole('heading',{name:attention==='question'?'Question':'An action needs review',exact:true}).waitFor();
   assert.equal(await page.locator('.transcript').isVisible(),true);
   await page.getByRole('button',{name:'Space',exact:true}).click();
   assert.equal(await page.locator('.transcript').isVisible(),true);
@@ -720,6 +728,200 @@ test('source collisions and identically named legacy folders survive paged inven
   await page.getByRole('button',{name:'Show archived conversations',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/history/sessions'&&req.query.includes('archived=true')&&!req.query.includes('cursor=')));
   assert.equal(await native.count(),0,'changing list scope resets loaded pages');
+});
+
+function colorQuestion({multi=false,approvals=[]}={}) {
+  return {calls:[{tool_call_id:'color-call',tool_name:'ask_user_question',args:{questions:[{
+    header:'Color',question:'Which color should I use?',multi_select:multi,
+    options:[
+      {label:'Blue',description:'A calm blue accent for the workspace.'},
+      {label:'Green',description:'A clear green accent with good contrast.'},
+      {label:'Purple',description:'A muted purple accent that matches the existing theme.'},
+    ],
+  }]}}],approvals};
+}
+const answerRequests=()=>state.requests.filter(row=>row.path.endsWith('/answers')&&row.method==='POST');
+
+for(const width of [1440,768,320])test(`compact numbered choices submit directly at ${width}px`,async t=>{
+  reset({status:'waiting',pending:colorQuestion()});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('heading',{name:'Question',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Send',exact:true}).count(),0);
+  const list=page.locator('.question-choice-list');
+  const choices=list.getByRole('button');
+  assert.equal(await choices.count(),3);
+  const boxes=await Promise.all([0,1,2].map(index=>choices.nth(index).boundingBox()));
+  assert.ok(boxes[0].y+boxes[0].height<=boxes[1].y&&boxes[1].y+boxes[1].height<=boxes[2].y);
+  assert.ok(boxes.every(box=>Math.abs(box.x-boxes[0].x)<1));
+  for(const number of ['1','2','3'])assert.equal(await list.getByText(number,{exact:true}).count(),1);
+  const sizes=await page.evaluate(()=>['.message-content','.question-choice-field legend','.question-choice-row','.question-custom-input'].map(selector=>getComputedStyle(document.querySelector(selector)).fontSize));
+  assert.equal(new Set(sizes).size,1);
+  await choices.nth(0).focus();await choices.nth(0).press('ArrowDown');
+  assert.equal(await page.getByRole('button',{name:'Green',exact:true}).evaluate(element=>element===document.activeElement),true);
+  assert.equal(answerRequests().length,0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await page.getByRole('button',{name:'Green',exact:true}).press('3');
+  await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers,[{header:'Color',selected:['Purple'],custom_answer:null}]);
+});
+
+test('Enter sends written answers while digits and Shift Enter remain text',async t=>{
+  reset({status:'waiting',pending:colorQuestion()});
+  const page=await pageFor(t);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('2 shades of orange');await custom.press('3');
+  assert.equal(await custom.inputValue(),'2 shades of orange3');
+  await custom.press('Shift+Enter');await custom.pressSequentially('With contrast');
+  assert.equal(answerRequests().length,0);
+  await custom.press('Enter');await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers,[{header:'Color',selected:[],custom_answer:'2 shades of orange3\nWith contrast'}]);
+});
+
+test('multi-select choices remain checkboxes and returning to choices clears custom text',async t=>{
+  reset({status:'waiting',pending:colorQuestion({multi:true})});
+  const page=await pageFor(t);
+  await page.getByRole('checkbox',{name:'Blue',exact:true}).click();
+  await page.getByRole('checkbox',{name:'Green',exact:true}).click();
+  for(const checkbox of await page.getByRole('checkbox').all())assert.equal(await checkbox.getAttribute('aria-pressed'),null);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('Amber');
+  assert.equal(await page.getByRole('checkbox',{name:'Blue',exact:true}).isChecked(),false);
+  await page.getByRole('checkbox',{name:'Purple',exact:true}).click();
+  assert.equal(await custom.inputValue(),'');
+  await page.getByRole('checkbox',{name:'Blue',exact:true}).click();
+  assert.equal(answerRequests().length,0);
+  await page.getByRole('checkbox',{name:'Blue',exact:true}).press('Enter');await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers[0].selected,['Purple','Blue']);
+});
+
+test('choosing an answer never implicitly resolves a pending approval',async t=>{
+  reset({status:'waiting',pending:colorQuestion({approvals:[{tool_call_id:'publish',tool_name:'publish_document',args:{title:'Test document'}}]})});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Blue',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:true}).count(),1);
+  assert.equal(await page.getByRole('button',{name:'Continue',exact:true}).isEnabled(),false);
+  await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).press('Enter');
+  assert.equal(answerRequests().length,0);
+  await page.getByRole('button',{name:'Decline',exact:true}).click();
+  await page.getByRole('button',{name:'Continue',exact:true}).click();await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.approvals,{publish:false});
+});
+
+test('failed answer submission preserves text and retries the same request identity',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerError:true});
+  const page=await pageFor(t);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('Soft orange');
+  await custom.press('Enter');
+  await page.getByRole('alert').filter({hasText:'The answer could not be saved.'}).waitFor();
+  assert.equal(await custom.inputValue(),'Soft orange');
+  assert.equal(await custom.evaluate(element=>element===document.activeElement),true);
+  state.answerError=false;
+  await page.keyboard.press('Enter');await waitFor(()=>answerRequests().length===2);
+  assert.deepEqual(answerRequests()[0].body,answerRequests()[1].body);
+});
+
+test('an accepted answer stays locked when conversation refresh fails and refresh never resubmits',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerRefreshError:true,canAnswer:true,canReply:true});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Blue',exact:true}).click();
+  await page.getByRole('alert').waitFor();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('button',{name:'Answer question',exact:true}).count(),0);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await composer.fill('Additional context after my answer.');await composer.press('Enter');
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/messages')&&row.method==='POST'));
+  assert.equal(state.requests.find(row=>row.path.endsWith('/messages')&&row.method==='POST').body.reply_to,undefined);
+  await page.locator('.question-form').evaluate(form=>form.requestSubmit());
+  assert.equal(answerRequests().length,1);
+  state.answerRefreshError=false;
+  await page.getByRole('button',{name:'Refresh conversation',exact:true}).click();
+  await page.locator('.question-form').waitFor({state:'hidden'});
+  assert.equal(answerRequests().length,1);
+});
+
+test('an answer sent through the composer also locks the question card after a failed refresh',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerRefreshError:true,canAnswer:true,canReply:true});
+  const page=await pageFor(t);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await composer.fill('Orange');await composer.press('Enter');
+  await page.getByRole('alert').waitFor();
+  assert.match(await page.getByRole('alert').innerText(),/Your response was sent/);
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('button',{name:'Answer question',exact:true}).count(),0);
+  await page.locator('.question-form').evaluate(form=>form.requestSubmit());
+  assert.equal(answerRequests().length,0);
+  state.answerRefreshError=false;
+  await page.getByRole('button',{name:'Refresh conversation',exact:true}).click();
+  await page.locator('.question-form').waitFor({state:'hidden'});
+  assert.equal(state.requests.filter(row=>row.path.endsWith('/messages')&&row.method==='POST').length,1);
+});
+
+test('IME confirmation cannot submit a written answer',async t=>{
+  reset({status:'waiting',pending:colorQuestion()});
+  const page=await pageFor(t);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('青');
+  await custom.dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
+  assert.equal(answerRequests().length,0);
+  await custom.dispatchEvent('keydown',{key:'Enter',code:'Enter',keyCode:229,isComposing:false});
+  assert.equal(answerRequests().length,0);
+  await custom.press('Enter');await waitFor(()=>answerRequests().length===1);
+  assert.equal(answerRequests()[0].body.answers['color-call'].answers[0].custom_answer,'青');
+});
+
+test('a failed answer does not steal focus from another control',async t=>{
+  let release;reset({status:'waiting',pending:colorQuestion(),answerError:true,answerHold:new Promise(resolve=>{release=resolve})});
+  t.after(()=>release());const page=await pageFor(t);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('Orange');await custom.press('Enter');await waitFor(()=>answerRequests().length===1);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});await composer.focus();
+  release();await page.getByRole('alert').waitFor();
+  assert.equal(await composer.evaluate(element=>element===document.activeElement),true);
+});
+
+test('a failed choice restores keyboard focus and retries the same answer',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerError:true});
+  const page=await pageFor(t),blue=page.getByRole('button',{name:'Blue',exact:true});
+  await blue.press('Enter');await page.getByRole('alert').waitFor();
+  assert.equal(await blue.evaluate(element=>element===document.activeElement),true);
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:true}).count(),1);
+  state.answerError=false;
+  await page.keyboard.press('Enter');await waitFor(()=>answerRequests().length===2);
+  assert.deepEqual(answerRequests()[0].body,answerRequests()[1].body);
+});
+
+test('answer controls are disabled while submission is in progress',async t=>{
+  let release;reset({status:'waiting',pending:colorQuestion(),answerHold:new Promise(resolve=>{release=resolve})});
+  t.after(()=>release());
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Blue',exact:true}).click();await waitFor(()=>answerRequests().length===1);
+  await page.getByRole('status').filter({hasText:'Sending…'}).waitFor();
+  assert.equal(await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).isEnabled(),false);
+  for(const button of await page.locator('.question-choice-list').getByRole('button').all())assert.equal(await button.isEnabled(),false);
+  await page.locator('.question-form').evaluate(form=>{form.requestSubmit();form.requestSubmit()});
+  assert.equal(answerRequests().length,1);
+  release();
+});
+
+test('the last answer submits a complete multi-question snapshot',async t=>{
+  const pending=colorQuestion();
+  pending.calls[0].args.questions.push({header:'Format',question:'Which format?',options:[{label:'Text'},{label:'JSON'}]});
+  reset({status:'waiting',pending});const page=await pageFor(t);
+  await page.getByRole('button',{name:'Blue',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:true}).count(),1);
+  await page.getByRole('button',{name:'Green',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:false}).count(),1);
+  assert.equal(await page.getByRole('button',{name:'Green',exact:true,pressed:true}).count(),1);
+  assert.equal(answerRequests().length,0);
+  await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).fill('Orange');
+  assert.equal(await page.locator('.question-choice-list').getByRole('button',{pressed:false}).count(),5);
+  await page.getByRole('button',{name:'JSON',exact:true}).click();await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers,[
+    {header:'Color',selected:[],custom_answer:'Orange'},
+    {header:'Format',selected:['JSON'],custom_answer:null},
+  ]);
 });
 
 for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and sends to its own session at ${width}px`,async t=>{
