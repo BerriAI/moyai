@@ -30,6 +30,7 @@ from .pr_publications import CreationReceipt, creation_receipt, persist_publicat
 logger = logging.getLogger(__name__)
 
 COMPUTER_EFFECTS = {"shell", "run_command", "start_command", "credentials_run"}
+SKILL_EFFECTS = {"skill_create", "skill_update", "skill_delete"}
 AUTOMATION_EFFECTS = {
     "automation_create", "automation_update", "automation_migrate",
     "automation_enable", "automation_pause", "automation_retire",
@@ -43,6 +44,8 @@ SERVICE_PREFIXES = ("github_", "linear_", "notion_", "slack_")
 
 
 def requires_receipt(tool: ToolDefinition) -> bool:
+    if tool.name in SKILL_EFFECTS:
+        return not workflow.in_workflow() or workflow.patched("moyai-skill-receipts-v1")
     if tool.name == "credentials_run":
         return not workflow.in_workflow() or workflow.patched("moyai-credential-command-receipts-v1")
     if tool.name in SCOPED_AUTOMATION_EFFECTS:

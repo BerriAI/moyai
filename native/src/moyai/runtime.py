@@ -172,6 +172,9 @@ class Runtime:
             if self.product_automations is not None:
                 from .product_automation_tools import capability
                 product_capabilities.append(capability(self.product_automations))
+                if self.product_skill_catalog is not None:
+                    from .product_skill_tools import capability as skill_capability
+                    product_capabilities.append(skill_capability(self.product_skill_catalog, self.product_automations))
             if self.product_secrets is not None:
                 from .product_credential_tools import capability as credential_capability
                 product_capabilities.append(credential_capability(self.product_secrets.execution))

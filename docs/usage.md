@@ -141,6 +141,15 @@ not the legacy application's database or APIs.
   are provided to the agent; files needed for execution must first be written
   to its workspace. Standalone bundled and saved skills also remain available
   through Pydantic's deferred capability mechanism.
+  In existing-product installations, ask the agent to create, read, update or
+  delete a saved skill. Its `skill_list`, `skill_read`, `skill_create`,
+  `skill_update` and `skill_delete` tools use the same canonical library.
+  Personal writes require an individual requester in a private web chat;
+  organization writes require an administrator in a shared web chat. Delegated
+  and automated work cannot manage skills. Updates require the revision from
+  a fresh read and preserve supporting files when omitted. Delete archives a
+  skill and removes it from the picker; ask to restore it to make it available
+  again. Changes apply to subsequent invocations. Bundled skills remain unchanged.
 - **Memory:** inspect and edit the Harness memory store in your authorized
   namespaces. Version checks reject conflicting edits. Other users' personal
   memory is not available to administrators.
