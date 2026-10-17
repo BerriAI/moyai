@@ -6,8 +6,16 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from pydantic import SecretStr
-from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+from pydantic_ai.messages import (
+    ModelResponse,
+    NativeToolCallPart,
+    NativeToolReturnPart,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+)
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
 from test_application_boundaries import sign_in
 from test_sidebar import member_client
@@ -18,6 +26,58 @@ from moyai.contracts import NewMessage
 from moyai.delegation import DelegationService
 from moyai.models import Session, User
 from moyai.work_progress import TOOL_LIMIT, WorkProgress, tools
+
+
+@pytest.mark.parametrize("tool_type", [None, ToolCallPart, NativeToolCallPart])
+@pytest.mark.parametrize("phase", [
+    None, "commentary", "final_answer", "analysis", "unknown", pytest.param(["invalid"], id="malformed"),
+])
+async def test_saved_root_and_child_text_use_the_same_public_phase_rules(runtime, active, tool_type, phase):
+    session, turn, _ = active
+    runtime.settings.gateway_key = SecretStr("synthetic-gateway-secret")
+    await runtime.stores.steps.register_run(RunRecord(run_id=turn.id, agent_name="moyai"))
+    child = await native_run(runtime, turn.id, terminal=None)
+    timestamp = datetime(2026, 10, 17, 10, tzinfo=UTC)
+    for run_id in (turn.id, child):
+        parts = [
+            ThinkingPart("private reasoning"),
+            TextPart("Checking synthetic-gateway-secret.", provider_details={"phase": phase}),
+        ]
+        if tool_type:
+            parts.append(tool_type("web_search", {"query": "private tool arguments"}, tool_call_id="search"))
+        if tool_type is NativeToolCallPart:
+            parts.append(NativeToolReturnPart("web_search", "private native result", tool_call_id="search"))
+        await runtime.stores.steps.save_snapshot(ContinuableSnapshot(
+            run_id=run_id, parent_run_id=turn.id if run_id == child else None, step_index=3,
+            messages=[ModelResponse(run_id=run_id, parts=parts, timestamp=timestamp, provider_response_id="response")],
+        ))
+    expected = (
+        ("commentary" if tool_type else "final_answer") if phase is None
+        else phase if phase in ("commentary", "final_answer") else None
+    )
+    path = f"/api/sessions/{session.id}/progress/{turn.id}?include_activity=true"
+    async with sign_in(runtime) as client:
+        first = await client.get(path)
+        assert first.status_code == 200
+        value = first.json()
+        assert [item["text"] for item in value["messages"]] == (
+            ["Checking [redacted]."] if expected == "commentary" else []
+        )
+        child_view = value["subagents"][0]
+        assert child_view["status"] == "running", "Text phase must not change execution status."
+        if expected is None:
+            assert child_view["messages"] == []
+        else:
+            assert child_view["messages"] == [{
+                "id": f"{child}:response:1", "text": "Checking [redacted].", "phase": expected,
+                "created_at": timestamp.isoformat(),
+            }]
+        assert all(secret not in first.text for secret in (
+            "private reasoning", "private tool arguments", "private native result", "synthetic-gateway-secret",
+        ))
+        assert (await client.get(path)).json() == value, "Cached snapshots retain the same classification."
+        runtime.work_progress.clear()
+        assert (await client.get(path)).json() == value, "Re-reading saved native history gives the same result."
 
 
 async def public_parent(runtime, active):

@@ -14,10 +14,11 @@ from datetime import UTC, datetime
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
 from sqlalchemy import select
 
+from .commentary import public_text_parts
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .models import Session, Turn
 from .presentation import redact
@@ -229,17 +230,10 @@ class WorkProgress:
         for message in snapshot.messages if snapshot else []:
             if not isinstance(message, ModelResponse) or message.run_id != record.run_id:
                 continue
-            has_tools = any(isinstance(part, ToolCallPart) for part in message.parts)
-            for index, part in enumerate(message.parts):
-                if not isinstance(part, TextPart) or not part.content.strip():
-                    continue
-                phase = (part.provider_details or {}).get("phase")
-                if phase not in {None, "commentary", "final_answer"}:
-                    continue
+            for index, content, phase in public_text_parts(message):
                 messages.append({
                     "id": f"{record.run_id}:{message.provider_response_id or stamp(message.timestamp)}:{index}",
-                    "text": str(redact(part.content, secrets)),
-                    "phase": phase or ("commentary" if has_tools else "final_answer"),
+                    "text": str(redact(content, secrets)), "phase": phase,
                     "created_at": stamp(message.timestamp),
                 })
         # Retain recent public updates without caching model history, tool
