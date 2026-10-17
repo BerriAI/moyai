@@ -278,6 +278,10 @@ async def run_moyai_turn(
             "repository_ids": github_repository_ids,
         }
         connections.connectors.save("github", github_credentials, "Eval GitHub")
+        connections.store.execute(
+            "INSERT INTO connection_policies(provider,enabled,read_only) VALUES('github',0,0) "
+            "ON CONFLICT(provider) DO UPDATE SET enabled=0",
+        )
         for repository_id, repository in zip(
             github_repository_ids,
             ("BerriAI/litellm", "BerriAI/litellm-docs", "BerriAI/moyai"),
