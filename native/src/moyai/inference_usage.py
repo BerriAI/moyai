@@ -353,14 +353,21 @@ class UsageCapture:
         try:
             # Both wire chunks and compressed output are processed in bounded
             # pieces. Model content is validated and skipped by the projector.
-            for offset in range(0, len(chunk), 16 * 1024):
+            for offset in range(0, max(1, len(chunk)), 16 * 1024):
                 piece = chunk[offset:offset + 16 * 1024]
                 if self.decoder is None:
                     self._piece(piece)
                     continue
-                while piece:
-                    self._piece(self.decoder.decompress(piece, 16 * 1024))
+                while True:
+                    decoded = self.decoder.decompress(piece, 16 * 1024)
+                    self._piece(decoded)
+                    if self.decoder.eof:
+                        break
                     piece = self.decoder.unconsumed_tail
+                    # Input can be exhausted while zlib still holds decoded
+                    # bytes. Drain with empty input, keeping every output bounded.
+                    if not piece and not decoded:
+                        break
         except (ValueError, OverflowError, zlib.error):
             self.disabled = True
             self.buffer = self.event = b""
@@ -395,6 +402,7 @@ class UsageCapture:
             return
         self.finished = True
         self.exhausted = exhausted
+        self.feed(b"")
         if not self.disabled:
             if self.streaming:
                 self._end_line()

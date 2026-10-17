@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import zlib
 from contextlib import contextmanager
 from decimal import Decimal
 from types import SimpleNamespace
@@ -378,6 +379,33 @@ async def test_gzip_observation_does_not_rewrite_transport_bytes(runtime):
     assert response.content == body and response.headers["content-encoding"] == "gzip"
     row, = await rows(runtime)
     assert row.cost_usd == "0.004" and row.input_tokens == 11
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_compressed_capture_drains_decoded_tail_when_input_ends(runtime, encoding, streaming):
+    value = {
+        "id": "response-one", "output": "x" * (16220 if streaming else 16267),
+        "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18, "cost": "0.123456789"},
+    }
+    body = (
+        b"".join(
+            b"data: " + json.dumps({"type": kind, "response": value}, separators=(",", ":")).encode() + b"\n\n"
+            for kind in ("response.created", "response.completed")
+        ) if streaming else json.dumps(value, separators=(",", ":")).encode()
+    )
+    # The complete JSON is decodable although the compression trailer was cut.
+    # With bounded output, zlib holds the closing braces after consuming every
+    # input byte. HTTPX flushes those bytes to the client; capture must keep them.
+    wire = gzip.compress(body, mtime=0)[:-9] if encoding == "gzip" else zlib.compress(body)[:-5]
+    response, _, _ = await request(runtime, wire, size=len(wire), headers={
+        "content-type": "text/event-stream" if streaming else "application/json",
+        "content-encoding": encoding,
+    })
+    assert response.content == body
+    row, = await rows(runtime)
+    assert (row.cost_usd, row.input_tokens, row.output_tokens, row.total_tokens) == ("0.123456789", 11, 7, 18)
+    assert row.cost_status == "actual" and row.coverage_error is None
 
 
 async def test_large_wire_payload_keeps_reported_usage_ahead_of_sdk_fallback(runtime):
