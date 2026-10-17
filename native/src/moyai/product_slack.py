@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 ID = re.compile(r"^[A-Z][A-Z0-9]{7,30}$")
 STAMP = re.compile(r"^\d{10,16}\.\d{1,9}$")
+ASIDE = re.compile(r"^\s*(?:!aside|\(aside\))(?:\s|$)", re.IGNORECASE)
 logger = logging.getLogger(__name__)
 
 
@@ -267,7 +268,7 @@ class ProductSlack:
 
         visible, prompt = routing_text(authored, f"<@{bot['user_id']}>")
         mentioned = event["type"] == "app_mention" or f"<@{bot['user_id']}>" in visible
-        if re.match(r"^\s*(?:!aside|\(aside\))(?:\s|$)", prompt, re.IGNORECASE):
+        if ASIDE.match(prompt):
             return {"ok": True}
         async with self.runtime.database.sessions() as db:
             thread = await db.scalar(select(SlackThread).where(
@@ -303,7 +304,8 @@ class ProductSlack:
                 prompt=prompt + attachments["context"], request_key="slack-message:" + message_key,
                 mode="asap", connections=selections, attachments=attachments["images"],
             )
-        if thread is None:
+        new_thread = thread is None
+        if new_thread:
             seen = await source_database(
                 self.store.rows,
                 """SELECT 1 FROM slack_receipts WHERE team_id=? AND channel=? AND message_ts=?
@@ -366,6 +368,9 @@ class ProductSlack:
         if binding.paused:
             await self.set_paused(binding.session_id, False)
         assert body is not None
+        if not new_thread:
+            from .product_slack_context import thread_prompt
+            body.prompt = await thread_prompt(self, actor, principal, provenance, bot, body)
         if attachments["uploads"]:
             async with self.runtime.database.sessions.begin() as db:
                 turn = await self.runtime.database.submit(actor, thread.session_id, body, db=db)
@@ -427,6 +432,9 @@ class ProductSlack:
             raise HTTPException(403, "This historical DM belongs to a different participant.")
         if source and source["paused"] and not wake and prompt.strip().lower().lstrip("/") != "status":
             return None
+        if body is not None:
+            from .product_slack_context import thread_prompt
+            body.prompt = await thread_prompt(self, actor, principal, provenance, bot, body)
         try:
             async with self.runtime.database.sessions.begin() as db:
                 if source:

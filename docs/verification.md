@@ -31,6 +31,14 @@ The native suite uses the real SDK, local Temporal, stores and encryption with
 controlled models. It covers execution, replay, cancellation, authorization,
 receipts, restoration and product adapters. Schema tests retain historical
 manifest digests and verify preserved rows without importing retired engines.
+
+The required native quality job also runs the Slack conversation contract by
+explicit test name. It invokes Moyai in a pre-existing human thread and checks
+the prepared model input for the parent link and preview. Preserve this behavior
+test when replacing a runtime; tests for signatures or reply delivery are not a
+substitute. A deliberate behavior change must update the contract and document
+the user-visible change, rather than delete the test as legacy-only.
+
 Release tests exercise the real controller with simulated Render/SSH responses
 and real PostgreSQL guards. Package tests build a wheel from the source archive
 and inspect resources outside the source checkout.
