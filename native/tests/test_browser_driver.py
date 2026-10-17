@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 SOURCE = Path(__file__).parents[1] / "browser_driver.py"
+ENV = {"PATH": os.defpath}
 spec = importlib.util.spec_from_file_location("browser_driver", SOURCE)
 driver = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = driver
@@ -180,9 +181,16 @@ def test_idle_supervisor_terminates_its_worker(service):
     state, process = start(idle=.3)
     worker = request(state, "first")["pid"]
     process.wait(timeout=2)
-    # kill(pid, 0) can observe a zombie until init reaps it; ps must show no live worker.
-    result = subprocess.run(["ps", "-p", str(worker), "-o", "stat="], check=False, capture_output=True, text=True)
-    assert not result.stdout.strip() or result.stdout.strip().startswith("Z")
+    # kill(pid, 0) can observe a zombie until init reaps it.
+    if Path("/proc/self/stat").exists():
+        try:
+            state = Path(f"/proc/{worker}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except FileNotFoundError:
+            return
+        assert state == "Z"
+    else:
+        result = subprocess.run(["ps", "-p", str(worker), "-o", "stat="], check=False, capture_output=True, text=True)
+        assert not result.stdout.strip() or result.stdout.strip().startswith("Z")
 
 
 def stop_managed(state):
@@ -200,12 +208,12 @@ def test_managed_call_reuses_worker_then_recovers_without_replaying_timeout(serv
     root, _ = service
     state, helper = root / "managed", root / "worker.py"
     try:
-        first = driver.call(state, helper, {"action": "first"}, time.time()+5, os.environ)
-        assert driver.call(state, helper, {"action": "second"}, time.time()+5, os.environ)["pid"] == first["pid"]
+        first = driver.call(state, helper, {"action": "first"}, time.time()+5, ENV)
+        assert driver.call(state, helper, {"action": "second"}, time.time()+5, ENV)["pid"] == first["pid"]
         previous = int((state / driver.PID_NAME).read_text())
         with pytest.raises((ConnectionError, TimeoutError, OSError)):
-            driver.call(state, helper, {"action": "hang"}, time.time()+.3, os.environ)
-        result = driver.call(state, helper, {"action": "recovered"}, time.time()+5, os.environ)
+            driver.call(state, helper, {"action": "hang"}, time.time()+.3, ENV)
+        result = driver.call(state, helper, {"action": "recovered"}, time.time()+5, ENV)
         assert result["pid"] != first["pid"]
         assert int((state / driver.PID_NAME).read_text()) != previous
         assert (root / "dispatches").read_text().splitlines() == ["first", "second", "hang", "recovered"]
@@ -221,9 +229,9 @@ def test_helper_version_change_replaces_the_owned_process_group(service):
     state, first_helper, next_helper = root / "managed", root / "worker.py", root / "next-worker.py"
     next_helper.write_text(first_helper.read_text())
     try:
-        first = driver.call(state, first_helper, {"action": "first"}, time.time()+5, os.environ)
+        first = driver.call(state, first_helper, {"action": "first"}, time.time()+5, ENV)
         previous = int((state / driver.PID_NAME).read_text())
-        result = driver.call(state, next_helper, {"action": "second"}, time.time()+5, os.environ)
+        result = driver.call(state, next_helper, {"action": "second"}, time.time()+5, ENV)
         assert result["pid"] != first["pid"]
         assert int((state / driver.PID_NAME).read_text()) != previous
     finally:
@@ -238,7 +246,7 @@ def test_stale_pid_file_does_not_kill_an_unrelated_process(service):
     outside = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"], start_new_session=True)
     (state / driver.PID_NAME).write_text(str(outside.pid))
     try:
-        assert driver.call(state, helper, {"action": "first"}, time.time()+5, os.environ)["action"] == "first"
+        assert driver.call(state, helper, {"action": "first"}, time.time()+5, ENV)["action"] == "first"
         assert outside.poll() is None
     finally:
         stop_managed(state)
@@ -253,7 +261,7 @@ def test_client_retires_orphaned_worker_after_supervisor_crash(service):
     script = (
         f"import sys,time,os;sys.path.insert(0,{str(SOURCE.parent)!r});"
         f"from browser_driver import call;from pathlib import Path;"
-        f"call(Path({str(state)!r}),Path({str(helper)!r}),{{'action':'hang'}},time.time()+30,os.environ)"
+        f"call(Path({str(state)!r}),Path({str(helper)!r}),{{'action':'hang'}},time.time()+30,{{'PATH':os.defpath}})"
     )
     client = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -271,4 +279,50 @@ def test_client_retires_orphaned_worker_after_supervisor_crash(service):
         if client.poll() is None:
             client.kill()
         client.wait(timeout=3)
+        stop_managed(state)
+
+
+@pytest.mark.skipif(not Path("/proc/self/cmdline").exists(), reason="The guest process manager runs on Linux.")
+@pytest.mark.parametrize("failed_starts", [1, 2])
+def test_managed_startup_failure_retries_once_before_dispatch(service, monkeypatch, failed_starts):
+    root, _ = service
+    state, helper = root / "managed", root / "worker.py"
+    launcher = root / "browser_driver.py"
+    launcher.write_text(
+        f"import sys,os;sys.path.insert(0,{str(SOURCE.parent)!r})\n"
+        "from pathlib import Path\n"
+        "from browser_driver import serve\n"
+        "state=Path(sys.argv[2]);counter=state/'starts'\n"
+        "starts=int(counter.read_text())+1 if counter.exists() else 1\n"
+        "counter.write_text(str(starts))\n"
+        f"if starts <= {failed_starts}:os._exit(23)\n"
+        "serve(state,(sys.executable,sys.argv[3],'worker'))\n"
+    )
+    # Inject a launcher that exits before binding; ensure/exchange/serve and
+    # their real process/socket behavior are otherwise the production code.
+    monkeypatch.setattr(driver, "__file__", str(launcher))
+    try:
+        if failed_starts == 1:
+            result = driver.call(state, helper, {"action": "once"}, time.time()+5, ENV)
+            assert result["action"] == "once"
+            assert (root / "dispatches").read_text() == "once\n"
+        else:
+            with pytest.raises(driver.DriverUnavailable):
+                driver.call(state, helper, {"action": "never"}, time.time()+5, ENV)
+            assert not (root / "dispatches").exists()
+        assert (state / "starts").read_text() == "2"
+    finally:
+        stop_managed(state)
+
+
+@pytest.mark.skipif(not Path("/proc/self/cmdline").exists(), reason="The guest process manager runs on Linux.")
+def test_managed_call_does_not_retry_a_dispatched_action_with_lost_reply(service):
+    root, _ = service
+    state, helper = root / "managed", root / "worker.py"
+    try:
+        with pytest.raises(ConnectionError) as error:
+            driver.call(state, helper, {"action": "lost-reply"}, time.time()+5, ENV)
+        assert not isinstance(error.value, driver.DriverUnavailable)
+        assert (root / "dispatches").read_text() == "lost-reply\n"
+    finally:
         stop_managed(state)

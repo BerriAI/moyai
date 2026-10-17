@@ -24,7 +24,7 @@ IDLE_SECONDS = 900
 
 
 class DriverUnavailable(ConnectionError):
-    """The connection failed before any request bytes were sent."""
+    """Startup or connection failed before any request bytes were sent."""
 
 
 @dataclass(frozen=True)
@@ -95,6 +95,7 @@ def managed(command: tuple[str, ...], state: Path, directory: Path) -> bool:
 
 
 def ensure(state: Path, helper: Path, deadline: float, env: Mapping[str, str]) -> Process:
+    remaining(deadline)
     program = Path(__file__).resolve()
     command = (sys.executable, str(program), "serve", str(state), str(helper))
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -156,18 +157,17 @@ def call(
     if len(frame) > MAX_FRAME:
         raise ValueError("The browser request is too large.")
     for attempt in range(2):
-        process = ensure(state, helper, deadline, env)
+        process = None
         try:
+            process = ensure(state, helper, deadline, env)
             return exchange(state, frame, deadline)
-        except DriverUnavailable:
-            terminate(process)
-            if attempt:
-                raise
-        except BaseException:
+        except BaseException as error:
             # Retire the whole private worker group before releasing command.lock.
             # Never replay an action after sendall, even if its reply was lost.
-            terminate(process)
-            raise
+            if process is not None:
+                terminate(process)
+            if not isinstance(error, DriverUnavailable) or attempt:
+                raise
     raise DriverUnavailable("The browser supervisor is unavailable.")
 
 
