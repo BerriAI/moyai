@@ -360,6 +360,14 @@ class SwarmService:
                 mission.budget_seconds = request.budget_seconds
                 mission.ends_at = deadline(request.budget_seconds)
             elif mission.status != "active":
+                deleted = await db.scalar(select(SwarmMember.session_id).outerjoin(
+                    Session, Session.id == SwarmMember.session_id,
+                ).where(
+                    SwarmMember.mission_id == mission.id,
+                    Session.id.is_(None) | Session.deleted.is_(True),
+                ).limit(1))
+                if deleted is not None:
+                    raise HTTPException(409, "Restore the deleted team conversation before resuming.")
                 pending = await db.scalar(select(Session.id).join(
                     SwarmMember, SwarmMember.session_id == Session.id,
                 ).where(

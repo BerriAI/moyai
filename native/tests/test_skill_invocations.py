@@ -88,6 +88,41 @@ async def test_generated_swarm_turns_inherit_only_human_selected_skills(runtime,
         assert prepared.prompt == injected
 
 
+@pytest.mark.parametrize("coordinator", [False, True])
+@pytest.mark.parametrize("results", [
+    {"calls": {"question": "Violet"}},
+    {"approvals": {"approval": True}},
+    {},
+])
+async def test_swarm_deferred_resume_does_not_replay_selected_skills(runtime, actor, coordinator, results):
+    skill_id = await save_skill(runtime, actor.id, content="Ask the human for a color, then use their answer.")
+    root, initial = await runtime.database.swarms.start(actor, NewSwarm(
+        prompt=marker("personal:team", "sparkles") + " Complete the original goal.",
+        workers=2, visibility="private", request_key="skill-resume",
+    ))
+    claimed = await runtime.database.claim_batch(3)
+    turn = initial if coordinator else next(turn for turn in claimed if turn.session_id != root.id)
+    configure(runtime)
+    environment = ActivityEnvironment()
+    prepared = await environment.run(prepare_turn, turn.id)
+    assert "Ask the human for a color" in prepared.prompt
+    conversation = '{"messages":[]}'
+    await runtime.database.save_result(
+        prepared.scope, conversation=conversation, output="", workspace=None, usage={}, deferred=True,
+    )
+    resumed = await runtime.database.resume(actor, turn.session_id, turn.id, "human-answer", results)
+    await runtime.database.claim_batch(3)
+    continuation = await environment.run(prepare_turn, resumed.id)
+    assert continuation.prompt == ""
+    assert continuation.deferred_results == results
+    assert continuation.conversation == conversation
+    # Retrying the continuation must not re-read a skill from the original goal.
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(SettingSkill).where(SettingSkill.id == skill_id).values(enabled=False))
+    retried = await environment.run(prepare_turn, resumed.id)
+    assert retried == continuation
+
+
 async def test_swarm_admission_normalizes_skills_and_uses_shared_default(runtime, actor):
     await save_skill(runtime, actor.id)
     async with client_for(runtime, actor) as client:

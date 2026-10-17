@@ -40,6 +40,10 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
             prepared = await prepare_product_turn(runtime, prepared, recover_workspace=recover_workspace)
         prepared.images = await runtime.database.input_images(turn_id, session_id=prepared.scope.session_id)
         await hydrate(runtime, prepared)
+        if prepared.deferred_results is not None:
+            # Answers continue the saved SDK conversation. Adding a skill-selected
+            # goal here would submit a new user prompt alongside the deferred reply.
+            return prepared
         generated_goal = None
         if prepared.scope.swarm_id:
             from .swarm_models import SwarmMission, SwarmTurn

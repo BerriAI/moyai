@@ -212,6 +212,66 @@ async def test_normal_stop_and_delete_fence_team(runtime, actor):
         await runtime.database.session(actor, view["members"][1]["session_id"])
 
 
+@pytest.mark.parametrize("paused", [False, True])
+async def test_deleted_worker_needs_restoration_before_team_can_resume(runtime, actor, paused):
+    root, _, prepared, workers = await prepared_team(runtime, actor)
+    deleted_id = workers[0]["session_id"]
+    waiting_turn, waiting = prepared[workers[1]["session_id"]]
+    await runtime.database.save_result(
+        waiting.scope, conversation='{"messages":[]}', output="", workspace=None, usage={}, deferred=True,
+    )
+    if paused:
+        await runtime.database.swarms.control(actor, root.id, SwarmControl(action="pause", revision=0))
+    await runtime.database.delete_session(actor, deleted_id)
+    view = await runtime.database.swarms.view(actor, root.id)
+    assert view["status"] == "attention" and "deleted" in view["reason"]
+    assert next(member for member in view["members"] if member["session_id"] == deleted_id)["deleted"]
+    assert await runtime.database.claim_batch(20) == []
+    for turn, value in prepared.values():
+        with pytest.raises(PermissionError):
+            await runtime.database.authorize_scope(value.scope)
+        if turn.id != waiting_turn.id:
+            await runtime.database.stopped(turn.id)
+    # A retry of Delete is idempotent, and Resume cannot start a doomed generation.
+    await runtime.database.delete_session(actor, deleted_id)
+    assert (await runtime.database.swarms.view(actor, root.id))["revision"] == view["revision"]
+    with pytest.raises(HTTPException, match="Restore the deleted team conversation") as refusal:
+        await runtime.database.swarms.control(
+            actor, root.id, SwarmControl(action="resume", revision=view["revision"]),
+        )
+    assert refusal.value.status_code == 409
+    assert not (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    unchanged = await runtime.database.swarms.view(actor, root.id)
+    assert (unchanged["generation"], unchanged["revision"]) == (view["generation"], view["revision"])
+    await runtime.database.restore_session(actor, deleted_id)
+    await runtime.database.swarms.control(
+        actor, root.id, SwarmControl(action="resume", revision=view["revision"]),
+    )
+    resumed = await runtime.database.swarms.view(actor, root.id)
+    assert resumed["status"] == "active" and resumed["generation"] == 2
+    assert [member["session_id"] for member in resumed["members"]] == [
+        member["session_id"] for member in view["members"]
+    ]
+    assert len(await runtime.database.claim_batch(20)) == 2
+    async with runtime.database.sessions() as db:
+        session = await db.get(Session, waiting_turn.session_id)
+        assert session.status == "waiting" and session.active_turn == waiting_turn.id
+
+
+async def test_nonowner_cannot_delete_worker_or_change_mission(runtime, actor):
+    root, _ = await start(runtime, actor, visibility="shared")
+    before = await runtime.database.swarms.view(actor, root.id)
+    async with runtime.database.sessions.begin() as db:
+        other = User(id=new_id(), username="other-admin", display_name="Other admin", password="", role="admin")
+        db.add(other)
+    with pytest.raises(HTTPException):
+        await runtime.database.delete_session(other, before["members"][1]["session_id"])
+    after = await runtime.database.swarms.view(actor, root.id)
+    assert (after["status"], after["revision"], after["members"]) == (
+        before["status"], before["revision"], before["members"],
+    )
+
+
 async def test_public_result_handoff_is_saved_once_and_coalesced(runtime, actor):
     root, _, prepared, workers = await prepared_team(runtime, actor)
     for session_id, (turn, value) in prepared.items():

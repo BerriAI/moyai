@@ -832,8 +832,11 @@ class Database:
 
     async def delete_session(self, actor: User, session_id: str) -> None:
         """Hide a session and fence work atomically; the existing Stop dispatcher cancels execution."""
-        await self.swarms.stop_session(actor, session_id)
         async with self._admission_session(None) as db:
+            member = await self.swarms.member(db, session_id)
+            # Keep the mission-before-session lock order and commit the deletion
+            # together with its team-wide attention fence.
+            mission = await self.swarms.lock(db, member.mission_id, actor) if member else None
             locked = await db.scalar(update(Session).where(
                 Session.id == session_id, Session.owner_id == actor.id,
             ).values(revision=Session.revision + 1).returning(Session.id))
@@ -843,6 +846,10 @@ class Database:
             assert session is not None
             if session.deleted:
                 return
+            if mission is not None:
+                await self.swarms.stop_in(
+                    db, mission, "attention", "A team conversation was deleted. Restore it before resuming.",
+                )
             session.deleted = True
             session.updated_at = now()
             # An answer already being saved retains its confirmed outcome.
