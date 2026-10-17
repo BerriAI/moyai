@@ -7,7 +7,7 @@
 .skill-mention { display: inline; color: var(--ui-primary); font-weight: 500; vertical-align: baseline; }
 .skill-mention > span { overflow-wrap: anywhere; }
 .skill-mention svg { display: inline; position: relative; top: .13em; width: 1em; height: 1em; margin-right: 5px; }
-.home-composer .skill-editor { min-height: 176px; padding: 22px 24px; font-size: 15px; }
+.home-composer .skill-editor { min-height: 160px; padding: 22px 24px; font-size: 15px; }
 .home-composer .skill-editor-placeholder { top: 22px; left: 24px; right: 24px; font-size: 15px; }
 .skill-picker { width: min(var(--radix-popover-trigger-width), calc(100vw - 24px)); max-height: min(360px, var(--radix-popover-content-available-height)); padding: 6px; overflow: auto; border-radius: 12px; box-shadow: 0 12px 36px #00000040; }
 .skill-picker-heading { padding: 7px 10px 5px; color: var(--ui-muted); font-size: 12px; font-weight: 400; }
@@ -23,7 +23,7 @@
 .skill-option-scope { color: var(--ui-muted); font-size: 12px; font-weight: 400; }
 @media (max-width: 600px) {
   .skill-editor, .home-composer .skill-editor, .home-composer .skill-editor-placeholder { font-size: 16px; }
-  .home-composer .skill-editor { padding: 18px; min-height: 140px; }
+  .home-composer .skill-editor { padding: 18px; min-height: 128px; }
   .home-composer .skill-editor-placeholder { top: 18px; left: 18px; right: 18px; }
   .skill-option { align-items: start; }
   .skill-option-icon, .skill-option-scope { padding-top: 2px; }
