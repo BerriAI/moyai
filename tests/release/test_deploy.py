@@ -439,7 +439,7 @@ class CheckAPI:
     def call(self, method, path):
         if 'docker.yml' in path:
             return {'workflow_runs': [self.docker] if self.docker else []}
-        if 'deploy-production.yml' in path:
+        if '/actions/runs?' in path:
             query = parse_qs(urlsplit(path).query)
             assert query['head_sha'] == [NEW] and query['event'] == ['workflow_dispatch']
             page = int(query['page'][0])

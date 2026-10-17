@@ -69,6 +69,8 @@ def test_maintenance_entrypoint_selects_packaged_probe_and_single_shot_migrator(
         def run(self):
             calls.append('maintenance')
     monkeypatch.setattr(maintenance_deploy, 'MaintenanceRelease', Controller)
+    monkeypatch.setattr(deploy.DeploymentContext, 'validate_checkout', lambda self, checkout: None)
+    monkeypatch.setenv('GITHUB_EVENT_NAME', 'workflow_dispatch')
     for key, value in {'GITHUB_REPOSITORY': 'BerriAI/moyai', 'GITHUB_REF': 'refs/heads/main',
         'GITHUB_SHA': 'a' * 40, 'GITHUB_RUN_ID': '1', 'RENDER_DEPLOY_SSH_KEY': 'synthetic-key',
         'RENDER_DEPLOY_API_KEY': 'synthetic-render-token', 'GH_TOKEN': 'synthetic-gh-token',
@@ -112,6 +114,8 @@ def test_rolling_entrypoint_selects_native_receipt_and_membership_checks(tmp_pat
         def run(self):
             calls.append('rolling')
     monkeypatch.setattr(native_rolling_deploy, 'NativeRollingRelease', Controller)
+    monkeypatch.setattr(deploy.DeploymentContext, 'validate_checkout', lambda self, checkout: None)
+    monkeypatch.setenv('GITHUB_EVENT_NAME', 'workflow_dispatch')
     for key, value in {'GITHUB_REPOSITORY': 'BerriAI/moyai', 'GITHUB_REF': 'refs/heads/main',
         'GITHUB_SHA': 'a' * 40, 'GITHUB_RUN_ID': '1', 'RENDER_DEPLOY_SSH_KEY': 'synthetic-key',
         'RENDER_DEPLOY_API_KEY': 'synthetic-render-token', 'GH_TOKEN': 'synthetic-gh-token',
