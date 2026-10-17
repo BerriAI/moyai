@@ -29,21 +29,23 @@ function queryFor(range: AnalyticsRange, filters: Filters) {
   return params
 }
 
-function useReport(path: string, revision: number) {
+function useReport(path: string, revision: number, billing: boolean) {
   const [state, setState] = useState<{ path: string; data?: AnalyticsReport; error?: string; denied?: boolean; loading: boolean }>({ path, loading: true })
   useEffect(() => {
     const controller = new AbortController()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true }))
-    void api<AnalyticsReport>(path, "GET", undefined, controller.signal).then(data => {
-      if (!controller.signal.aborted) setState({ path, data, loading: false })
-    }, error => {
+    void api<AnalyticsReport | { activity: AnalyticsReport }>(path, "GET", undefined, controller.signal).then(data => {
+      const report = billing ? "activity" in data ? data.activity : undefined : "summary" in data ? data : undefined
+      if (!report) throw new Error("The usage report is unavailable.")
+      if (!controller.signal.aborted) setState({ path, data: report, loading: false })
+    }).catch(error => {
       if (!controller.signal.aborted) setState({
         path, loading: false, denied: error instanceof ApiError && [401, 403].includes(error.status),
         error: error instanceof Error ? error.message : "The report could not be loaded.",
       })
     })
     return () => controller.abort()
-  }, [path, revision])
+  }, [path, revision, billing])
   return state.path === path ? state : { path, loading: true }
 }
 
@@ -57,6 +59,15 @@ function Cost({ row, compact = false }: { row: { cost_usd?: number | null; cost_
 
 function CostCoverage({ data }: { data: AnalyticsReport }) {
   const coverage = data.coverage
+  if (data.capabilities?.unified_billing) return <p className={`analytics-status ${partialCost(data.summary) || coverage?.activity_unknown_request_turns || coverage?.activity_capture_gap_turns ? "analytics-warning" : ""}`} role="status">
+    {data.methodology?.cost}
+    {coverage && <> {spendCount(coverage.legacy_observations)} historical records · {spendCount(coverage.native_observations)} native records.
+      {" "}{spendCount(coverage.priced_requests)} priced requests · {spendCount(coverage.unpriced_requests)} unpriced requests.
+      {Boolean(coverage.unknown_requests) && <> {spendCount(coverage.unknown_requests)} request counts need reconciliation.</>}
+      {Boolean(coverage.activity_unknown_request_turns) && <> Complete request history could not be verified for {spendCount(coverage.activity_unknown_request_turns)} native {coverage.activity_unknown_request_turns === 1 ? "turn" : "turns"}.</>}
+      {Boolean(coverage.activity_capture_gap_turns) && <> {spendCount(coverage.activity_capture_gap_turns)} native turns have recorded capture gaps; their missing amounts remain unavailable.</>}
+    </>}
+  </p>
   return <p className={`analytics-status ${partialCost(data.summary) ? "analytics-warning" : ""}`} role="status">
     {data.methodology?.cost || data.cost_note || "Only costs reported by model responses are included."}
     {coverage && <> {spendCount(coverage.priced_requests)} priced requests · {spendCount(coverage.unpriced_requests)} unpriced requests · {spendCount(coverage.legacy_turns)} legacy turns.</>}
@@ -93,10 +104,10 @@ function OverallReport({ data }: { data: AnalyticsReport }) {
   return <>
     <AnalyticsMetrics items={[
       ["Reported LLM spend", dollars(data.summary.cost_usd), !finiteValue(data.summary.cost_usd) ? "No authoritative amount recorded" : partialCost(data.summary) ? "Partial reported subtotal" : "Authoritative response costs"],
-      ["Recorded requests", spendCount(data.summary.requests), data.summary.unknown_request_turns ? `Unknown request counts in ${spendCount(data.summary.unknown_request_turns)} ${data.summary.unknown_request_turns === 1 ? "turn" : "turns"}` : undefined],
+      ["Recorded requests", spendCount(data.summary.requests), data.summary.unknown_requests ? `${spendCount(data.summary.unknown_requests)} request counts need reconciliation` : data.summary.unknown_request_turns ? `Unknown request counts in ${spendCount(data.summary.unknown_request_turns)} ${data.summary.unknown_request_turns === 1 ? "turn" : "turns"}` : undefined],
       ["Recorded tokens", spendCount(data.summary.total_tokens), finiteValue(data.summary.token_coverage) && data.summary.token_coverage < 1 ? "Partial token coverage" : undefined],
     ]} /><CostCoverage data={data} />
-    <section className="analytics-section"><h2>Sessions</h2><AnalyticsMetrics items={[
+    <section className="analytics-section"><h2>{data.capabilities?.unified_billing ? "Native session activity" : "Sessions"}</h2><AnalyticsMetrics items={[
       ["Created sessions", spendCount(data.summary.sessions_created)], ["Active sessions", spendCount(data.summary.sessions_active ?? data.summary.sessions), "Distinct sessions in this range"],
     ]} /><div className="analytics-chart-heading"><h3>Sessions over time</h3><span>Daily · UTC</span></div><AnalyticsLegend series={[...sessionSeries, sessionLine]} />
       <AnalyticsChart rows={data.series.map(day => ({ date: day.date, sessions: day.sessions, sessions_active: day.sessions_active, sessions_created: day.sessions_created }))} series={sessionSeries} line={sessionLine} title="Sessions over time" />
@@ -170,6 +181,7 @@ export function UsersReport({ data, search, onSearch, sort, onSort }: {
           </div>}
       <p className="analytics-users-note analytics-muted">{data.by_user && <span>{rows.length} of {allRows.length} users. </span>}
         Missing amounts stay unavailable. PR statuses use creation dates; merge totals use merge dates.
+        {data.capabilities?.unified_billing && <span> Spend, requests and tokens include historical and native billing. Session, turn and PR counts cover native activity.</span>}
         {!prAvailable && <span> PR analytics are unavailable from this server.</span>}
       </p>
       <details className="analytics-methodology analytics-users-methodology"><summary>Coverage and calculations</summary>
@@ -216,7 +228,7 @@ function TurnTable({ data, performance, offset, onOffset, loading }: { data: Ana
         </> : <><TableCell>{spendCount(row.requests)}</TableCell><TableCell>{spendCount(row.total_tokens)}</TableCell><TableCell>{dollars(row.cost_usd)}<small>{row.pricing_status}</small></TableCell></>}
       </TableRow>)}
     </ReportTable>
-    {!data.rows.length && <p className="analytics-status">No recorded turns match this range and its filters.</p>}
+    {!data.rows.length && <p className="analytics-status">{data.coverage?.private_activity_details_omitted ? "Private turn activity is included in aggregates; its details are not visible to this account." : "No recorded turns match this range and its filters."}</p>}
     <div className="analytics-pagination"><p role="status">{data.total ? `${spendCount(data.offset + 1)}–${spendCount(Math.min(data.offset + data.rows.length, data.total))} of ${spendCount(data.total)} turns` : "No turns in this range"}</p><div><Button variant="outline" disabled={loading || offset === 0} onClick={() => onOffset(Math.max(0, data.offset - data.limit))}>Previous</Button><Button variant="outline" disabled={loading || data.offset + data.limit >= data.total} onClick={() => onOffset(data.offset + data.limit)}>Next</Button></div></div>
   </>
 }
@@ -238,14 +250,21 @@ function PerformanceReport({ data }: { data: AnalyticsReport }) {
   </>
 }
 
-export function AnalyticsPage({ kind, headingRef }: { kind: ReportKind; headingRef?: React.Ref<HTMLHeadingElement> }) {
+export function AnalyticsPage({ kind, productMode, headingRef }: { kind: ReportKind; productMode?: "standalone" | "existing"; headingRef?: React.Ref<HTMLHeadingElement> }) {
   const [range, setRange] = useState<AnalyticsRange>(() => presetAnalyticsRange())
   const [filters, setFilters] = useState<Filters>(allFilters), [view, setView] = useState<ReportView>("overall")
   const [offset, setOffset] = useState(0), [revision, setRevision] = useState(0), [search, setSearch] = useState("")
   const [userSort, setUserSort] = useState<UserSort>({ key: "spend", direction: "desc" })
   const [modelOptions, setModelOptions] = useState<string[]>([]), [userOptions, setUserOptions] = useState<ReportUser[]>([])
   const params = queryFor(range, filters)
-  const resource = useReport(`/settings/${kind}?${params}&limit=50&offset=${offset}`, revision)
+  const billing = kind === "usage" && productMode === "existing"
+  if (billing) {
+    if (params.has("model")) { params.set("root_model", params.get("model")!); params.delete("model") }
+    if (params.has("status")) { params.set("turn_status", params.get("status")!); params.delete("status") }
+    params.set("include_activity", "true")
+  }
+  const endpoint = billing ? "/settings/billing" : `/settings/${kind}`
+  const resource = useReport(`${endpoint}?${params}&limit=50&offset=${offset}`, revision, billing)
   useEffect(() => {
     if (resource.denied) { setModelOptions([]); setUserOptions([]) }
     else if (resource.data) {
@@ -257,7 +276,7 @@ export function AnalyticsPage({ kind, headingRef }: { kind: ReportKind; headingR
   const updateFilter = (key: keyof Filters, value: string) => { setFilters(previous => ({ ...previous, [key]: value })); setOffset(0) }
   const aggregateExports = resource.data?.capabilities?.reported_costs === true
   const exportKind = kind === "performance" || !aggregateExports ? "turns" : view === "users" ? "users" : "daily"
-  const exportUrl = (format: string) => `/api/settings/${kind}?${params}&format=csv&export=${encodeURIComponent(format)}`
+  const exportUrl = (format: string) => `/api${endpoint}?${params}&format=csv&export=${encodeURIComponent(format)}`
   return <div className="native-analytics">
     <header className="ns-page-heading analytics-report-heading"><div><h1 ref={headingRef} tabIndex={-1}>{kind === "performance" ? "Performance" : "Spend & usage"}</h1><p>{kind === "performance" ? "Moyai startup, broker handoff, and computer readiness." : "Your team’s recorded costs, sessions, and PR outcomes."}</p></div>
       <div className="analytics-actions"><AnalyticsDatePicker value={range} onChange={value => { setRange(value); setOffset(0) }} /><Button variant="outline" disabled={resource.loading} onClick={refresh}><RefreshCw size={16} />Refresh</Button></div>
@@ -271,7 +290,7 @@ export function AnalyticsPage({ kind, headingRef }: { kind: ReportKind; headingR
       {resource.data && !resource.loading && !resource.error ? <Button asChild className="analytics-export"><a href={exportUrl(exportKind)} download><Download size={16} />{aggregateExports || kind === "performance" ? "Export CSV" : "Export turns CSV"}</a></Button> : <Button className="analytics-export" disabled><Download size={16} />Export CSV</Button>}
     </div>
     <div className="analytics-filters"><ReportSelect label="Root turn model" value={filters.model} onChange={value => updateFilter("model", value)} options={[{ value: "all", label: "All root models" }, ...modelOptions.map(value => ({ value, label: value }))]} />
-      <ReportSelect label="Report user" value={filters.user_id} onChange={value => updateFilter("user_id", value)} options={[{ value: "all", label: "All users" }, ...userOptions.map(row => ({ value: row.id, label: row.display_name || row.username }))]} />
+      <ReportSelect label="Report user" value={filters.user_id} onChange={value => updateFilter("user_id", value)} options={[{ value: "all", label: "All users" }, ...userOptions.filter(row => row.filterable !== false).map(row => ({ value: row.id, label: row.display_name || row.username }))]} />
       <ReportSelect label="Report status" value={filters.status} onChange={value => updateFilter("status", value)} options={[{ value: "all", label: "All statuses" }, ...statuses.map(value => ({ value, label: (value[0].toUpperCase() + value.slice(1)).replaceAll("_", " ") }))]} />
       {Object.values(filters).some(value => value !== "all") && <Button variant="ghost" onClick={() => { setFilters(allFilters); setOffset(0) }}>Clear filters</Button>}
     </div>
@@ -281,13 +300,13 @@ export function AnalyticsPage({ kind, headingRef }: { kind: ReportKind; headingR
         : !resource.data ? <p className="analytics-status" role="status">Loading report…</p> : <>
           {kind === "performance" ? <PerformanceReport data={resource.data} /> : view === "overall" ? <OverallReport data={resource.data} /> : view === "users" ? <UsersReport data={resource.data} search={search} onSearch={setSearch} sort={userSort} onSort={setUserSort} /> : <UsageHistory data={resource.data} exportUrl={exportUrl} />}
           {kind === "performance" ? <section className="analytics-section"><h2>Recorded turns</h2><TurnTable data={resource.data} performance offset={offset} onOffset={setOffset} loading={resource.loading} /></section>
-            : view === "history" && <details className="analytics-breakdown"><summary>Recorded turns</summary><Button asChild variant="ghost" size="sm"><a href={exportUrl("turns")} download><Download size={14} />Export turns</a></Button><TurnTable data={resource.data} performance={false} offset={offset} onOffset={setOffset} loading={resource.loading} /></details>}
+            : view === "history" && <details className="analytics-breakdown"><summary>{resource.data.capabilities?.unified_billing ? "Native turn details" : "Recorded turns"}</summary><Button asChild variant="ghost" size="sm"><a href={exportUrl("turns")} download><Download size={14} />Export turns</a></Button><TurnTable data={resource.data} performance={false} offset={offset} onOffset={setOffset} loading={resource.loading} /></details>}
           {(kind !== "usage" || view !== "users") && <details className="analytics-methodology"><summary>About this data</summary>
             {Object.entries(resource.data.methodology ?? {}).filter(([key]) => ["startup", "startup_breakdown", "computer_readiness", "timing_coverage", "timing_cards"].includes(key) === (kind === "performance")).map(([key, text]) => <p key={key}>{text}</p>)}
             {!resource.data.methodology && <p>{resource.data.cost_note || "Cost coverage and attribution are supplied by the report API."}</p>}
             <p>{resource.data.latency_note || "Turn timing includes tools and waits; it is not time to first token."}</p>
             {kind === "usage" && <p>Creation-status distributions describe PRs created in the selected range. Merge counts describe verified merge events in the range and may include PRs created earlier.</p>}
-            <p>Charts and aggregates cover all filtered records. Turn history is paginated; CSV exports include the entire selected dataset. Dates use UTC half-open bounds; custom end dates include the whole selected day.</p>
+            <p>{resource.data.capabilities?.unified_billing ? "Spend charts and aggregate exports include historical and native billing. Turn history and turn exports contain visible native turns." : "Charts and aggregates cover all filtered records. Turn history is paginated; CSV exports include the entire selected dataset."} Dates use UTC half-open bounds; custom end dates include the whole selected day.</p>
             {kind === "usage" && <p>Provider invoices and infrastructure billing are not included. Unknown costs and inaccessible PR statuses remain explicitly unavailable.</p>}
           </details>}
         </>}

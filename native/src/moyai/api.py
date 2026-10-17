@@ -207,7 +207,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         app.include_router(product_skill_routes(runtime.product_skill_catalog))
     if runtime.product_billing is not None:
         from .product_billing_routes import routes as product_billing_routes
-        app.include_router(product_billing_routes(runtime.product_billing))
+        app.include_router(product_billing_routes(runtime.product_billing, runtime=runtime))
     if runtime.product_automations is not None:
         from .product_automations import routes as product_automation_routes
         app.include_router(product_automation_routes(runtime.product_automations))

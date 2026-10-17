@@ -38,6 +38,7 @@ CostState = Literal["final", "pending", "missing", "estimated"]
 MAX_RECORDS = 50_000
 MAX_RECONCILIATION_ROUNDS = 4
 LOOKUP_CHUNK = 200
+LEDGER_LOOKUP_CHUNK = 2_000
 
 
 class BillingReadError(ValueError):
@@ -721,17 +722,25 @@ class BillingReader:
             "limit": self.max_records + 1,
         }
         predicates = [("created_at>=:start AND created_at<:end", parameters)]
-        for offset in range(0, len(candidates), LOOKUP_CHUNK):
+        for offset in range(0, len(candidates), LEDGER_LOOKUP_CHUNK):
             identities = (
                 ("id", "gateway_id", "cost_receipt_id") if engine == "legacy"
                 else ("id", "request_key", "provider_request_id")
             )
+            # An OR of three ANY predicates repeatedly scans the ledger when
+            # one identity column has no leading index. Join each identity
+            # separately so PostgreSQL can use its index or a bounded hash join.
+            # UNION retains one source row even when several aliases match.
+            matches = " UNION ".join(
+                f'SELECT matched.source_id FROM {self.storage.ledger} matched '
+                f'JOIN unnest(CAST(:identities AS text[])) wanted(identity) '
+                f'ON matched."{storage_column(engine, name)}"=wanted.identity '
+                "WHERE matched.source=:source"
+                for name in identities
+            )
             predicates.append((
-                " OR ".join(
-                    f'"{storage_column(engine, name)}"=ANY(CAST(:identities AS text[]))'
-                    for name in identities
-                ),
-                {**parameters, "identities": candidates[offset:offset + LOOKUP_CHUNK]},
+                f"source_id IN ({matches})",
+                {**parameters, "identities": candidates[offset:offset + LEDGER_LOOKUP_CHUNK]},
             ))
         result: dict[str, dict[str, Any]] = {}
         columns = ",".join(f'"{storage_column(engine, name)}" AS "{name}"' for name in fields)

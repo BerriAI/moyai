@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import HTTPException
@@ -18,6 +18,7 @@ MAX_IDENTITIES = 50_000
 class ReportIdentities:
     canonical_ids: dict[str, str]
     users: list[dict[str, Any]]
+    product_ids: set[str] = field(default_factory=set)
 
     def canonical(self, actor_id: str) -> str:
         return self.canonical_ids.get(actor_id, actor_id)
@@ -55,6 +56,7 @@ async def report_identities(runtime: Any) -> ReportIdentities:
         raise HTTPException(422, "Too many product report identities.")
     known = {row["id"]: row for row in source}
     canonical_ids: dict[str, str] = {}
+    product_ids: set[str] = set()
     labels: dict[str, dict[str, Any]] = {}
     for actor in native:
         person = known.get(actor.id)
@@ -73,10 +75,13 @@ async def report_identities(runtime: Any) -> ReportIdentities:
         if person["kind"] == "slack" and target is not None and target["kind"] in {"google", "cloudflare"}:
             person = target
         canonical = person["id"]
+        product_ids.add(canonical)
         canonical_ids[actor.id] = canonical
         labels[canonical] = {
             "id": canonical, "username": person["email"] or canonical,
             "display_name": person["name"] or person["email"] or canonical,
             "email": person["email"],
         }
-    return ReportIdentities(canonical_ids, sorted(labels.values(), key=lambda row: (row["display_name"], row["id"])))
+    return ReportIdentities(
+        canonical_ids, sorted(labels.values(), key=lambda row: (row["display_name"], row["id"])), product_ids,
+    )

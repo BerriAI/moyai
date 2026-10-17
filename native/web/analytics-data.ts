@@ -3,13 +3,14 @@ import { finiteValue } from "./analytics-format"
 
 export type PricingStatus = "priced" | "partial" | "unpriced" | "empty"
 export type PRState = "open" | "draft" | "closed" | "merged" | "unknown"
-export type ReportUser = { id: string; username: string; display_name: string; email?: string | null }
+export type ReportUser = { id: string; username: string; display_name: string; email?: string | null; filterable?: boolean }
 export type ReportSummary = {
   turns: number; sessions: number; completed: number; failed: number
   sessions_created?: number; sessions_active?: number
   requests: number; input_tokens: number | null; output_tokens: number | null; total_tokens: number | null
   cost_usd: number | null; cost_usd_exact?: string | null; priced_turns?: number; unpriced_turns?: number
   unknown_request_turns?: number; capture_gap_turns?: number; token_samples?: number; usage_samples?: number; token_coverage?: number | null
+  unknown_requests?: number
   priced_requests?: number; unpriced_requests?: number; cost_coverage?: number | null; pricing_status?: PricingStatus
   latency_samples: number; mean_latency_ms: number | null; p50_latency_ms: number | null; p95_latency_ms: number | null
   prs_created?: number; prs_merged?: number; prs_merged_current?: number
@@ -72,9 +73,12 @@ export type AnalyticsReport = {
   coverage?: {
     legacy_turns: number; ledger_requests: number; priced_requests: number; unpriced_requests: number; unknown_request_turns?: number; capture_gap_turns?: number; linked_cost_limited?: boolean
     pr_receipts: number; pr_status_checked: number; pr_status_unknown: number; pr_tracking: string; pr_merge_date_unknown?: number; unclassified_confirmed_create_calls?: number
+    legacy_observations?: number; native_observations?: number; unknown_requests?: number
+    activity_unknown_request_turns?: number; activity_capture_gap_turns?: number
+    private_activity_details_omitted?: number
   }
   methodology?: { sessions?: string; prs_created?: string; prs_merged?: string; cost?: string; requests?: string; model?: string; cost_per_merged_pr?: string; startup?: string; startup_breakdown?: string; computer_readiness?: string; timing_coverage?: string; timing_cards?: string }
-  capabilities?: { pr_analytics?: boolean; reported_costs?: boolean }
+  capabilities?: { pr_analytics?: boolean; reported_costs?: boolean; unified_billing?: boolean }
 }
 
 function displayIdentity(value: string | null | undefined): string {

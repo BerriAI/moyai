@@ -117,3 +117,31 @@ After `consolidate`, the two old stores no longer exist, so that read-only rollb
 command refuses to imply that it can restore them. Restore the reviewed backup
 or roll forward if a pre-cutover application/schema is required. Keep the backup
 outside the active billing schema; the completed application maintains one store.
+
+## One reporting API
+
+`GET /api/settings/billing` is the canonical product billing and usage API.
+Spend & usage calls it with `include_activity=true`; the response contains the
+accounting report and an `activity` view for the dashboard. Both use the same
+financial projection, including historical and native records. The activity
+view reuses that projection rather than reading and summing billing again.
+Its session, turn and PR measurements retain their native activity scope.
+
+The existing `/api/settings/usage` URL remains a compatibility adapter for
+clients expecting the older dashboard shape. `/api/admin/spend` and personal
+`/api/spend` retain their existing scopes. They do not own separate spend
+calculations. Standalone installations, which have no product history, keep
+their native usage API.
+
+Date and canonical user filters apply to the financial report. `model` selects
+the recorded inference alias; `root_model` and `turn_status` select the saved
+historical session or native turn cohort. The dashboard uses those latter two
+filters. Daily, user and model CSV exports use the same canonical endpoint and
+exact decimal amounts. `include_activity=true&format=csv&export=turns` exports
+visible native turn details; it does not invent historical turn records.
+
+Unknown amounts and unresolved identities remain explicit. Accounting totals
+retain private usage, while request/session details and native turn exports
+respect visibility. A failed financial read returns an error instead of falling
+back to a native-only subtotal. Reporting is read-only and needs no additional
+backfill or schema migration.

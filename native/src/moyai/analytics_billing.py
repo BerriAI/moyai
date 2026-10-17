@@ -1,0 +1,122 @@
+"""Adapt the shared product accounting report to the existing usage response.
+
+Session/turn/PR activity keeps its native lineage. Financial cards, user/model
+breakdowns, daily series and their CSVs all consume ProductBillingService.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+from fastapi import HTTPException
+from sqlalchemy.exc import SQLAlchemyError
+
+from .analytics_identity import ReportIdentities
+from .product_billing import BillingReadError, SourceRef
+from .product_billing_routes import ProductBillingService, _totals
+
+
+def identity_map(service: ProductBillingService, identities: ReportIdentities) -> dict[str, str]:
+    result = {}
+    for user in identities.users:
+        identity = user["id"]
+        source = SourceRef("legacy" if identity in identities.product_ids else "native", identity)
+        resolved = service.mappings.resolve(source, actor=True)
+        assert resolved is not None
+        result[identity] = resolved.id
+    return result
+
+
+def chart_amount(value: str | None) -> float | None:
+    if value is None:
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def metrics(row: dict[str, Any]) -> dict[str, Any]:
+    """Rename fields only; the accounting service owns sums and coverage."""
+    return {
+        **{key: row.get(key) for key in (
+            "requests", "input_tokens", "output_tokens", "total_tokens",
+            "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+            "priced_requests", "unpriced_requests", "unknown_requests",
+            "cost_coverage", "pricing_status", "token_samples", "usage_samples", "token_coverage",
+        )},
+        "cost_usd": chart_amount(row["spend"]), "cost_usd_exact": row["cost_usd_exact"],
+        # Old SDK turn counters are activity evidence, not missing ledger charges.
+        "unknown_request_turns": 0, "capture_gap_turns": 0,
+        "priced_turns": 0, "unpriced_turns": 0, "legacy_turns": 0,
+    }
+
+
+async def read(
+    service: ProductBillingService, identities: ReportIdentities, *, viewer_id: str,
+    start: str, end: str, preset: str, user_id: str | None, model: str | None, status: str | None,
+) -> dict[str, Any]:
+    people = identity_map(service, identities)
+    try:
+        return await service.report(
+            start=start, end=end, preset=preset,
+            user_id=people.get(identities.canonical(user_id), user_id) if user_id is not None else None,
+            root_model=model, turn_status=status, include_root_cohorts=True,
+            viewer_id=viewer_id, limit=1,
+        )
+    except BillingReadError as error:
+        bounded = str(error).startswith("too_many_")
+        raise HTTPException(
+            422 if bounded else 503,
+            "Too many accounting records; narrow the date range." if bounded else
+            "Accounting evidence is unavailable or needs reconciliation. No partial total was substituted.",
+        ) from None
+    except (SQLAlchemyError, TimeoutError):
+        raise HTTPException(503, "Product accounting is temporarily unavailable.") from None
+
+
+def apply(
+    billing: dict[str, Any], identities: ReportIdentities, service: ProductBillingService,
+    *, summary: dict[str, Any], series: list[dict[str, Any]], by_user: list[dict[str, Any]],
+    users: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    people = identity_map(service, identities)
+    summary.update(metrics(billing["total"]))
+    days = {row["date"]: row for row in billing["daily"]}
+    for day in series:
+        financial = days[day["date"]]
+        day.update(metrics(financial))
+        day.update(
+            models=[{"model": row["model"] or "Unattributed model", **metrics(row)}
+                    for row in financial["models"]],
+            cumulative_cost_usd=chart_amount(financial["cumulative_spend"]),
+            cumulative_pricing_status=financial["cumulative_pricing_status"],
+        )
+    empty = metrics(_totals([]))
+    activity = {
+        people.get(row["user_id"], row["user_id"]): {
+            **row, **empty, "user_id": people.get(row["user_id"], row["user_id"]),
+        }
+        for row in by_user
+    }
+    labels = {
+        people.get(row["id"], row["id"]): {**row, "id": people.get(row["id"], row["id"])}
+        for row in users
+    }
+    known_ids = set(labels) | {row["id"] for row in billing["users"] if row["id"] is not None}
+    unknown_key = "billing:unattributed"
+    while unknown_key in known_ids:
+        unknown_key += ":unknown"
+    for row in billing["users"]:
+        identity = row["id"]
+        # A real unknown actor remains unattributed, rather than borrowing an
+        # account. The explicit bucket is a display key, never authorization.
+        key = identity if identity is not None else unknown_key
+        existing = activity.get(key, {"user_id": key})
+        activity[key] = {**existing, **metrics(row)}
+        labels[key] = {
+            **labels.get(key, {}), "id": key, "username": row["email"] or row["name"],
+            "display_name": row["name"], "email": row["email"],
+            "filterable": identity is not None,
+        }
+    models = [{"model": row["model"] or "Unattributed model", **metrics(row)} for row in billing["models"]]
+    return list(activity.values()), models, list(labels.values())
