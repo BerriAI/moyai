@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     computer_idle_timeout: int = Field(
         default=600, ge=60, le=86400, validation_alias="MOYAI_COMPUTER_IDLE_TIMEOUT"
     )
+    # Replay-only: new turns and delegates have no model-request-count cap.
     model_request_limit: int = Field(default=100, ge=1, le=1000, validation_alias="MOYAI_MODEL_CALL_LIMIT")
     model_timeout_seconds: int = Field(default=300, ge=10, le=900, validation_alias="MOYAI_MODEL_TIMEOUT")
     secure_cookies: bool = Field(default=False, validation_alias="MOYAI_SECURE_COOKIES")

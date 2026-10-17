@@ -55,6 +55,7 @@ from .effects import EffectReceipts
 from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
 from .live_events import root_event_stream
+from .request_limits import UnlimitedModelRequests
 from .settings import Settings
 from .settings_runtime import settings_capability
 from .storage import ObjectStore
@@ -327,6 +328,7 @@ def make_agent(
         retries=2,
         instructions=(PACKAGE_ROOT / "instructions.md").read_text(),
         capabilities=[
+            UnlimitedModelRequests(),
             workspace,
             authority,
             SwarmCapability(database.swarms),

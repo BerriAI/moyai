@@ -113,6 +113,11 @@ same composer and keeps attachments; Save/Cancel restore the unsent draft.
 **Steer now** promotes the existing message through the native Temporal signal
 and Pydantic `AgentRun.enqueue` path. A message already admitted cannot be edited.
 
+New tasks and their delegated agents have no fixed model-request-count limit.
+Long tasks can continue past the former 100-round parent and 50-round delegate
+caps. Stop remains available while work is running. Existing failed turns are
+not restarted automatically.
+
 ## Settings and administration
 
 The account's Settings button opens a dedicated rail with Overview, Skills,
