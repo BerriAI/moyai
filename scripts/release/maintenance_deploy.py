@@ -324,10 +324,15 @@ class MaintenanceRelease(RollingRelease):
         compatible = all(valid_schema_support(state.get('schema_support'))
             and state['schema_support']['compatibility'] == support['compatibility']
             and state['schema_support']['required'] <= current for state in states.values())
-        if compatible:
+        # Native maintenance upgrades canonical and native receipts together at
+        # zero owners. An unchanged compatibility floor does not imply that an
+        # additive online plan exists (the billing v21 -> v22 upgrade has none).
+        # Select this path explicitly; never turn a failed online plan into an
+        # offline fallback for the historical legacy controller.
+        if compatible and self.candidate.get('core', 'legacy') != 'pydantic':
             return super().plan_schema(states)
         if self.offline_migrate is None:
-            raise ReleaseError('An incompatible schema requires the explicit offline maintenance migration transport; no changes made.')
+            raise ReleaseError('This schema upgrade requires the explicit offline maintenance migration transport; no changes made.')
         return {'mode': 'offline', 'from_revision': current, 'to_revision': target,
                 'source_digest': self.candidate['source_schema_digest']}
 
