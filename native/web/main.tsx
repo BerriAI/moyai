@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from "react"
+import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -892,8 +892,18 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
   const [approvals, setApprovals] = useState<Record<string, boolean>>({})
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const [submitted, setSubmitted] = useState(false)
+  const form = useRef<HTMLFormElement>(null)
+  const restoreFocus = useRef<HTMLElement | null>(null)
   const requestKey = useRef(crypto.randomUUID())
   const submitting = useRef(false)
+  const disabled = busy || submitted
+  useLayoutEffect(() => {
+    if (busy || submitted || !restoreFocus.current) return
+    const target = restoreFocus.current
+    restoreFocus.current = null
+    if (target.isConnected && document.activeElement === document.body) target.focus()
+  }, [busy, submitted])
   const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
   const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
@@ -902,6 +912,12 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
     return Boolean(nextCustom[key]?.trim() || nextValues[key]?.length)
   })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
   const requiresContinue = pending.approvals.length > 0 || credentials.length > 0
+  async function refreshSubmitted() {
+    setBusy(true); setError("")
+    try { await onDone() }
+    catch { setError("Your response was sent, but the conversation could not be refreshed.") }
+    finally { setBusy(false) }
+  }
   async function submit(nextValues = values, nextCustom = custom) {
     if (submitting.current || unknown) return
     if (!isComplete(nextValues, nextCustom)) {
@@ -909,13 +925,23 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
       return
     }
     submitting.current = true
+    restoreFocus.current = document.activeElement instanceof HTMLElement && form.current?.contains(document.activeElement)
+      ? document.activeElement : null
     setBusy(true); setError("")
     const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
       return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
     }) }]))
-    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }); await onDone() }
-    catch (e) { setError(String(e)) } finally { submitting.current = false; setBusy(false) }
+    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }) }
+    catch (e) {
+      submitting.current = false
+      setError(String(e)); setBusy(false)
+      return
+    }
+    // Once accepted, only refresh the conversation; never reopen this answer.
+    restoreFocus.current = null
+    setSubmitted(true)
+    await refreshSubmitted()
   }
   return <>
     {credentials.map(call => {
@@ -923,13 +949,13 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
-    {(questions.length > 0 || pending.approvals.length > 0) && <form className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
+    {(questions.length > 0 || pending.approvals.length > 0) && <form ref={form} aria-busy={busy} className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
     {questions.length
-      ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{busy && <span className="question-send-status" role="status">Sending…</span>}</div>
+      ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{disabled && <span className="question-send-status" role="status">{submitted ? "Answer sent" : "Sending…"}</span>}</div>
       : <h3>Your input is needed</h3>}
     {questions.map(({ call, questions }) => questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
-      return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={busy}
+      return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={disabled}
         onSelect={selected => {
           if (submitting.current) return
           const nextValues = { ...values, [key]: selected }, nextCustom = { ...custom, [key]: "" }
@@ -942,10 +968,10 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
           if (value.trim()) setValues(previous => ({ ...previous, [key]: [] }))
         }} />
     }))}
-    {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={busy} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
+    {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={disabled} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
     {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
-    {error && <p className="error" role="alert">{error}</p>}
-    {requiresContinue && <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={busy || unknown || !isComplete(values, custom)}>{busy ? "Submitting…" : "Continue"}</Button></div>}
+    {error && <p className="error" role="alert">{error}{submitted && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refreshSubmitted()}>Refresh conversation</Button>}</p>}
+    {requiresContinue && <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={disabled || unknown || !isComplete(values, custom)}>{submitted ? "Submitted" : busy ? "Submitting…" : "Continue"}</Button></div>}
   </form>}
   </>
 }

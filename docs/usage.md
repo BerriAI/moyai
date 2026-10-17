@@ -13,6 +13,10 @@ checkboxes and press Enter when finished. Multiple questions submit once every
 question is answered. Accompanying approvals and credential requests retain
 their explicit Continue step.
 
+If sending fails, your answer and keyboard focus are preserved so you can retry.
+If the answer was accepted but refreshing fails, **Refresh conversation** reloads
+the conversation without sending the answer again.
+
 ## Attachments and the computer
 
 The native interface reuses Moyai's navigation style, home constellation and

@@ -32,7 +32,7 @@ export function QuestionChoices({ question, selected, customAnswer, disabled, on
       : [label])
   }
   function shortcut(event: React.KeyboardEvent<HTMLFieldSetElement>) {
-    if (disabled || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
+    if (disabled || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
     if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return
     const row = (event.target as HTMLElement).closest<HTMLButtonElement>(".question-choice-row")
     if (!row) return
@@ -95,7 +95,7 @@ export function QuestionChoices({ question, selected, customAnswer, disabled, on
         value={customAnswer}
         onChange={event => onCustomAnswer(event.target.value)}
         onKeyDown={event => {
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
             event.preventDefault()
             event.stopPropagation()
             event.currentTarget.form?.requestSubmit()

@@ -78,7 +78,7 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/answers')&&req.method==='POST') {
       if(state.answerHold)await state.answerHold;
       if(state.answerError)return json({detail:'The answer could not be saved. Try again.'},503);
-      state.status='idle';state.pending=undefined;
+      state.status='idle';state.pending=undefined;state.answerAccepted=true;
       return json({id:'resumed-turn',status:'queued'},202);
     }
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
@@ -108,6 +108,7 @@ async function handle(req,res,next) {
       if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
       return json({updated:true});
     }
+    if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
     const row=session(url.pathname.split('/')[3]);
     const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(state.holdSessionRead)await state.holdSessionRead;
@@ -809,8 +810,58 @@ test('failed answer submission preserves text and retries the same request ident
   await custom.press('Enter');
   await page.getByRole('alert').filter({hasText:'The answer could not be saved.'}).waitFor();
   assert.equal(await custom.inputValue(),'Soft orange');
+  assert.equal(await custom.evaluate(element=>element===document.activeElement),true);
   state.answerError=false;
-  await custom.press('Enter');await waitFor(()=>answerRequests().length===2);
+  await page.keyboard.press('Enter');await waitFor(()=>answerRequests().length===2);
+  assert.deepEqual(answerRequests()[0].body,answerRequests()[1].body);
+});
+
+test('an accepted answer stays locked when conversation refresh fails and refresh never resubmits',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerRefreshError:true});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Blue',exact:true}).click();
+  await page.getByRole('alert').waitFor();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).isEnabled(),false);
+  await page.locator('.question-form').evaluate(form=>form.requestSubmit());
+  assert.equal(answerRequests().length,1);
+  state.answerRefreshError=false;
+  await page.getByRole('button',{name:'Refresh conversation',exact:true}).click();
+  await page.locator('.question-form').waitFor({state:'hidden'});
+  assert.equal(answerRequests().length,1);
+});
+
+test('IME confirmation cannot submit a written answer',async t=>{
+  reset({status:'waiting',pending:colorQuestion()});
+  const page=await pageFor(t);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('青');
+  await custom.dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
+  assert.equal(answerRequests().length,0);
+  await custom.dispatchEvent('keydown',{key:'Enter',code:'Enter',keyCode:229,isComposing:false});
+  assert.equal(answerRequests().length,0);
+  await custom.press('Enter');await waitFor(()=>answerRequests().length===1);
+  assert.equal(answerRequests()[0].body.answers['color-call'].answers[0].custom_answer,'青');
+});
+
+test('a failed answer does not steal focus from another control',async t=>{
+  let release;reset({status:'waiting',pending:colorQuestion(),answerError:true,answerHold:new Promise(resolve=>{release=resolve})});
+  t.after(()=>release());const page=await pageFor(t);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('Orange');await custom.press('Enter');await waitFor(()=>answerRequests().length===1);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});await composer.focus();
+  release();await page.getByRole('alert').waitFor();
+  assert.equal(await composer.evaluate(element=>element===document.activeElement),true);
+});
+
+test('a failed choice restores keyboard focus and retries the same answer',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerError:true});
+  const page=await pageFor(t),blue=page.getByRole('button',{name:'Blue',exact:true});
+  await blue.press('Enter');await page.getByRole('alert').waitFor();
+  assert.equal(await blue.evaluate(element=>element===document.activeElement),true);
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:true}).count(),1);
+  state.answerError=false;
+  await page.keyboard.press('Enter');await waitFor(()=>answerRequests().length===2);
   assert.deepEqual(answerRequests()[0].body,answerRequests()[1].body);
 });
 
