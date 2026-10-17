@@ -111,6 +111,11 @@ any changes: adopt the new entrypoint and shutdown protocol through maintenance
 first. Qualify longer activities separately; an already-dispatched model request
 is never replayed to hide an interrupted stream.
 
+For first adoption, use the maintenance procedure to install the shared worker
+shutdown protocol. Then inspect a rolling preflight receipt: `worker_shutdown`
+must report `moyai-worker-shared-drain-v1` and `seconds: 240`. Selecting rolling
+does not retrofit that behavior into an already-running older worker.
+
 The candidate must retain every role compatibility contract, canonical schema
 revision, native application migration manifest and Harness/framework version.
 This path performs no schema migration, global drain, pause or resume. Use

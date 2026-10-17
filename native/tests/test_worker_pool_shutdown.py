@@ -130,3 +130,19 @@ async def test_failed_poller_shutdown_still_waits_for_every_other_poller():
     with pytest.raises(RuntimeError, match="Poller shutdown failed"):
         await task
     assert draining.closed.is_set()
+
+
+async def test_partial_start_failure_starts_all_owned_drains_together():
+    started = (ControlledWorker(), ControlledWorker(polling=False))
+    failed = ControlledWorker(fail_start=True)
+    task = asyncio.create_task(WorkerPools((*started, failed)).__aenter__())
+    try:
+        await asyncio.wait_for(asyncio.gather(*(worker.closing.wait() for worker in started)), 2)
+        assert not task.done()
+        assert not failed.closing.is_set()
+    finally:
+        for worker in started:
+            worker.finish.set()
+        with pytest.raises(RuntimeError, match="Poller could not start"):
+            await task
+    assert all(worker.closed.is_set() for worker in started)

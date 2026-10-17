@@ -15,7 +15,10 @@ from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurabili
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
+from temporalio.client import Client
 from temporalio.common import RetryPolicy
+from temporalio.runtime import Runtime as TemporalRuntime
+from temporalio.runtime import TelemetryConfig
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 
@@ -272,6 +275,63 @@ async def test_split_workers_register_one_owner_before_polling_and_all_become_re
                     await asyncio.sleep(.01)
             pools.register.assert_awaited_once()
         assert not pools.is_running
+
+
+async def test_replacement_polls_while_old_worker_finishes_one_model_activity(runtime, actor):
+    scenario = CapacityScenario()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def held_model(messages, info):
+        scenario.model_calls += 1
+        started.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("Completed without replay.")])
+
+    scenario.respond = held_model
+    scenario.install(runtime)
+    runtime.settings.worker_shutdown_seconds = 4
+    turn = await queued(runtime, actor, "draining model")
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        old = make_worker(runtime)
+        async with old:
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            await asyncio.wait_for(started.wait(), 15)
+            closing = None
+            try:
+                # Separate SDK runtimes model separate worker processes; one
+                # runtime rejects duplicate pollers for the same queue.
+                runtime.client = await Client.connect(
+                    environment.client.service_client.config.target_host,
+                    namespace=environment.client.namespace, data_converter=converter,
+                    plugins=[PydanticAIPlugin()],
+                    runtime=TemporalRuntime(telemetry=TelemetryConfig()),
+                )
+                replacement = make_worker(runtime)
+                async with replacement:
+                    async with asyncio.timeout(5):
+                        while not replacement.is_running:
+                            await asyncio.sleep(.01)
+                    closing = asyncio.create_task(old.shutdown())
+                    # This exceeds the former one-second per-pool slice while
+                    # remaining inside the configured four-second shared grace.
+                    await asyncio.sleep(1.5)
+                    assert not closing.done() and scenario.model_calls == 1
+                    release.set()
+                    result = await asyncio.wait_for(handle.result(), 15)
+                    assert result["status"] == "completed"
+                    await asyncio.wait_for(closing, 10)
+                    assert scenario.model_calls == 1
+            finally:
+                release.set()
+                if closing is not None:
+                    await asyncio.gather(closing, return_exceptions=True)
+                runtime.client = environment.client
 
 
 async def test_repeated_cancellation_retires_all_real_temporal_pollers(runtime):
