@@ -379,7 +379,7 @@ def make_agent(
             on_demand_coder(authority.save_workspace),
             WorkflowPlanning(
                 store_resolver=lambda ctx: stores.plan(
-                    ctx.deps.session_id if ctx.run_id == ctx.deps.turn_id
+                    ctx.deps.session_id if ctx.run_id == ctx.deps.root_run_id
                     else f"{ctx.deps.session_id}/delegate/{ctx.run_id}"
                 ),
                 enable_subtasks=True,

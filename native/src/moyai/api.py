@@ -28,6 +28,7 @@ from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .file_preview import routes as file_preview_routes
+from .history_handoff import is_turn_run, latest_turn_snapshot
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
 from .live_stream import authorized_events
@@ -468,7 +469,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 "arguments": json.loads(runtime.security.unseal(effect.arguments)),
             } for effect in unsettled if effect.actor_id == user.id]
         if include_activity and turns and turns[0].actor_id == user.id and turns[0].status != "running":
-            snapshot = await runtime.stores.steps.latest_snapshot(run_id=turns[0].id)
+            snapshot = await latest_turn_snapshot(runtime, turns[0].id)
             if snapshot is not None:
                 result["activity"] = saved_activity(snapshot.messages, turns[0].id)
         if row.status == "waiting" and row.conversation and active_turn is not None:
@@ -529,7 +530,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 Turn.session_id == session_id,
             ).order_by(Turn.created_at.desc()).limit(1))).first()
         if turn is not None and turn.actor_id == user.id and turn.status != "running":
-            snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id)
+            snapshot = await latest_turn_snapshot(runtime, turn.id)
             if snapshot is not None:
                 return saved_activity(snapshot.messages, turn.id)
         return []
@@ -730,7 +731,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                         async for event in native:
                             next_offset = native.offset + 1
                             if isinstance(event, AgentRunResultEvent):
-                                finished = event.result.run_id == turn.id
+                                finished = is_turn_run(event.result.run_id, turn.id)
                             item = public_event(event)
                             if item is not None:
                                 yield f"id: {native.offset}\ndata: " + json.dumps(

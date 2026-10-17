@@ -11,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 
 from .answer_settlement import SNAPSHOT_WARNING
 from .contracts import CompletedTurn, PreparedTurn, SteeringInput
+from .history_handoff import HISTORY_ACTIVITIES
 from .images import hydrate
 from .runtime import current
 from .workspace_recovery import prepare_workspace
@@ -130,6 +131,6 @@ async def steering_receipt(turn_id: str, enqueue_id: str | None) -> None:
 
 ACTIVITIES = [
     prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
-    prepare_steering, steering_receipt,
+    prepare_steering, steering_receipt, *HISTORY_ACTIVITIES,
 ]
 

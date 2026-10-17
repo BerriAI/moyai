@@ -97,9 +97,11 @@ def redact(value: Any, secrets: list[str]) -> Any:
 
 
 def saved_activity(messages: list[ModelMessage], run_id: str) -> list[dict[str, Any]]:
+    from .history_handoff import is_turn_run
+
     result = []
     for message in messages:
-        if message.run_id != run_id:
+        if not is_turn_run(message.run_id, run_id):
             continue
         for part in message.parts:
             if isinstance(message, ModelResponse) and isinstance(part, ToolCallPart):

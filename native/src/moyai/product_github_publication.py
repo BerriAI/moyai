@@ -353,7 +353,7 @@ class Publications:
 
     async def approve_lifecycle(self, ctx: RunContext[RunScope], request: LifecycleAccess) -> dict:
         from .product_github_workflows import parse
-        if not ctx.tool_call_approved or ctx.run_id != self.scope.turn_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
+        if not ctx.tool_call_approved or ctx.run_id != self.scope.root_run_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
             raise ToolFailed("Only explicit requester approval may grant PR lifecycle access.")
         row = await self.operation(ctx, "request_pr_lifecycle_access", request)
         if row.turn_id != self.scope.turn_id:
@@ -428,7 +428,7 @@ class Publications:
         return await self.finish(row, result)
 
     async def approve(self, ctx: RunContext[RunScope], request: PRWrite) -> dict:
-        if not ctx.tool_call_approved or ctx.run_id != self.scope.turn_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
+        if not ctx.tool_call_approved or ctx.run_id != self.scope.root_run_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
             raise ToolFailed("Only an explicit native approval in the requester's direct chat may grant PR access.")
         row = await self.operation(ctx, "request_pull_request_write_access", request)
         if row.turn_id != self.scope.turn_id:

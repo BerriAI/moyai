@@ -53,6 +53,12 @@ class RunScope:
     # must retain SDK delegation and its shared parent computer.
     interactive_delegation: bool = False
     execution_context: ExecutionContext | None = None
+    history_segment: int = 0
+
+    @property
+    def root_run_id(self) -> str:
+        """One logical turn can contain several SDK runs across Temporal histories."""
+        return self.turn_id if not self.history_segment else f"{self.turn_id}:segment:{self.history_segment}"
 
     @property
     def authority(self) -> ExecutionContext:
