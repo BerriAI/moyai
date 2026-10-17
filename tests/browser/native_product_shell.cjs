@@ -94,6 +94,7 @@ async function handle(req,res,next) {
       const messages=state.messagesBySession?.[url.pathname.split('/')[3]]||state.messages;
       if(req.method==='POST') {
         messages.push({id:messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
+        if(data.reply_to){state.status='idle';state.pending=undefined;state.answerAccepted=true;}
         return json({id:'turn-skill',actor_id:'viewer',status:'completed'});
       }
       return json(messages);
@@ -817,18 +818,40 @@ test('failed answer submission preserves text and retries the same request ident
 });
 
 test('an accepted answer stays locked when conversation refresh fails and refresh never resubmits',async t=>{
-  reset({status:'waiting',pending:colorQuestion(),answerRefreshError:true});
+  reset({status:'waiting',pending:colorQuestion(),answerRefreshError:true,canAnswer:true,canReply:true});
   const page=await pageFor(t);
   await page.getByRole('button',{name:'Blue',exact:true}).click();
   await page.getByRole('alert').waitFor();
   assert.equal(await page.getByRole('button',{name:'Blue',exact:true}).isEnabled(),false);
   assert.equal(await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('button',{name:'Answer question',exact:true}).count(),0);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await composer.fill('Additional context after my answer.');await composer.press('Enter');
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/messages')&&row.method==='POST'));
+  assert.equal(state.requests.find(row=>row.path.endsWith('/messages')&&row.method==='POST').body.reply_to,undefined);
   await page.locator('.question-form').evaluate(form=>form.requestSubmit());
   assert.equal(answerRequests().length,1);
   state.answerRefreshError=false;
   await page.getByRole('button',{name:'Refresh conversation',exact:true}).click();
   await page.locator('.question-form').waitFor({state:'hidden'});
   assert.equal(answerRequests().length,1);
+});
+
+test('an answer sent through the composer also locks the question card after a failed refresh',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerRefreshError:true,canAnswer:true,canReply:true});
+  const page=await pageFor(t);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await composer.fill('Orange');await composer.press('Enter');
+  await page.getByRole('alert').waitFor();
+  assert.match(await page.getByRole('alert').innerText(),/Your response was sent/);
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('button',{name:'Answer question',exact:true}).count(),0);
+  await page.locator('.question-form').evaluate(form=>form.requestSubmit());
+  assert.equal(answerRequests().length,0);
+  state.answerRefreshError=false;
+  await page.getByRole('button',{name:'Refresh conversation',exact:true}).click();
+  await page.locator('.question-form').waitFor({state:'hidden'});
+  assert.equal(state.requests.filter(row=>row.path.endsWith('/messages')&&row.method==='POST').length,1);
 });
 
 test('IME confirmation cannot submit a written answer',async t=>{

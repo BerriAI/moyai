@@ -415,6 +415,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   viewNow.current = view
   const sensitiveVersion = useRef(0)
   const [draft, setDraft] = useState("")
+  const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
@@ -457,7 +458,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     resolvedOnce.current = undefined
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
-    setDraft(""); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
@@ -570,7 +571,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (element) element.scrollTop = element.scrollHeight
   }, [messages.length, sendingNow])
   const active = view?.turns.find(turn => turn.id === view.session.active_turn)
-  const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && pictures.files.length === 0)
+  const requestAnswered = Boolean(active && answeredRequest === active.id)
+  const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
   useEffect(() => {
     if (!activeId || endedStreams.current.has(activeId)) return
@@ -635,10 +637,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
+    let accepted = false
     try {
       await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: lastRequest.current.key })
+      accepted = true
+      if (body.reply_to) setAnsweredRequest(body.reply_to)
       setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
-    } catch (e) { setError(String(e)) } finally { setBusy(false) }
+    } catch (e) { setError(accepted && body.reply_to ? "Your response was sent, but the conversation could not be refreshed." : String(e)) } finally { setBusy(false) }
   }
   async function sendNow(turnId: string) {
     if (busy) return
@@ -714,7 +719,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
             {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
-            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} onDone={load} />
+            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} />
           </>}
           {session.status === "waiting" && !view.can_answer && !view.pending && <p className="notice">Waiting for the original requester’s response. New messages will be queued.</p>}
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
@@ -726,7 +731,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
           {answeringQuestion && <p className="question-reply-hint">Your reply will answer the pending question.</p>}
-          {session.status === "waiting" && view.can_answer && !answeringQuestion && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
+          {requestAnswered && <p className="question-reply-hint">Your answer was sent. You can send a follow-up.</p>}
+          {session.status === "waiting" && view.can_answer && !answeringQuestion && !requestAnswered && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
             <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
@@ -886,13 +892,12 @@ function EffectReview({ effect, onDone }: { effect: Effect; onDone: () => Promis
   </form>
 }
 
-function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pending; turnId: string; sessionId: string; onDone: () => Promise<void> }) {
+function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void> }) {
   const [values, setValues] = useState<Record<string, string[]>>({})
   const [custom, setCustom] = useState<Record<string, string>>({})
   const [approvals, setApprovals] = useState<Record<string, boolean>>({})
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
-  const [submitted, setSubmitted] = useState(false)
   const form = useRef<HTMLFormElement>(null)
   const restoreFocus = useRef<HTMLElement | null>(null)
   const requestKey = useRef(crypto.randomUUID())
@@ -919,7 +924,7 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
     finally { setBusy(false) }
   }
   async function submit(nextValues = values, nextCustom = custom) {
-    if (submitting.current || unknown) return
+    if (submitting.current || submitted || unknown) return
     if (!isComplete(nextValues, nextCustom)) {
       setError(requiresContinue ? "Complete the remaining questions and approval requests before continuing." : "Answer the remaining questions before continuing.")
       return
@@ -940,7 +945,7 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
     }
     // Once accepted, only refresh the conversation; never reopen this answer.
     restoreFocus.current = null
-    setSubmitted(true)
+    onAccepted()
     await refreshSubmitted()
   }
   return <>
@@ -970,7 +975,8 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
     }))}
     {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={disabled} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
     {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
-    {error && <p className="error" role="alert">{error}{submitted && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refreshSubmitted()}>Refresh conversation</Button>}</p>}
+    {error && <p className="error" role="alert">{error}</p>}
+    {submitted && <div className={questions.length ? "question-form-actions" : undefined}><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refreshSubmitted()}>Refresh conversation</Button></div>}
     {requiresContinue && <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={disabled || unknown || !isComplete(values, custom)}>{submitted ? "Submitted" : busy ? "Submitting…" : "Continue"}</Button></div>}
   </form>}
   </>
