@@ -137,6 +137,7 @@ class ProductSkillTools:
         result["capabilities"] = {"read": True, "create": writable, "update": writable, "delete": writable}
         result["note"] = "Use skill_read before editing. Deletion archives; skill_update can restore."
         if "skills" in result:
+            result["can_publish"] = principal.role == "admin" and scope.visibility == "shared"
             for skill in result["skills"]:
                 skill["can_manage"] = writable and (
                     (skill["scope"] == "personal") == (scope.visibility == "private")

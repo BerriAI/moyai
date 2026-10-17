@@ -79,6 +79,8 @@ def content(**overrides):
 
 async def test_crud_uses_canonical_library_preserves_files_and_restores(skills):
     ctx = skills
+    listing = await ctx.skills.read(ctx.scope, ctx.scope.turn_id)
+    assert listing["can_publish"] and listing["capabilities"]["create"]
     created, receipt = await call(ctx, "skill_create", CreateSkill(**content(), scope="organization"))
     detail = await ctx.skills.read(ctx.scope, ctx.scope.turn_id, skill_id=created["id"])
     assert detail["instructions"] == content()["instructions"]
@@ -139,6 +141,7 @@ async def test_private_skills_never_release_into_shared_chat_even_to_admin(skill
     ctx = skills
     _, _, private = await active_turn(ctx.product, private=True)
     created, _ = await call(ctx, "skill_create", CreateSkill(**content()), scope=private.scope)
+    assert not (await ctx.skills.read(private.scope, private.scope.turn_id))["can_publish"]
     assert not (await ctx.skills.read(ctx.scope, ctx.scope.turn_id))["skills"]
     with pytest.raises(HTTPException) as denied:
         await ctx.skills.read(ctx.scope, ctx.scope.turn_id, skill_id=created["id"])
