@@ -43,3 +43,19 @@ not certify a live Cloudflare policy or tunnel. Follow [production deployment](p
 for application upgrades and Cloudflare's [Access documentation](https://developers.cloudflare.com/cloudflare-one/access-controls/)
 for edge changes. Rotate connector and application service credentials separately;
 do not regenerate product encryption keys when rotating edge credentials.
+
+## Local Modal connections through WARP
+
+Modal command routers use public names under `*.w.modal.host`. WARP's default
+Local Domain Fallback list includes `host`, which also matches these names.
+Those queries use the configured fallback DNS servers instead of Gateway DNS.
+If those servers are unreachable, sandbox creation can succeed while its first
+command fails to resolve the router.
+
+Check `warp-cli dns fallback list` and `warp-cli dns default-fallbacks`, then
+compare a live sandbox router's system DNS lookup with a public DNS lookup.
+An administrator should review whether the active device profile needs the
+broad `host` fallback. Removing it routes these public names through Gateway;
+retain more specific fallback entries for any required internal names.
+This is a device-profile change, separate from Moyai's Access authentication.
+See Cloudflare's [Local Domain Fallback documentation](https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/configure/route-traffic/local-domains/).
