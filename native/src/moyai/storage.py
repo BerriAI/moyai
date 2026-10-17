@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import struct
 import tempfile
+import zlib
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,6 +19,9 @@ from temporalio.converter import DataConverter, DefaultFailureConverterWithEncod
 
 from .security import Security
 from .settings import Settings
+
+COMPRESSED_INLINE = b"moyai/encrypted-zlib-inline-v1"
+MAX_COMPRESSED_INLINE_BYTES = 2 * 1024 * 1024
 
 
 class ObjectStore:
@@ -103,10 +108,14 @@ class ObjectStore:
 class EncryptedPayloadCodec(PayloadCodec):
     """Encrypt every payload; offload large ones before they enter Temporal history."""
 
-    def __init__(self, security: Security, objects: ObjectStore, threshold: int = 64 * 1024):
+    def __init__(
+        self, security: Security, objects: ObjectStore, threshold: int = 64 * 1024,
+        *, compress: bool = False,
+    ):
         self.security = security
         self.objects = objects
         self.threshold = threshold
+        self.compress = compress
 
     async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
         result = []
@@ -119,17 +128,28 @@ class EncryptedPayloadCodec(PayloadCodec):
                     data=json.dumps({"object": digest}).encode(),
                 ))
             else:
+                encoding = b"moyai/encrypted-inline-v1"
+                if self.compress and 1024 <= len(serialized) <= MAX_COMPRESSED_INLINE_BYTES:
+                    compressed = struct.pack(">I", len(serialized)) + zlib.compress(serialized, level=3)
+                    # Keep high-entropy/small data in the existing format. Test
+                    # offloading against the ORIGINAL size: a tiny reference
+                    # must not turn back into a larger inline compressed blob.
+                    if len(compressed) + 64 < len(serialized):
+                        serialized, encoding = compressed, COMPRESSED_INLINE
                 result.append(Payload(
-                    metadata={"encoding": b"moyai/encrypted-inline-v1"},
+                    metadata={"encoding": encoding},
                     data=self.security.seal(serialized).encode(),
                 ))
         return result
+
     async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
         result = []
         for payload in payloads:
             encoding = payload.metadata.get("encoding")
             if encoding == b"moyai/encrypted-inline-v1":
                 raw = self.security.unseal(payload.data.decode())
+            elif encoding == COMPRESSED_INLINE:
+                raw = self._inflate(self.security.unseal(payload.data.decode()))
             elif encoding == b"moyai/encrypted-reference-v1":
                 raw = await self.objects.get(json.loads(payload.data)["object"])
             else:
@@ -140,10 +160,28 @@ class EncryptedPayloadCodec(PayloadCodec):
             result.append(decoded)
         return result
 
+    @staticmethod
+    def _inflate(encoded: bytes) -> bytes:
+        if len(encoded) < 4:
+            raise ValueError("Invalid compressed Temporal payload.")
+        expected, = struct.unpack(">I", encoded[:4])
+        if not 0 < expected <= MAX_COMPRESSED_INLINE_BYTES:
+            raise ValueError("Invalid compressed Temporal payload size.")
+        decoder = zlib.decompressobj()
+        try:
+            raw = decoder.decompress(encoded[4:], expected + 1)
+        except zlib.error:
+            raise ValueError("Invalid compressed Temporal payload.") from None
+        if len(raw) != expected or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+            raise ValueError("Invalid compressed Temporal payload.")
+        return raw
+
 
 def encrypted_converter(security: Security, objects: ObjectStore) -> DataConverter:
     return DataConverter(
-        payload_codec=EncryptedPayloadCodec(security, objects),
+        payload_codec=EncryptedPayloadCodec(
+            security, objects, compress=objects.settings.compress_temporal_payloads,
+        ),
         failure_converter_class=DefaultFailureConverterWithEncodedAttributes,
     )
 
