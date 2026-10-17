@@ -2,10 +2,10 @@
 
 The canonical product requires revision **21**, with compatibility floor **20**.
 The Pydantic application and Harness have separate receipts; see the
-[deployment contract](pydantic-deployment.md). Use the guarded maintenance release
+[deployment contract](pydantic-deployment.md). Coordinate a maintenance window
 for current native upgrades. The retained online migration engine and its ledger
-support historical schema compatibility; they do not make native rolling releases
-qualified.
+support historical schema compatibility. Managed deployment procedures live in
+a private repository.
 
 `MOYAI_SCHEMA_MODE=auto` remains the default for existing installations and SQLite.
 For an explicitly migrated PostgreSQL schema, use `MOYAI_SCHEMA_MODE=verify` on
@@ -42,12 +42,11 @@ is insufficient.
 4. Set `MOYAI_SCHEMA_MODE=verify` on every role, including the dedicated API.
    Use the same reviewed release and shared settings for this first activation.
    Start the coordinator to publish the contracts, then broker, workers and API.
-   Activate role routing and coordinator handoff following the production deployment runbook;
-   verify health and an ordinary saved session before reopening ingress.
+   Enable the configured role routing and coordinator handoff; verify health and
+   an ordinary saved session before reopening ingress.
 
-The API-only and rolling release modes do **not** perform this first migration
-or topology activation. Complete the separately coordinated maintenance
-transition before enabling them. A normal pre-deploy hook that runs while the old
+Complete this coordinated maintenance transition before enabling concurrent
+replacements of compatible runtime versions. A normal pre-deploy hook that runs while the old
 app is live will be rejected. Once this activation is complete, deploy the bridge
 at the same schema revision to all four roles before using online expansions.
 An installation still on an earlier revision, such as revision 14, first needs
@@ -68,17 +67,15 @@ migration prints the current revision 21, health checks pass, and an ordinary sa
 opens before reopening ingress. Verify that a private test session returns 404
 for a second individual account.
 
-The rolling and API release actions reject this compatibility change. The original
-coordinated action covers the older two/three-service topology and does not perform
-this four-role migration. Do not use it to bypass the compatibility check.
+This compatibility change requires a coordinated maintenance window; older
+application versions must not overlap the upgraded runtime.
 
 ## Reviewed online expansions
 
 The following describes the retained canonical online engine. Current native
-releases still use maintenance. Keep `MOYAI_SCHEMA_MODE=verify`. The controller computes the plan from the immutable
-candidate checkout, verifies every live role's installed protocol support, and
-applies the plan before replacing any service. `preflight_only` validates the
-entire plan and records it while making no database or service writes.
+upgrades still require maintenance. Keep `MOYAI_SCHEMA_MODE=verify`. Compute the
+plan from the target release and verify every live role's installed protocol
+support before applying it.
 
 `app/online_schema_migrations.json` is the explicit reviewed registry. Each step
 names its source and target revision, their digests from `schema_versions.json`,
@@ -113,12 +110,10 @@ failures inside the transaction roll the whole plan back. A lost commit
 acknowledgement remains uncertain and does not imply rollback. No background
 jobs, provider clients or schema initializers are started by this path.
 
-After commit, all four existing service identities must still be healthy with
-the same policy/contracts and the target schema before replacement begins. An
-uncertain response stops the release without retry or rollback. Inspect the
-receipt and database state; a fresh action can observe a complete compatible
-target and resume replacements without executing the plan again. A partial
-receipt chain, dirty state or unknown schema drift is rejected.
+After commit, every existing service must still be healthy with the same
+policy/contracts and the target schema. Inspect the receipt and database state
+after an uncertain response before continuing. A partial receipt chain, dirty
+state or unknown schema drift is rejected.
 
 ## Maintenance migration failure and rollback
 
@@ -182,7 +177,7 @@ Point `MOYAI_TEST_POSTGRES_URL` at a disposable PostgreSQL database, then run:
 ```sh
 python -m pytest -q tests/test_schema_migrations.py
 python -m pytest -q native/tests/test_canonical_schema_migrations.py
-python -m pytest -q tests/test_online_migrations.py tests/release
+python -m pytest -q tests/test_online_migrations.py
 python -m scripts.online_migration_probe --output /tmp/moyai-online-migration
 ```
 
@@ -194,7 +189,6 @@ and restart behavior, not production traffic handoff.
 The online probe keeps a separate worker process writing and renewing its lease
 through a synthetic future expansion. It reconnects an old-source reader, kills
 a migration process after real uncommitted DDL, and verifies rollback and an
-explicit inspected retry. The required production release rehearsal runs these
-checks and saves their receipts. This remains a local PostgreSQL proof; a real
-Render deployment with an active session is still required for production
-continuity qualification.
+explicit inspected retry. The public runtime rehearsal runs these checks and
+saves their receipts. This remains a local PostgreSQL proof; continuity must also
+be qualified against the actual deployment with an active session.

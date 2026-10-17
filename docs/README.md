@@ -7,8 +7,8 @@
 | [Using Moyai](usage.md) | Chat, computer, files, Settings, connections and Slack |
 | [Architecture](architecture.md) | Execution ownership, service roles and storage boundaries |
 | [Docker installation](../deploy/docker/README.md) | Versioned standalone or split services and upgrades |
-| [Production deployment](production-deploy.md) | Prepare and upgrade the existing four-role product |
-| [Deployment contract](pydantic-deployment.md) | Configuration, schema receipts, drain and release ordering |
+| Managed operations | Deployment workflows and runbooks are maintained in a private repository |
+| [Deployment contract](pydantic-deployment.md) | Runtime configuration, schema receipts and maintenance interfaces |
 | [Authentication](authentication.md) | Local accounts and existing Google/Cloudflare identity |
 | [Cloudflare Access](cloudflare-access.md) | Preserve the existing edge and origin identity boundary |
 | [Automations](pydantic-automations.md) | Canonical definitions, adoption and admission fences |
@@ -20,7 +20,7 @@
 | [Object storage](object-storage.md) | Historical payload migration and backup requirements |
 | [UI components](shadcn-ui.md) | Shared controls, frontend build and browser checks |
 | [Verification](verification.md) | Local and CI checks and their limits |
-| [CI execution](ci-execution.md) | Isolated native test shards and required release checks |
+| [CI execution](ci-execution.md) | Isolated native test shards and runtime checks |
 | [Consolidation scope](consolidation.md) | Preserved functionality and removed runtime families |
 
 Older designs and rollout reports remain in Git history. They describe their

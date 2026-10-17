@@ -31,10 +31,10 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: astral-sh/setup-uv@v6
-      - name: Install the locked workspace for native release contract checks
+      - name: Install the locked workspace for runtime contract checks
         run: uv sync --frozen --python 3.13
-      - name: Verify release ordering, failures and real PostgreSQL drain guards
-        run: uv run --frozen --python 3.13 pytest -q tests/release tests/test_render.py tests/test_render_shutdown.py tests/test_online_migrations.py
+      - name: Verify startup, shutdown and PostgreSQL migration contracts
+        run: uv run --frozen --python 3.13 pytest -q tests/test_render.py tests/test_render_shutdown.py tests/test_online_migrations.py
       - name: Keep old and new readers working through a real additive migration
         run: uv run --frozen --python 3.13 python -m scripts.online_migration_probe --output /tmp/moyai-online-migration
       - uses: actions/upload-artifact@v4

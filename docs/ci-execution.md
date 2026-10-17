@@ -1,8 +1,7 @@
-# CI execution and deployment gates
+# CI execution
 
-Production deployment still waits for successful CI on its exact selected main
-commit. Parallel jobs shorten that wait without omitting tests or changing the
-maintenance rollout.
+Public CI checks runtime behavior, packaging and self-hosted startup. Managed
+deployment workflows, gates and runbooks live in a private repository.
 
 ## Native runtime
 
@@ -39,11 +38,9 @@ and prints the slowest tests to help evaluate balance from actual runner timings
 ## Docker startup
 
 The image build and actual container startup/restart checks run independently
-of the shared-service, release and native test workflows. The stable `docker`
-check covers the image and startup proof; the release controller also requires
-the other checks on the selected commit. Retired-engine regression groups are
+of the shared-service, runtime rehearsal and native test workflows. The stable
+`docker` check covers the image and startup proof. Retired-engine regression groups are
 removed with their engines; current shared-service tests run in the PostgreSQL
 runtime workflow.
 
-No production deployment is triggered by this workflow. The release controller's
-existing exact-commit CI checks and maintenance sequence are unchanged.
+These public CI workflows do not deploy the managed application.
