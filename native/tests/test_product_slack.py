@@ -182,6 +182,11 @@ async def test_outbox_single_claim_against_real_local_receiver(slack, active, re
         await asyncio.gather(*[slack.service.deliver(client, delivery) for _ in range(4)])
         await slack.service.deliver(client, delivery)
     assert len(receiver.requests) == 1
+    payload = receiver.requests[0]
+    assert payload["channel"] == "CTEST0001" and payload["thread_ts"] == "1792100000.000"
+    assert payload["metadata"] == {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}}
+    assert payload["parse"] == "none" and payload["link_names"] is False
+    assert payload["unfurl_links"] is False and payload["unfurl_media"] is False
     async with slack.runtime.database.sessions() as db:
         row = await db.get(Delivery, delivery.id)
         assert row.status == "sent" and row.receipt
@@ -416,7 +421,14 @@ async def test_source_review_claim_cancellation_cannot_release_a_competing_sende
             receiver.release.set()
             await asyncio.gather(first, second, return_exceptions=True)
     assert len(receiver.requests) == 1
-    assert service.store.rows("SELECT status FROM slack_outbox")[0]["status"] == "sent"
+    saved = service.store.rows("SELECT id,status FROM slack_outbox")[0]
+    assert saved["status"] == "sent"
+    payload = receiver.requests[0]
+    assert payload["channel"] == "CTEST0001" and payload["thread_ts"] == "1792100000.000"
+    assert payload["metadata"] == {
+        "event_type": "moyai_delivery", "event_payload": {"id": "source:" + str(saved["id"])},
+    }
+    assert payload["parse"] == "none" and payload["link_names"] is False
 
 
 @pytest.mark.parametrize("kind,expected", [

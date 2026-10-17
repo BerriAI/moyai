@@ -119,7 +119,7 @@ The local quickstart's data is not automatically migrated into this topology.
 
 ### Option 3: Develop from source
 
-**Prerequisites:** Python 3.13, Node.js 22 or newer, and
+**Prerequisites:** Python 3.13, Node.js 22 or newer, Rust 1.88 or newer (to build AgentChat), and
 [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```sh

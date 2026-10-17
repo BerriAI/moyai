@@ -8,13 +8,26 @@ COPY frontend ./frontend
 COPY native/web ./native/web
 RUN npm run build:native
 
-FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
+FROM rust:1.88-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS rust
+FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS python-base
 COPY --from=uv /uv /usr/local/bin/uv
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+
+# Compile AgentChat's pinned native SDK in the builder, keeping Rust out of runtime.
+FROM python-base AS dependencies
+COPY --from=rust /usr/local/cargo /usr/local/cargo
+COPY --from=rust /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH="/usr/local/cargo/bin:${PATH}"
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock ./
 COPY native/pyproject.toml ./native/
 RUN uv sync --frozen --no-dev --no-install-workspace
+
+FROM python-base
+COPY pyproject.toml uv.lock ./
+COPY native/pyproject.toml ./native/
+COPY --from=dependencies /app/.venv /app/.venv
 COPY app ./app
 COPY native/src ./native/src
 COPY --from=native-ui /build/native/src/moyai/static ./native/src/moyai/static

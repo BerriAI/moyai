@@ -17,6 +17,15 @@ members = [
 ]
 
 [[package]]
+name = "agentchat"
+version = "0.1.0a1"
+source = { git = "https://github.com/BerriAI/agentchat.git?rev=c2e7435fc3819569dc3c9f13747f017ec60b0956#c2e7435fc3819569dc3c9f13747f017ec60b0956" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "slack-sdk" },
+]
+
+[[package]]
 name = "aiofile"
 version = "3.12.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1828,6 +1837,7 @@ name = "moyai-pydantic"
 version = "0.1.0"
 source = { editable = "native" }
 dependencies = [
+    { name = "agentchat" },
     { name = "aiosqlite" },
     { name = "asyncpg" },
     { name = "boto3" },
@@ -1863,6 +1873,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=c2e7435fc3819569dc3c9f13747f017ec60b0956" },
     { name = "aiosqlite", specifier = ">=0.20,<1" },
     { name = "asyncpg", specifier = ">=0.30,<1" },
     { name = "boto3", specifier = ">=1.43,<2" },
@@ -3640,6 +3651,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "slack-sdk"
+version = "3.45.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/74/a4b30685bc76846b70baa9edaa45ba577ce5a28fc9e474b51524bb2aa932/slack_sdk-3.45.0.tar.gz", hash = "sha256:1ab794452f238b59db0d8a4d346263d65190288add53ec67a05751d8e7402486", size = 259739, upload-time = "2026-10-01T22:24:56.998Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/58/d54e4564946a9a3276f3de2905d18b66977977d4ba0fd7d11164df3c73cb/slack_sdk-3.45.0-py2.py3-none-any.whl", hash = "sha256:6356d4486d1a3ad156462c5544ab1b9c076ff426a250495c08f51b7ad71eb8fb", size = 322681, upload-time = "2026-10-01T22:24:55.133Z" },
 ]
 
 [[package]]

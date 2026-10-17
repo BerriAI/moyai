@@ -143,6 +143,13 @@ async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, s
     assert "Open conversation:" not in message["text"]
     assert message["blocks"][0]["text"]["text"] == "Both checks passed."
     assert not any("Open session:" in block.get("text", {}).get("text", "") for block in message["blocks"])
+    if product:
+        assert "thread_ts" not in message
+        assert message["metadata"]["event_payload"]["id"] == final.id
+        assert message["blocks"][0]["expand"] is True
+        for _path, payload in requests:
+            assert payload["parse"] == "none" and payload["link_names"] is False
+            assert payload["unfurl_links"] is False and payload["unfurl_media"] is False
 
 
 @pytest.mark.parametrize("product", [False, True])
