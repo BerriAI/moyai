@@ -18,10 +18,15 @@ from moyai.product_config import (
     NATIVE_OBJECT_FORMAT,
     load_product_config,
 )
-from moyai.product_start import prepare_native_schema
+from moyai.product_continuation_schema import (
+    install_source_continuation_fence,
+    verify_source_continuation_fence,
+)
+from moyai.product_schema import migrate_product_schema
 from moyai.runtime import Runtime, configure
 from moyai.settings import Settings
 from moyai.storage import encrypted_converter
+from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
 from pydantic import SecretStr
@@ -146,14 +151,28 @@ async def run_moyai_turn(
     root_dir = EVALS / "jobs" / "runner" / f"{case['id']}-{trial}-{uuid4().hex[:8]}"
     root_dir.mkdir(parents=True, exist_ok=True)
     async with product_database_state(root_dir, initialize_legacy=True) as product:
+        await migrate_product_schema(
+            product.source, schema=product.schema, source_schema="moyai",
+        )
         environment = product_environment(
             root_dir / "legacy-store", product.settings.database_url, product.schema, agent_model,
         )
         product_config = load_product_config(environment)
         if product_config is None:
             raise RuntimeError("Could not load the eval's existing-product configuration.")
-        await prepare_native_schema(product_config, apply=True)
         settings = Settings.model_validate(product_config.native_overrides())
+        provisioner = NativeStores(settings.model_copy(update={"product_mode": "standalone"}))
+        try:
+            await provisioner.start(provision=True)
+        finally:
+            await provisioner.close()
+        async with product.source.begin() as connection:
+            await install_source_continuation_fence(
+                connection, source_schema="moyai", native_schema=product.schema,
+            )
+        await verify_source_continuation_fence(
+            product.source, source_schema="moyai", native_schema=product.schema,
+        )
         runtime = Runtime(settings, product_config=product_config)
         try:
             async with await WorkflowEnvironment.start_local(
