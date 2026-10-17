@@ -1,5 +1,20 @@
 # Swarms on Pydantic AI
 
+In an ordinary web chat, ask: **“Start a swarm of 20 workers with a two-hour work
+window to investigate X.”** The agent can call
+`start_swarm(goal, workers=20, budget_seconds=7200)` and return a link to the
+persistent team. Launch returns immediately; the team continues in its own
+conversations. It inherits the chat's model, visibility and selected accounts.
+The original authenticated request and directions travel with the assignment;
+the agent's proposed goal is reference data, not new human authorization.
+Current-turn attachments receive independent member-scoped references.
+
+The tool is available only in direct web chats. Swarm members, delegated agents,
+Slack and automated executions cannot launch another swarm. A retried native
+tool call recovers the same team. Stop or new guidance before admission fences
+creation; once created, the team has its own Pause/Stop controls at the returned
+link. The chat's Stop button does not stop an already-created independent team.
+
 Choose **Swarm** on the new-session screen, describe one shared goal, type any
 whole number of at least 2 workers, and choose a work window. There is no fixed
 maximum team size. The default is 20 workers, plus the
@@ -15,22 +30,44 @@ activity and dispatch settings still govern execution capacity. Removing the ros
 maximum does not change those settings or provider quotas.
 
 Each member has a persistent native conversation and its own Modal computer.
-The mission opens in **Space**, a live constellation of the actual saved team,
-adapted from the original swarm space view in #362. Every worker remains reachable,
-including larger teams and narrow screens. Nodes show the selected model, current
-status, worker lead, and most recent public finding or saved reply among the latest
-50 board posts. The shared feed shows the six latest public team updates.
+The mission opens in **Space**, an orbital view of the actual saved team.
+The elected worker lead is the central sun; before the election, the coordinator
+occupies the center. Numbered planets show each member's current status.
+Select a planet to read its assignment, selected model and latest public finding
+or saved reply among the latest 50 board posts, then open its conversation.
+The collapsed **Team updates** feed retains the latest 50 public updates and
+their complete text, including assignments and human directions.
+Narrow screens and large teams page the orbits so every member stays reachable.
 Updates refresh with the existing three-second mission poll; they are not private
-reasoning or a token stream. Animated connections indicate active work, not messages.
-Reduced motion keeps a static graph that still refreshes when team state changes.
+reasoning or a token stream. Faint connections indicate active work, not messages.
+Planet positions remain stable while statuses refresh, and reduced motion is
+respected by the detail popovers.
 
-Select a member or reply to open its conversation. **Chat** restores the roster,
-full recent board, and mission conversation without discarding the composer draft.
+Ordinary conversations with delegated subagents also offer **Space | Chat**.
+Their parent agent is the central sun, and the existing workspace inventory
+supplies the planets. Persistent subagents open their own conversations; earlier
+SDK delegates open the existing details panel. Private tasks and model details
+remain visible only to the requester. Eligible persistent subagents retain their
+individual Stop action. Swarm Pause/Stop still controls the entire team.
+
+A finite work window appears as time remaining in the compact swarm header.
+Owners can select that label to change the window; completed or stopped teams
+show the configured duration. Unlimited teams show **No time limit**.
+
+**Workspace → Agents** is the single roster for swarm members and ordinary
+subagents. It includes the coordinator, worker lead, current status and links
+to each available conversation; larger lists can be filtered by name or role.
+The same swarm roster is available from any member conversation. Opening an
+agent from Workspace selects its Chat view.
+
+**Chat** shows the conversation and compact team controls, without a separate
+agent grid or board panel. Switching views preserves the composer draft.
+The shared goal and full recent board remain available in **Space**.
 Questions, credential requests, and unsettled effects open the conversation for
 review instead of being hidden behind Space. Team controls remain available in
 both views, subject to the same owner permissions.
 
-The team shares a public board, not a filesystem. Open a member from the roster
+The team shares a public board, not a filesystem. Open a member from Workspace
 to inspect its full answer, activity, files, questions, and computer, or to send
 it a direct instruction. Member conversations retain the mission's visibility.
 Saved artifact links can also be previewed from another conversation in the same
@@ -83,6 +120,12 @@ references to the same encrypted objects. Coding work must be coordinated
 explicitly because each member has an independent filesystem.
 
 ## Native implementation
+
+`SwarmLaunchCapability` exposes `start_swarm(goal, workers=20, budget_seconds=0)`
+to ordinary direct web chats. Zero means no time limit; finite windows must be
+60–2,592,000 seconds. It uses `SwarmService.start` inside the source chat's
+authority/session fence and commits its tool receipt in the same transaction as
+the team. It does not add a second execution engine or change concurrency limits.
 
 `SwarmCapability` contributes a registered Pydantic `FunctionToolset`:
 

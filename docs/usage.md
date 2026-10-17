@@ -49,7 +49,7 @@ inside the preview. Reopening the same file selects its existing tab. External
 website links keep their normal behavior.
 
 Sessions open with chat only. **Workspace** opens a compact overlay ordered
-**Pull requests → Subagents → Outputs**, aligned to the main chat's right edge.
+**Pull requests → Agents → Outputs**, aligned to the main chat's right edge.
 It slides within the chat column, including when another panel is open, and
 respects reduced motion. Selecting a resource opens a right-panel tab. Its **+**
 menu adds Side chat, Files, Computer, Activity or Plan.
@@ -109,10 +109,13 @@ The header and sidebar use the same menu. Deleted conversations can be restored
 from the Deleted list once any active work has stopped. Restore preserves saved
 answers and downloads and does not restart cancelled work.
 
-**Workspace** opens an overlay of pull requests, subagents and outputs. Uploaded
+**Workspace** opens an overlay of pull requests, agents and outputs. Its **Agents**
+list includes ordinary subagents and the current swarm's coordinator and workers,
+with status, lead labels and conversation links. Larger lists have a search field.
+Uploaded
 sources and saved outputs are also available in the Files tab.
 New ordinary subagents open as full private conversations: select one under
-**Workspace → Subagents**, then message, queue a follow-up, use **Send now**,
+**Workspace → Agents**, then message, queue a follow-up, use **Send now**,
 answer questions, or stop it with the normal session controls. **Parent chat**
 returns to the conversation that delegated the work. Each child retains its
 history and has its own computer. In the left sidebar, children nest beneath their

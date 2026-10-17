@@ -24,9 +24,12 @@ from test_images_and_computer import image_bytes
 from test_sidebar import member_client
 
 from moyai.contracts import NewMessage, NewSession
+from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Session, SessionLink, SubagentLabel, Turn, User, new_id
 from moyai.storage import encrypted_converter
+from moyai.swarm_contracts import NewSwarm
+from moyai.swarm_models import SwarmMember, SwarmMission
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
 
@@ -144,6 +147,84 @@ async def test_nested_colon_ids_follow_requester_ancestry_and_keep_stable_public
         for run_id in (owner_run, private_run, owner_turn.id, "unrelated-orphan", "missing"):
             assert (await member.get(f"{path}/subagents/{run_id}")).status_code == 404
         assert (await member.get(f"/api/sessions/{private.id}/workspace")).status_code == 404
+
+
+async def test_persistent_subagent_card_withholds_task_and_model_from_other_viewers(runtime, actor):
+    parent = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    turn = await runtime.database.submit(actor, parent.id, NewMessage(
+        prompt="Delegate a bounded review.", request_key="orbit-task",
+    ))
+    await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+    child = await DelegationService(runtime.database).start(
+        prepared.scope, "orbit-child", "Private delegated requirement " + "x" * 2000,
+    )
+    async with sign_in(runtime) as owner, member_client(runtime) as (viewer, _):
+        path = f"/api/sessions/{parent.id}/workspace"
+        own = (await owner.get(path)).json()["subagents"][0]
+        other = (await viewer.get(path)).json()["subagents"][0]
+        assert own["session_id"] == child["session_id"]
+        assert own["model"] == prepared.scope.model
+        assert own["task"].startswith("Private delegated requirement") and len(own["task"]) == 1600
+        assert other["session_id"] is None and not other["can_inspect"]
+        assert other["model"] is None and other["task"] is None
+        assert "Private delegated requirement" not in str(other)
+
+
+async def test_workspace_lists_complete_swarm_from_coordinator_and_worker(runtime, actor):
+    root, _ = await runtime.database.swarms.start(actor, NewSwarm(
+        prompt="Inspect one shared goal.", request_key="workspace-team", workers=20, visibility="private",
+    ))
+    other, _ = await runtime.database.swarms.start(actor, NewSwarm(
+        prompt="Another team.", request_key="other-team", workers=2, visibility="private",
+    ))
+    ordinary = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    async with runtime.database.sessions.begin() as db:
+        workers = list(await db.scalars(select(SwarmMember).where(
+            SwarmMember.mission_id == root.id, SwarmMember.position > 0,
+        ).order_by(SwarmMember.position)))
+        (await db.get(SwarmMission, root.id)).leader_id = workers[0].session_id
+    async with sign_in(runtime) as client:
+        first = (await client.get(f"/api/sessions/{root.id}/workspace")).json()
+        second = (await client.get(f"/api/sessions/{workers[-1].session_id}/workspace")).json()
+        members = first["swarm_members"]
+        assert members == second["swarm_members"]
+        assert len(members) == 21 and len({member["id"] for member in members}) == 21
+        assert members[0]["role"] == "coordinator" and members[0]["session_id"] == root.id
+        assert members[1]["role"] == "lead" and members[-1]["name"] == "Agent 20"
+        assert all(member["can_inspect"] and member["status"] == "queued" for member in members)
+        assert not any(member["session_id"] == other.id for member in members)
+        assert first["subagents"] == []
+        assert (await client.get(f"/api/sessions/{ordinary.id}/workspace")).json()["swarm_members"] == []
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Session, workers[-1].session_id)).deleted = True
+        deleted = (await client.get(f"/api/sessions/{root.id}/workspace")).json()["swarm_members"][-1]
+        assert deleted["status"] == "deleted" and not deleted["can_inspect"]
+        assert deleted["session_id"] is None and deleted["model"] is None
+
+
+@pytest.mark.parametrize("visibility", ["private", "shared"])
+async def test_workspace_swarm_visibility_does_not_grant_control(runtime, actor, visibility):
+    root, _ = await runtime.database.swarms.start(actor, NewSwarm(
+        prompt="Inspect the authorized team.", request_key="visible-team", workers=2, visibility=visibility,
+    ))
+    async with runtime.database.sessions() as db:
+        child = await db.scalar(select(SwarmMember).where(
+            SwarmMember.mission_id == root.id, SwarmMember.position == 1,
+        ))
+    async with member_client(runtime) as (viewer, _):
+        for session_id in (root.id, child.session_id):
+            response = await viewer.get(f"/api/sessions/{session_id}/workspace")
+            assert response.status_code == (200 if visibility == "shared" else 404)
+            if visibility == "shared":
+                assert len(response.json()["swarm_members"]) == 3
+                assert all(member["can_inspect"] for member in response.json()["swarm_members"])
+        if visibility == "shared":
+            assert (await viewer.get(f"/api/sessions/{child.session_id}/messages")).status_code == 200
+            denied = await viewer.post(f"/api/sessions/{child.session_id}/messages", json={
+                "prompt": "Unauthorized direction.", "request_key": "viewer-direction",
+            })
+            assert denied.status_code == 403
 
 
 async def test_cyclic_or_unrooted_lineage_never_authorizes_from_conversation_id(runtime, actor):

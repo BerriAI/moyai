@@ -62,6 +62,7 @@ from .settings import Settings
 from .settings_runtime import settings_capability
 from .storage import ObjectStore
 from .stores import NativeStores
+from .swarm_launch import SwarmLaunchCapability
 from .swarm_tools import SwarmCapability
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / "resources"
@@ -361,6 +362,7 @@ def make_agent(
             workspace,
             authority,
             InteractiveDelegation(database),
+            SwarmLaunchCapability(database.swarms),
             SwarmCapability(database.swarms),
             Commentary(database),
             EffectReceipts(database),

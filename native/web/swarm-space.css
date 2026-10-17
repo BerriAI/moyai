@@ -2,51 +2,82 @@
 .swarm-space-mode > .transcript[hidden] { display: none; }
 .swarm-space-mode .composer :is(textarea, .skill-editor) { min-height: 48px; height: 48px; padding-block: 10px; }
 .swarm-space-mode .skill-editor-placeholder { top: 10px; }
-.swarm-details.swarm-space-details { flex: 1; min-height: 0; max-height: none; display: flex; flex-direction: column; overflow: hidden; }
-.swarm-space-details > .swarm-window { flex: none; padding-bottom: 10px; }
+.swarm-details.swarm-space-details { flex: 1; min-height: 0; max-height: none; display: flex; flex-direction: column; overflow: hidden; scrollbar-gutter: auto; }
 .swarm-space { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
-.swarm-space-mission { text-align: center; padding: 10px 16px 8px; }
-.swarm-space-kicker { color: var(--ui-muted); font-family: var(--ui-font); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 10px; }
-.swarm-space-goal { max-width: 760px; margin: 0 auto; font-size: clamp(15px, 1.7vw, 23px); font-weight: 400; line-height: 1.4; overflow-wrap: anywhere; }
-.swarm-details .swarm-space-goal summary { display: flex; gap: 6px; justify-content: center; font-size: inherit; padding: 0; }
+.swarm-space > .space-backdrop { position: absolute; inset: 0; z-index: -1; opacity: .6; }
+.swarm-space-mission { text-align: center; padding: 16px 12px 4px; }
+.swarm-space-kicker { color: var(--ui-muted); font: 10px var(--ui-font); letter-spacing: .16em; text-transform: uppercase; margin: 0 0 10px; }
+.swarm-space-goal { max-width: 860px; margin: 0 auto; font-size: clamp(15px, 1.65vw, 22px); font-weight: 400; line-height: 1.4; overflow-wrap: anywhere; }
+.swarm-details .swarm-space-goal summary { display: flex; gap: 10px; justify-content: center; font-size: inherit; padding: 0; }
+.swarm-space-goal summary::before { content: ">"; color: var(--ui-primary); }
 .swarm-space-goal summary::after { content: "+"; color: var(--ui-muted); }
 .swarm-space-goal summary > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .swarm-space-goal[open] summary::after { content: "−"; }
-.swarm-space-goal > p { font-size: 14px; text-align: left; margin: 12px 0; white-space: pre-wrap; }
-.swarm-space-stage { position: relative; min-width: 0; }
-.swarm-space-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: -1; opacity: .8; }
-.swarm-space-node { position: absolute; transform: translate(-50%, -43px); max-width: calc(100% - 24px); text-align: center; }
-.swarm-space-agent[data-slot="button"] { display: flex; flex-direction: column; width: 100%; height: auto; gap: 4px; padding: 0 4px; white-space: normal; background: transparent; color: var(--ui-foreground); }
-.swarm-space-agent strong { display: flex; gap: 7px; align-items: center; justify-content: center; font-size: 12px; font-weight: 500; }
-.swarm-space-agent .swarm-lead { display: inline-flex; align-items: center; gap: 3px; }
-.swarm-space-mark { width: 56px; height: 56px; display: grid; place-items: center; position: relative; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 18px; margin-bottom: 4px; color: var(--ui-primary); }
-.swarm-space-mark[data-working="true"] { border-color: var(--ui-primary); box-shadow: 0 0 28px color-mix(in srgb, var(--ui-primary) 16%, transparent); }
-.swarm-space-mark[data-attention="true"] { border-color: var(--ui-warning, #f0c681); }
-.swarm-space-agent:hover .swarm-space-mark { background: var(--ui-secondary); }
-.swarm-space-state { position: absolute; right: -4px; bottom: -3px; width: 18px; height: 18px; display: grid; place-items: center; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 50%; }
-.swarm-space-model { max-width: 100%; font-size: 10px; color: var(--ui-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.swarm-space-status, .swarm-space-empty { color: var(--ui-muted); font-size: 11px; }
-.swarm-space-empty { margin: 10px 0; }
-.swarm-space-preview { display: flex; flex-direction: column; gap: 6px; text-align: left; margin-top: 10px; padding: 10px 12px; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 10px; color: inherit; text-decoration: none; font-size: 12px; line-height: 1.45; }
-.swarm-space-preview > span { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-.swarm-space-preview small, .swarm-space-feed small { display: block; font-size: 10px; color: var(--ui-primary); }
-.swarm-space-preview:hover { background: var(--ui-secondary); }
-.swarm-space[data-compact="true"] .swarm-space-mark { width: 48px; height: 48px; border-radius: 15px; }
-.swarm-space[data-compact="true"] .swarm-space-preview > span { -webkit-line-clamp: 2; }
-.swarm-space a:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 3px; }
-.swarm-space-feed { margin: 0 auto; width: calc(100% - 16px); max-width: 800px; padding: 10px 14px; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-subtle); }
-.swarm-space-feed h3 { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; font-weight: 500; margin: 0 0 6px; }
-.swarm-space-feed h3 span { color: var(--ui-muted); font-weight: 400; }
-.swarm-space-feed [role="log"] { max-height: 100px; overflow-y: auto; overscroll-behavior: contain; font-size: 12px; }
-.swarm-space-feed article { padding: 8px 0; border-bottom: 1px solid var(--ui-border); }
-.swarm-space-feed article > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; color: var(--ui-muted); font-size: 10px; }
-.swarm-space-feed article strong { color: var(--ui-foreground); font-weight: 500; }
+.swarm-space-goal > p { font-size: 13px; text-align: left; margin: 16px 0; white-space: pre-wrap; }
+.orbit-stage { position: relative; min-width: 0; }
+.orbit-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.orbit-lines ellipse { fill: none; stroke: var(--ui-border); stroke-width: 1; opacity: .7; }
+.orbit-lines .orbit-beam { stroke: var(--ui-primary); stroke-width: 1; opacity: .25; }
+.orbit-agent { position: absolute; transform: translate(-50%, -14px); width: 72px; height: 58px; min-height: 44px; padding: 0; display: flex; flex-direction: column; justify-content: flex-start; gap: 3px; border-radius: 6px; background: transparent; color: var(--ui-muted); line-height: 1; font-weight: 400; white-space: normal; }
+.orbit-agent:hover, .orbit-agent[data-state="open"] { background: transparent; color: var(--ui-foreground); }
+.orbit-agent:focus-visible { outline: 1px solid var(--ui-primary); outline-offset: 5px; }
+.orbit-planet { display: grid; place-items: center; width: var(--planet-size); height: var(--planet-size); min-height: var(--planet-size); position: relative; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--ui-foreground) 15%, transparent); background: radial-gradient(circle at 32% 25%, color-mix(in srgb, var(--ui-muted) 52%, var(--ui-background)), var(--ui-secondary) 46%, var(--ui-canvas) 83%); box-shadow: inset -3px -4px 7px #0008; opacity: var(--planet-depth); }
+.orbit-planet > i { position: absolute; width: 5px; height: 5px; border-radius: 50%; right: -3px; top: -2px; background: currentColor; box-shadow: 0 0 0 2px var(--ui-canvas); }
+.orbit-agent[data-tone="quiet"] .orbit-planet > i { display: none; }
+.orbit-agent[data-tone="working"] { color: var(--ui-primary); }
+.orbit-agent[data-tone="failed"], .orbit-card-heading [data-tone="failed"] { color: var(--ui-danger); }
+.orbit-agent[data-tone="waiting"], .orbit-card-heading [data-tone="waiting"] { color: var(--ui-warning); }
+.orbit-agent[data-tone="done"], .orbit-card-heading [data-tone="done"] { color: var(--ui-success); }
+.orbit-card-heading [data-tone="working"] { color: var(--ui-primary); }
+.orbit-agent[data-working="true"] .orbit-planet { border-color: var(--ui-primary); box-shadow: 0 0 15px color-mix(in srgb, var(--ui-primary) 28%, transparent), inset -3px -4px 7px #0008; }
+.orbit-agent[data-state="open"] .orbit-planet, .orbit-agent:hover .orbit-planet { outline: 1px dashed var(--ui-primary); outline-offset: 5px; opacity: 1; }
+.orbit-name { font-size: 11px; color: var(--ui-muted); letter-spacing: .08em; }
+.orbit-status { font-size: 10px; line-height: 12px; white-space: nowrap; }
+.orbit-sun { width: 148px; height: 122px; transform: translate(-50%, -42px); gap: 8px; }
+.orbit-sun .orbit-planet { --planet-size: 76px; width: 76px; height: 76px; min-height: 76px; border: 1px solid color-mix(in srgb, var(--ui-primary) 65%, transparent); background: repeating-linear-gradient(-45deg, color-mix(in srgb, var(--ui-primary) 27%, var(--ui-canvas)) 0 4px, color-mix(in srgb, var(--ui-primary) 9%, var(--ui-canvas)) 4px 9px); color: var(--ui-foreground); opacity: 1; box-shadow: 0 0 54px 10px color-mix(in srgb, var(--ui-primary) 17%, transparent); }
+.orbit-sun .orbit-planet > span { font-size: 10px; letter-spacing: .02em; opacity: .85; }
+.orbit-sun .orbit-name { color: var(--ui-foreground); font-size: 12px; text-transform: uppercase; letter-spacing: .2em; }
+.orbit-sun-caption { max-width: 148px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; line-height: 12px; color: var(--ui-primary); }
+.swarm-space[data-compact="true"] .orbit-sun { width: 96px; }
+.swarm-space[data-compact="true"] .orbit-sun-caption { max-width: 96px; }
+.orbit-agent-card[data-slot="popover-content"] { width: 320px; max-width: calc(100vw - 24px); max-height: var(--radix-popover-content-available-height); overflow-y: auto; box-sizing: border-box; padding: 16px; background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 12px; box-shadow: 0 12px 40px #0006; font: 13px/1.6 var(--ui-font); }
+.orbit-card-heading { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; }
+.orbit-card-heading strong { font-size: 12px; font-weight: 400; letter-spacing: .12em; text-transform: uppercase; overflow-wrap: anywhere; }
+.orbit-card-heading > span { font-size: 11px; white-space: nowrap; }
+.orbit-agent-card p { margin: 10px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.orbit-card-meta, .orbit-card-update small { color: var(--ui-muted); font-size: 11px; }
+.orbit-card-task, .orbit-card-update > p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.orbit-card-update > p { -webkit-line-clamp: 2; }
+.orbit-card-update { margin-top: 12px; border-top: 1px solid var(--ui-border); padding-top: 10px; }
+.orbit-card-update > p { margin-top: 4px; }
+.orbit-card-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 12px -8px -4px; }
+.orbit-card-actions [data-slot="button"] { font-size: 11px; }
+.orbit-stop[data-slot="button"] { color: var(--ui-danger); margin-left: auto; }
+.orbit-pagination { display: flex; gap: 12px; align-items: center; justify-content: center; font-size: 11px; color: var(--ui-muted); padding: 0 8px 10px; }
+.swarm-space-feed { margin: 0 auto 12px; max-width: 800px; width: calc(100% - 24px); border-top: 1px solid var(--ui-border); font-size: 12px; }
+.swarm-space-feed summary { color: var(--ui-muted); display: flex; gap: 10px; flex-wrap: wrap; }
+.swarm-space-feed summary::before { content: "+"; color: var(--ui-primary); }
+.swarm-space-feed[open] summary::before { content: "−"; }
+.swarm-space-feed summary span { font-size: 10px; }
+.swarm-space-feed [role="log"] { max-height: 180px; overflow-y: auto; overscroll-behavior: contain; }
+.swarm-space-feed article { padding: 10px 0; border-top: 1px solid var(--ui-border); }
+.swarm-space-feed article > div:first-child { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; color: var(--ui-muted); font-size: 10px; }
+.swarm-space-feed .message-content { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.swarm-space-feed .message-content p { margin: 6px 0; }
+.swarm-space-feed article strong { color: var(--ui-foreground); font-weight: 400; }
 .swarm-space-feed time { margin-left: auto; }
 .swarm-space-feed article > a { display: block; color: inherit; text-decoration: none; padding: 4px 0; }
 .swarm-space-feed article > a > span, .swarm-space-feed article > p { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; margin: 0 0 4px; }
+.swarm-space-feed small { color: var(--ui-primary); font-size: 10px; }
 @media (max-width: 600px) {
-  .swarm-space-mission { padding-inline: 0; }
-  .swarm-space-feed { width: 100%; padding: 8px 10px; }
-  .swarm-space-feed [role="log"] { max-height: 80px; }
-  .swarm-space-preview { min-height: 44px; }
+  .swarm-space-mission { padding: 12px 0 4px; }
+  .swarm-space-kicker { font-size: 9px; letter-spacing: .08em; }
+  .orbit-card-actions [data-slot="button"] { min-height: 44px; }
+  .swarm-space-mode .composer-actions { gap: 6px; padding: 4px 8px 8px; }
+  .swarm-space-mode .composer-actions > [data-slot="button"] { width: 40px; padding-inline: 0; font-size: 0; }
+  .swarm-space-mode .composer-actions > [data-slot="select-trigger"] { width: 0; min-width: 0; max-width: none; flex: 1; }
+  .swarm-space-mode .send-actions { width: auto; margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orbit-agent-card[data-slot="popover-content"] { animation: none; transition: none; }
 }

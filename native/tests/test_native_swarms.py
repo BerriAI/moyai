@@ -408,6 +408,7 @@ async def test_ordinary_chat_retains_native_delegation_without_swarm_tools(runti
     )
     assert result.output == "Ordinary chat."
     assert "delegate_task" in offered
+    assert "start_swarm" in offered
     assert not any(name.startswith("swarm_") for name in offered)
 
 
