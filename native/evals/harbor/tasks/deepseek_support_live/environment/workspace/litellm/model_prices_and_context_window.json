@@ -1,0 +1,32 @@
+{
+  "deepseek/deepseek-flash": {
+    "litellm_provider": "deepseek",
+    "mode": "chat",
+    "input_cost_per_token": 3e-07,
+    "output_cost_per_token": 1.2e-06,
+    "cache_read_input_token_cost": 6e-09,
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 384000,
+    "supports_vision": true,
+    "supported_endpoints": ["/v1/chat/completions"]
+  },
+  "deepseek/deepseek-v4-flash": {
+    "litellm_provider": "deepseek",
+    "mode": "chat",
+    "input_cost_per_token": 3e-07,
+    "output_cost_per_token": 1.2e-06,
+    "cache_read_input_token_cost": 6e-09,
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 384000,
+    "supports_vision": true,
+    "supported_endpoints": ["/v1/chat/completions"],
+    "comment": "legacy name, routes to deepseek-flash"
+  },
+  "fireworks_ai/glm-5p3": {
+    "litellm_provider": "fireworks_ai",
+    "mode": "chat",
+    "input_cost_per_token": 9e-07,
+    "output_cost_per_token": 3.6e-06,
+    "max_input_tokens": 262144
+  }
+}
