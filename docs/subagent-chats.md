@@ -26,7 +26,7 @@ other independently admitted sessions keep their own controls.
 
 Delegation remains bounded to the root, children and grandchildren. Swarm mode
 still uses its fixed roster. Each child uses ordinary turn admission, accounting,
-request limits, connected-account authorization and durable Temporal execution.
+usage controls, connected-account authorization and durable Temporal execution.
 The child's generated assignment inherits the parent's admitted account policies
 and cannot grant human authority, expand skill selections, mutate personal memory
 or manage skills/automations as a direct human request. Subsequent authenticated

@@ -14,7 +14,7 @@ import "./workspace.css"
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type AttachmentKind = "pull_request" | "output"
 type Link = { id?: string; kind: AttachmentKind | "source"; url: string; title: string; origin: "attached" | "mentioned"; can_remove: boolean }
-export type Subagent = { id: string; parent_id: string; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number }
+export type Subagent = { id: string; parent_id: string; session_id?: string | null; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number }
 type PanelAgent = Pick<Subagent, "id" | "name" | "status" | "avatar"> & Partial<Pick<Subagent, "can_inspect">>
 type WorkspaceData = {
   links: Link[]; files: { id: string; name: string; url: string; size: number; media_type?: string }[]

@@ -739,6 +739,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
         </div>
         <div className="header-controls">
+          {session.parent_session_id && <Button asChild variant="ghost" size="sm"><a href={`#${session.parent_session_id}`}>Parent chat</a></Button>}
           <Button className="header-new-session" type="button" variant="ghost" size="icon-sm" aria-label="New session" title="New session" onClick={sessionActions.newSession}><SquarePen size={16} /></Button>
           <SessionMenu session={session} header />
           <WorkspaceOverlayTrigger asChild><Button className="workspace-toggle" type="button" variant={workspaceOpen ? "secondary" : "ghost"} size="icon-sm" aria-label={workspaceOpen ? "Close workspace" : "Open workspace"} title="Workspace"><ListTree size={17} /></Button></WorkspaceOverlayTrigger>
@@ -749,7 +750,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       <WorkspaceOverlayContent>
         <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
           onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
-          onSubagent={agent => openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })}
+          onSubagent={agent => {
+            if (agent.session_id) { window.location.hash = agent.session_id; return }
+            openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })
+          }}
           onOutput={openOutput} />
       </WorkspaceOverlayContent>
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
