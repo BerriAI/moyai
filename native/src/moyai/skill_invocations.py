@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 from sqlalchemy import or_, select
 
-from .contracts import RunScope
+from .contracts import ExecutionContext, RunScope
 from .models import User
 from .product_identity import ProductGrant
 from .settings_models import SettingSkill
@@ -125,8 +125,12 @@ class SkillInvocations:
         return list(selected.values()), display_text(remaining)
 
     async def normalize(self, prompt: str, user: User, session: Any) -> str:
-        async with self.runtime.database.sessions() as db:
-            context = await self.runtime.database.execution_context(db, session)
+        context = ExecutionContext(session.visibility, session.surface)
+        # New swarm admission supplies its requested context before a session
+        # exists. Only persisted conversations can have inherited authority.
+        if getattr(session, "id", None) is not None:
+            async with self.runtime.database.sessions() as db:
+                context = await self.runtime.database.execution_context(db, session)
         selected, _ = await self.resolve(
             prompt, actor_id=user.id, visibility=context.visibility, surface=context.surface,
             grant=getattr(user, "product_grant", None),
