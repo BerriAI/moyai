@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from contextlib import asynccontextmanager, contextmanager
@@ -21,7 +22,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIResponsesModel
 from pydantic_ai.providers.litellm import LiteLLMProvider
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
 from starlette.responses import Response
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import ExecuteActivityInput
@@ -35,7 +36,7 @@ from moyai.inference_usage import (
     InferenceUsage,
     InferenceUsageTransport,
 )
-from moyai.models import Event, Session
+from moyai.models import Event, Session, Turn
 from moyai.performance import PREFIX
 from moyai.product_billing import (
     BillingReader,
@@ -455,6 +456,127 @@ async def test_exact_recovery_reuses_product_receipt_and_never_calls_inference(i
     settled, = await requests(inference)
     assert settled.cost_usd == "0.313000001" and settled.cost_source == "gateway_recovery"
     assert settled.cost_receipt_id == "gateway-receipt" and len(inference.calls) == 1
+
+
+async def test_repaired_receipt_permission_recovers_previously_parked_charge(inference):
+    await perform(inference, cost=None)
+    row, = await requests(inference)
+    async with inference.product.database.sessions.begin() as db:
+        saved = await db.get(ProductInferenceRequest, row.id)
+        saved.recovery_error = "receipt_access_denied"
+        saved.recovery_attempts = 1
+        saved.next_attempt_at = None
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, json=spend_receipt(row)),
+    )) as client:
+        assert await inference.service.recovery.poll(client) == 1
+        assert await inference.service.recovery.poll(client) == 0
+    settled, = await requests(inference)
+    assert settled.cost_usd == "0.313000001"
+    assert settled.recovery_error is None and settled.next_attempt_at is None
+    assert len(inference.calls) == 1
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_failed_product_preparation_does_not_make_recorded_costs_partial(inference, prepared):
+    from moyai.analytics_service import report
+    from moyai.contracts import NewMessage, NewSession
+
+    ctx = inference
+    await perform(ctx)
+    session = await ctx.product.database.create_session(ctx.product.actor, NewSession())
+    failed = await ctx.product.database.submit(
+        ctx.product.actor, session.id, NewMessage(prompt="Never dispatched", request_key="preflight"),
+    )
+    if prepared:
+        assert (await ctx.product.database.claim_next()).id == failed.id
+        await ctx.product.database.prepare(failed.id)
+    await ctx.product.database.fail(failed.id, "Synthetic pre-dispatch preparation failure.")
+    async with ctx.product.database.sessions.begin() as db:
+        paid = await db.get(Turn, ctx.turn.id)
+        paid.usage = json.dumps({"requests": 1, "input_tokens": 11, "output_tokens": 7})
+    runtime = SimpleNamespace(database=ctx.product.database, security=ctx.product.database.security)
+    value = await report(runtime, ctx.product.actor, None, None, None, None, None, 100, 0, "json")
+    assert value["summary"]["pricing_status"] == "priced"
+    assert value["summary"]["cost_usd_exact"] == "0.120000001"
+    assert value["coverage"]["undispatched_failed_turns"] == 1
+    assert value["coverage"]["unknown_request_turns"] == 0
+    assert value["summary"]["unpriced_turns"] == 0
+    assert next(row for row in value["rows"] if row["id"] == failed.id)["pricing_status"] == "empty"
+
+
+@pytest.mark.parametrize("missing_usage_row", [False, True])
+async def test_failed_product_turn_with_observed_attempt_remains_unpriced(inference, missing_usage_row):
+    from moyai.analytics_service import report
+
+    ctx = inference
+    await perform(ctx, cost=None)
+    async with ctx.product.database.sessions.begin() as db:
+        turn = await db.get(Turn, ctx.turn.id)
+        turn.status, turn.preparation, turn.usage = "failed", None, "{}"
+        if missing_usage_row:
+            await db.execute(delete(InferenceUsage).where(InferenceUsage.turn_id == turn.id))
+    runtime = SimpleNamespace(database=ctx.product.database, security=ctx.product.database.security)
+    value = await report(runtime, ctx.product.actor, None, None, None, None, None, 100, 0, "json")
+    assert value["summary"]["pricing_status"] == "unpriced"
+    assert value["coverage"]["undispatched_failed_turns"] == 0
+    if not missing_usage_row:
+        assert value["summary"]["unpriced_requests"] == 1
+    else:
+        assert value["coverage"]["unknown_request_turns"] == 1
+
+
+async def test_proven_unsent_product_failure_does_not_invent_missing_cost(inference):
+    from moyai.analytics_service import report
+
+    ctx = inference
+
+    async def never_connected(_):
+        raise httpx2.ConnectError("Synthetic pre-connect failure.")
+
+    with pytest.raises(httpx2.ConnectError):
+        await perform(ctx, handler=never_connected)
+    await ctx.product.database.fail(ctx.turn.id, "Failed before connecting to the model.")
+    runtime = SimpleNamespace(database=ctx.product.database, security=ctx.product.database.security)
+    value = await report(runtime, ctx.product.actor, None, None, None, None, None, 100, 0, "json")
+    assert value["summary"]["requests"] == value["summary"]["unpriced_requests"] == 0
+    assert value["summary"]["pricing_status"] == "empty"
+    assert value["coverage"]["undispatched_failed_turns"] == 1
+    assert value["coverage"]["unknown_request_turns"] == 0
+
+
+async def test_long_responses_receipt_keeps_exact_cost_and_scoped_identity(inference):
+    await perform(inference, cost=None)
+    row, = await requests(inference)
+    receipt_id = "resp_" + "a" * 200
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, json=spend_receipt(row, request_id=receipt_id)),
+    )) as client:
+        await inference.service.recovery.process(client, row)
+        await inference.service.recovery.process(client, row)
+    saved, = await requests(inference)
+    assert saved.cost_usd == "0.313000001"
+    assert saved.cost_receipt_id == "sha256:" + hashlib.sha256(receipt_id.encode()).hexdigest()
+    assert saved.receipt_key == hashlib.sha256(
+        f"{saved.gateway_scope}/{saved.key_hash}/{receipt_id}".encode()
+    ).hexdigest()
+    assert len(inference.calls) == 1
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_receipt_access_denial_is_backed_off_without_replaying_inference(inference, status):
+    await perform(inference, cost=None)
+    row, = await requests(inference)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(status),
+    )) as client:
+        await inference.service.recovery.process(client, row)
+        saved, = await requests(inference)
+        assert saved.recovery_error == "receipt_access_denied"
+        assert saved.next_attempt_at is not None
+        assert saved.recovery_attempts == 1 and saved.cost_usd is None
+        assert await inference.service.recovery.poll(client) == 0
+    assert len(inference.calls) == 1
 
 
 @pytest.mark.parametrize(("changes", "error"), [

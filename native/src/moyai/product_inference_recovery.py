@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import httpx
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
 from .inference_usage import InferenceUsage, money
@@ -90,7 +90,10 @@ class ProductInferenceRecovery:
                 return
             current.recovery_attempts += 1
             current.recovery_error = reason
-            retryable = reason in {"not_found", "gateway_unavailable"}
+            # Permissions can be repaired without changing the request's key
+            # scope. Keep a bounded retry instead of permanently abandoning
+            # a paid request after the first 401/403.
+            retryable = reason in {"not_found", "gateway_unavailable", "receipt_access_denied"}
             current.next_attempt_at = (
                 datetime.now(UTC) + timedelta(seconds=min(3600, 60 * 2 ** min(current.recovery_attempts - 1, 6)))
             ).isoformat() if retryable else None
@@ -115,7 +118,13 @@ class ProductInferenceRecovery:
             current.receipt_key = usage.receipt_key = receipt_key
             current.cost_usd = usage.cost_usd = cost
             current.cost_source = usage.cost_source = "gateway_recovery"
-            current.cost_receipt_id = receipt_id
+            # The original ID is already incorporated into the scoped unique
+            # receipt_key above. Preserve a stable reference within the
+            # existing varchar(200) column for long Responses gateway IDs.
+            current.cost_receipt_id = (
+                receipt_id if len(receipt_id) <= 200
+                else "sha256:" + hashlib.sha256(receipt_id.encode()).hexdigest()
+            )
             current.recovery_error, current.next_attempt_at = None, None
             usage.cost_status = "actual"
             if current.status == "dispatching":
@@ -189,7 +198,16 @@ class ProductInferenceRecovery:
                 ProductInferenceRequest.status != "not_dispatched",
                 ProductInferenceRequest.gateway_scope == gateway,
                 ProductInferenceRequest.key_hash == key_hash,
-                ProductInferenceRequest.next_attempt_at <= now(),
+                or_(
+                    ProductInferenceRequest.next_attempt_at <= now(),
+                    # Earlier versions parked access-denied receipts forever.
+                    # Re-admit only that repairable state; ambiguous or invalid
+                    # charge evidence still requires explicit investigation.
+                    and_(
+                        ProductInferenceRequest.next_attempt_at.is_(None),
+                        ProductInferenceRequest.recovery_error == "receipt_access_denied",
+                    ),
+                ),
             ).order_by(ProductInferenceRequest.next_attempt_at, ProductInferenceRequest.id).limit(BATCH_SIZE))).all())
         if client is None:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, limits=httpx.Limits(max_connections=1)) as owned:
