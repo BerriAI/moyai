@@ -118,4 +118,3 @@ class NativeRollingRelease(RollingRelease):
         self.record.setdefault('core', 'pydantic-v1')
         self.record.setdefault('native', deepcopy(self.baseline['native']))
         self.record.setdefault('native_drain', deepcopy(self.baseline['native_drain']))
-
