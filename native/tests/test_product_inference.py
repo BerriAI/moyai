@@ -301,9 +301,26 @@ async def test_cancellation_retains_unknown_request_and_releases_slot(inference)
         await perform(inference, attempt=2)
 
 
-async def test_cancel_after_admission_commit_is_known_unsent_and_never_billed(inference, monkeypatch):
+@pytest.mark.parametrize(("cleanup_lock_seconds", "cleanup_timeout", "cleared"), [
+    (0, None, True),
+    (1.2, None, True),
+    (1.2, 0.05, False),
+])
+async def test_cancel_after_admission_commit_keeps_accounting_safe(
+    inference, monkeypatch, cleanup_lock_seconds, cleanup_timeout, cleared,
+):
+    if cleanup_timeout is not None:
+        monkeypatch.setattr("moyai.product_inference.UNSENT_CLEANUP_TIMEOUT_SECONDS", cleanup_timeout)
     original = inference.product.database.sessions.begin
     calls = 0
+    locked = asyncio.Event()
+    blockers = []
+
+    async def hold_admission_row():
+        async with inference.product.database.sessions() as db, db.begin():
+            await db.scalar(select(ProductInferenceRequest).with_for_update())
+            locked.set()
+            await asyncio.sleep(cleanup_lock_seconds)
 
     @asynccontextmanager
     async def interrupted_ack():
@@ -313,17 +330,34 @@ async def test_cancel_after_admission_commit_is_known_unsent_and_never_billed(in
         async with original() as db:
             yield db
         if current == 1:
+            if cleanup_lock_seconds:
+                blockers.append(asyncio.create_task(hold_admission_row()))
+                await asyncio.wait_for(locked.wait(), 5)
             raise asyncio.CancelledError
 
     monkeypatch.setattr(inference.product.database.sessions, "begin", interrupted_ack)
-    with pytest.raises(asyncio.CancelledError):
-        await perform(inference)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await perform(inference)
+    finally:
+        await asyncio.gather(*blockers)
     assert not inference.calls
     row, = await requests(inference)
-    assert row.status == "not_dispatched" and row.cost_usd is None and row.next_attempt_at is None
+    assert row.status == ("not_dispatched" if cleared else "dispatching")
+    assert row.cost_usd is None
+    async with inference.product.database.sessions() as db:
+        usage = await db.get(InferenceUsage, row.request_key)
+        assert usage.status == ("not_dispatched" if cleared else "pending")
+        assert usage.cost_usd is None
     assert inference.service.slots.active == 0
-    await perform(inference, attempt=2)
-    assert len(inference.calls) == 1
+    if cleared:
+        assert row.next_attempt_at is None
+        await perform(inference, attempt=2)
+        assert len(inference.calls) == 1
+    else:
+        with pytest.raises(InferenceAdmissionError, match="already dispatched"):
+            await perform(inference, attempt=2)
+        assert not inference.calls
 
 
 async def test_legacy_and_native_slots_share_postgres_capacity(inference):
