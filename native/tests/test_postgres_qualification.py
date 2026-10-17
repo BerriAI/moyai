@@ -147,21 +147,24 @@ async def qualify_pool_wait(runtime, session_id, turn_id, monkeypatch):
                     transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
                     base_url="http://test",
                 ) as web,
-                engine.connect() as held,
             ):
-                started = asyncio.get_running_loop().time()
-                pulse = asyncio.create_task(heartbeat())
-                sending = asyncio.create_task(deliver_one(runtime, slack, delivery))
-                health = asyncio.create_task(web.get("/health"))
-                try:
-                    await asyncio.sleep(0.65)
-                    assert not sending.done() and not health.done() and sent == []
-                finally:
-                    await held.close()
-                    pulse.cancel()
-                    await asyncio.gather(pulse, return_exceptions=True)
-                response = await asyncio.wait_for(health, 5)
-                await asyncio.wait_for(sending, 5)
+                # Build FastAPI's lazy route/middleware stack before measuring
+                # pool contention; cold application setup is synchronous work.
+                assert (await web.get("/health")).status_code == 200
+                async with engine.connect() as held:
+                    started = asyncio.get_running_loop().time()
+                    pulse = asyncio.create_task(heartbeat())
+                    sending = asyncio.create_task(deliver_one(runtime, slack, delivery))
+                    health = asyncio.create_task(web.get("/health"))
+                    try:
+                        await asyncio.sleep(0.65)
+                        assert not sending.done() and not health.done() and sent == []
+                    finally:
+                        await held.close()
+                        pulse.cancel()
+                        await asyncio.gather(pulse, return_exceptions=True)
+                    response = await asyncio.wait_for(health, 5)
+                    await asyncio.wait_for(sending, 5)
                 assert response.status_code == 200
                 assert asyncio.get_running_loop().time() - started >= 0.65
         assert len(ticks) >= 10
