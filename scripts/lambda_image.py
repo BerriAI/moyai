@@ -18,7 +18,7 @@ def package(destination: Path) -> str:
         for path in sorted((ROOT / "native/lambda_guest").iterdir()):
             if path.is_file() and path.name in {"Dockerfile", "service.py", "checkpoint.py"}:
                 archive.write(path, path.name)
-        for name in ("desktop.py", "browser_guest.py"):
+        for name in ("desktop.py", "browser_guest.py", "browser_driver.py"):
             archive.write(ROOT / "native" / name, name)
         for path in sorted((ROOT / "native/skills").rglob("*")):
             if path.is_file() and "__pycache__" not in path.parts:
