@@ -209,6 +209,47 @@ async def test_unknown_send_reconciles_read_only_without_reposting(slack, active
         assert (await db.get(Delivery, delivery.id)).status == "sent"
 
 
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_sdk_reconciliation_checks_authority_before_each_page(slack, active, revoke):
+    delivery = await queued(slack, active)
+    async with slack.runtime.database.sessions.begin() as db:
+        row = await db.get(Delivery, delivery.id)
+        row.status = "sending"
+        row.claimed_at = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    async with slack.runtime.database.sessions() as db:
+        delivery = await db.get(Delivery, delivery.id)
+    requests = []
+
+    async def handler(request):
+        assert request.method == "GET"
+        requests.append(request)
+        if len(requests) == 1:
+            slack.authority["current"] = not revoke
+            return httpx.Response(200, json={
+                "ok": True, "messages": [{
+                    "ts": "1792100000.001",
+                    "metadata": {"event_type": "another_app", "event_payload": {"id": delivery.id}},
+                }], "response_metadata": {"next_cursor": "next-page"},
+            })
+        assert request.url.params["cursor"] == "next-page"
+        return httpx.Response(200, json={
+            "ok": True, "messages": [{
+                "ts": "1792100000.002", "thread_ts": "1792100000.000",
+                "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
+            }],
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
+        if revoke:
+            with pytest.raises(HTTPException, match="access changed"):
+                await slack.service._deliver_batch(client, [delivery])
+        else:
+            await slack.service._deliver_batch(client, [delivery])
+    assert len(requests) == (1 if revoke else 2)
+    async with slack.runtime.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).status == ("sending" if revoke else "sent")
+
+
 @pytest.mark.parametrize("change", ["revoked", "private", "paused", "reconnected"])
 async def test_delivery_live_authority_and_private_sink_fences(slack, active, receiver, change):
     delivery = await queued(slack, active)

@@ -1,5 +1,5 @@
 import pytest
-from app.slack_format import slack_text
+from app.slack_format import slack_text, split_reply
 
 
 @pytest.mark.parametrize(
@@ -72,3 +72,30 @@ def test_formatting_keeps_mentions_literal_and_file_links_authenticated():
     assert "<https://moyai.example/#run=" + "a" * 32 + "&amp;file=report.md|Report>" in value
     assert "<https://moyai.example/#run=" + "a" * 32 + "&amp;file=notes.md|notes.md>" in value
     assert value.endswith("```\n# **raw** &lt;@U12345678&gt; [Report](report.md)\n```")
+
+
+def test_file_link_policy_stays_in_moyai_after_provider_formatting_moves():
+    answer = "[Allowed](report.md) [Parent](../secret.md) `notes.md` [Script](javascript:alert)"
+    assert slack_text(answer) == answer
+    value = slack_text(answer, public_url="https://moyai.example", run_id="a" * 32)
+    assert "&amp;file=report.md|Allowed>" in value
+    assert "&amp;file=notes.md|notes.md>" in value
+    assert "[Parent](../secret.md)" in value
+    assert "[Script](javascript:alert)" in value
+
+
+def test_reply_chunks_keep_authenticated_links_intact_and_legacy_empty_fallback():
+    value = slack_text("🌊" * 2580 + "[Report](report.md)", public_url="https://moyai.example", run_id="a" * 32)
+    link = value[value.index("<https://"):]
+    chunks = split_reply(value)
+    assert "".join(chunks) == value
+    assert any(link in chunk for chunk in chunks)
+    assert split_reply("") == ["No response text was returned."]
+    assert split_reply("abcdefghij\n\nklmnopqrst", limit=12) == ["abcdefghij\n", "klmnopqrst"]
+
+
+def test_reply_chunks_do_not_split_fence_markers():
+    value = "a" * 2599 + "```\n" + "🦀" * 20 + "\n```"
+    chunks = split_reply(value)
+    assert all(chunk.count("```") % 2 == 0 for chunk in chunks)
+    assert sum(chunk.count("🦀") for chunk in chunks) == 20

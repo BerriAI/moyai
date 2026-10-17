@@ -95,8 +95,11 @@ async def test_original_file_copy_is_scoped_and_never_overwrites_edited_copy(sla
     assert await workspace.read_bytes(result["path"]) == b"User edits"
 
 
-async def test_real_file_reader_downloads_inspects_and_retains_before_reuse(slack, actor, monkeypatch):
-    content = b"Slack attachment bytes.\n"
+@pytest.mark.parametrize("canvas", [False, True])
+async def test_real_file_reader_downloads_inspects_and_retains_before_reuse(slack, actor, monkeypatch, canvas):
+    content = (b'<div class="quip-canvas-content">Slack attachment bytes.</div>'
+               if canvas else b"Slack attachment bytes.\n")
+    media_type = "application/vnd.slack-docs" if canvas else "text/plain"
     file_id = "F12345678"
     url = "https://files.slack.com/files-pri/TTEST0001-F12345678/notes.txt"
     calls = []
@@ -107,8 +110,9 @@ async def test_real_file_reader_downloads_inspects_and_retains_before_reuse(slac
         assert params == {"file": file_id} and allowed_errors == ("missing_scope",)
         calls.append("metadata")
         return {"ok": True, "file": {
-            "id": file_id, "name": "notes.txt", "size": len(content),
-            "mimetype": "text/plain", "url_private_download": url,
+            "id": file_id, "name": "notes.txt", "size": 99999 if canvas else len(content),
+            "mimetype": media_type, "url_private_download": url,
+            **({"filetype": "quip", "mode": "quip"} if canvas else {}),
         }}
 
     async def chunks(size):
@@ -122,7 +126,7 @@ async def test_real_file_reader_downloads_inspects_and_retains_before_reuse(slac
         assert headers == {"Authorization": "Bearer synthetic-bot-token", "Accept-Encoding": "identity"}
         calls.append("download")
         yield SimpleNamespace(
-            status=200, headers={"Content-Length": str(len(content))},
+            status=200, headers={"Content-Length": str(len(content)), "Content-Type": "text/html; charset=utf-8"},
             content=SimpleNamespace(iter_chunked=chunks),
         )
 
@@ -132,7 +136,7 @@ async def test_real_file_reader_downloads_inspects_and_retains_before_reuse(slac
         yield SimpleNamespace(get=response)
 
     monkeypatch.setattr(slack.service.connectors, "request", request)
-    monkeypatch.setattr("app.slack_files.aiohttp.ClientSession", client)
+    monkeypatch.setattr("agentchat.channels.slack.files.aiohttp.ClientSession", client)
     principal = await slack.service.product.identity.require_current(slack.grant)
     event = {"files": [{"id": file_id}]}
     first = await slack.service.files.prepare(actor, principal, event, provenance())
@@ -142,5 +146,6 @@ async def test_real_file_reader_downloads_inspects_and_retains_before_reuse(slac
     assert "Slack attachment bytes." in first["context"]
     async with slack.runtime.database.sessions() as db:
         original = await db.get(Upload, first["uploads"][0])
-        assert original.name == "notes.txt" and original.media_type == "text/plain"
+        assert original.name == ("notes.txt.html" if canvas else "notes.txt")
+        assert original.media_type == media_type
         assert await slack.runtime.objects.get(original.digest) == content

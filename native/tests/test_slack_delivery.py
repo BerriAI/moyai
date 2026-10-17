@@ -20,14 +20,14 @@ from moyai.slack import admit_one, deliver_one, reconcile_one, stage_deliveries
 
 async def test_signed_ingress_deduplicates_and_admits_linked_actor(runtime, actor):
     runtime.settings.slack_signing_secret = SecretStr("local-signature-secret")
-    runtime.settings.slack_team_id = "TTEST"
+    runtime.settings.slack_team_id = "TTEST0001"
     async with runtime.database.sessions.begin() as db:
         saved = await db.get(User, actor.id)
-        saved.slack_user_id = "UTEST"
+        saved.slack_user_id = "UTEST0001"
     body = json.dumps({
-        "type": "event_callback", "event_id": "EONE", "team_id": "TTEST",
-        "event": {"type": "app_mention", "channel": "CTEST", "user": "UTEST",
-                  "ts": "123.456", "text": "Explain this test."},
+        "type": "event_callback", "event_id": "EONE", "team_id": "TTEST0001",
+        "event": {"type": "app_mention", "channel": "CTEST0001", "user": "UTEST0001",
+                  "ts": "1792100000.456", "text": "Explain this test."},
     }).encode()
     stamp = str(int(time.time()))
     signature = "v0=" + hmac.new(
@@ -63,13 +63,13 @@ async def test_signed_ingress_deduplicates_and_admits_linked_actor(runtime, acto
 @pytest.mark.parametrize("order", [("app_mention", "message"), ("message", "app_mention")])
 async def test_same_slack_message_in_two_event_envelopes_admits_one_turn(runtime, actor, order):
     async with runtime.database.sessions.begin() as db:
-        (await db.get(User, actor.id)).slack_user_id = "UTEST"
+        (await db.get(User, actor.id)).slack_user_id = "UTEST0001"
 
     async def admit(event_type, timestamp, thread_ts=None):
         inbox = SlackInbox(id=new_id(), payload=runtime.security.seal({
-            "team_id": "TTEST", "event_id": new_id(),
+            "team_id": "TTEST0001", "event_id": new_id(),
             "event": {
-                "type": event_type, "channel": "CTEST", "user": "UTEST",
+                "type": event_type, "channel": "CTEST0001", "user": "UTEST0001",
                 "ts": timestamp, "text": "Same user message.",
                 **({"thread_ts": thread_ts} if thread_ts else {}),
             },
@@ -79,12 +79,12 @@ async def test_same_slack_message_in_two_event_envelopes_admits_one_turn(runtime
         await admit_one(runtime, inbox)
 
     for kind in order:
-        await admit(kind, "123.456")
+        await admit(kind, "1792100000.456")
     # Thread replies can also arrive in either order. Different timestamps are
     # distinct messages even when the actor and text are identical.
-    for timestamp in ("123.457", "123.458"):
+    for timestamp in ("1792100000.457", "1792100000.458"):
         for kind in order:
-            await admit(kind, timestamp, "123.456")
+            await admit(kind, timestamp, "1792100000.456")
     async with runtime.database.sessions() as db:
         assert await db.scalar(select(func.count()).select_from(Turn)) == 3
         assert await db.scalar(select(func.count()).select_from(SlackThread)) == 1
@@ -161,7 +161,7 @@ async def test_lost_send_ack_is_reconciled_without_reposting(runtime, active):
             raise httpx.ReadTimeout("Acknowledgment lost after dispatch.", request=request)
         return httpx.Response(200, json={
             "ok": True, "messages": [{
-                "ts": "123.999", "metadata": {"event_payload": {"id": delivery.id}},
+                "ts": "123.999", "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
             }],
         })
 

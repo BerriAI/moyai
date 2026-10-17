@@ -12,6 +12,7 @@ from urllib.parse import quote
 import warnings
 from weakref import WeakValueDictionary
 
+from agentchat.channels.slack.files import CANVAS_MIME, bounded_preview
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -19,7 +20,6 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .audio import AudioTranscriber, audio_type
 from .attachment_transport import CONTENT_TYPE, OVERHEAD, unseal_file
 from .attachment_uploads import AttachmentUploads, UploadSpec, PART_BYTES
-from .slack_canvas import CANVAS_MIME, bounded_preview
 
 # Compatibility framing for older clients. Current clients transfer as many
 # authenticated parts as needed; this does not bound an attachment's size.

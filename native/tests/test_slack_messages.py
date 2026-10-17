@@ -80,7 +80,7 @@ def test_session_route_and_long_fenced_answer():
 def test_empty_text_has_only_the_ambient_session_link():
     message = thread_message("", URL)
     assert message["blocks"] == [{
-        "type": "section",
+        "type": "section", "expand": True,
         "text": {"type": "mrkdwn", "text": f"<{URL}|[↗︎]>", "verbatim": True},
     }]
     assert message["text"] == "\n\nOpen session: " + URL
@@ -100,7 +100,7 @@ def test_card_replaces_standalone_reference_line(reference):
     answer = "Both checks passed.\n\n" + reference.format(title="Keep native commentary", url=PR)
     message = thread_message(slack_text(answer), URL, cards=pr_cards(answer, URL))
     assert message["blocks"] == [{
-        "type": "section",
+        "type": "section", "expand": True,
         "text": {"type": "mrkdwn", "text": "Both checks passed.", "verbatim": True},
     }]
     assert PR.casefold() in message["text"].casefold()
@@ -324,3 +324,8 @@ async def test_product_navigation_does_not_enter_approval_or_agent_path(slack):
         "type": "block_actions", "team": {"id": "TTEST0001"}, "user": {"id": "UTEST0001"},
         "actions": [{"type": "button", "action_id": "moyai_view_pr"}],
     })
+
+
+def test_whitespace_only_answer_has_readable_fallback():
+    message = thread_message(" \n\t ", "")
+    assert message["blocks"][0]["text"]["text"] == "No response text was returned."

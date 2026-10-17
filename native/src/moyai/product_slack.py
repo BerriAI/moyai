@@ -15,14 +15,15 @@ import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 from agentchat.channels.slack.rendering import message_request
+from agentchat.channels.slack.webhook import SlackWebhook
 from agentchat.models import RichReply
 from app.db import database as source_database
 from app.slack_format import ID, STAMP
+from app.slack_http import SlackHTTP, webhook_errors
 from fastapi import APIRouter, HTTPException, Request
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai_harness.ask_user import AskUserRequest
@@ -184,18 +185,13 @@ class ProductSlack:
                 logger.warning("Product Slack delivery remains saved (%s).", type(error).__name__)
             await asyncio.sleep(3)
 
+    @property
+    def webhook(self) -> SlackWebhook:
+        return SlackWebhook(self.settings.slack_signing_secret)
+
     def verify_signature(self, body: bytes, headers: Any) -> None:
-        stamp = headers.get("x-slack-request-timestamp", "")
-        try:
-            recent = abs(time.time() - int(stamp)) <= 300
-        except ValueError:
-            recent = False
-        secret = self.settings.slack_signing_secret
-        expected = "v0=" + hmac.new(
-            secret.encode(), b"v0:" + stamp.encode() + b":" + body, hashlib.sha256,
-        ).hexdigest()
-        if not secret or not recent or not hmac.compare_digest(expected, headers.get("x-slack-signature", "")):
-            raise HTTPException(401, "Invalid Slack request.")
+        with webhook_errors():
+            self.webhook.verify(body, headers)
 
     def installation(self) -> dict[str, Any]:
         from app.connection_authority import authority
@@ -570,25 +566,9 @@ class ProductSlack:
         if not still_allowed:
             await self._settle(delivery.id, "suppressed")
             return
-        try:
-            # AgentChat owns provider rendering/routing; this durable host owns
-            # the one-attempt effect and reconciliation after an uncertain send.
-            response = await client.post(
-                request["method"], headers={"Authorization": "Bearer " + token}, json=request["payload"],
-            )
-            response.raise_for_status()
-            result = response.json()
-            if not isinstance(result, dict):
-                return
-        except (httpx.HTTPError, ValueError):
-            # Sending survives lost response/process death/cancellation. There
-            # is no timeout-based replay; reconciliation reads Slack metadata.
-            return
-        status = (
-            "sent" if result.get("ok") and result.get("ts")
-            else "rejected" if result.get("ok") is False else "sending"
-        )
-        await self._settle(delivery.id, status, result)
+        outcome = await SlackHTTP(client, {"Authorization": "Bearer " + token}).delivery.send_request(request)
+        status = {"confirmed": "sent", "rejected": "rejected", "uncertain": "sending"}[outcome["status"]]
+        await self._settle(delivery.id, status, outcome["receipt"])
 
     async def _settle(self, identity: str, status: str, receipt: dict[str, Any] | None = None):
         async def write():
@@ -717,19 +697,17 @@ class ProductSlack:
                                       "UPDATE slack_outbox SET status='pending' WHERE id=? AND status='sending'", (row["id"],))
                 raise
             try:
-                response = await client.post(
-                    request["method"], headers={"Authorization": "Bearer " + token}, json=request["payload"],
-                )
-                response.raise_for_status()
-                result = response.json()
-                if not isinstance(result, dict) or not result.get("ok") or not result.get("ts"):
-                    raise ValueError("Slack did not confirm the review notice.")
-            except (httpx.HTTPError, ValueError, asyncio.CancelledError) as error:
+                outcome = await SlackHTTP(client, {"Authorization": "Bearer " + token}).delivery.send_request(request)
+            except asyncio.CancelledError:
                 await source_database(self.store.execute,
                                       "UPDATE slack_outbox SET status='uncertain' WHERE id=? AND status='sending'", (row["id"],))
-                if isinstance(error, asyncio.CancelledError):
-                    raise
+                raise
+            if outcome["status"] != "confirmed":
+                await source_database(self.store.execute,
+                                      "UPDATE slack_outbox SET status='uncertain' WHERE id=? AND status='sending'", (row["id"],))
                 continue
+            result = outcome["receipt"]
+            assert result is not None
             # Confirmed receipt persistence is outside the ambiguous-send catch.
             await source_database(self.store.execute,
                                   "UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=? AND status='sending'",
@@ -749,16 +727,8 @@ class ProductSlack:
         @router.post("/hooks/slack/interactions")
         async def interaction(request: Request):
             raw = await bounded_body(request, 65536)
-            self.verify_signature(raw, request.headers)
-            try:
-                values = parse_qs(raw.decode(), strict_parsing=True)
-                if len(values["payload"]) != 1:
-                    raise ValueError()
-                payload = json.loads(values["payload"][0])
-                if not isinstance(payload, dict):
-                    raise TypeError()
-            except (ValueError, TypeError, KeyError, UnicodeDecodeError):
-                raise HTTPException(400, "Invalid Slack interaction.") from None
+            with webhook_errors():
+                payload = self.webhook.interaction(raw, request.headers)
             key = "native-interaction:" + hashlib.sha256(raw).hexdigest()
             await database(self.inbox.enqueue, key, {"type": "native_interaction", "payload": payload})
             self.inbox.wake.set()

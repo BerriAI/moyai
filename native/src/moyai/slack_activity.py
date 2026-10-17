@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 from app.db import database as source_database
+from app.slack_http import SlackHTTP
 from fastapi import HTTPException
 from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -194,15 +195,10 @@ class SlackActivityService:
             if current != target:
                 await self.write(thread_id, claim, retry_at=0)
                 return
-            response = await client.post(
-                "assistant.threads.setStatus",
-                headers={"Authorization": "Bearer " + token},
-                json={"channel_id": target.channel, "thread_ts": target.thread_ts, "status": target.status},
-                timeout=REQUEST_SECONDS,
-            )
-            response.raise_for_status()
-            result = response.json()
-            if not isinstance(result, dict) or result.get("ok") is not True:
+            result = await SlackHTTP(
+                client, {"Authorization": "Bearer " + token}, timeout=REQUEST_SECONDS,
+            ).delivery.set_status(target.channel, target.thread_ts, target.status)
+            if result["status"] != "confirmed":
                 raise ValueError("Slack did not confirm the working status.")
             await self.write(thread_id, claim, refreshed_at=time.time(), retry_at=0)
         finally:

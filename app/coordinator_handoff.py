@@ -11,12 +11,12 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
-import re
 import time
 
 from fastapi import HTTPException
 
 from .db import database, now
+from .slack_http import webhook_errors
 
 log = logging.getLogger(__name__)
 coordinator_owner: ContextVar[tuple[str, int] | None] = ContextVar('coordinator_owner', default=None)
@@ -56,21 +56,14 @@ class HookInbox:
 
     async def receive_event(self, request):
         body = await bounded_body(request, MAX_EVENT_BYTES)
-        self.slack.verify_signature(body, request.headers)
-        try:
-            payload = json.loads(body)
-            if not isinstance(payload, dict):
-                raise ValueError()
-        except (ValueError, UnicodeDecodeError):
-            raise HTTPException(400, 'Invalid Slack event.') from None
-        if payload.get('type') == 'url_verification':
-            return {'challenge': payload.get('challenge', '')}
-        if payload.get('type') != 'event_callback':
+        with webhook_errors():
+            incoming = self.slack.webhook.event(body, request.headers)
+        if incoming['kind'] == 'challenge':
+            return {'challenge': incoming['challenge']}
+        if incoming['kind'] == 'ignored':
             return {'ok': True}
-        team, event_id = payload.get('team_id'), payload.get('event_id')
-        if not all(isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,100}', value)
-                   for value in (team, event_id)):
-            raise HTTPException(400, 'Invalid Slack event identifier.')
+        payload = incoming['payload']
+        team, event_id = payload['team_id'], payload['event_id']
         # Signature freshness is checked only at intake. A saved, authenticated
         # event may wait through a deploy or provider outage longer than 5 min.
         await database(self.enqueue, f'event:{team}:{event_id}', payload)

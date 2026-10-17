@@ -1,122 +1,45 @@
-"""Durable Slack uploads, using the same attachment pipeline as web inputs."""
+"""Moyai access, inspection and retention boundary for AgentChat Slack files."""
 import asyncio
-from email.message import Message
-import math
+from functools import partial
 from pathlib import PurePath
-import random
-import re
-import tempfile
-from urllib.parse import urlsplit
 
-import aiohttp
+from agentchat.channels.slack.files import (
+    CanvasFormatError,
+    SlackFileError,
+    SlackFileReader,
+    SlackTransportError,
+    file_operation,
+    inspect_canvas,
+)
 
 from .audio import AUDIO_TYPES, AudioTranscriber, audio_type
-from .attachments import filename, inspect_file
+from .attachments import inspect_file
 from .connector_errors import ConnectorError
-from .db import database, drain
-from .slack_canvas import CanvasFormatError, inspect_canvas, is_canvas
+from .db import database
 
 
-READ_ATTEMPTS = 2
-READ_BUDGET_SECONDS = 90
-RETRY_DELAY_SECONDS = 1
 INSPECTION_BUDGET_SECONDS = 90
-DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=45, sock_connect=10, sock_read=15)
-TRANSIENT_STATUSES = {408, 500, 502, 503, 504}
-CONTENT_ENCODINGS = {'identity', 'gzip', 'br', 'deflate', 'zstd'}
-AUTH_FAILURES = {'invalid_auth', 'token_revoked', 'not_authed', 'account_inactive',
-                 'invalid_client_id', 'bad_client_secret', 'invalid_refresh_token', 'invalid_grant'}
-
-# Only application-owned prose/codes enter errors and events. Never copy a
-# provider exception, URL, filename, response body or arbitrary header value.
-FAILURES = {
-    'access_changed': ('Slack access changed.', 'Reconnect Slack and resend the attachment.'),
-    'authentication': ('Could not read this Slack attachment because access was denied.', 'Reconnect Slack and verify the bot can access the file.'),
-    'credential_upstream': ('Slack’s credential service returned an upstream error.', 'Wait for the service to recover and check the saved Slack connection before retrying.'),
-    'credential_transport': ('The Slack credential service could not be reached.', 'Check the network and saved Slack connection before retrying.'),
-    'credential_unconfirmed': ('The Slack credential acquisition result could not be confirmed.', 'Check the saved Slack connection before retrying an unconfirmed token refresh.'),
-    'credential_unavailable': ('Slack bot credentials could not be obtained.', 'Check the saved Slack connection state before retrying.'),
-    'missing_scope': ('Reconnect Slack with files:read permission.', 'Reconnect Slack and resend the attachment.'),
-    'unavailable': ('This Slack file is unavailable.', 'Upload the attachment again or describe its contents.'),
-    'invalid_identifier': ('Expected a Slack file identifier.', 'Resend the attachment from Slack.'),
-    'invalid_size': ('Slack returned an invalid file size.', 'Upload the attachment again.'),
-    'hard_limit': ('This file exceeds the workspace attachment storage budget.', 'Ask an administrator to increase the budget, or send a smaller file.'),
-    'unsupported_location': ('Slack returned an unsupported file location.', 'Upload the attachment directly to Slack again.'),
-    'redirect': ('Could not read this Slack attachment without following a redirect.', 'Upload the attachment again; private-file redirects are not followed.'),
-    'encoded_response': ('Slack returned an encoded transfer despite the identity request.', 'Retry later or upload the file again; compressed transfer bytes were not accepted as file bytes.'),
-    'invalid_headers': ('Slack returned unverifiable download headers.', 'Retry later or upload the file again.'),
-    'partial_response': ('Slack returned only a partial file response.', 'Retry later or upload the complete attachment again.'),
-    'metadata_size_mismatch': ('Slack file did not match its declared size.', 'Upload the attachment again or describe its contents; the complete file could not be verified.'),
-    'truncated_stream': ('Slack file download ended with an incomplete stream.', 'Retry later or upload the attachment again.'),
-    'rate_limited': ('Slack rate-limited the attachment read.', 'Wait for Slack’s retry interval, then retry the attachment.'),
-    'transient_http': ('Slack temporarily could not serve the attachment.', 'Retry later or describe the missing content.'),
-    'timeout': ('Slack attachment read timed out.', 'Retry later or send a smaller attachment.'),
-    'read_budget': ('Slack attachment recovery reached its time budget.', 'Retry later or send a smaller attachment.'),
-    'transport': ('The Slack attachment connection was interrupted.', 'Retry later or upload the attachment again.'),
-    'tls': ('The Slack attachment connection could not be verified.', 'Ask an administrator to check the network connection.'),
-    'storage': ('The attachment could not be written to temporary storage.', 'Ask an administrator to check workspace storage.'),
-    'inspection_timeout': ('The attachment could not be inspected within its time budget.', 'Send a smaller attachment or describe its contents.'),
-    'canvas_representation': ('Slack did not return a readable Canvas HTML export.', 'Retry the Canvas export or provide its text; the response was not used as document content.'),
-    'transfer_size_mismatch': ('The downloaded attachment did not match its HTTP Content-Length.', 'Retry later; incomplete or inconsistent transfer bytes were not retained.'),
-}
 
 
-class SlackFileError(ValueError):
-    """An allowlisted explanation plus bounded, non-content read diagnostics."""
-    def __init__(self, code, *, retryable=False, retry_after=None):
-        self.code = code
-        self.retryable, self.retry_after = retryable, retry_after
-        self.history = []
-        self.retry_blocker = ''
-        super().__init__(FAILURES[code][0])
-
-    def diagnostic(self):
-        latest = self.history[-1] if self.history else {'stage': 'access'}
-        attempts = latest.get('attempt', 0)
-        return {'phase': 'slack_attachment_read', 'code': self.code, **latest,
-                'attempts': attempts, 'attempt_history': self.history,
-                'recovery_tried': ('A read-only retry was attempted; the attempt history identifies the stage reached.'
-                                   if attempts > 1 else 'No retry was made.'),
-                'remaining_blocker': self.retry_blocker or FAILURES[self.code][0],
-                'next_action': FAILURES[self.code][1],
-                **({'retry_after_seconds': self.retry_after} if self.retry_after is not None else {})}
-
-    def __str__(self):
-        detail = self.diagnostic()
-        counts = ', '.join(f'{key}={detail[key]}' for key in ('declared_bytes', 'received_bytes', 'content_encoding')
-                           if detail.get(key) is not None)
-        return (f'{FAILURES[self.code][0]} '
-                f'[stage={detail["stage"]}, code={self.code}, attempts={detail["attempts"]}'
-                f'{", " + counts if counts else ""}] '
-                f'{detail["recovery_tried"]} Remaining blocker: {detail["remaining_blocker"]} '
-                f'Next action: {detail["next_action"]}')
-
-
-def retry_seconds(value):
-    """Slack documents Retry-After as seconds. Invalid/missing means do not retry."""
-    try:
-        seconds = float(value)
-        return seconds if math.isfinite(seconds) and seconds >= 0 else None
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-async def file_operation(operation, *args):
-    """Drain a file operation before cancellation can close its temporary file."""
-    return await drain(asyncio.create_task(asyncio.to_thread(operation, *args)))
+def transport_error(error):
+    """Only safe canonical failure metadata crosses the SDK boundary."""
+    return SlackTransportError(
+        error.code,
+        status_code=error.status_code,
+        dispatched=error.dispatched,
+        rejected=error.rejected,
+        retryable=error.retryable,
+        retry_after=error.retry_after,
+    )
 
 
 class SlackFiles:
     def __init__(self, owner):
         self.owner = owner
         self.transcriber = AudioTranscriber(owner.settings)
-        self.slots = asyncio.Semaphore(2)
-        self.rate_limit_until = 0.0
-
-    def check_rate_limit(self):
-        remaining = self.rate_limit_until - asyncio.get_running_loop().time()
-        if remaining > 0:
-            raise SlackFileError('rate_limited', retryable=True, retry_after=remaining)
+        self.reader = SlackFileReader(
+            max_bytes=owner.settings.attachment_storage_limit_mb * 1024 * 1024,
+        )
 
     def check_access(self, team, *, connection=None):
         connectors = self.owner.connectors
@@ -124,228 +47,60 @@ class SlackFiles:
         if not self.owner.status(connection=connection)['enabled'] or installation.get('team_id') != team:
             raise SlackFileError('access_changed')
 
-    async def read(self, file_id, team):
-        """Retry only verified GETs, never publish partial or unverifiable bytes."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + READ_BUDGET_SECONDS
-        history, state = [], {'stage': 'access'}
+    async def token(self):
         try:
-            async with asyncio.timeout_at(deadline):
-                for attempt in range(READ_ATTEMPTS):
-                    state = {'stage': 'access', 'attempt': attempt + 1}
-                    try:
-                        name, raw, claimed_type = await self.download(file_id, team, state)
-                        break
-                    except SlackFileError as exc:
-                        if exc.code == 'rate_limited' and exc.retry_after is not None:
-                            self.rate_limit_until = max(self.rate_limit_until, loop.time() + exc.retry_after)
-                        history.append({**state, 'code': exc.code})
-                        exc.history = list(history)
-                        if not exc.retryable or attempt + 1 >= READ_ATTEMPTS:
-                            raise
-                        # Spread independent readers without ever jittering or
-                        # shortening a provider-mandated Retry-After interval.
-                        delay = (exc.retry_after if exc.code == 'rate_limited' else
-                                 random.uniform(.5 * RETRY_DELAY_SECONDS, 1.5 * RETRY_DELAY_SECONDS))
-                        if delay is None:
-                            exc.retry_blocker = 'Slack did not supply a usable Retry-After interval; no early retry was made.'
-                            raise
-                        if delay >= deadline - loop.time():
-                            exc.retry_blocker = (
-                                'Slack’s retry interval exceeds the remaining read budget; no early retry was made.'
-                                if exc.code == 'rate_limited' else
-                                'The remaining read budget is too short for another attempt.')
-                            raise
-                        state = {**state, 'stage': 'retry_wait'}
-                        await asyncio.sleep(delay)
-        except TimeoutError:
-            exc = SlackFileError('read_budget')
-            exc.history = [*history, {**state, 'code': exc.code}]
-            raise exc from None
+            return await self.owner.connectors.slack_bot_token()
+        except ConnectorError as error:
+            raise transport_error(error) from None
+
+    async def request(self, method, payload, token):
+        try:
+            return await self.owner.connectors.request(
+                'GET',
+                'https://slack.com/api/' + method,
+                headers={'Authorization': 'Bearer ' + token, 'Accept-Encoding': 'identity'},
+                params=payload,
+                allowed_errors=('missing_scope',),
+            )
+        except ConnectorError as error:
+            raise transport_error(error) from None
+
+    async def read(self, file_id, team):
+        downloaded = await self.reader.read(
+            file_id,
+            token=self.token,
+            request=self.request,
+            authorize=partial(database, self.check_access, team),
+        )
+        raw = downloaded.raw
         transferred = False
         try:
             await database(self.check_access, team)
             async with asyncio.timeout(INSPECTION_BUDGET_SECONDS):
-                inspected = (await file_operation(inspect_canvas, raw) if state.get('representation') == 'canvas_html'
-                             else await self.inspect(name, raw, claimed_type))
-            await database(self.check_access, team)
-            raw.seek(0)
-            transferred = True
-            return name, raw, inspected
-        except TimeoutError:
-            exc = SlackFileError('inspection_timeout')
-            exc.history = [*history, {**state, 'stage': 'inspection', 'code': exc.code}]
-            raise exc from None
-        except CanvasFormatError:
-            exc = SlackFileError('canvas_representation')
-            exc.history = [*history, {**state, 'stage': 'inspection', 'code': exc.code}]
-            raise exc from None
-        except SlackFileError as exc:
-            exc.history = [*history, {**state, 'stage': 'access', 'code': exc.code}]
-            raise
-        finally:
-            # Ownership transfers to prepare only on a successful return.
-            if not transferred:
-                raw.close()
-
-    async def download(self, file_id, team, state):
-        connectors = self.owner.connectors
-        raw = None
-        transferred = False
-        try:
-            await database(self.check_access, team)
-            if not isinstance(file_id, str) or not re.fullmatch(r'F[A-Z0-9]{1,30}', file_id):
-                raise SlackFileError('invalid_identifier')
-            state['stage'] = 'metadata'
-            self.check_rate_limit()
-            state['stage'] = 'access'
-            token = await connectors.slack_bot_token()
-            await database(self.check_access, team)
-            headers = {'Authorization': 'Bearer ' + token, 'Accept-Encoding': 'identity'}
-            state['stage'] = 'metadata'
-            # Saved OAuth scopes can be stale after an installation changes.
-            info = await connectors.request('GET', 'https://slack.com/api/files.info',
-                headers=headers, params={'file': file_id}, allowed_errors=('missing_scope',))
-            await database(self.check_access, team)
-            if info.get('ok') is False and info.get('error') == 'missing_scope':
-                raise SlackFileError('missing_scope')
-            file = info.get('file')
-            if info.get('ok') is not True or not isinstance(file, dict) or file.get('id') != file_id or file.get('is_external'):
-                raise SlackFileError('unavailable')
-            size = file.get('size')
-            canvas = is_canvas(file)
-            if not canvas and (type(size) is not int or size <= 0):
-                raise SlackFileError('invalid_size')
-            if type(size) is int and size >= 0:
-                state['declared_bytes'] = size
-            if canvas:
-                state['representation'] = 'canvas_html'
-            hard_limit = self.owner.settings.attachment_storage_limit_mb * 1024 * 1024
-            if not canvas and size > hard_limit:
-                raise SlackFileError('hard_limit')
-            url = file.get('url_private_download') or file.get('url_private')
-            try:
-                target = urlsplit(url) if isinstance(url, str) else None
-                if (not target or target.scheme != 'https' or target.hostname != 'files.slack.com'
-                        or target.port not in (None, 443) or target.username or target.password
-                        or target.fragment or not target.path.startswith('/files-pri/')):
-                    raise ValueError
-            except ValueError:
-                raise SlackFileError('unsupported_location') from None
-            name = filename(file.get('name') or 'attachment')
-            if canvas and not name.lower().endswith('.html'):
-                name = filename(name[:175] + '.html')
-            state['stage'] = 'headers'
-            self.check_rate_limit()
-            # Compare file bytes, not aiohttp's implicitly decompressed transfer.
-            # If Slack ignores identity, reject rather than decode without a bound.
-            async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT, auto_decompress=False) as client:
-                async with client.get(url, headers=headers, allow_redirects=False) as response:
-                    state['http_status'] = response.status
-                    encoding_header = response.headers.get('Content-Encoding')
-                    encoding = encoding_header.strip().lower() if encoding_header is not None else 'identity'
-                    state.update(content_encoding=encoding if encoding in CONTENT_ENCODINGS else 'unsupported',
-                                 content_encoding_present=encoding_header is not None)
-                    if response.status == 429:
-                        raise SlackFileError('rate_limited', retryable=True,
-                                             retry_after=retry_seconds(response.headers.get('Retry-After')))
-                    if response.status in {401, 403}:
-                        raise SlackFileError('authentication')
-                    if 300 <= response.status < 400:
-                        raise SlackFileError('redirect')
-                    if response.status in TRANSIENT_STATUSES:
-                        raise SlackFileError('transient_http', retryable=True)
-                    if response.status == 206 or response.headers.get('Content-Range'):
-                        raise SlackFileError('partial_response', retryable=True)
-                    if response.status != 200:
-                        raise SlackFileError('unavailable')
-                    if state['content_encoding'] != 'identity':
-                        raise SlackFileError('encoded_response', retryable=True)
-                    if canvas:
-                        content_type = Message()
-                        content_type['content-type'] = response.headers.get('Content-Type', '')
-                        if (content_type.get_content_type() != 'text/html'
-                                or content_type.get_content_charset() not in {None, 'utf-8', 'utf8'}):
-                            raise SlackFileError('canvas_representation')
-                    length = response.headers.get('Content-Length')
-                    if length is not None:
-                        if not re.fullmatch(r'[0-9]{1,20}', length):
-                            raise SlackFileError('invalid_headers', retryable=True)
-                        state['content_length_bytes'] = int(length)
-                        if int(length) > hard_limit:
-                            raise SlackFileError('hard_limit')
-                        if not canvas and int(length) != size:
-                            raise SlackFileError('metadata_size_mismatch', retryable=True)
-                    state['stage'] = 'download'
-                    raw = tempfile.TemporaryFile()
-                    received = 0
-                    async for chunk in response.content.iter_chunked(64 * 1024):
-                        received += len(chunk)
-                        state['received_bytes'] = received
-                        # Independent actual-byte cap; metadata is not authority
-                        # to consume more storage. Check before writing the chunk.
-                        if state['received_bytes'] > hard_limit:
-                            raise SlackFileError('hard_limit')
-                        if length is not None and received > int(length):
-                            raise SlackFileError('transfer_size_mismatch', retryable=True)
-                        if not canvas and state['received_bytes'] > size:
-                            raise SlackFileError('metadata_size_mismatch', retryable=True)
-                        await file_operation(raw.write, chunk)
-            # Zero is observed only after a clean empty body, not a headers-only
-            # rejection, temporary-file failure or interrupted first read.
-            state['received_bytes'] = received
-            if length is not None and received != int(length):
-                raise SlackFileError('truncated_stream', retryable=True)
-            if not canvas and received != size:
-                raise SlackFileError('metadata_size_mismatch', retryable=True)
-            if canvas and not received:
-                raise SlackFileError('canvas_representation')
-            await database(self.check_access, team)
-            raw.seek(0)
-            transferred = True
-            return name, raw, file.get('mimetype') or ''
-        except ConnectorError as exc:
-            state['http_status'] = exc.status_code
-            if exc.status_code in {401, 403} or exc.code in AUTH_FAILURES:
-                failure = SlackFileError('authentication')
-            elif exc.code == 'missing_scope':
-                failure = SlackFileError('missing_scope')
-            elif state['stage'] == 'access':
-                # Token acquisition may POST an OAuth refresh. Read-only file
-                # recovery must not replay that mutation or infer denied access
-                # merely because its failure occurred before files.info.
-                if exc.status_code == 429 or exc.code in {'ratelimited', 'rate_limited'}:
-                    failure = SlackFileError('rate_limited', retry_after=retry_seconds(exc.retry_after))
-                elif exc.status_code in TRANSIENT_STATUSES:
-                    failure = SlackFileError('credential_upstream')
-                elif exc.code == 'connection_unavailable' and exc.dispatched is False:
-                    failure = SlackFileError('credential_transport')
-                elif exc.code == 'response_unavailable' or (exc.dispatched is not False and not exc.rejected):
-                    failure = SlackFileError('credential_unconfirmed')
+                if downloaded.representation == 'canvas_html':
+                    inspected = await file_operation(inspect_canvas, raw)
                 else:
-                    failure = SlackFileError('credential_unavailable')
-                failure.retry_blocker = (
-                    'Token acquisition may perform an OAuth refresh POST; attachment recovery did not replay it.')
-            elif exc.status_code == 429 or exc.code in {'ratelimited', 'rate_limited'}:
-                failure = SlackFileError('rate_limited', retryable=True, retry_after=retry_seconds(exc.retry_after))
-            elif exc.status_code in TRANSIENT_STATUSES or exc.retryable:
-                failure = SlackFileError('transport', retryable=True)
+                    inspected = await self.inspect(downloaded.name, raw, downloaded.media_type)
+            await database(self.check_access, team)
+            raw.seek(0)
+            transferred = True
+            return downloaded.name, raw, inspected
+        except (TimeoutError, CanvasFormatError, SlackFileError) as error:
+            stage = 'inspection'
+            if isinstance(error, SlackFileError):
+                failure = error
+                stage = 'access'
+            elif isinstance(error, TimeoutError):
+                failure = SlackFileError('inspection_timeout')
             else:
-                failure = SlackFileError('unavailable')
+                failure = SlackFileError('canvas_representation')
+            failure.history = [
+                *downloaded.history,
+                {**downloaded.state, 'stage': stage, 'code': failure.code},
+            ]
             raise failure from None
-        except aiohttp.ClientPayloadError:
-            raise SlackFileError('truncated_stream', retryable=True) from None
-        except (aiohttp.ClientSSLError, aiohttp.ServerFingerprintMismatch):
-            raise SlackFileError('tls') from None
-        except TimeoutError:
-            raise SlackFileError('timeout', retryable=True) from None
-        except aiohttp.ClientError:
-            raise SlackFileError('transport', retryable=True) from None
-        except OSError:
-            raise SlackFileError('storage') from None
         finally:
-            # Only a fully verified download transfers ownership to read().
-            if raw is not None and not transferred:
+            if not transferred:
                 raw.close()
 
     async def inspect(self, name, raw, claimed_type):

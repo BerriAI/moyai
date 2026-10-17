@@ -6,6 +6,7 @@ import re
 from html import unescape
 from typing import Any
 
+from agentchat.channels.slack.rendering import text_blocks
 from fastapi import HTTPException
 
 from .links import PR_MENTION
@@ -137,30 +138,23 @@ def thread_message(
     controls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Keep fallback text accessible and all section text inside Slack's limit."""
-    from app.slack_format import split_reply
-
     # Keep one message even for long answers. Its blocks carry the readable
     # text; the saved conversation remains the source for anything beyond it.
     if len(text) > 32_000:
         text = text[:32_000] + "\n\nOpen the Moyai session for the full answer."
     visible = without_pr_references(text, cards)
     link = f"<{url}|[↗︎]>" if url and not cards else ""
+    suffix = ""
     if link:
         fenced = visible.rstrip().endswith("```") or visible.count("```") % 2 == 1
         suffix = ("\n" if fenced else " ") + link
-        parts = split_reply(visible, limit=2900 - len(suffix)) if visible.strip() else []
+    if visible.strip():
+        blocks: list[dict[str, Any]] = text_blocks(visible, limit=2900 - len(suffix))
+        blocks[-1]["text"]["text"] += suffix
+    elif cards:
+        blocks = []
     else:
-        suffix = ""
-        parts = split_reply(visible, limit=2900) if visible.strip() or not cards else []
-    if link:
-        if parts:
-            parts[-1] += suffix
-        else:
-            parts = [link]
-    blocks: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": part, "verbatim": True}}
-        for part in parts
-    ]
+        blocks = text_blocks(link or "No response text was returned.", limit=2900)
     actions = list(controls or [])
     if actions:
         blocks.append({"type": "actions", "elements": actions})
