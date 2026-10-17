@@ -97,7 +97,7 @@ answers and downloads and does not restart cancelled work.
 **Workspace** opens an overlay of pull requests, subagents and outputs. Uploaded
 sources and saved outputs are also available in the Files tab.
 New ordinary subagents open as full private conversations: select one under
-**Workspace → Subagents**, then message, queue a follow-up, use **Steer now**,
+**Workspace → Subagents**, then message, queue a follow-up, use **Send now**,
 answer questions, or stop it with the normal session controls. **Parent chat**
 returns to the conversation that delegated the work. Each child retains its
 history and has its own computer. They also appear in the requester's session list.
@@ -115,7 +115,7 @@ GitHub patches are labelled; this is a read-only viewer.
 
 Queued messages appear above the composer. **Edit** loads their text into that
 same composer and keeps attachments; Save/Cancel restore the unsent draft.
-**Steer now** promotes the existing message through the native Temporal signal
+**Send now** promotes the existing message through the native Temporal signal
 and Pydantic `AgentRun.enqueue` path. A message already admitted cannot be edited.
 
 New tasks and their delegated agents have no fixed model-request-count limit.

@@ -3,7 +3,7 @@
 Ask a normal chat to delegate three self-contained tasks. New `delegate_task`
 calls create three persistent native sessions. Open **Workspace → Subagents**
 and select a child to use the same transcript, composer, queued input,
-**Steer now**, questions, files, activity and Stop controls as any other session.
+**Send now**, questions, files, activity and Stop controls as any other session.
 **Parent chat** returns to its direct parent. The session list and search also
 keep the child's conversation reachable after the parent finishes.
 
