@@ -9,7 +9,7 @@ from sqlalchemy import select
 from test_delegated_sessions import finish
 from test_workspace_overview import sign_in
 
-from moyai.contracts import Grant, NewMessage, NewSession
+from moyai.contracts import Grant, GuidanceChanged, NewMessage, NewSession
 from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Connection, Session, Turn
@@ -131,3 +131,23 @@ async def test_shared_child_cannot_select_personal_connections_on_followup(runti
         ))
     async with database.sessions() as db:
         assert len(list(await db.scalars(select(Turn).where(Turn.session_id == child["session_id"])))) == 1
+
+
+async def test_promoting_an_older_message_makes_it_the_latest_guidance(runtime, actor, active):
+    session, _, prepared = active
+    database = runtime.database
+    older = await database.submit(actor, session.id, NewMessage(prompt="Queued first", request_key="older"))
+    newer = await database.submit(actor, session.id, NewMessage(
+        prompt="Correction sent second", request_key="newer", mode="asap",
+    ))
+    await database.steering_receipt(newer.id, "second")
+    await database.steer_queued(actor, older.id)
+    service = DelegationService(database)
+    with pytest.raises(GuidanceChanged):
+        await service.start(prepared.scope, "stale", "Old work", input_id=newer.id)
+    child = await service.start(prepared.scope, "latest", "Promoted work", input_id=older.id)
+    assert child["session_id"]
+    # Receipt retries must not reorder or restore a superseded input.
+    await database.steering_receipt(newer.id, "second")
+    with pytest.raises(GuidanceChanged):
+        await service.start(prepared.scope, "stale-again", "Old work", input_id=newer.id)

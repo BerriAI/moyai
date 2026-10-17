@@ -163,11 +163,13 @@ class PullRequestService:
                 Connection.kind == "github", Connection.enabled.is_(True),
                 or_(Connection.owner_id == user.id, Connection.shared.is_(True)),
             ).order_by(Connection.id)))
+            contexts = {session.id: await self.runtime.database.execution_context(db, session) for session in sessions}
         result = {}
         for session in sessions:
+            context = contexts[session.id]
             permitted = []
             for connection in connections:
-                if session.surface == "slack" or (session.visibility == "shared" and not connection.shared):
+                if context.surface == "slack" or (context.visibility == "shared" and not connection.shared):
                     continue
                 try:
                     policy = json.loads(connection.policy)

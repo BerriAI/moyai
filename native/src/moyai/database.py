@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from pydantic import TypeAdapter
 from pydantic_ai import Conversation, ConversationTypeAdapter
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-from sqlalchemy import and_, delete, event, or_, select, text, update
+from sqlalchemy import and_, delete, event, func, or_, select, text, update
 from sqlalchemy import insert as sql_insert
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -457,6 +457,8 @@ class Database:
                     turn.status = "steering"
             transaction.add(turn)
             await transaction.flush()
+            if turn.status == "steering":
+                self._record_guidance(transaction, turn, session.revision)
             from .performance import admission
             admission(
                 transaction, turn, received_at or admitted_at or turn.created_at,
@@ -646,7 +648,18 @@ class Database:
                     raise HTTPException(409, "This message needs its own run. It will start after the active task.")
                 turn.parent_turn = active.id
                 turn.status = "steering"
+                self._record_guidance(db, turn, session.revision)
             return turn
+
+    def _record_guidance(self, db: AsyncSession, turn: Turn, revision: int) -> None:
+        # Event IDs order admissions while holding the session fence, including
+        # "Send now" for an older queued message. Message creation time cannot
+        # order those corrections. A repeated promotion can have a new receipt.
+        db.add(Event(
+            session_id=turn.session_id, turn_id=turn.id, kind="steering_admitted",
+            identity=f"guidance:{turn.id}:{revision}",
+            content=self.security.seal({"parent_turn": turn.parent_turn}),
+        ))
 
     async def dispatch_boundary(self) -> tuple[str, str] | None:
         async with self.sessions() as db:
@@ -817,10 +830,15 @@ class Database:
             if [(g.id, g.revision) for g in current] != [(g.id, g.revision) for g in scope.grants]:
                 raise PermissionError("Connection access changed. Start a fresh authorized turn.")
             if input_id is not None:
+                admission_order = select(func.max(Event.id)).where(
+                    Event.turn_id == Turn.id, Event.kind == "steering_admitted",
+                ).scalar_subquery()
                 pending = await db.scalar(select(Turn).where(
                     Turn.parent_turn == turn.id,
                     Turn.status.in_(["steering", "signal_sent", "accepted"]),
-                ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
+                ).order_by(
+                    admission_order.desc().nulls_last(), Turn.created_at.desc(), Turn.id.desc(),
+                ).limit(1))
                 if pending and pending.id != input_id:
                     raise GuidanceChanged("New guidance arrived before this action was dispatched.")
 

@@ -13,7 +13,7 @@ from test_product_authority import active_turn
 from moyai.contracts import GuidanceChanged, NewMessage
 from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
-from moyai.models import Session, Turn
+from moyai.models import Session
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 admitted_product = fixtures.admitted_product
