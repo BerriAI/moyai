@@ -50,7 +50,9 @@ EXECUTION_COMPATIBILITY_SCHEMA_VERSION = "2026-10-16-product-execution-v14"
 BILLING_STORAGE_SCHEMA_VERSION = "2026-10-16-product-billing-storage-v15"
 SWARM_SCHEMA_VERSION = "2026-10-16-native-swarms-v16"
 GITHUB_WORKFLOW_SCHEMA_VERSION = "2026-10-16-product-github-workflows-v17"
-PRODUCT_SCHEMA_VERSION = GITHUB_WORKFLOW_SCHEMA_VERSION
+CHARGE_RECEIPT_SCHEMA_VERSION = "2026-10-17-product-charge-receipts-v18"
+PRODUCT_SCHEMA_VERSION = CHARGE_RECEIPT_SCHEMA_VERSION
+CHARGE_RECEIPT_COLUMNS = frozenset({"billing_request_id", "billing_receipts", "billing_purpose"})
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -124,6 +126,7 @@ MIGRATIONS = (
     (SWARM_SCHEMA_VERSION, SWARM_TABLES),
     # New tool schemas/operation kinds cannot be resumed by the previous worker.
     (GITHUB_WORKFLOW_SCHEMA_VERSION, frozenset()),
+    (CHARGE_RECEIPT_SCHEMA_VERSION, frozenset()),
 )
 
 
@@ -177,6 +180,18 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         if table.name not in included:
             continue
         copy = table.to_metadata(metadata, schema=schema)
+        if table.name == "moyai_billing_records" and versions.index(version) < versions.index(
+            CHARGE_RECEIPT_SCHEMA_VERSION,
+        ):
+            for index in tuple(copy.indexes):
+                if any(column.name in CHARGE_RECEIPT_COLUMNS for column in index.columns):
+                    copy.indexes.remove(index)
+            for name in CHARGE_RECEIPT_COLUMNS:
+                copy._columns.remove(copy.c[name])
+        if table.name == "moyai_product_inference_requests" and versions.index(version) < versions.index(
+            CHARGE_RECEIPT_SCHEMA_VERSION,
+        ):
+            copy._columns.remove(copy.c.purpose)
         for column in copy.columns:
             if _is_identity(table.name, column.name):
                 column.type = String(512)
@@ -411,6 +426,25 @@ async def migrate_product_schema(
                         "owner_pid,owner_started,source_policy) "
                         "VALUES (1,0,true,'bootstrap',:fingerprint,:stamp,NULL,NULL,NULL)"
                     ), {"fingerprint": BOOTSTRAP_FINGERPRINT, "stamp": now()})
+                if revision == CHARGE_RECEIPT_SCHEMA_VERSION:
+                    await connection.execute(text(
+                        f'ALTER TABLE "{schema}".moyai_billing_records '
+                        "ADD COLUMN billing_request_id VARCHAR(36), "
+                        "ADD COLUMN billing_receipts JSONB, "
+                        "ADD COLUMN billing_purpose VARCHAR(100)"
+                    ))
+                    await connection.execute(text(
+                        f'CREATE INDEX ix_moyai_billing_records_billing_request '
+                        f'ON "{schema}".moyai_billing_records (billing_request_id)'
+                    ))
+                    await connection.execute(text(
+                        f'CREATE INDEX ix_moyai_billing_records_receipts '
+                        f'ON "{schema}".moyai_billing_records USING gin (billing_receipts)'
+                    ))
+                    await connection.execute(text(
+                        f'ALTER TABLE "{schema}".moyai_product_inference_requests '
+                        "ADD COLUMN purpose VARCHAR(100) NOT NULL DEFAULT 'unknown'"
+                    ))
                 await connection.execute(text(
                     f'INSERT INTO "{schema}"."{RECEIPTS}" (version,manifest) VALUES (:version,:manifest)'
                 ), {"version": revision, "manifest": _manifest(metadata)})
