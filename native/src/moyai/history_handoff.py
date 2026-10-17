@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from fastapi import HTTPException
 from pydantic import TypeAdapter
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, is_provider_valid
@@ -17,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from temporalio import activity
 from temporalio.contrib.workflow_streams import WorkflowStreamState
+from temporalio.exceptions import ApplicationError
 
 from .contracts import PreparedTurn, RunScope
 from .models import Effect, Event
@@ -31,6 +33,13 @@ VERSION = "moyai-agent-history-handoff-v1"
 class HistoryLimits:
     max_bytes: int
     max_events: int
+
+
+@dataclass
+class CheckpointSave:
+    """A refused checkpoint leaves the paused agent alive in this execution."""
+
+    reference: str | None = None
 
 
 @dataclass
@@ -81,24 +90,30 @@ async def history_limits() -> HistoryLimits:
 
 
 @activity.defn(name="moyai_save_history_checkpoint_v1")
-async def save_history_checkpoint(checkpoint: AgentCheckpoint) -> str:
+async def save_history_checkpoint(checkpoint: AgentCheckpoint) -> CheckpointSave:
     from .runtime import current
 
     runtime = current()
     scope = checkpoint.prepared.scope
     conversation = ConversationTypeAdapter.validate_json(checkpoint.conversation)
     if not is_provider_valid(conversation.messages) or conversation.deferred_tool_requests is not None:
-        raise ValueError("An unfinished tool batch cannot cross a history handoff.")
-    await runtime.database.authorize_scope(scope)
+        return CheckpointSave()
+    try:
+        await runtime.database.authorize_scope(scope)
+    except (PermissionError, HTTPException) as error:
+        raise ApplicationError(
+            "The turn is no longer authorized to continue.",
+            type="MoyaiHistoryAuthorizationDenied", non_retryable=True,
+        ) from error
     async with runtime.database.sessions() as db:
         pending = await db.scalar(select(Effect.id).where(
             Effect.turn_id == scope.turn_id, Effect.state == "pending",
         ).limit(1))
     if pending is not None:
-        raise PermissionError("An uncertain action cannot cross a history handoff.")
+        return CheckpointSave()
     # No plaintext checkpoint or credentials enter the history. The existing
     # immutable encrypted object store also makes activity redelivery idempotent.
-    return await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(checkpoint))
+    return CheckpointSave(await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(checkpoint)))
 
 
 @activity.defn(name="moyai_load_history_checkpoint_v1")

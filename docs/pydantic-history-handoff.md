@@ -24,7 +24,12 @@ capabilities and tool discovery reconstruct their state from the continued
 conversation. Root-only product permissions, inference accounting, saved
 activity, and public progress distinguish SDK segments from delegated runs.
 
-The agent iterator is closed at that boundary before Continue-As-New. No model
+The checkpoint must be accepted while the agent iterator and stream pollers are
+still alive. A refused checkpoint or storage failure leaves the agent running in
+the current execution; queued guidance is delivered there, and a later boundary
+can try again. Authorization loss and Stop remain terminal.
+
+After acceptance, the agent iterator is closed before Continue-As-New. No model
 request or tool batch is interrupted to make a checkpoint. Pending model input
 is drained before choosing the boundary. Guidance arriving during the handoff
 is carried to the next execution in receipt order without falsely acknowledging
@@ -63,7 +68,8 @@ during the handoff must still satisfy the normal workspace availability checks.
 
 Real Temporal regression tests cover repeated history rollover, one execution
 of each file-appending action, cumulative usage, loaded capabilities, persistent
-delegation, stream offsets, replay, and Stop/guidance during checkpoint commit.
+delegation, stream offsets, replay, no-computer turns, refused/failed checkpoint
+saves, and Stop/guidance during checkpoint commit.
 Scripted models in those tests supplement the baseline/final real-app acceptance
 run with the configured gateway and Modal.
 

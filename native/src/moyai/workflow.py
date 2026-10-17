@@ -36,7 +36,7 @@ with workflow.unsafe.imports_passed_through():
 
     from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
     from .history_handoff import VERSION as HISTORY_VERSION
-    from .history_handoff import AgentCheckpoint, HistoryHandoff, HistoryLimits
+    from .history_handoff import AgentCheckpoint, CheckpointSave, HistoryHandoff, HistoryLimits
     from .images import prompt_content
     from .product_continuation_errors import public_preparation_message
     from .product_drain import DRAIN_VERSION, DrainDecision
@@ -182,7 +182,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                 if prepared.deferred_results and resumed is None else None
             )
             initial_requests = conversation.usage.requests
-            checkpoint: AgentCheckpoint | None = None
+            checkpoint_ref: str | None = None
             async with self.events, runtime.agent.iter(
                 None if resumed else prompt_content(prepared.prompt, prepared.images),
                 conversation=conversation,
@@ -225,17 +225,41 @@ class TurnWorkflow(PydanticAIWorkflow):
                         # steering before the first await; later signals carry
                         # into the next execution without an enqueue receipt.
                         self.handing_off = True
-                        self.events.stream.detach_pollers()
-                        await workflow.wait_condition(workflow.all_handlers_finished)
-                        checkpoint = self.checkpoint(prepared, agent_run, node)
-                        break
+                        # Poll handlers do not mutate the agent. Keep them live
+                        # until persistence succeeds; detaching is irreversible.
+                        await workflow.wait_condition(
+                            lambda: not self.steered.intersection(self.pending_steering),
+                        )
+                        try:
+                            saved = await workflow.execute_activity(
+                                "moyai_save_history_checkpoint_v1",
+                                self.checkpoint(prepared, agent_run, node),
+                                result_type=CheckpointSave, **CONTROL,
+                            )
+                        except ActivityError as error:
+                            if (
+                                isinstance(error.cause, ApplicationError)
+                                and error.cause.type == "MoyaiHistoryAuthorizationDenied"
+                            ):
+                                raise
+                            workflow.logger.warning(
+                                "History checkpoint could not be saved; continuing the live agent.",
+                            )
+                            saved = CheckpointSave()
+                        if saved.reference is not None:
+                            checkpoint_ref = saved.reference
+                            self.events.stream.detach_pollers()
+                            await workflow.wait_condition(workflow.all_handlers_finished)
+                            break
+                        # An uncertain receipt or storage outage must not turn
+                        # a still-live read/finalization path into a failed turn.
+                        self.handing_off = False
+                        for steering_id in list(self.pending_steering):
+                            await self.steer(steering_id)
                 result = agent_run.result
-                if result is None and checkpoint is None:
+                if result is None and checkpoint_ref is None:
                     raise RuntimeError("The SDK ended without a run result.")
-            if checkpoint is not None:
-                checkpoint_ref = await workflow.execute_activity(
-                    "moyai_save_history_checkpoint_v1", checkpoint, result_type=str, **CONTROL,
-                )
+            if checkpoint_ref is not None:
                 await self.events.stream.continue_as_new(lambda state: [
                     turn_id, HistoryHandoff(
                         checkpoint=checkpoint_ref, stream_state=state,
@@ -358,14 +382,15 @@ class TurnWorkflow(PydanticAIWorkflow):
         }
         for name in manager.failed_tools:
             retries[name] = (manager.ctx.retries.get(name, 0) if manager.ctx else 0) + 1
+        workspace = run.ctx.deps.workspace
+        reference = workspace.ref if workspace is not None else None
         return AgentCheckpoint(
             prepared=replace(prepared, prompt="", images=[], conversation=None, deferred_results=None),
             conversation=ConversationTypeAdapter.dump_json(Conversation(
                 messages=messages, usage=run.usage, conversation_id=run.conversation_id,
             )).decode(),
             workspace=(
-                TypeAdapter(WorkspaceRef).dump_python(run.ctx.deps.workspace.ref, mode="json")
-                if run.ctx.deps.workspace.ref else None
+                TypeAdapter(WorkspaceRef).dump_python(reference, mode="json") if reference else None
             ),
             run_step=run.ctx.state.run_step,
             output_retries_used=run.ctx.state.output_retries_used,

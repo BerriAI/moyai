@@ -10,18 +10,23 @@ import pytest
 from pydantic import TypeAdapter
 from pydantic_ai import ConversationTypeAdapter, ModelRetry
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.workspaces import WorkspaceRef
 from sqlalchemy import select
 from temporalio import activity, workflow
 from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.converter import DataConverter
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
+from test_bundled_skills_startup import scripted_model
+from test_computer_startup import lazy_local_workspace
 from test_delegation_temporal import dispatching
 
+from moyai.agent import make_agent
 from moyai.contracts import NewMessage
-from moyai.history_handoff import AgentCheckpoint, is_turn_run, latest_turn_snapshot
+from moyai.history_handoff import AgentCheckpoint, CheckpointSave, is_turn_run, latest_turn_snapshot
 from moyai.live_events import PUBLIC_TOPIC, ResponseStart
 from moyai.models import Effect, Event, Session, Turn
 from moyai.presentation import saved_activity
@@ -137,7 +142,7 @@ def test_segment_identity_is_scoped_to_its_turn(run_id, expected):
     assert is_turn_run(run_id, "turn") is expected
 
 
-@pytest.mark.parametrize("action", ["steer", "stop"])
+@pytest.mark.parametrize("action", ["steer", "stop", "failed_steer"])
 @pytest.mark.parametrize("runtime", ["history"], indirect=True)
 async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, actor, monkeypatch, action):
     from moyai import history_handoff, worker
@@ -146,12 +151,14 @@ async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, act
     save = history_handoff.save_history_checkpoint
 
     @activity.defn(name="moyai_save_history_checkpoint_v1")
-    async def hold_after_commit(checkpoint: AgentCheckpoint) -> str:
+    async def hold_after_commit(checkpoint: AgentCheckpoint) -> CheckpointSave:
         reference = await save(checkpoint)
         messages = ConversationTypeAdapter.validate_json(checkpoint.conversation).messages
         if "history-append-1" in str(messages) and not entered.is_set():
             entered.set()
             await release.wait()
+            if action == "failed_steer":
+                raise ApplicationError("Checkpoint acknowledgment was lost.", non_retryable=True)
         return reference
 
     monkeypatch.setattr(worker, "ACTIVITIES", [
@@ -170,7 +177,7 @@ async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, act
                 TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
             )
             await asyncio.wait_for(entered.wait(), 45)
-            if action == "steer":
+            if action in {"steer", "failed_steer"}:
                 correction = await runtime.database.submit(actor, session.id, NewMessage(
                     prompt="NEW GUIDANCE", request_key="at-handoff", mode="asap",
                 ))
@@ -193,6 +200,78 @@ async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, act
                     saved = await db.get(Turn, turn.id)
                 assert saved.status == "stopped"
     assert (runtime.settings.data_dir.parent / "computer/handoff-ledger.txt").read_text() == "1\n"
+
+
+@pytest.mark.parametrize("outcome", ["saved", "pending_effect", "storage_error"])
+async def test_checkpoint_without_a_computer_and_refused_saves_keep_agent_alive(
+    runtime, active, monkeypatch, outcome,
+):
+    from moyai import history_handoff, worker
+
+    session, turn, prepared = active
+    allocations = []
+    attempts = 0
+
+    def respond(messages, info):
+        count = sum(
+            isinstance(part, ToolReturnPart) and part.tool_name == "read_plan"
+            for message in messages for part in message.parts
+        )
+        if count < 3:
+            return ModelResponse(parts=[ToolCallPart(
+                "read_plan", {}, tool_call_id=f"plan-read-{count}",
+            )])
+        return ModelResponse(parts=[TextPart("Completed without a computer.")])
+
+    runtime.models = {"test": scripted_model(respond)}
+    runtime.agent, runtime.durability = make_agent(
+        runtime.settings, runtime.database, runtime.stores, runtime.objects, models=runtime.models,
+        workspace=lazy_local_workspace(runtime.settings.data_dir.parent / "computer", allocations),
+    )
+    save = history_handoff.save_history_checkpoint
+
+    @activity.defn(name="moyai_save_history_checkpoint_v1")
+    async def save_or_refuse(checkpoint: AgentCheckpoint) -> CheckpointSave:
+        nonlocal attempts
+        attempts += 1
+        assert checkpoint.workspace is None
+        if outcome == "storage_error":
+            raise ApplicationError("Object storage is temporarily unavailable.", non_retryable=True)
+        if outcome == "pending_effect" and attempts == 1:
+            async with runtime.database.sessions.begin() as db:
+                db.add(Effect(
+                    id="uncertain-effect", session_id=session.id, turn_id=turn.id,
+                    actor_id=prepared.scope.actor_id, tool_name="shell",
+                    arguments=runtime.security.seal({}), fingerprint="a" * 64,
+                ))
+        return await save(checkpoint)
+
+    monkeypatch.setattr(worker, "ACTIVITIES", [
+        save_or_refuse if item is save else item for item in worker.ACTIVITIES
+    ])
+    runtime.settings.history_continue_bytes = 16384
+    converter = DataConverter(payload_codec=EncryptedPayloadCodec(runtime.security, runtime.objects))
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        async with make_worker(runtime):
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            first_run = handle.result_run_id
+            result = await asyncio.wait_for(handle.result(), 60)
+            final = await runtime.client.get_workflow_handle(turn.workflow_id).describe()
+        assert result["status"] == "completed"
+        assert (final.run_id != first_run) is (outcome == "saved")
+    assert attempts >= 1 and allocations == []
+    async with runtime.database.sessions() as db:
+        saved = await db.get(Turn, turn.id)
+        effect = await db.get(Effect, "uncertain-effect")
+    assert runtime.security.unseal(saved.result).decode() == "Completed without a computer."
+    assert json.loads(saved.usage)["requests"] == 4
+    if outcome == "pending_effect":
+        assert effect is not None and effect.state == "pending"
 
 
 @pytest.mark.parametrize("runtime", ["history_retry"], indirect=True)
