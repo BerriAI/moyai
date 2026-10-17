@@ -49,6 +49,6 @@ silently converted into new conversations, and in-flight recorded workflows keep
 their original delegation path through the Temporal version marker.
 
 Existing-product deployments require the additive
-`2026-10-16-interactive-delegation-v17` migration and native protocol revision 4
+`2026-10-16-interactive-delegation-v18` migration and native protocol revision 5
 through the coordinated maintenance release. Earlier schema receipts are preserved.
 Standalone local databases add the new link table at startup.

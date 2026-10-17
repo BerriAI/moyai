@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai import RunContext
-from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.capabilities import LocalWorkspace, Toolset
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
 from sqlalchemy import select, update
 from temporalio import workflow
@@ -171,6 +172,52 @@ async def test_full_agent_replays_pre_lazy_startup_commands(runtime, active, mon
             interceptors=[ActivityCapacity()],
         ).replay_workflow(history)
     assert len(model_calls) == 1
+
+
+async def test_prefixed_github_checkout_acquires_and_persists_first_workspace(runtime, active, actor):
+    session, turn, _ = active
+    directory = runtime.settings.data_dir.parent / "computer"
+    allocations = []
+    tools = FunctionToolset[RunScope](id="checkout-startup-test")
+
+    @tools.tool(name="github_11111111_checkout", metadata={"annotations": {"readOnlyHint": True}})
+    async def checkout(ctx: RunContext[RunScope]) -> str:
+        assert ctx.workspace.ref is not None
+        await ctx.workspace.write_bytes(str(directory / "checkout-started.txt"), b"workspace acquired")
+        return "checkout acquired its workspace"
+
+    def respond(messages, info):
+        returned = [part for message in messages for part in message.parts
+                    if isinstance(part, ToolReturnPart) and part.tool_name == "github_11111111_checkout"]
+        if not returned:
+            assert allocations == []
+            return ModelResponse(parts=[ToolCallPart("github_11111111_checkout", {}, tool_call_id="first-checkout")])
+        assert (directory / "checkout-started.txt").read_bytes() == b"workspace acquired"
+        return ModelResponse(parts=[TextPart("Checkout completed.")])
+
+    runtime.models = {"test": scripted_model(respond)}
+    runtime.agent, runtime.durability = make_agent(
+        runtime.settings, runtime.database, runtime.stores, runtime.objects, models=runtime.models,
+        workspace=lazy_local_workspace(directory, allocations), product_capabilities=[Toolset(tools)],
+    )
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        async with make_worker(runtime):
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            assert (await asyncio.wait_for(handle.result(), 30))["status"] == "completed"
+            history = await handle.fetch_history()
+        await Replayer(
+            workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            interceptors=[ActivityCapacity()],
+        ).replay_workflow(history)
+    saved = await runtime.database.session(actor, session.id)
+    assert json.loads(saved.workspace) == {"provider": "local", "id": str(directory)}
+    assert allocations == [str(directory)]
 
 
 @pytest.mark.parametrize("revocation", ["stop", "disable"])

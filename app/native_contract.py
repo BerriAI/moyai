@@ -10,7 +10,7 @@ import re
 
 CORE_IDENTITY = "pydantic-v1"
 # Interactive delegation tools and their admission schema require coordinated owners.
-NATIVE_PROTOCOL_REVISION = 4
+NATIVE_PROTOCOL_REVISION = 5
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

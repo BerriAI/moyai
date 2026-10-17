@@ -7,6 +7,8 @@ dependencies = [
     "pydantic-ai[temporal]==2.55.0",
     "openai==3.29.0",
     "pydantic-ai-harness[coder,modal,skills,github,linear,notion,slack,temporal,playwright,code-mode]==0.55.0",
+    # Harness 0.55 references FilesystemExecutionError, removed by Modal 1.6.
+    "modal>=1.5.5,<1.6",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
     "httpx>=0.28,<1",

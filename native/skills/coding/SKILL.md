@@ -17,3 +17,14 @@ description: Implement or fix code in a repository, including setup, tests, and 
 If authentication is needed, use the configured native GitHub connection.
 Never write account tokens into repository files, URLs, shell history, or output.
 Do not replace a missing integration with a mock and call it live verification.
+
+Discover the selected connection's checkout and publication tools. Preserve the
+requested repository, source ref, PR base and head. Use `publish_branch` for
+branch-only delivery and `open_pull_request` for an existing head; opening a PR
+does not grant ownership of that branch. New PRs are ready for review.
+Use a stable request key only for identical intent. After an uncertain write,
+inspect `publication_status` with the original unprefixed operation name and
+request key, including `update_pull_request` for follow-ups. Never automatically
+repeat an incomplete operation with a new key.
+Rebase publishes one prepared commit on the current base and requires the exact
+expected PR head. Never approve, merge, enable auto-merge, or clear queue blockers.

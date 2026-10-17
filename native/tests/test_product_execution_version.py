@@ -23,7 +23,9 @@ from moyai.product_config import load_product_config
 from moyai.product_schema import (
     EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
     GIT_OPERATION_SCHEMA_VERSION,
+    GITHUB_WORKFLOW_SCHEMA_VERSION,
     MIGRATIONS,
+    SWARM_SCHEMA_VERSION,
     ProductSchemaError,
     migrate_product_schema,
     verify_product_schema,
@@ -53,9 +55,9 @@ def test_execution_protocol_changes_all_native_contracts_but_preserves_legacy(
     assert config is not None
     settings = config.legacy_settings()
     legacy = settings.model_copy(update={"moyai_core": "legacy"})
-    assert native_contract.NATIVE_PROTOCOL_REVISION == 4
+    assert native_contract.NATIVE_PROTOCOL_REVISION == 5
     current, unchanged = fingerprints(settings), fingerprints(legacy)
-    monkeypatch.setattr(native_contract, "NATIVE_PROTOCOL_REVISION", 3)
+    monkeypatch.setattr(native_contract, "NATIVE_PROTOCOL_REVISION", 4)
     assert all(new != old for new, old in zip(current, fingerprints(settings), strict=True))
     assert fingerprints(legacy) == unchanged
 
@@ -69,16 +71,20 @@ async def receipts(engine: AsyncEngine, schema: str) -> dict[str, tuple[str, str
 
 
 @pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
-async def test_v13_to_v14_adds_only_receipt_and_preserves_data_and_drain(
-    product_database: ProductDatabase,
+@pytest.mark.parametrize(("before_version", "after_version", "count"), [
+    (GIT_OPERATION_SCHEMA_VERSION, EXECUTION_COMPATIBILITY_SCHEMA_VERSION, 13),
+    (SWARM_SCHEMA_VERSION, GITHUB_WORKFLOW_SCHEMA_VERSION, 16),
+])
+async def test_execution_receipt_preserves_data_and_drain(
+    product_database: ProductDatabase, before_version: str, after_version: str, count: int,
 ) -> None:
     product = product_database
     await migrate_product_schema(
-        product.source, schema=product.schema, source_schema="moyai", version=GIT_OPERATION_SCHEMA_VERSION,
+        product.source, schema=product.schema, source_schema="moyai", version=before_version,
     )
     previous = await receipts(product.source, product.schema)
-    assert len(previous) == 13
-    assert dict(MIGRATIONS)[EXECUTION_COMPATIBILITY_SCHEMA_VERSION] == frozenset()
+    assert len(previous) == count
+    assert dict(MIGRATIONS)[after_version] == frozenset()
     async with product.database.sessions.begin() as db:
         db.add(User(
             id="retained", username="retained", display_name="Retained", password="unused",
@@ -108,22 +114,22 @@ async def test_v13_to_v14_adds_only_receipt_and_preserves_data_and_drain(
     try:
         assert await migrate_product_schema(
             product.source, schema=product.schema, source_schema="moyai",
-            version=EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
-        ) == EXECUTION_COMPATIBILITY_SCHEMA_VERSION
+            version=after_version,
+        ) == after_version
         assert len(writes) == 1 and "moyai_app_schema_versions" in writes[0]
         writes.clear()
         await migrate_product_schema(
             product.source, schema=product.schema, source_schema="moyai",
-            version=EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
+            version=after_version,
         )
         assert writes == []
     finally:
         event.remove(product.source.sync_engine, "before_cursor_execute", observe)
 
     current = await receipts(product.source, product.schema)
-    assert set(current) == {*previous, EXECUTION_COMPATIBILITY_SCHEMA_VERSION}
+    assert set(current) == {*previous, after_version}
     assert all(current[version] == receipt for version, receipt in previous.items())
-    assert current[EXECUTION_COMPATIBILITY_SCHEMA_VERSION][0] == previous[GIT_OPERATION_SCHEMA_VERSION][0]
+    assert current[after_version][0] == previous[before_version][0]
     manifests = {version: receipt[0] for version, receipt in current.items()}
     target = {
         "schema": product.schema,
@@ -131,13 +137,13 @@ async def test_v13_to_v14_adds_only_receipt_and_preserves_data_and_drain(
         "harness": {"sdk_version": "2.55.0", "harness_version": "0.55.0"},
     }
     old_target = {**target, "app": {
-        version: manifest for version, manifest in manifests.items() if version != EXECUTION_COMPATIBILITY_SCHEMA_VERSION
+        version: manifest for version, manifest in manifests.items() if version != after_version
     }}
     assert migration_plan({**old_target, "state": "receipted"}, target)["apply"]
     with pytest.raises(ValueError, match="incomplete or incompatible"):
         migration_plan({**target, "state": "receipted"}, old_target)
     await verify_product_schema(
-        product.source, schema=product.schema, version=EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
+        product.source, schema=product.schema, version=after_version,
     )
     async with product.database.sessions() as db:
         user = await db.get(User, "retained")

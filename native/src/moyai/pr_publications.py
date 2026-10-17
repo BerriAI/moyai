@@ -66,7 +66,9 @@ def creation_receipt(
     """Only a successful exact creation tool and its selected grant can attest creation."""
     selected = [
         grant for grant in scope.grants
-        if grant.kind == "github" and tool_name == f"github_{grant.id[:8]}_create_pull_request"
+        if grant.kind == "github" and tool_name in {
+            f"github_{grant.id[:8]}_create_pull_request", f"github_{grant.id[:8]}_open_pull_request",
+        }
     ]
     if len(selected) != 1 or selected[0].read_only:
         return None
@@ -123,7 +125,10 @@ async def persist_publication(database: Any, scope: RunScope, identity: str, rec
         if (
             effect is None or effect.state != "confirmed" or effect.session_id != scope.session_id
             or effect.actor_id != scope.actor_id or effect.turn_id != scope.turn_id
-            or effect.tool_name != f"github_{receipt.connection_id[:8]}_create_pull_request"
+            or effect.tool_name not in {
+                f"github_{receipt.connection_id[:8]}_create_pull_request",
+                f"github_{receipt.connection_id[:8]}_open_pull_request",
+            }
         ):
             raise ValueError("A matching confirmed native effect is required.")
         fields = asdict(receipt)

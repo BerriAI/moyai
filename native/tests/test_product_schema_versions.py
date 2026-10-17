@@ -23,6 +23,7 @@ from moyai.product_schema import (
     DRAIN_SCHEMA_VERSION,
     EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
     GIT_OPERATION_SCHEMA_VERSION,
+    GITHUB_WORKFLOW_SCHEMA_VERSION,
     INFERENCE_SCHEMA_VERSION,
     MEMORY_REVIEW_SCHEMA_VERSION,
     SWARM_SCHEMA_VERSION,
@@ -161,7 +162,8 @@ async def test_additive_versions_preserve_every_earlier_receipt(product_database
     for version in (
         CREDENTIAL_REQUEST_SCHEMA_VERSION, MEMORY_REVIEW_SCHEMA_VERSION, DRAIN_SCHEMA_VERSION,
         GIT_OPERATION_SCHEMA_VERSION, EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
-        BILLING_STORAGE_SCHEMA_VERSION, SWARM_SCHEMA_VERSION, DELEGATION_SCHEMA_VERSION,
+        BILLING_STORAGE_SCHEMA_VERSION, SWARM_SCHEMA_VERSION, GITHUB_WORKFLOW_SCHEMA_VERSION,
+        DELEGATION_SCHEMA_VERSION,
     ):
         await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai", version=version)
         current = await receipts(product)
