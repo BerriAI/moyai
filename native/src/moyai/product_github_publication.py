@@ -62,10 +62,7 @@ class Publications:
         session = await self.database.allowed_session(db, self.scope.session_id, actor)
         if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
             raise ToolFailed("This publication was stopped or superseded.")
-        current = await self.database.resolve_grants(
-            db, actor.id, [item.id for item in self.scope.grants],
-            shared_session=session.visibility == "shared", surface=session.surface,
-        )
+        current = await self.database.scope_grants(db, self.scope, session)
         if self.grant not in current or self.grant.read_only:
             raise ToolFailed("Current GitHub write access is required.")
 

@@ -93,10 +93,7 @@ async def locked_scope(
         or (session.visibility == "private" and session.owner_id != scope.actor_id)
     ):
         raise PermissionError("The workspace authority changed.")
-    current = await database.resolve_grants(
-        db, scope.actor_id, [grant.id for grant in scope.grants],
-        shared_session=scope.visibility == "shared", surface=scope.surface,
-    )
+    current = await database.scope_grants(db, scope, session)
     if [(g.id, g.revision) for g in current] != [(g.id, g.revision) for g in scope.grants]:
         raise PermissionError("Workspace account access changed.")
     return session, turn

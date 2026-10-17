@@ -196,10 +196,7 @@ class ProductMemoryStore:
         return prefs, notes, inputs, repository
 
     async def _connections(self, db: AsyncSession, session: Session) -> None:
-        current = await self.service.database.resolve_grants(
-            db, self.scope.actor_id, [grant.id for grant in self.scope.grants],
-            shared_session=session.visibility == "shared", surface=session.surface,
-        )
+        current = await self.service.database.scope_grants(db, self.scope, session)
         if [(grant.id, grant.revision) for grant in current] != [
             (grant.id, grant.revision) for grant in self.scope.grants
         ]:

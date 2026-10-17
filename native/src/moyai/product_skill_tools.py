@@ -92,6 +92,7 @@ class ProductSkillTools:
         if (
             session is None or session.deleted or session.surface != "web"
             or session.visibility != scope.visibility
+            or scope.authority.visibility != session.visibility or scope.authority.surface != session.surface
             or await self.authority.automated_session(db, session.id)
             or await self.authority.human_origin(db, scope) is None
         ):

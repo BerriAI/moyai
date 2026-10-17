@@ -27,6 +27,14 @@ class Grant:
     policy: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Policy context, independent of the conversation's display/ACL context."""
+
+    visibility: str = "private"
+    surface: str = "web"
+
+
 @dataclass
 class RunScope:
     session_id: str
@@ -44,6 +52,11 @@ class RunScope:
     # Chosen by the workflow and carried into tool activities. Old payloads
     # must retain SDK delegation and its shared parent computer.
     interactive_delegation: bool = False
+    execution_context: ExecutionContext | None = None
+
+    @property
+    def authority(self) -> ExecutionContext:
+        return self.execution_context or ExecutionContext(self.visibility, self.surface)
 
     @property
     def grants_key(self) -> str:
@@ -66,9 +79,9 @@ class RunScope:
         actor_segment = self.actor_id if re.fullmatch(
             r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", self.actor_id,
         ) else "identity-" + hashlib.sha256(self.actor_id.encode()).hexdigest()
-        if self.surface == "slack":
+        if self.authority.surface == "slack":
             return f"slack/{self.session_id}/{actor_segment}/{self.grants_key}"
-        return f"{self.visibility}/{actor_segment}/{self.grants_key}"
+        return f"{self.authority.visibility}/{actor_segment}/{self.grants_key}"
 
     @property
     def workspace_key(self) -> str:

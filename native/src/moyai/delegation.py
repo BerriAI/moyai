@@ -23,7 +23,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import workflow
 
-from .contracts import Grant, NewMessage, NewSession, RunScope
+from .contracts import NewMessage, NewSession, RunScope
+from .delegation_authority import DelegatedAuthority
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .input_identity import input_identity
 from .models import Message, Session, Turn, TurnImage, User
@@ -86,10 +87,6 @@ class DelegationService:
         from .workspace import AGENT_NAMES
 
         database = self.database
-        # Admission must enforce guidance itself, including direct callers and
-        # retries. Missing historical identity belongs to the original input;
-        # it never opts out of the steering fence.
-        await database.authorize_scope(scope, input_id=input_id or scope.turn_id)
         fingerprint = hashlib.sha256(task.encode()).hexdigest()
         async with database._admission_session(None) as db:
             actor = await db.get(User, scope.actor_id)
@@ -116,6 +113,12 @@ class DelegationService:
             ).values(revision=Session.revision + 1).returning(Session.id))
             if locked is None:
                 raise PermissionError("The parent stopped before delegation was admitted.")
+            await db.refresh(parent)
+            await db.refresh(parent_turn)
+            # Hold the same fence as submission, promotion, receipts and Stop
+            # through the entire child admission. A read before taking this
+            # lock cannot decide whether the model acted on current guidance.
+            await database.authorize_scope(scope, input_id=input_id or scope.turn_id, db=db)
             previous = await db.scalar(select(DelegatedSession).where(
                 DelegatedSession.parent_turn_id == scope.turn_id,
                 DelegatedSession.tool_call_id == call_id,
@@ -128,14 +131,10 @@ class DelegationService:
             depth = ancestry.depth + 1 if ancestry else 1
             if depth > MAX_DEPTH or scope.swarm_id:
                 raise PermissionError("This conversation cannot delegate another level of work.")
-            current = await database.resolve_grants(
-                db, actor.id, [item.id for item in scope.grants],
-                shared_session=scope.visibility == "shared", surface=scope.surface,
-            )
-            if [(item.id, item.revision) for item in current] != [
-                (item.id, item.revision) for item in scope.grants
-            ]:
+            current = await database.scope_grants(db, scope, parent)
+            if current != scope.grants:
                 raise PermissionError("Connection access changed before delegation.")
+            authority = DelegatedAuthority(scope.authority, scope.grants)
             names = set(await db.scalars(select(DelegatedSession.name).where(
                 DelegatedSession.parent_session_id == parent.id,
             )))
@@ -159,7 +158,7 @@ class DelegationService:
                 request_key="delegation:" + hashlib.sha256(f"{scope.turn_id}:{call_id}".encode()).hexdigest(),
                 model=scope.model, connections=[item.id for item in scope.grants],
                 attachments=attachments,
-            ), db=db)
+            ), db=db, delegated_authority=authority)
             # A model's assignment is context, not a fresh human instruction.
             message = await db.scalar(select(Message).where(Message.identity == f"user:{turn.id}"))
             if message is not None:
@@ -171,7 +170,7 @@ class DelegationService:
                 session_id=child.id, parent_session_id=parent.id, parent_turn_id=scope.turn_id,
                 initial_turn_id=turn.id, actor_id=actor.id, tool_call_id=call_id,
                 fingerprint=fingerprint, depth=depth, name=name, avatar=seed % 4,
-                grants=database.security.seal(TypeAdapter(list[Grant]).dump_json(scope.grants)),
+                grants=database.security.seal(TypeAdapter(DelegatedAuthority).dump_json(authority)),
             ))
             await db.flush()
             db.add(DelegatedTurn(turn_id=turn.id, session_id=child.id))

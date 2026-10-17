@@ -721,7 +721,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
             <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
-            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={editing ? undefined : pictures.paste} />
+            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} sessionId={id} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={editing ? undefined : pictures.paste} />
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />

@@ -588,10 +588,7 @@ class ProductAutomationService:
         session = await self.database.allowed_session(db, scope.session_id, actor)
         if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
             raise PermissionError("The execution was stopped or superseded.")
-        current = await self.database.resolve_grants(
-            db, actor.id, [grant.id for grant in scope.grants],
-            shared_session=session.visibility == "shared", surface=session.surface,
-        )
+        current = await self.database.scope_grants(db, scope, session)
         if [(grant.id, grant.revision) for grant in current] != [(grant.id, grant.revision) for grant in scope.grants]:
             raise PermissionError("Selected connection authority changed.")
 

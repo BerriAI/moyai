@@ -125,8 +125,10 @@ class SkillInvocations:
         return list(selected.values()), display_text(remaining)
 
     async def normalize(self, prompt: str, user: User, session: Any) -> str:
+        async with self.runtime.database.sessions() as db:
+            context = await self.runtime.database.execution_context(db, session)
         selected, _ = await self.resolve(
-            prompt, actor_id=user.id, visibility=session.visibility, surface=session.surface,
+            prompt, actor_id=user.id, visibility=context.visibility, surface=context.surface,
             grant=getattr(user, "product_grant", None),
         )
         if not selected:
@@ -146,7 +148,7 @@ class SkillInvocations:
             return prompt
         await self.runtime.database.authorize_scope(scope)
         selected, remaining = await self.resolve(
-            prompt, actor_id=scope.actor_id, visibility=scope.visibility, surface=scope.surface,
+            prompt, actor_id=scope.actor_id, visibility=scope.authority.visibility, surface=scope.authority.surface,
             grant=scope.product_grant,
         )
         context = json.dumps([{
