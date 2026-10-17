@@ -62,6 +62,7 @@ def main() -> None:
     tool_names = [item.get("name") for item in trace]
     run_count = tool_names.count("credentials_run")
     gates = {
+        "no_question": not gates_spec.get("no_question") or "ask_user_question" not in tool_names,
         "credentials_list": not gates_spec.get("credentials_list") or "credentials_list" in tool_names,
         "stub_model": (
             len(requests) >= gates_spec.get("min_stub_requests", 0)

@@ -270,6 +270,23 @@ async def run_moyai_turn(
             product.actor = await product.adapter.project_native_user(db, principal)
         connections = ProductConnections(product_services, product.database)
         connections.connectors.save("slack", bot_credentials, "Eval Slack")
+        github_repository_ids = [101, 102, 103]
+        github_credentials = {
+            "kind": "github_app",
+            "installation_id": 201,
+            "account_id": 301,
+            "repository_ids": github_repository_ids,
+        }
+        connections.connectors.save("github", github_credentials, "Eval GitHub")
+        for repository_id, repository in zip(
+            github_repository_ids,
+            ("BerriAI/litellm", "BerriAI/litellm-docs", "BerriAI/moyai"),
+        ):
+            connections.store.execute(
+                "INSERT INTO github_repositories(installation_id,repository_id,owner_id,full_name,aliases) "
+                "VALUES(?,?,?,?,?)",
+                (201, repository_id, 301, repository, json.dumps([repository.lower()])),
+            )
         settings: Settings = product.settings
         settings.default_model = agent_model
         settings.model_catalog = agent_model
