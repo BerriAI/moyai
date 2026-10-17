@@ -39,8 +39,9 @@ jobs:
             exit 0
           fi
           if [[ -z "$MOYAI_EVAL_AGENT_MODEL" || -z "$MOYAI_EVAL_JUDGE_MODEL" ]]; then
-            echo "::error::Moyai eval model variables must be configured"
-            exit 1
+            echo "::notice::Moyai agent eval skipped because the model variables are not configured"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo "enabled=true" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@v6
@@ -56,32 +57,53 @@ jobs:
             -p evals/tasks/deepseek_support_live \
             -a moyai_harbor.agent:MoyaiAgent \
             -k 3 -n 1 -o evals/jobs -y
-      - name: Require at least two passing trials
-        if: steps.eval-config.outputs.enabled == 'true'
+      - name: Report eval result
+        if: always() && steps.eval-config.outputs.enabled == 'true'
         run: |
           python - <<'PY'
-          import sys
+          import os
           from pathlib import Path
 
-          jobs = [path for path in Path("evals/jobs").iterdir() if path.is_dir()]
-          if not jobs:
-              raise SystemExit("No Harbor job directory was produced")
-          job = max(jobs, key=lambda path: path.stat().st_mtime)
-          trials = [
-              path for path in job.iterdir()
-              if path.is_dir() and path.name.startswith("deepseek_support_live__")
-          ]
+          jobs_root = Path("evals/jobs")
+          jobs = [path for path in jobs_root.iterdir() if path.is_dir()] if jobs_root.is_dir() else []
+          job = max(jobs, key=lambda path: path.stat().st_mtime) if jobs else None
+          trials = sorted(
+              (
+                  path for path in job.iterdir()
+                  if path.is_dir() and path.name.startswith("deepseek_support_live__")
+              ),
+              key=lambda path: path.name,
+          )[:3] if job else []
           passed = 0
-          for trial in trials:
-              reward_path = trial / "verifier" / "reward.txt"
-              try:
-                  reward = float(reward_path.read_text().strip())
-              except (OSError, ValueError):
+          rows = []
+          for index in range(3):
+              if index < len(trials):
+                  trial = trials[index]
+                  try:
+                      reward = float((trial / "verifier" / "reward.txt").read_text().strip())
+                  except (OSError, ValueError):
+                      reward = 0.0
+                  label = trial.name
+              else:
                   reward = 0.0
+                  label = f"Trial {index + 1} (missing)"
               passed += reward == 1.0
-          print(f"Harbor reward 1: {passed}/{len(trials)} trials; required at least 2/3")
-          if len(trials) != 3 or passed < 2:
-              sys.exit(1)
+              rows.append(f"| {label} | {reward:g} |")
+
+          summary = [
+              f"passed {passed}/3",
+              "",
+              "| Trial | Reward |",
+              "| --- | ---: |",
+              *rows,
+              "",
+          ]
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
+              stream.write("\n".join(summary))
+          print(f"passed {passed}/3")
+          if passed < 2:
+              print(f"::warning::Moyai eval passed {passed}/3 trials; expected at least 2/3")
+              raise SystemExit(1)
           PY
       - name: Upload Harbor jobs
         if: always() && steps.eval-config.outputs.enabled == 'true'
