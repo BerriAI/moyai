@@ -27,6 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .analytics import ReportRange, csv_export, report_range
+from .analytics_identity import ReportIdentities, report_identities
 from .product_billing import (
     LOOKUP_CHUNK,
     MAX_RECORDS,
@@ -216,14 +217,14 @@ class ProductBillingService:
             # are only SELECTs; do not change pooled writer connection PRAGMAs.
             yield BillingReader(connection, schema=schema, max_records=self.max_records)
 
-    async def _labels(self, reader: BillingReader) -> dict[str, dict[str, Any]]:
+    async def _labels(self, reader: BillingReader, mappings: IdentityMappings) -> dict[str, dict[str, Any]]:
         users = await reader.table("users", ("id", "kind", "name", "email"), ("id", "kind"))
         values = list((await reader.connection.execute(select(users).limit(self.max_records + 1))).mappings())
         if len(values) > self.max_records:
             raise BillingReadError("too_many_accounting_identities")
         result = {}
         for row in values:
-            person = self.mappings.resolve(SourceRef("legacy", row["id"]), actor=True)
+            person = mappings.resolve(SourceRef("legacy", row["id"]), actor=True)
             if person:
                 result[person.id] = {
                     "id": person.id, "name": row.get("name") or person.id,
@@ -339,10 +340,12 @@ class ProductBillingService:
         personal: bool = False, all_details: bool = False, viewer_id: str | None = None,
         root_model: str | None = None, turn_status: str | None = None,
         include_root_cohorts: bool = False,
+        identities: ReportIdentities | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 500 or not 0 <= offset <= self.max_records * 2:
             raise HTTPException(422, "Choose a valid report page.")
         period = _period(preset, start, end)
+        mappings = identities.accounting_mappings(self.mappings) if identities is not None else self.mappings
         async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
             async with self._reader(self.source_engine, self.schema) as old:
                 async with self._reader(self.native_engine, self.native_schema) as new:
@@ -355,13 +358,13 @@ class ProductBillingService:
                     old.billing_connection = new.connection
                     policy = self.recovery_policy() if callable(self.recovery_policy) else self.recovery_policy
                     projection = await read_product_billing(
-                        old, new, period, rules=self.rules, mappings=self.mappings, policy=policy,
+                        old, new, period, rules=self.rules, mappings=mappings, policy=policy,
                         clock=datetime.now(UTC), native_bindings=self.native_bindings, links=self.observation_links,
                     )
                     cohorts = await self._root_cohorts(old, new, projection.charges) if (
                         root_model is not None or turn_status is not None or include_root_cohorts
                     ) else {}
-                labels = await self._labels(old)
+                labels = await self._labels(old, mappings)
             charges = [row for row in projection.charges if
                        (user_id is None or row.actor_id == user_id) and (model is None or row.model == model)
                        and (root_model is None and turn_status is None or any(
@@ -468,7 +471,7 @@ class ProductBillingService:
                         any(issue in row.issues for issue in ("native_scope_unbound", "unproven_observation_overlap"))
                         for row in charges
                     ),
-                    "mapping_version": self.mappings.version,
+                    "mapping_version": mappings.version,
                     "complete": all(row.cost_state == "final" and not row.issues for row in charges),
                 },
                 "capabilities": {
@@ -476,7 +479,7 @@ class ProductBillingService:
                 },
                 "methodology": {
                     "cost": "Recorded final USD amounts only. Estimates are separate; unresolved overlaps never add a second charge.",
-                    "identity": "Explicit versioned mappings and saved Slack links; equal IDs across engines are not identity proof.",
+                    "identity": "Explicit versioned mappings, verified product mirrors and saved Slack links; equal IDs across engines are not identity proof.",
                     "dates": "UTC. Date-only end inputs are inclusive; timestamp end inputs are exclusive. Duplicate observations use the broker's request timestamp only after proven linkage.",
                     "model": "Canonical requested inference alias; conflicting aliases remain unattributed.",
                     "root_model": "Root model and status filters include historical sessions and native turns.",
@@ -522,12 +525,18 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
                 raise HTTPException(403, "Another account's spending is unavailable.")
             user_id = own.id
         try:
+            identities = await report_identities(runtime) if runtime is not None else None
+            if identities is not None and not personal:
+                from .analytics_billing import selected_user
+
+                user_id = selected_user(service, identities, user_id)
             value = await service.report(
                 preset=preset, start=start, end=end, user_id=user_id, model=model,
                 limit=limit, offset=offset, personal=personal, all_details=format == "csv" and export == "requests",
                 viewer_id=principal.id,
                 root_model=root_model, turn_status=turn_status,
                 include_root_cohorts=include_activity,
+                identities=identities,
             )
             activity_export = None
             if include_activity:
@@ -543,7 +552,7 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
                     runtime, native_user, value["start_at"], value["end_before"], root_model,
                     turn_status, user_id, limit, offset,
                     "csv" if format == "csv" and export in {"turns", "users", "daily", "models"} else "json",
-                    preset=preset, export=export, billing=service, billing_data=value,
+                    preset=preset, export=export, billing=service, billing_data=value, identities=identities,
                 )
                 if isinstance(activity, Response):
                     activity_export = activity

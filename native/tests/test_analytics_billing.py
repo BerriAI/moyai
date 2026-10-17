@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 import pytest_asyncio
 import test_product_billing as billing_fixtures
 from fastapi import HTTPException
@@ -278,3 +280,102 @@ async def test_explicit_accounting_map_groups_activity_before_distinct_counts(ru
             assert person["sessions_active"] == 1  # Both actors used the same session.
             assert person["requests"] == 3
             assert person["cost_usd_exact"] == body["summary"]["cost_usd_exact"] == "0.623400000000000002"
+
+
+@pytest.mark.parametrize("bound", [True, False])
+@pytest.mark.parametrize("target", [None, "mapped-person"])
+async def test_verified_product_mirror_shares_billing_activity_and_filters(runtime, actor, shared, bound, target):
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(User).where(User.id == actor.id).values(
+            username="product:" + hashlib.sha256(actor.id.encode()).hexdigest(),
+        ))
+    shared.service.mappings = IdentityMappings(
+        "test-map", "explicit-test-mapping",
+        actors={SourceRef("legacy", actor.id): target} if target else {},
+    )
+    original = shared.service.mappings
+    if not bound:
+        shared.service.native_bindings = {}
+    canonical = target or f"legacy:{actor.id}"
+    expected = "0.323400000000000002" if bound else "0.123400000000000001"
+    async with client_for(runtime, actor) as client:
+        for path in ("/api/settings/billing", "/api/settings/usage"):
+            for selected in (None, actor.id, canonical):
+                response = await client.get(path, params=params(
+                    **({"include_activity": "true"} if path.endswith("billing") else {}),
+                    **({"user_id": selected} if selected else {}),
+                ))
+                assert response.status_code == 200, response.text
+                value = response.json()
+                activity = value.get("activity", value)
+                person, = activity["by_user"]
+                assert person["user_id"] == canonical
+                assert person["turns"] == person["sessions_active"] == 1
+                assert person["cost_usd_exact"] == activity["summary"]["cost_usd_exact"] == expected
+                assert person["requests"] == (2 if bound else 1)
+                assert person["unknown_requests"] == (0 if bound else 1)
+                if "activity" in value:
+                    assert [row["id"] for row in value["users"]] == [canonical]
+                    assert value["total"]["cost_usd_exact"] == expected
+    # Report attribution is request-local, never a mutation of the configured mappings.
+    assert shared.service.mappings is original
+
+
+async def test_unverified_equal_ids_remain_separate_in_canonical_report(runtime, actor, shared):
+    shared.service.mappings = IdentityMappings("test-map", "source-namespaces")
+    async with client_for(runtime, actor) as client:
+        response = await client.get("/api/settings/billing", params=params(include_activity="true"))
+        assert response.status_code == 200
+        value = response.json()
+        people = {row["user_id"]: row for row in value["activity"]["by_user"]}
+        assert set(people) == {f"legacy:{actor.id}", f"native:{actor.id}"}
+        assert people[f"native:{actor.id}"]["turns"] == 1
+        assert people[f"native:{actor.id}"]["cost_usd_exact"] == "0.200000000000000001"
+        assert people[f"legacy:{actor.id}"]["cost_usd_exact"] == "0.123400000000000001"
+
+
+async def test_verified_linked_alias_keeps_explicit_native_override(runtime, actor, shared):
+    other = await member(runtime)
+    async with runtime.database.sessions.begin() as db:
+        for identity in (actor.id, other.id):
+            await db.execute(update(User).where(User.id == identity).values(
+                username="product:" + hashlib.sha256(identity.encode()).hexdigest(),
+            ))
+    async with shared.source.begin() as db:
+        await db.execute(text("INSERT INTO users(id,kind,linked_user_id) VALUES (:id,'slack',:target)"),
+                         {"id": other.id, "target": actor.id})
+    session, turn = await observation(runtime, other, known=False)
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(Session).where(Session.id == session.id).values(visibility="private"))
+    native = await ledger(runtime, other, session, turn, cost="0.3")
+    shared.service.mappings = IdentityMappings("override", "configured-override", actors={
+        SourceRef("native", other.id): "separate-account",
+    })
+    shared.service.native_bindings = {
+        **shared.service.native_bindings,
+        SourceRef("native", native.id): NativeBinding(
+            SCOPE, RequestIdentity("broker_request", "linked-native-request"), "fixture", "1",
+        ),
+    }
+    async with client_for(runtime, actor) as client:
+        for selected in (other.id, "separate-account"):
+            response = await client.get("/api/settings/billing", params=params(
+                include_activity="true", user_id=selected,
+            ))
+            assert response.status_code == 200, response.text
+            value = response.json()
+            person, = value["activity"]["by_user"]
+            assert person["user_id"] == "separate-account"
+            assert person["turns"] == person["requests"] == 1
+            assert person["cost_usd_exact"] == value["total"]["cost_usd_exact"] == "0.3"
+    # Removing the override restores the verified saved link in both views.
+    shared.service.mappings = IdentityMappings("empty", "source-namespaces")
+    async with client_for(runtime, actor) as client:
+        response = await client.get("/api/settings/billing", params=params(include_activity="true"))
+        assert response.status_code == 200, response.text
+        value = response.json()
+        person, = value["activity"]["by_user"]
+        assert person["turns"] == 2 and person["requests"] == 3
+        assert person["cost_usd_exact"] == value["total"]["cost_usd_exact"] == "0.623400000000000002"
+        assert native.id not in str(value["request_details"])
+        assert turn.id not in str(value["activity"]["rows"])

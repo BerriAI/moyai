@@ -28,7 +28,7 @@ from .analytics import (
     usage_totals,
     utc,
 )
-from .analytics_identity import report_identities
+from .analytics_identity import ReportIdentities, report_identities
 from .inference_usage import InferenceUsage
 from .models import Effect, ProductTurnAuthority, Session, Turn, User
 from .pr_publications import PRPublication, verified_status
@@ -316,6 +316,7 @@ async def report(
     *, preset: str = "7d", export: str = "turns", service: PullRequestService | None = None,
     billing: ProductBillingService | None = None,
     billing_data: dict[str, Any] | None = None,
+    identities: ReportIdentities | None = None,
 ) -> Any:
     if user.role != "admin" or not user.enabled:
         raise HTTPException(403, "Administrator access is required.")
@@ -324,7 +325,7 @@ async def report(
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
     lower, upper = period.start.isoformat(), period.end.isoformat()
-    identities = await report_identities(runtime)
+    identities = identities if identities is not None else await report_identities(runtime)
     people: dict[str, str] = {}
     actor_ids = identities.actors(user_id)
     person = identities.canonical

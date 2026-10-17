@@ -19,15 +19,18 @@ from .product_billing_routes import ProductBillingService, _totals
 
 def identity_map(service: ProductBillingService, identities: ReportIdentities) -> dict[str, str]:
     result = {}
+    mappings = identities.accounting_mappings(service.mappings)
     for user in identities.users:
         identity = user["id"]
         source = SourceRef("legacy" if identity in identities.product_ids else "native", identity)
-        resolved = service.mappings.resolve(source, actor=True)
+        resolved = mappings.resolve(source, actor=True)
         assert resolved is not None
         result[identity] = resolved.id
     for actor, canonical in identities.canonical_ids.items():
         if canonical in result:
-            result[actor] = result[canonical]
+            resolved = mappings.resolve(SourceRef("native", actor), actor=True)
+            assert resolved is not None
+            result[actor] = resolved.id
     return result
 
 
@@ -39,7 +42,7 @@ def selected_user(
     people = identity_map(service, identities)
     if user_id in set(people.values()) | set(service.mappings.actors.values()):
         return user_id
-    return people.get(identities.canonical(user_id), user_id)
+    return people.get(user_id, people.get(identities.canonical(user_id), user_id))
 
 
 def chart_amount(value: str | None) -> float | None:
@@ -74,7 +77,7 @@ async def read(
             start=start, end=end, preset=preset,
             user_id=selected_user(service, identities, user_id),
             root_model=model, turn_status=status, include_root_cohorts=True,
-            viewer_id=viewer_id, limit=1,
+            viewer_id=viewer_id, limit=1, identities=identities,
         )
     except BillingReadError as error:
         bounded = str(error).startswith("too_many_")

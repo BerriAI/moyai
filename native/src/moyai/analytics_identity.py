@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, text
 
 from .models import User
+from .product_billing import IdentityMappings, SourceRef
 
 MAX_IDENTITIES = 50_000
 
@@ -30,6 +31,24 @@ class ReportIdentities:
         return {canonical} | {
             actor_id for actor_id, person_id in self.canonical_ids.items() if person_id == canonical
         }
+
+    def accounting_mappings(self, configured: IdentityMappings) -> IdentityMappings:
+        """Join verified product mirrors for this report, preserving explicit overrides.
+
+        canonical_ids contains only mirrors verified against the product directory,
+        including saved Slack links. This is actor attribution, never request
+        reconciliation or permission to disclose private session details.
+        """
+        actors = dict(configured.actors)
+        for actor, canonical in self.canonical_ids.items():
+            target = configured.resolve(SourceRef("legacy", canonical), actor=True)
+            assert target is not None
+            actors.setdefault(SourceRef("native", actor), target.id)
+        return IdentityMappings(
+            configured.version + "+verified-product-mirrors-v1",
+            configured.provenance + ";verified-product-directory",
+            actors=actors, sessions=configured.sessions,
+        ) if actors != configured.actors else configured
 
 
 async def report_identities(runtime: Any) -> ReportIdentities:

@@ -127,6 +127,12 @@ financial projection, including historical and native records. The activity
 view reuses that projection rather than reading and summing billing again.
 Its session, turn and PR measurements retain their native activity scope.
 
+Each request uses one verified product-directory identity snapshot for accounting
+and activity. Verified native product mirrors, including saved Slack links, use
+the same actor namespace as historical charges; explicit configured mappings
+take precedence. Equal raw IDs alone never join accounts. These report mappings
+do not grant private-session access or establish missing charge provenance.
+
 The existing `/api/settings/usage` URL remains a compatibility adapter for
 clients expecting the older dashboard shape. `/api/admin/spend` and personal
 `/api/spend` retain their existing scopes. They do not own separate spend
