@@ -16,7 +16,7 @@ import "./workspace.css"
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type AttachmentKind = "pull_request" | "output"
 type Link = { id?: string; kind: AttachmentKind | "source"; url: string; title: string; origin: "attached" | "mentioned"; can_remove: boolean }
-export type Subagent = { id: string; parent_id: string; session_id?: string | null; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number }
+export type Subagent = { id: string; parent_id: string; session_id?: string | null; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number; model?: string | null; task?: string | null }
 type PanelAgent = Pick<Subagent, "id" | "name" | "status" | "avatar"> & Partial<Pick<Subagent, "can_inspect">>
 type WorkspaceData = {
   links: Link[]; files: { id: string; name: string; url: string; size: number; media_type?: string }[]
@@ -94,6 +94,10 @@ function useWorkspaceResources(id: string, enabled = true, expanded = true) {
 }
 
 const WorkspaceResourceContext = createContext<ReturnType<typeof useWorkspaceResources> | null>(null)
+
+export function useWorkspaceResource() {
+  return useContext(WorkspaceResourceContext)
+}
 
 /** Resource refreshes update the key/menu, not the conversation or its editor. */
 export function WorkspaceResourceProvider({ id, visible, expanded, children }: {

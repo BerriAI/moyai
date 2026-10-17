@@ -447,6 +447,7 @@ class SwarmService:
         ).distinct()))
         return {
             "id": mission.id, "status": mission.status, "reason": mission.reason,
+            "title": next((session.title for member, session in rows if member.position == 0), ""),
             "revision": mission.revision, "generation": mission.generation, "round": mission.round,
             "goal": self.database.security.unseal(mission.goal).decode(),
             "budget_seconds": mission.budget_seconds, "ends_at": mission.ends_at,

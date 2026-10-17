@@ -168,6 +168,8 @@ async def test_workspace_opens_child_as_session_and_exposes_parent_link(runtime,
     async with sign_in(runtime) as client:
         overview = (await client.get(f"/api/sessions/{parent.id}/workspace")).json()
         assert overview["subagents"][0]["session_id"] == child["session_id"]
+        assert overview["subagents"][0]["task"] == "Independent task"
+        assert overview["subagents"][0]["model"] == prepared.scope.model
         response = await client.get(f"/api/sessions/{child['session_id']}")
         assert response.status_code == 200
         assert response.json()["session"]["parent_session_id"] == parent.id

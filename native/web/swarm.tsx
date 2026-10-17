@@ -1,12 +1,14 @@
 import React, { useEffect, useId, useRef, useState } from "react"
-import { ExternalLink, MessageSquare, Orbit, Pause, Play, Square, Users } from "lucide-react"
+import { ExternalLink, Pause, Play, Square } from "lucide-react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ApiError, api, csrfToken } from "./api"
+import { AgentViewSwitch } from "./agent-space"
 import { SwarmSpace } from "./swarm-space"
 import "./swarm.css"
 
@@ -18,7 +20,7 @@ type Member = {
 type Post = { id: string; sequence: number; kind: string; author: string; author_session_id: string | null; content: string; created_at: string }
 export type SwarmView = {
   id: string; status: string; reason: string; revision: number; generation: number; round: number
-  goal: string; budget_seconds: number; ends_at: string | null; leader_id: string | null
+  goal: string; title?: string; budget_seconds: number; ends_at: string | null; leader_id: string | null
   can_control: boolean; sequence: number; members: Member[]; posts: Post[]; has_more: boolean; next_after: number
 }
 
@@ -66,9 +68,42 @@ export function SwarmSetup({ value, onChange, models, disabled }: {
   </fieldset>
 }
 
-export function SwarmPanel({ sessionId, visible = true, onChanged, space = false, onSpaceChange }: {
+function SwarmWindow({ data, visible, busy, onChange }: {
+  data: SwarmView; visible: boolean; busy: boolean; onChange: (seconds: number) => void
+}) {
+  const [now, setNow] = useState(Date.now)
+  const countdown = Boolean(data.ends_at && ["active", "paused"].includes(data.status))
+  useEffect(() => {
+    if (!visible || !countdown) return
+    setNow(Date.now())
+    const timer = setInterval(() => { if (!document.hidden) setNow(Date.now()) }, 1000)
+    return () => clearInterval(timer)
+  }, [visible, countdown, data.ends_at])
+  const seconds = Math.max(0, Math.ceil((Date.parse(data.ends_at ?? "") - now) / 1000)) || 0
+  const duration = data.budget_seconds % 3600 === 0 ? `${data.budget_seconds / 3600}h`
+    : data.budget_seconds % 60 === 0 ? `${data.budget_seconds / 60}m` : `${data.budget_seconds}s`
+  const label = !data.budget_seconds ? "No time limit" : countdown
+    ? `${Math.floor(seconds / 3600)}:${String(Math.floor(seconds / 60) % 60).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")} left`
+    : `${duration} window`
+  const timeOptions = windows.some(option => option.value === String(data.budget_seconds)) ? windows
+    : [...windows, { value: String(data.budget_seconds), label: `${duration} window` }]
+  if (!data.can_control) return <span className="swarm-meta">{label}</span>
+  return <Popover><PopoverTrigger asChild>
+    <Button className="swarm-clock" variant="ghost" size="sm" aria-label="Change work window">{label}</Button>
+  </PopoverTrigger><PopoverContent className="swarm-time-card" aria-label="Work window">
+    <label htmlFor={`window-${data.id}`}>Work window</label>
+    <Select disabled={busy} value={String(data.budget_seconds)} onValueChange={value => onChange(Number(value))}>
+      <SelectTrigger id={`window-${data.id}`} aria-label="Change swarm work window"><SelectValue /></SelectTrigger>
+      <SelectContent>{timeOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+    </Select>
+    <p>{data.ends_at ? `Ends ${new Date(data.ends_at).toLocaleString()}. Includes startup, queueing and pauses.`
+      : "Works until the goal is complete, or you pause or stop it."}</p>
+  </PopoverContent></Popover>
+}
+
+export function SwarmPanel({ sessionId, visible = true, onChanged, space = false, spaceBlocked = false, onSpaceChange }: {
   sessionId: string; visible?: boolean; onChanged: () => Promise<unknown>
-  space?: boolean; onSpaceChange?: (value: boolean) => void
+  space?: boolean; spaceBlocked?: boolean; onSpaceChange?: (value: boolean) => void
 }) {
   const [data, setData] = useState<SwarmView | null>(null)
   const [error, setError] = useState("")
@@ -119,39 +154,33 @@ export function SwarmPanel({ sessionId, visible = true, onChanged, space = false
 
   if (!data) return <p className="notice" role="status">{error ? `Team details are unavailable. ${error}` : "Loading team…"}</p>
   const active = data.status === "active", workers = data.members.filter(member => !member.coordinator)
-  const timeOptions = windows.some(option => option.value === String(data.budget_seconds)) ? windows
-    : [...windows, { value: String(data.budget_seconds), label: `${Math.round(data.budget_seconds / 60)} minutes` }]
   return <section className="swarm-panel" aria-label="Swarm mission">
     <div className="swarm-heading">
-      <Button variant="ghost" size="sm" aria-expanded={space || expanded} onClick={() => {
+      <Button className="swarm-heading-title" variant="ghost" size="sm" aria-expanded={space || expanded} onClick={() => {
         if (space) { onSpaceChange?.(false); setExpanded(false) } else setExpanded(value => !value)
-      }}><Users size={16} />Swarm · {workers.length} workers</Button>
-      <span className={`status ${active ? "running" : ""}`}>{data.status === "attention" ? "Needs attention" : data.status}</span>
-      <span className="muted">Round {data.round}</span>
-      {onSpaceChange && <div className="swarm-view-switch" role="group" aria-label="Swarm view">
-        <Button variant={space ? "secondary" : "ghost"} size="sm" aria-pressed={space} onClick={() => onSpaceChange(true)}><Orbit size={14} />Space</Button>
-        <Button variant={!space ? "secondary" : "ghost"} size="sm" aria-pressed={!space} onClick={() => { onSpaceChange(false); setExpanded(true) }}><MessageSquare size={14} />Chat</Button>
-      </div>}
-      {sessionId !== data.id && <a href={`#${data.id}`}>Open mission <ExternalLink size={12} /></a>}
-      {data.can_control && <div className="swarm-controls">
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => void control(active ? "pause" : "resume")}>
-          {active ? <Pause size={13} /> : <Play size={13} />}{active ? "Pause team" : "Resume team"}
+      }}>Swarm <span>{workers.length} workers</span></Button>
+      <span className="swarm-state" data-state={data.status}>{data.status === "attention" ? "Needs attention" : data.status}</span>
+      <span className="swarm-meta">Round {data.round}</span>
+      <SwarmWindow data={data} visible={visible} busy={busy} onChange={seconds => void control("time", seconds)} />
+      <div className="swarm-toolbar">
+        {onSpaceChange && <AgentViewSwitch space={space} disabled={spaceBlocked} onChange={value => {
+          if (!value) setExpanded(true)
+          onSpaceChange(value)
+        }} />}
+        {sessionId !== data.id && <a className="swarm-mission-link" href={`#${data.id}`} aria-label="Open mission"><ExternalLink size={13} /><span>Mission</span></a>}
+        {data.can_control && <div className="swarm-controls">
+        <Button size="sm" variant="ghost" aria-label={active ? "Pause team" : "Resume team"} disabled={busy} onClick={() => void control(active ? "pause" : "resume")}>
+          {active ? <Pause size={13} /> : <Play size={13} />}{active ? "Pause" : "Resume"}
         </Button>
-        <Button size="sm" variant="ghost" disabled={busy || data.status === "stopped"} onClick={() => void control("stop")}><Square size={12} />Stop team</Button>
-      </div>}
+        <Button className="swarm-stop" size="sm" variant="ghost" aria-label="Stop team" disabled={busy || data.status === "stopped"} onClick={() => void control("stop")}><Square size={12} />Stop</Button>
+        </div>}
+      </div>
     </div>
     {error && <p className="error" role="alert">{error}</p>}
     {data.reason && <p className="notice" role="status">{data.reason}</p>}
     {!active && data.members.some(member => member.status === "waiting") &&
       <p className="notice">Pending questions and approvals are saved. Resume the team before answering.</p>}
     {(space || expanded) && <div className={`swarm-details${space ? " swarm-space-details" : ""}`}>
-      <div className="swarm-window">
-        {data.can_control && <Select disabled={busy} value={String(data.budget_seconds)} onValueChange={value => void control("time", Number(value))}>
-          <SelectTrigger aria-label="Change swarm work window"><SelectValue /></SelectTrigger>
-          <SelectContent>{timeOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-        </Select>}
-        <span className="muted">{data.ends_at ? `Work window ends ${new Date(data.ends_at).toLocaleString()}` : "Works until the goal is complete, or you pause or stop it."}</span>
-      </div>
       {space ? <SwarmSpace data={data} sessionId={sessionId} visible={visible} onConversation={() => { setExpanded(true); onSpaceChange?.(false) }} /> : <>
       <div className="swarm-roster" aria-label="Swarm members">{data.members.map(member => <a
         key={member.session_id} href={`#${member.session_id}`} aria-current={member.session_id === sessionId ? "page" : undefined}

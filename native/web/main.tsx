@@ -22,7 +22,8 @@ import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { SessionTitle } from "./session-title"
-import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
+import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey, type Subagent } from "./workspace"
+import { SubagentSpacePanel } from "./subagent-space"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
 import { FilesPanel, OutputPanel } from "./output"
@@ -417,6 +418,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
+  const [hasSubagents, setHasSubagents] = useState(false)
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
   const [accountRevision, setAccountRevision] = useState(0)
@@ -459,6 +461,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setHasSubagents(false); setSwarmSpace(null)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
@@ -671,6 +674,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
+  function openSubagent(agent: Subagent) {
+    if (agent.session_id) { window.location.hash = agent.session_id; return }
+    openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })
+  }
   function openOutput(resource: OutputResource, sourceSessionId = id) {
     openTab({
       id: `output:${sourceSessionId}:${resource.kind}:${resource.id ?? resource.url}`,
@@ -682,14 +689,17 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     openTab({ id: kind === "side-chat" ? `side-chat:new:${crypto.randomUUID()}` : kind, kind, title: titles[kind] })
   }
   // Questions and effect reviews remain in the conversation where they can be answered.
-  const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
-    && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
+  const spaceBlocked = Boolean(view.pending || view.credential_requests?.length || view.has_unsettled_effects)
+  const space = Boolean(!sideMode && (session.swarm_id || hasSubagents)
+    && (swarmSpace ?? session.swarm_id === id) && !spaceBlocked)
   const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
         {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
-          space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
+          space={space} spaceBlocked={spaceBlocked} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
+        {!session.swarm_id && !sideMode && <SubagentSpacePanel key={id} session={session}
+          space={space} blocked={spaceBlocked} onSpaceChange={setSwarmSpace} onAvailable={setHasSubagents} onOpen={openSubagent} />}
         {originalSessionId && !space && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>
           <ProductHistoryPrefix sessionId={originalSessionId} scopeKey={`${authorityKey}:${connectionVersion}`} active={visible} onOpenSession={openSessionReference} />
         </React.Suspense>}
@@ -765,10 +775,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       {!sideMode && <WorkspaceOverlayContent>
         <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
           onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
-          onSubagent={agent => {
-            if (agent.session_id) { window.location.hash = agent.session_id; return }
-            openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })
-          }}
+          onSubagent={openSubagent}
           onSubagentSideChat={agent => {
             if (agent.session_id) openTab({ id: `side-chat:${agent.session_id}`, kind: "side-chat", sessionId: agent.session_id, title: agent.name })
           }}
@@ -781,7 +788,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     {chat}
   </div>
   return <div className="conversation">
-    <WorkspaceResourceProvider id={id} visible={visible} expanded={workspaceOpen}>
+    <WorkspaceResourceProvider id={id} visible={visible} expanded={workspaceOpen || space || session.status === "running"}>
     <WorkspaceOverlay open={workspaceOpen} onOpenChange={setWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
     <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
       <header className="topbar">

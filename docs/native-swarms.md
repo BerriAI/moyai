@@ -30,14 +30,28 @@ activity and dispatch settings still govern execution capacity. Removing the ros
 maximum does not change those settings or provider quotas.
 
 Each member has a persistent native conversation and its own Modal computer.
-The mission opens in **Space**, a live constellation of the actual saved team,
-adapted from the original swarm space view in #362. Every worker remains reachable,
-including larger teams and narrow screens. Nodes show the selected model, current
-status, worker lead, and most recent public finding or saved reply among the latest
-50 board posts. The shared feed shows the six latest public team updates.
+The mission opens in **Space**, an orbital view of the actual saved team.
+The elected worker lead is the central sun; before the election, the coordinator
+occupies the center. Numbered planets show each member's current status.
+Select a planet to read its assignment, selected model and latest public finding
+or saved reply among the latest 50 board posts, then open its conversation.
+The collapsed **Team updates** feed retains the six latest public updates.
+Narrow screens and large teams page the orbits so every member stays reachable.
 Updates refresh with the existing three-second mission poll; they are not private
-reasoning or a token stream. Animated connections indicate active work, not messages.
-Reduced motion keeps a static graph that still refreshes when team state changes.
+reasoning or a token stream. Faint connections indicate active work, not messages.
+Planet positions remain stable while statuses refresh, and reduced motion is
+respected by the detail popovers.
+
+Ordinary conversations with delegated subagents also offer **Space | Chat**.
+Their parent agent is the central sun, and the existing workspace inventory
+supplies the planets. Persistent subagents open their own conversations; earlier
+SDK delegates open the existing details panel. Private tasks and model details
+remain visible only to the requester. Eligible persistent subagents retain their
+individual Stop action. Swarm Pause/Stop still controls the entire team.
+
+A finite work window appears as time remaining in the compact swarm header.
+Owners can select that label to change the window; completed or stopped teams
+show the configured duration. Unlimited teams show **No time limit**.
 
 Select a member or reply to open its conversation. **Chat** restores the roster,
 full recent board, and mission conversation without discarding the composer draft.

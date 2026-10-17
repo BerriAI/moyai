@@ -12,9 +12,25 @@
 .swarm-models { display: grid; gap: 8px; margin-top: 12px; }
 .swarm-models label { display: flex; gap: 8px; overflow-wrap: anywhere; }
 .swarm-panel { flex: 0 0 auto; min-width: 0; padding: 12px 20px; border-bottom: 1px solid var(--ui-border); }
-.swarm-heading { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swarm-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 32px; font-size: 11px; }
+.swarm-heading-title, .swarm-heading-title[data-slot="button"] { display: inline-flex; align-items: center; gap: 12px; padding: 0; font-size: 11px; font-weight: 400; text-transform: uppercase; letter-spacing: .12em; color: var(--ui-foreground); background: transparent; }
+.swarm-heading-title > span, .swarm-meta, .swarm-clock { color: var(--ui-muted); font-size: 10px; font-weight: 400; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+.swarm-clock { padding-inline: 0; font-variant-numeric: tabular-nums; }
+.swarm-state { display: inline-flex; align-items: center; gap: 7px; text-transform: uppercase; letter-spacing: .12em; font-size: 10px; color: var(--ui-muted); }
+.swarm-state::before { content: ""; width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
+.swarm-state[data-state="active"], .swarm-state[data-state="completed"] { color: var(--ui-success); }
+.swarm-state[data-state="attention"] { color: var(--ui-danger); }
+.swarm-state[data-state="paused"] { color: var(--ui-warning); }
+.swarm-toolbar { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+.swarm-stop[data-slot="button"] { color: var(--ui-danger); }
+.swarm-mission-link { display: inline-flex; align-items: center; gap: 4px; color: var(--ui-muted); font-size: 11px; }
+.swarm-time-card[data-slot="popover-content"] { width: 280px; max-width: calc(100vw - 24px); font: 13px/1.5 var(--ui-font); }
+.swarm-time-card > label { display: block; margin-bottom: 10px; }
+.swarm-time-card > p { color: var(--ui-muted); font-size: 11px; margin: 10px 0 0; }
+.orbit-limited { text-align: center; font-size: 11px; }
 .swarm-heading > a { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
-.swarm-controls { display: flex; gap: 4px; margin-left: auto; }
+.swarm-controls { display: flex; gap: 4px; }
+.swarm-controls [data-slot="button"] { font-size: 11px; font-weight: 400; padding-inline: 8px; }
 .swarm-view-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--ui-border); border-radius: 8px; }
 .swarm-details { margin-top: 12px; max-height: 45vh; overflow: auto; scrollbar-gutter: stable; }
 .swarm-window { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; }
@@ -37,7 +53,10 @@
 @media (max-width: 600px) {
   .swarm-panel { padding: 12px; }
   .swarm-roster { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .swarm-controls { width: 100%; margin-left: 0; }
+  .swarm-heading { gap: 4px 8px; }
+  .swarm-heading-title, .swarm-heading-title[data-slot="button"] { gap: 8px; font-size: 10px; letter-spacing: .08em; }
+  .swarm-heading-title > span, .swarm-meta, .swarm-clock, .swarm-state { font-size: 9px; letter-spacing: .04em; }
+  .swarm-toolbar { width: 100%; margin-left: 0; justify-content: space-between; gap: 6px; }
   .swarm-controls button { min-height: 44px; }
   .swarm-setup { padding: 16px; }
   .swarm-settings-row { grid-template-columns: 1fr; gap: 16px; }

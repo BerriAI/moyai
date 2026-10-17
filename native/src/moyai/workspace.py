@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai_harness.step_persistence import RunRecord
 from sqlalchemy import delete, select, update
+from sqlalchemy.orm import load_only
 
 from .delegation_models import DelegatedSession
 from .links import PR_MENTION, LinkInput, save_link
@@ -183,18 +184,24 @@ def routes(runtime: Runtime, actor) -> APIRouter:
                     mentioned.append({**item.model_dump(), "origin": "mentioned", "can_remove": False})
         subagents, truncated = await native_subagents(runtime, session_id, turns, user)
         async with runtime.database.sessions() as db:
-            children = (await db.execute(select(DelegatedSession, Session).join(
+            children = (await db.execute(select(DelegatedSession, Session, Turn.prompt).join(
                 Session, Session.id == DelegatedSession.session_id,
+            ).join(
+                Turn, Turn.id == DelegatedSession.initial_turn_id,
             ).where(
                 DelegatedSession.parent_session_id == session_id, Session.deleted.is_(False),
-            ).order_by(DelegatedSession.created_at).limit(101))).all()
+            ).options(load_only(Session.id, Session.title, Session.model, Session.status))
+                .order_by(DelegatedSession.created_at).limit(101))).all()
             subagents = [{
                 "id": link.initial_turn_id, "parent_id": link.parent_turn_id,
                 "session_id": child.id if link.actor_id == user.id else None,
                 "name": child.title if link.actor_id == user.id else link.name,
                 "avatar": link.avatar, "status": child.status,
                 "started_at": link.created_at, "can_inspect": link.actor_id == user.id, "depth": 0,
-            } for link, child in children[:100]] + subagents
+                "model": child.model if link.actor_id == user.id else None,
+                "task": runtime.security.unseal(initial_prompt).decode().split("\n\n", 1)[-1][:1600]
+                if link.actor_id == user.id else None,
+            } for link, child, initial_prompt in children[:100]] + subagents
             truncated = truncated or len(children) > 100
         await recheck(user, session_id)
         return {

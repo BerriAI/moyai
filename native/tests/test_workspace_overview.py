@@ -24,6 +24,7 @@ from test_images_and_computer import image_bytes
 from test_sidebar import member_client
 
 from moyai.contracts import NewMessage, NewSession
+from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
 from moyai.models import Session, SessionLink, SubagentLabel, Turn, User, new_id
 from moyai.storage import encrypted_converter
@@ -144,6 +145,28 @@ async def test_nested_colon_ids_follow_requester_ancestry_and_keep_stable_public
         for run_id in (owner_run, private_run, owner_turn.id, "unrelated-orphan", "missing"):
             assert (await member.get(f"{path}/subagents/{run_id}")).status_code == 404
         assert (await member.get(f"/api/sessions/{private.id}/workspace")).status_code == 404
+
+
+async def test_persistent_subagent_card_withholds_task_and_model_from_other_viewers(runtime, actor):
+    parent = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    turn = await runtime.database.submit(actor, parent.id, NewMessage(
+        prompt="Delegate a bounded review.", request_key="orbit-task",
+    ))
+    await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+    child = await DelegationService(runtime.database).start(
+        prepared.scope, "orbit-child", "Private delegated requirement " + "x" * 2000,
+    )
+    async with sign_in(runtime) as owner, member_client(runtime) as (viewer, _):
+        path = f"/api/sessions/{parent.id}/workspace"
+        own = (await owner.get(path)).json()["subagents"][0]
+        other = (await viewer.get(path)).json()["subagents"][0]
+        assert own["session_id"] == child["session_id"]
+        assert own["model"] == prepared.scope.model
+        assert own["task"].startswith("Private delegated requirement") and len(own["task"]) == 1600
+        assert other["session_id"] is None and not other["can_inspect"]
+        assert other["model"] is None and other["task"] is None
+        assert "Private delegated requirement" not in str(other)
 
 
 async def test_cyclic_or_unrooted_lineage_never_authorizes_from_conversation_id(runtime, actor):
