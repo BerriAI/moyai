@@ -11,7 +11,7 @@ from test_product_authority import demote
 
 from moyai.models import ProductTurnAuthority, Session, Turn
 from moyai.product_schema import (
-    EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
+    MIGRATIONS,
     SWARM_SCHEMA_VERSION,
     SWARM_TABLES,
     migrate_product_schema,
@@ -35,23 +35,30 @@ async def receipt_rows(product):
 
 async def test_swarm_schema_preserves_prior_receipts_and_requires_explicit_provisioning(product_database):
     product = product_database
+    versions = [version for version, _ in MIGRATIONS]
+    target_index = versions.index(SWARM_SCHEMA_VERSION)
+    # Other additive migrations may precede this historical step. Include their
+    # receipts before checking that the swarm migration adds only its own.
     await migrate_product_schema(
         product.source, schema=product.schema, source_schema="moyai",
-        version=EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
+        version=versions[target_index - 1],
     )
     before = await receipt_rows(product)
-    assert len(before) == 14
+    assert len(before) == target_index
     async with product.source.connect() as db:
         for name in SWARM_TABLES:
             assert await db.scalar(text("SELECT to_regclass(:name)"), {"name": f"{product.schema}.{name}"}) is None
     assert await migrate_product_schema(
         product.source, schema=product.schema, source_schema="moyai",
+        version=SWARM_SCHEMA_VERSION,
     ) == SWARM_SCHEMA_VERSION
     after = await receipt_rows(product)
     assert set(after) == {*before, SWARM_SCHEMA_VERSION}
     assert all(after[key] == value for key, value in before.items())
-    await verify_product_schema(product.source, schema=product.schema)
-    await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai")
+    await verify_product_schema(product.source, schema=product.schema, version=SWARM_SCHEMA_VERSION)
+    await migrate_product_schema(
+        product.source, schema=product.schema, source_schema="moyai", version=SWARM_SCHEMA_VERSION,
+    )
     assert await receipt_rows(product) == after
 
 
