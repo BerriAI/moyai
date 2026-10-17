@@ -22,6 +22,7 @@ from scripts.release.native_migration import candidate_manifest
 from scripts.release.native_probe import (COUNTS as NATIVE_COUNTS, CORE_COUNTS as NATIVE_CORE_COUNTS,
     migration_plan as native_migration_plan)
 from scripts.release.native_control import owner as native_owner, validate as validate_native_control
+from scripts.release.billing_migration import validate as validate_billing
 
 COUNTS = ('unsafe_sessions', 'executing_sessions', 'legacy_active_sessions',
           'model_requests', 'live_leases')
@@ -86,7 +87,8 @@ class MaintenanceRelease(RollingRelease):
     def __init__(self, *args, contract=maintenance_contract,
                  migration_plan=candidate_migration_plan, offline_migrate=None,
                  target_core='preserve', native_manifest=candidate_manifest, native_migrate=None,
-                 native_control=None, automation_probe=None, **kwargs):
+                  native_control=None, automation_probe=None, consolidate_billing=False,
+                  billing_storage=None, **kwargs):
         super().__init__(*args, contract=contract, migration_plan=migration_plan, **kwargs)
         self.offline_migrate = offline_migrate
         self.running = {}
@@ -110,6 +112,11 @@ class MaintenanceRelease(RollingRelease):
         self.legacy_schedule_count = None
         self.legacy_automation_receipt = None
         self.batch: dict[str, Replacement] = {}
+        if type(consolidate_billing) is not bool:
+            raise ReleaseError('Billing consolidation must be explicitly selected; no changes made.')
+        self.consolidate_billing = consolidate_billing
+        self.billing_storage = billing_storage
+        self.billing_before = None
 
     @property
     def native_maintenance(self):
@@ -503,6 +510,56 @@ class MaintenanceRelease(RollingRelease):
         # the DDL transaction and never retries an uncertain schema write.
         super().migrate_schema(plan)
 
+    def prepare_billing_cutover(self, schema_plan):
+        if not self.consolidate_billing:
+            return
+        if (not self.native_maintenance or self.baseline['schema'] < 22
+                or schema_plan is not None or not self.native_plan
+                or self.native_plan['apply'] or not callable(self.billing_storage)):
+            raise ReleaseError(
+                'Billing cutover requires an existing native cluster with fully provisioned schemas '
+                'and the guarded billing transport. Deploy schema changes and backfill first; no changes made.')
+        service = self.expected[COORDINATOR]
+        try:
+            self.billing_before = deepcopy(validate_billing(
+                self.billing_storage(service, 'status'),
+                source_schema=service.env['MOYAI_DATABASE_SCHEMA'],
+                native_schema=service.env['MOYAI_NATIVE_SCHEMA']))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise ReleaseError(
+                'Billing cutover requires completed backfills and matching source/ledger records; no changes made.') from None
+        self.record['billing_consolidation'] = {
+            'before': deepcopy(self.billing_before), 'status': 'planned', 'confirmed': False, 'verified': False}
+
+    def consolidate_billing_storage(self):
+        self.unchanged()
+        if (not self.consolidate_billing or self.billing_before is None or not self.native_maintenance
+                or not self.drained or self.identities or self.selected is not None or self.batch
+                or not all(s.env['RENDER_MIGRATION_STAGE'] == 'true' for s in self.running.values())):
+            raise ReleaseError('Billing consolidation requires all four owners retired and services staged.')
+        service = self.expected[COORDINATOR]
+        entry = self.record['billing_consolidation']
+        expected = {key: deepcopy(self.baseline[key]) for key in ('schema', 'policy', 'contracts')}
+        expected.update({key: [] for key in INVENTORIES})
+        expected.update(sha=self.record['commit'], source_schema=self.candidate['schema'],
+            source_schema_digest=self.candidate['source_schema_digest'], native_required=True,
+            native=deepcopy(self.native_inventory), native_drain=deepcopy(self.native_control_receipt))
+        already = self.billing_before['phase'] == 'consolidated'
+        entry.update(status='verifying' if already else 'requested', confirmed=False)
+        self.phase('Verify the single billing ledger' if already else
+                   'Consolidate prepared billing tables with all runtime owners stopped')
+        result = self.billing_storage(service, 'status' if already else 'consolidate', expected)
+        try:
+            validate_billing(result, source_schema=service.env['MOYAI_DATABASE_SCHEMA'],
+                native_schema=service.env['MOYAI_NATIVE_SCHEMA'], consolidated=True)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise ReleaseError(
+                'Billing cutover result is uncertain or mismatched; no activation or retry was attempted.') from None
+        entry.update(status='already_consolidated' if already else 'consolidated',
+                     confirmed=not already, verified=True, after=deepcopy(result))
+        self.save()
+        self.unchanged()
+
     def transition_service(self, service, sha, changes, *, release_drain=False):
         self.unchanged()
         self.configure(service, changes)
@@ -863,6 +920,7 @@ class MaintenanceRelease(RollingRelease):
                 and self.candidate['contracts'] != self.baseline['contracts']):
             raise ReleaseError('A changed role contract requires coordinator compatibility to change as well; no changes made.')
         plan = self.plan_schema(states)
+        self.prepare_billing_cutover(plan)
         self.record.update(previous={sid: {'role': service.role, 'sha': service.sha,
             'deploy_id': service.deploy_id, 'owner': self.identities[sid],
             'default_harness': states[sid]['default_harness']} for sid, service in self.expected.items()},
@@ -892,7 +950,10 @@ class MaintenanceRelease(RollingRelease):
                 return
             if (not self.core_changes and not self.harness_changes
                     and not (self.native_plan and self.native_plan['apply'])
+                    and not (self.consolidate_billing and self.billing_before['phase'] != 'consolidated')
                     and all(service.sha == sha for service in self.expected.values())):
+                if self.consolidate_billing:
+                    self.record['billing_consolidation'].update(status='already_consolidated', verified=True)
                 self.record['status'] = 'success'
                 self.phase('Selected build is already active on all four roles')
                 return
@@ -940,6 +1001,8 @@ class MaintenanceRelease(RollingRelease):
                 self.migrate_offline(plan)
             if self.native_plan:
                 self.migrate_native()
+            if self.consolidate_billing:
+                self.consolidate_billing_storage()
             activation = (COORDINATOR, BROKER) if self.native_maintenance else (
                 COORDINATOR, BROKER, WORKER, self.api_service_id)
             for sid in activation:

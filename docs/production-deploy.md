@@ -174,6 +174,35 @@ The first legacy-to-native adoption has additional source-automation pause and
 original-queue preservation checks. Follow the full [deployment contract](pydantic-deployment.md)
 for that transition. A maintenance release includes a service interruption.
 
+## Finish physical billing consolidation
+
+First deploy the canonical/native billing schemas, retain a current database
+backup, and complete both backfills using the [billing storage procedure](billing-storage.md).
+Then select **maintenance**, **pydantic** (or **preserve** on a native cluster),
+and **consolidate_billing: true** in the deployment workflow. Start with
+**preflight_only: true** to inspect the saved billing comparison.
+
+This option requires an existing native cluster with the candidate's schema
+receipts already provisioned. Preflight reads the storage receipt, verifies both
+backfills and mirrors, checks source table definitions and compares every mapped
+field. It performs no backfill or financial-data mutation. Ordinary releases
+default this option to false.
+
+The actual release drains and stages all four roles, verifies zero owners, and
+then records one billing cutover intent before invoking the installed migrator.
+The migrator rechecks the release's policy, ownership, safe-work counts, native
+receipts and paused generation while holding its exclusive canonical lock. Its
+atomic cutover verifies the data again and replaces the two original stores with
+compatibility views. Activation follows only a confirmed one-store receipt.
+Unsupported constraints or dependent objects can still reject the final DDL;
+the transaction then retains the original stores.
+
+An explicit request performs this maintenance sequence even when the selected
+build is already deployed. If that build already has a verified consolidated
+ledger, the workflow only verifies it. An uncertain cutover response leaves the
+services staged for inspection and never retries or restores tables automatically.
+The CLI equivalent is `--release-type maintenance --consolidate-billing`.
+
 ## Failure and recovery
 
 An uncertain control-plane write or migration result stops the release at its

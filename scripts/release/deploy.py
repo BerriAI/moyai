@@ -530,9 +530,14 @@ def main():
                         help='Explicit candidate core. A core switch requires maintenance; preserve keeps the running selection.')
     parser.add_argument('--preflight', action='store_true', default=os.environ.get('PREFLIGHT_ONLY') == 'true',
                         help='Check CI, credentials and the current topology without changing production.')
+    parser.add_argument('--consolidate-billing', action='store_true',
+                        default=os.environ.get('CONSOLIDATE_BILLING') == 'true',
+                        help='Consolidate already-backfilled billing tables during native maintenance.')
     args = parser.parse_args()
     if args.core != 'preserve' and args.release_type != 'maintenance':
         raise ReleaseError('Explicit core selection requires a maintenance release; no changes made.')
+    if args.consolidate_billing and args.release_type != 'maintenance':
+        raise ReleaseError('Billing consolidation requires a maintenance release; no changes made.')
     if os.environ.get('GITHUB_REPOSITORY') != REPOSITORY or os.environ.get('GITHUB_REF') != 'refs/heads/main':
         raise ReleaseError('Production deployment may only run from main in BerriAI/moyai.')
     if args.release_type == 'coordinated' and os.environ.get('MOYAI_API_SERVICE_ID'):
@@ -559,12 +564,15 @@ def main():
             from scripts.release.native_control import SSHNativeControl
             from scripts.release.automation_probe import SSHAutomationProbe
             from scripts.release.online_migration import SSHMigration
+            from scripts.release.billing_migration import SSHBillingStorage
             release = MaintenanceRelease(render, github, SSHMaintenanceProbe(key_path, connections=connections),
                                          args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
                                          migrate=SSHMigration(key_path), offline_migrate=SSHMaintenanceMigration(key_path),
                                          target_core=args.core, native_migrate=SSHNativeMigration(key_path),
                                          native_control=SSHNativeControl(key_path, connections=connections),
                                          automation_probe=SSHAutomationProbe(key_path, connections=connections),
+                                         consolidate_billing=args.consolidate_billing,
+                                         billing_storage=SSHBillingStorage(key_path, connections=connections),
                                          preflight_only=args.preflight)
         elif args.release_type == 'rolling':
             from scripts.release.native_rolling_deploy import NativeRollingRelease
