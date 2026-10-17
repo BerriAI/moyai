@@ -467,7 +467,7 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
     {id:'personal-team',name:'team',description:'Investigate a bug with a team.',scope:'personal',reference:'personal:team',icon:'👥'},
     {id:'org-team',name:'team',description:'Organization workflow.',scope:'organization',reference:'org:team',icon:'code'},
   ];
-  reset({status:'completed',skills});
+  reset({status:'completed',skills,sessionOverrides:{['c'.repeat(32)]:{title:'Skill draft session'}}});
   const page=await pageFor(t,'#',width), input=page.getByRole('textbox',{name:'Message Moyai'});
   await page.getByRole('checkbox',{name:'Private session · Only you',exact:true}).check();
   await input.fill('Please use /team');
@@ -491,12 +491,16 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   assert.equal(await saved.locator('svg[data-skill-icon="team"]').count(),1);
   assert.match(await saved.locator('..').innerText(),/Please use Team to inspect the issue\./);
   state.skills=skills;
-  await page.goto(base+'/#'+sessionId);await input.fill('/team');await options.waitFor();
+  await page.goto(base+'/#'+sessionId);
+  await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
+  await input.fill('/team');await options.waitFor();
   await input.press('ArrowDown');await input.press('Tab');
   await mention.waitFor();assert.match(await mention.getAttribute('title'),/org:team/);
   await input.press('Backspace');await input.press('Backspace');await input.press('Backspace');
   assert.equal(await mention.count(),0);
-  await input.fill('/nomatch');await page.getByRole('status').filter({hasText:'No matching skills'}).waitFor();
+  assert.equal(await input.textContent(),'');
+  await input.pressSequentially('/nomatch');await page.getByRole('status').filter({hasText:'No matching skills'}).waitFor();
+  assert.equal(await input.innerText(),'/nomatch');
   await input.fill('/team');await options.waitFor();await input.press('Escape');await options.waitFor({state:'hidden'});
   assert.equal(await input.innerText(),'/team');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
