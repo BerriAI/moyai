@@ -107,13 +107,14 @@
 }
 @media (max-width: 600px) {
   .session-title-input { font-size: 16px; }
-  .conversation .topbar { min-height: 52px; height: 52px; padding-left: 54px; padding-right: 8px; gap: 4px; }
-  .conversation > .workspace { grid-template-rows: 52px minmax(0, 1fr); }
+  .conversation .topbar { min-height: 56px; height: 56px; padding: 5px 8px 5px 54px; align-items: center; gap: 4px; }
+  .conversation > .workspace { grid-template-rows: 56px minmax(0, 1fr); }
   .conversation .session-heading .privacy-icon { display: none; }
   .conversation .header-controls .header-new-session { display: none; }
-  .conversation .header-controls > button, .conversation .header-controls [data-slot="popover-trigger"] { min-height: 44px; width: 40px; }
+  .conversation .topbar .header-controls > button, .conversation .topbar .header-controls [data-slot="popover-trigger"] { min-height: 44px; height: 44px; width: 40px; }
+  .main:has(.conversation) > .mobile-menu { top: 6px; width: 40px; height: 44px; }
   .main:has(.tabbed-panel:not([hidden])) > .mobile-menu { display: none; }
-  .panel-tabbar { height: 52px; min-height: 52px; padding: 3px 4px; }
+  .panel-tabbar { height: 56px; min-height: 56px; padding: 5px 4px; }
   .panel-tab { max-width: 170px; }
   .panel-tab > [role="tab"], .panel-tab .panel-tab-close { min-height: 44px; }
   .panel-tab .panel-tab-close { width: 32px; }
@@ -121,5 +122,5 @@
   .panel-tab-actions > button[title="Expand panel"], .panel-tab-actions > button[title="Restore size"] { display: none; }
   .panel-add-search input, .side-chat-search input { font-size: 16px; }
   .workspace-resource-popover { border-radius: 12px; padding: 8px 12px; max-height: calc(100dvh - 76px); }
-  .workspace-popover-anchor { height: 52px; }
+  .workspace-popover-anchor { height: 56px; }
 }
