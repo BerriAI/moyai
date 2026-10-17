@@ -3,15 +3,21 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
+from socket import socket
 from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
+import boto3
 import httpx
 import sqlalchemy
+from botocore.config import Config
 from cryptography.fernet import Fernet
+from moto.server import ThreadedMotoServer
 from moyai.models import SlackThread, Turn
 from moyai.product_config import (
     NATIVE_KEY_FORMAT,
@@ -31,6 +37,7 @@ from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
 from pydantic import SecretStr
 from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
+from pydantic_ai.capabilities.abstract import leaf_capabilities
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 from temporalio.testing import WorkflowEnvironment
@@ -47,6 +54,10 @@ BOT_USER = "UBOT00001"
 SLACK_USER = "UTEST0001"
 TEAM = "TTEST0001"
 CHANNEL = "CTEST0001"
+OBJECT_STORAGE_BUCKET = "synthetic-bucket"
+OBJECT_STORAGE_REGION = "us-east-1"
+OBJECT_STORAGE_ACCESS_KEY_ID = "synthetic-key-id"
+OBJECT_STORAGE_SECRET_ACCESS_KEY = "synthetic-secret"
 
 
 def conversation_trace(conversation_json: str | None, security: Any) -> list[dict[str, Any]]:
@@ -70,7 +81,8 @@ def conversation_trace(conversation_json: str | None, security: Any) -> list[dic
 
 
 def product_environment(
-    data_dir: Path, database_url: str, native_schema: str, agent_model: str,
+    data_dir: Path, database_url: str, native_schema: str, agent_model: str, *,
+    object_storage_endpoint: str,
 ) -> dict[str, str]:
     gateway_url = os.getenv("LITELLM_API_BASE") or os.environ["LITELLM_GATEWAY_BASE_URL"]
     gateway_url = gateway_url.rstrip("/")
@@ -111,16 +123,40 @@ def product_environment(
         "AGENT_MODEL": agent_model,
         "DATA_DIR": str(data_dir),
         "OBJECT_STORAGE_PREFIX": "moyai",
-        "OBJECT_STORAGE_BUCKET": "synthetic-bucket",
-        "OBJECT_STORAGE_ENDPOINT": "http://127.0.0.1:9000",
-        "OBJECT_STORAGE_ACCESS_KEY_ID": "synthetic-key-id",
-        "OBJECT_STORAGE_SECRET_ACCESS_KEY": "synthetic-secret",
-        "OBJECT_STORAGE_SESSION_TOKEN": "synthetic-session",
+        "OBJECT_STORAGE_BUCKET": OBJECT_STORAGE_BUCKET,
+        "OBJECT_STORAGE_ENDPOINT": object_storage_endpoint,
+        "OBJECT_STORAGE_REGION": OBJECT_STORAGE_REGION,
+        "OBJECT_STORAGE_ACCESS_KEY_ID": OBJECT_STORAGE_ACCESS_KEY_ID,
+        "OBJECT_STORAGE_SECRET_ACCESS_KEY": OBJECT_STORAGE_SECRET_ACCESS_KEY,
         "SLACK_BOT_ENABLED": "true",
         "SLACK_THREAD_CHAT_ENABLED": "true",
         "SLACK_SESSION_USERS": SLACK_USER,
         "SLACK_SIGNING_SECRET": "synthetic-eval-signing-secret",
     }
+
+
+@contextmanager
+def moto_object_storage() -> Iterator[str]:
+    with socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = int(reservation.getsockname()[1])
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=port)
+    server.start()
+    try:
+        host, port = server.get_host_and_port()
+        endpoint = f"http://{host}:{port}"
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name=OBJECT_STORAGE_REGION,
+            aws_access_key_id=OBJECT_STORAGE_ACCESS_KEY_ID,
+            aws_secret_access_key=OBJECT_STORAGE_SECRET_ACCESS_KEY,
+            config=Config(s3={"addressing_style": "path"}),
+        )
+        client.create_bucket(Bucket=OBJECT_STORAGE_BUCKET)
+        yield endpoint
+    finally:
+        server.stop()
 
 
 def seed_credentials(runtime: Runtime, values: dict[str, str]) -> None:
@@ -154,71 +190,110 @@ async def run_moyai_turn(
         await migrate_product_schema(
             product.source, schema=product.schema, source_schema="moyai",
         )
-        environment = product_environment(
-            root_dir / "legacy-store", product.settings.database_url, product.schema, agent_model,
-        )
-        product_config = load_product_config(environment)
-        if product_config is None:
-            raise RuntimeError("Could not load the eval's existing-product configuration.")
-        settings = Settings.model_validate(product_config.native_overrides())
-        provisioner = NativeStores(settings.model_copy(update={"product_mode": "standalone"}))
-        try:
-            await provisioner.start(provision=True)
-        finally:
-            await provisioner.close()
-        async with product.source.begin() as connection:
-            await install_source_continuation_fence(
-                connection, source_schema="moyai", native_schema=product.schema,
+        with moto_object_storage() as object_storage_endpoint:
+            return await run_runtime_turn(
+                case,
+                trial=trial,
+                thread=thread,
+                credentials=credentials,
+                workspace=workspace,
+                agent_model=agent_model,
+                root_dir=root_dir,
+                product=product,
+                object_storage_endpoint=object_storage_endpoint,
             )
-        await verify_source_continuation_fence(
-            product.source, source_schema="moyai", native_schema=product.schema,
+
+
+async def run_runtime_turn(
+    case: dict[str, Any],
+    *,
+    trial: int,
+    thread: list[dict[str, Any]],
+    credentials: dict[str, str],
+    workspace: HarborWorkspace,
+    agent_model: str,
+    root_dir: Path,
+    product: Any,
+    object_storage_endpoint: str,
+) -> dict[str, Any]:
+    environment = product_environment(
+        root_dir / "legacy-store", product.settings.database_url, product.schema, agent_model,
+        object_storage_endpoint=object_storage_endpoint,
+    )
+    product_config = load_product_config(environment)
+    if product_config is None:
+        raise RuntimeError("Could not load the eval's existing-product configuration.")
+    settings = Settings.model_validate(product_config.native_overrides())
+    provisioner = NativeStores(settings.model_copy(update={"product_mode": "standalone"}))
+    try:
+        await provisioner.start(provision=True)
+    finally:
+        await provisioner.close()
+    async with product.source.begin() as connection:
+        await install_source_continuation_fence(
+            connection, source_schema="moyai", native_schema=product.schema,
         )
-        runtime = Runtime(settings, product_config=product_config)
-        try:
-            async with await WorkflowEnvironment.start_local(
-                plugins=[PydanticAIPlugin()],
-                data_converter=encrypted_converter(runtime.security, runtime.objects),
-            ) as temporal:
-                runtime.client = temporal.client
-                skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
-                if skills.return_code != 0:
-                    raise RuntimeError("Could not prepare the workspace skill directory.")
-                await runtime.start(workspace=workspace, skills_directory="skills")
-                assert runtime.product_connections is not None
-                assert runtime.product_slack is not None
-                configure(runtime)
-                bot_credentials = {
-                    "access_token": "synthetic-slack-user-token",
-                    "bot": {
-                        "access_token": "synthetic-slack-bot-token",
-                        "bot_user_id": BOT_USER,
-                        "team": {"id": TEAM},
-                        "scope": "channels:history,groups:history,chat:write",
-                    },
+    await verify_source_continuation_fence(
+        product.source, source_schema="moyai", native_schema=product.schema,
+    )
+    runtime = Runtime(settings, product_config=product_config)
+    try:
+        async with await WorkflowEnvironment.start_local(
+            plugins=[PydanticAIPlugin()],
+            data_converter=encrypted_converter(runtime.security, runtime.objects),
+        ) as temporal:
+            runtime.client = temporal.client
+            skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
+            if skills.return_code != 0:
+                raise RuntimeError("Could not prepare the workspace skill directory.")
+            await runtime.start(workspace=workspace, skills_directory="skills")
+            assert runtime.product_connections is not None
+            assert runtime.product_slack is not None
+            configure(runtime)
+            bot_credentials = {
+                "access_token": "synthetic-slack-user-token",
+                "bot": {
+                    "access_token": "synthetic-slack-bot-token",
+                    "bot_user_id": BOT_USER,
+                    "team": {"id": TEAM},
+                    "scope": "channels:history,groups:history,chat:write",
+                },
+            }
+            runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
+            seed_credentials(runtime, credentials)
+            async with make_worker(runtime):
+                result = await execute_turn(
+                    case, trial=trial, thread=thread, runtime=runtime, temporal=temporal,
+                    workspace=workspace,
+                )
+                result["credential_tool_calls"] = {
+                    name: any(call["name"] == name for call in result["tool_trace"])
+                    for name in CREDENTIAL_TOOLS
                 }
-                runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
-                seed_credentials(runtime, credentials)
-                async with make_worker(runtime):
-                    result = await execute_turn(
-                        case, trial=trial, thread=thread, runtime=runtime, temporal=temporal,
-                    )
-                    result["credential_tool_calls"] = {
-                        name: any(call["name"] == name for call in result["tool_trace"])
-                        for name in CREDENTIAL_TOOLS
-                    }
-                    result.pop("turn_id")
-                    return result
-        finally:
-            await runtime.close()
+                result.pop("turn_id")
+                return result
+    finally:
+        await runtime.close()
 
 
-async def offered_tool_names(runtime: Runtime, turn_id: str) -> list[str]:
+async def offered_tool_names(
+    runtime: Runtime, turn_id: str, workspace: HarborWorkspace,
+) -> list[str]:
     prepared = await runtime.database.prepare(turn_id)
     context = RunContext(
         deps=prepared.scope,
         model=runtime.models[prepared.scope.model],
         usage=RunUsage(),
+        agent=runtime.agent,
     )
+    context.capabilities = {
+        str(index): capability
+        for index, capability in enumerate(leaf_capabilities(runtime.agent.root_capability))
+    }
+    workspace_backend = workspace.get_workspace(context, ref=workspace.reference)
+    if workspace_backend is None:
+        raise RuntimeError("The Harbor workspace is unavailable to the Runtime agent.")
+    context.workspace = workspace_backend
     names: set[str] = set()
     for toolset in runtime.agent.toolsets:
         names.update((await toolset.get_tools(context)).keys())
@@ -232,6 +307,7 @@ async def execute_turn(
     thread: list[dict[str, Any]],
     runtime: Runtime,
     temporal: Any,
+    workspace: HarborWorkspace,
 ) -> dict[str, Any]:
     service = runtime.product_slack
     assert service is not None and runtime.product_connections is not None
@@ -279,7 +355,7 @@ async def execute_turn(
     if turn is None:
         raise RuntimeError(f"ProductSlack did not submit a turn for {case['id']}.")
     await runtime.database.claim_next()
-    available_tools = await offered_tool_names(runtime, turn.id)
+    available_tools = await offered_tool_names(runtime, turn.id, workspace)
     handle = await temporal.client.start_workflow(
         TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
     )

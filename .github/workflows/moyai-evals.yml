@@ -53,7 +53,7 @@ jobs:
         env:
           PYTHONPATH: .:evals:native/src:native/tests
         run: |
-          uv run --project native --python 3.13 --with harbor==0.24.0 --with openai==3.29.0 harbor run \
+          uv run --project native --python 3.13 --with harbor==0.24.0 --with 'moto[server]==5.1.4' --with openai==3.29.0 harbor run \
             -p evals/tasks/deepseek_support_live \
             -a moyai_harbor.agent:MoyaiAgent \
             -k 3 -n 1 -o evals/jobs -y
