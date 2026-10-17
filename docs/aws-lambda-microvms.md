@@ -92,6 +92,11 @@ guest disk space. A failed/oversized save preserves the answer and reports that
 automatic restoration is unavailable. No blank replacement or uncertain command
 replay is used to recover a missing computer.
 
+Lambda does not use suspension. VM lifetime follows `MOYAI_COMPUTER_TIMEOUT`,
+capped at eight hours; `MOYAI_COMPUTER_IDLE_TIMEOUT` applies only to Modal.
+Completed turns save checkpoints, while the VM remains available until explicit
+termination or lifetime expiry.
+
 Prepared environment snapshots remain provider-specific: a Modal environment
 image cannot be used as a Lambda image. Plain repository preparation and native
 file continuations use the selected provider. Interactive desktop streaming is
