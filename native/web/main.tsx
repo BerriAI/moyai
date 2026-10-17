@@ -860,43 +860,59 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   const requestKey = useRef(crypto.randomUUID())
+  const submitting = useRef(false)
   const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
   const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
-  const complete = questions.every(({ call, questions }) => questions.every(question => {
+  const isComplete = (nextValues: typeof values, nextCustom: typeof custom) => questions.every(({ call, questions }) => questions.every(question => {
     const key = `${call.tool_call_id}:${question.header}`
-    return Boolean(custom[key]?.trim() || values[key]?.length)
+    return Boolean(nextCustom[key]?.trim() || nextValues[key]?.length)
   })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
+  const requiresContinue = pending.approvals.length > 0 || credentials.length > 0
+  async function submit(nextValues = values, nextCustom = custom) {
+    if (submitting.current || unknown) return
+    if (!isComplete(nextValues, nextCustom)) {
+      setError(requiresContinue ? "Complete the remaining questions and approval requests before continuing." : "Answer the remaining questions before continuing.")
+      return
+    }
+    submitting.current = true
+    setBusy(true); setError("")
+    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
+      const key = `${call.tool_call_id}:${question.header}`
+      return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
+    }) }]))
+    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }); await onDone() }
+    catch (e) { setError(String(e)) } finally { submitting.current = false; setBusy(false) }
+  }
   return <>
     {credentials.map(call => {
       const requestId = pending.metadata?.[call.tool_call_id]?.request_id
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
-    {(questions.length > 0 || pending.approvals.length > 0) && <form className={questions.length ? "question-form" : "pending"} onSubmit={async e => {
-    e.preventDefault()
-    if (busy || unknown || !complete) return
-    setBusy(true); setError("")
-    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
-      const key = `${call.tool_call_id}:${question.header}`
-      return { header: question.header, selected: custom[key]?.trim() ? [] : values[key] ?? [], custom_answer: custom[key]?.trim() || null }
-    }) }]))
-    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }); await onDone() }
-    catch (e) { setError(String(e)) } finally { setBusy(false) }
-  }}>
+    {(questions.length > 0 || pending.approvals.length > 0) && <form className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
     {questions.length
-      ? <div className="question-form-header"><MessageCircleQuestion size={18} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3></div>
+      ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{busy && <span className="question-send-status" role="status">Sending…</span>}</div>
       : <h3>Your input is needed</h3>}
     {questions.map(({ call, questions }) => questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
       return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={busy}
-        onSelect={selected => setValues(previous => ({ ...previous, [key]: selected }))}
-        onCustomAnswer={value => setCustom(previous => ({ ...previous, [key]: value }))} />
+        onSelect={selected => {
+          if (submitting.current) return
+          const nextValues = { ...values, [key]: selected }, nextCustom = { ...custom, [key]: "" }
+          setValues(nextValues); setCustom(nextCustom)
+          if (!question.multi_select && !requiresContinue && isComplete(nextValues, nextCustom)) void submit(nextValues, nextCustom)
+        }}
+        onCustomAnswer={value => {
+          if (submitting.current) return
+          setCustom(previous => ({ ...previous, [key]: value }))
+          if (value.trim()) setValues(previous => ({ ...previous, [key]: [] }))
+        }} />
     }))}
     {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={busy} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
     {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
     {error && <p className="error" role="alert">{error}</p>}
-    <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={busy || unknown || !complete}>{busy ? "Sending…" : questions.length ? "Send" : "Continue"}</Button></div>
+    {requiresContinue && <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={busy || unknown || !isComplete(values, custom)}>{busy ? "Submitting…" : "Continue"}</Button></div>}
   </form>}
   </>
 }

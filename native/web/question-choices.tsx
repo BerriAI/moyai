@@ -1,6 +1,6 @@
 import React, { useId, useRef } from "react"
 import { Check, Pencil } from "lucide-react"
-import { Checkbox as CheckboxPrimitive, RadioGroup } from "radix-ui"
+import { Checkbox as CheckboxPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import "./question-choices.css"
@@ -27,7 +27,6 @@ export function QuestionChoices({ question, selected, customAnswer, disabled, on
   const active = customAnswer.trim() ? [] : selected
   function choose(label: string) {
     if (disabled) return
-    onCustomAnswer("")
     onSelect(question.multi_select
       ? active.includes(label) ? active.filter(value => value !== label) : [...active, label]
       : [label])
@@ -35,6 +34,22 @@ export function QuestionChoices({ question, selected, customAnswer, disabled, on
   function shortcut(event: React.KeyboardEvent<HTMLFieldSetElement>) {
     if (disabled || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
     if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return
+    const row = (event.target as HTMLElement).closest<HTMLButtonElement>(".question-choice-row")
+    if (!row) return
+    if (question.multi_select && event.key === "Enter") {
+      event.preventDefault()
+      event.currentTarget.form?.requestSubmit()
+      return
+    }
+    if (!question.multi_select && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault()
+      const index = buttons.current.indexOf(row)
+      const count = question.options.length
+      const next = event.key === "Home" ? 0 : event.key === "End" ? count - 1
+        : (index + (event.key === "ArrowDown" ? 1 : -1) + count) % count
+      buttons.current[next]?.focus()
+      return
+    }
     const index = /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : -1
     if (index < 0 || index >= question.options.length) return
     event.preventDefault()
@@ -50,40 +65,38 @@ export function QuestionChoices({ question, selected, customAnswer, disabled, on
         {option.description && <small id={description}>{option.description}</small>}
       </span>
     </>
-    const button = <Button
+    const button = <Button key={option.label}
       type="button" variant="ghost" className="question-choice-row"
       ref={element => { buttons.current[index] = element }}
       aria-label={option.label} aria-describedby={description} aria-keyshortcuts={String(index + 1)}
+      disabled={disabled}
+      data-state={active.includes(option.label) ? "checked" : "unchecked"}
+      onClick={question.multi_select ? undefined : () => choose(option.label)}
     >
       {content}
       {question.multi_select
         ? <CheckboxPrimitive.Indicator className="question-choice-check"><Check aria-hidden="true" /></CheckboxPrimitive.Indicator>
-        : <RadioGroup.Indicator className="question-choice-check"><Check aria-hidden="true" /></RadioGroup.Indicator>}
+        : active.includes(option.label) && <span className="question-choice-check"><Check aria-hidden="true" /></span>}
     </Button>
     return question.multi_select
       ? <CheckboxPrimitive.Root key={option.label} asChild checked={active.includes(option.label)} disabled={disabled} onCheckedChange={() => choose(option.label)}>{button}</CheckboxPrimitive.Root>
-      : <RadioGroup.Item key={option.label} asChild value={option.label}>{button}</RadioGroup.Item>
+      : button
   })
   return <fieldset className="question-choice-field" disabled={disabled} onKeyDown={shortcut}>
     <legend id={`${id}-question`}>{question.question}</legend>
-    {question.multi_select && <p className="question-choice-hint">Choose any that apply.</p>}
-    {question.multi_select
-      ? <div className="question-choice-list">{options}</div>
-      : <RadioGroup.Root className="question-choice-list" aria-labelledby={`${id}-question`} orientation="vertical"
-        value={active[0] ?? ""} disabled={disabled} onValueChange={choose}>{options}</RadioGroup.Root>}
+    {question.multi_select && <p className="question-choice-hint">Choose any that apply, then press Enter.</p>}
+    <div className="question-choice-list">{options}</div>
     <div className="question-custom-answer">
-      <Pencil size={18} aria-hidden="true" />
+      <Pencil size={14} aria-hidden="true" />
       <Textarea
         className="question-custom-input" rows={1} disabled={disabled}
         aria-label={`Custom answer for ${question.header}`} placeholder="Or write your own response…"
         value={customAnswer}
-        onChange={event => {
-          onCustomAnswer(event.target.value)
-          if (event.target.value.trim()) onSelect([])
-        }}
+        onChange={event => onCustomAnswer(event.target.value)}
         onKeyDown={event => {
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault()
+            event.stopPropagation()
             event.currentTarget.form?.requestSubmit()
           }
         }}

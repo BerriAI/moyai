@@ -4,12 +4,14 @@
 
 ## Answering questions
 
-Question cards show numbered options in a vertical list. Choose an option or
-write your own response, then select **Send**. Multiple-choice questions that
-allow several answers use checkboxes. While an option has focus, number keys
-select an option; arrow keys also navigate single-choice questions. Digits typed
-in the response field remain text. Command/Ctrl+Enter submits a written response.
-Any accompanying action approval still requires an explicit Allow or Decline.
+Question cards use the chat's compact typography and numbered vertical options.
+Click a single choice to submit it immediately, or write a response and press
+Enter. Shift+Enter adds a new line. Number keys activate a focused question's
+options; arrow keys move between single choices without submitting. Digits typed
+in the response field remain text. For multi-select questions, choose the
+checkboxes and press Enter when finished. Multiple questions submit once every
+question is answered. Accompanying approvals and credential requests retain
+their explicit Continue step.
 
 ## Attachments and the computer
 
