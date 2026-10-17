@@ -21,7 +21,7 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
-from moyai.models import Effect
+from moyai.models import Effect, Session, Turn, now
 from moyai.product_drain import ProductDrainError, ProductDrainService
 from moyai.product_drain_models import ProductDrainReceipt, ProductDrainState
 from moyai.product_identity import ProductIdentityAdapter
@@ -185,6 +185,68 @@ async def test_unknown_effect_blocks_park_and_resume_without_rewriting_it(drain)
         assert effect.state == "pending" and effect.resolution is None
         assert receipt.phase == "blocked"
         assert (await db.get(ProductDrainState, 1)).generation == 2
+
+
+@pytest.mark.parametrize("status", ["included", "steering", "signal_sent", "accepted", "unknown"])
+async def test_terminal_steering_input_does_not_block_drain_or_resume(drain, status):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, parent, _ = await authority_fixtures.active_turn(product)
+    async with product.database.sessions.begin() as db:
+        stored = await db.get(Turn, parent.id)
+        assert stored is not None
+        stored.status, stored.finished_at = "failed", now()
+        saved_session = await db.get(Session, session.id)
+        assert saved_session is not None
+        saved_session.status, saved_session.active_turn = "failed", None
+        child = Turn(
+            session_id=session.id, actor_id=product.actor.id, prompt="Synthetic steering input",
+            request_key="steering-input", request_fingerprint="f" * 64, model=parent.model,
+            parent_turn=parent.id, status=status, workflow_id="steering-input-workflow",
+            finished_at=now() if status == "included" else None,
+        )
+        db.add(child)
+        await db.flush()
+        child_id, finished_at = child.id, child.finished_at
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    observed = await service.status()
+    terminal = status == "included"
+    assert observed["counts"]["unsafe_turns"] == (0 if terminal else 1)
+    assert observed["counts"]["parked"] == 0
+    assert observed["state"] == ("drained" if terminal else "draining")
+    if terminal:
+        assert not (await service.request(
+            paused=False, expected_generation=2, request_key="resume",
+        ))["paused"]
+    else:
+        with pytest.raises(ProductDrainError, match="unknown outcomes"):
+            await service.request(paused=False, expected_generation=2, request_key="resume")
+    async with product.database.sessions() as db:
+        saved = await db.get(Turn, child_id)
+        assert saved is not None
+        assert (saved.status, saved.finished_at, saved.parent_turn) == (status, finished_at, parent.id)
+        assert await db.get(ProductDrainReceipt, (child_id, 2)) is None
+
+
+async def test_included_input_does_not_hide_an_unsettled_effect(drain):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, turn, _ = await authority_fixtures.active_turn(product)
+    async with product.database.sessions.begin() as db:
+        saved = await db.get(Turn, turn.id)
+        assert saved is not None
+        saved.status, saved.finished_at = "included", now()
+        db.add(Effect(
+            id="included-unknown-effect", session_id=session.id, turn_id=turn.id,
+            actor_id=product.actor.id, tool_name="shell", arguments="synthetic-fixture",
+            fingerprint="e" * 64, state="pending",
+        ))
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    observed = await service.status()
+    assert observed["counts"]["unsafe_turns"] == 0 and observed["counts"]["effects"] == 1
+    assert observed["state"] == "draining"
+    with pytest.raises(ProductDrainError, match="unknown outcomes"):
+        await service.request(paused=False, expected_generation=2, request_key="resume")
 
 
 async def test_checkpoint_is_idempotent_and_resume_preserves_generation_receipts(drain):

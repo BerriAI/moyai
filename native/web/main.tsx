@@ -20,6 +20,7 @@ import { Home } from "./home"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
+import { SessionTitle } from "./session-title"
 import { WorkspaceOverview, SubagentPanel } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
@@ -748,7 +749,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     <WorkspaceOverlay open={workspaceOpen} onOpenChange={setWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
     <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
       <header className="topbar">
-        <div className="session-heading"><h1 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h1>
+        <div className="session-heading"><h1 ref={heading} tabIndex={-1} title={session.title} aria-label={session.title}>
+          <SessionTitle session={session} onRenamed={title => {
+            // Discard reads started before the rename so they cannot restore the old title.
+            ++loadVersion.current
+            const current = viewNow.current
+            if (!current) return
+            const next = { ...current, session: { ...current.session, title } }
+            viewNow.current = next; setView(next); sessionCallback.current?.(next.session)
+          }} />
+        </h1>
           <span className={`status ${displayStatus}`}>{displayStatus === "waiting" ? "Needs input" : displayStatus}</span>
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
         </div>

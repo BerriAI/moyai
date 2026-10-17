@@ -52,7 +52,7 @@ def test_native_counts_include_unknown_effects_requests_and_queued_or_waiting_tu
             connection.execute(sql.SQL('INSERT INTO {}.{} VALUES(%s)').format(
                 sql.Identifier(schema), sql.Identifier(table)), (value,))
     insert('moyai_turns', ['queued', 'waiting', 'running', 'starting', 'saving', 'steering', 'signal_sent',
-                           'accepted', 'unknown', None, 'completed', 'failed', 'stopped', 'resumed'])
+                           'accepted', 'unknown', None, 'completed', 'failed', 'stopped', 'resumed', 'included'])
     insert('moyai_effects', ['pending', 'unknown', None, 'confirmed', 'not_dispatched'])
     insert('moyai_product_inference_requests', ['dispatching', 'unknown', 'completed', 'failed', 'not_dispatched'])
     insert('moyai_inference_usage', ['pending', 'running', 'unknown', None, 'completed', 'failed'])

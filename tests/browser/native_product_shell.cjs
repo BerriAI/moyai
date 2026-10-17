@@ -12,7 +12,7 @@ function reset(overrides={}) {
   state={signedIn:true, individual:true, mode:'existing', google:true, password:true, access:false, denied:false, status:'running',
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect this repository.'}], requests:[], streams:[], ...overrides};
 }
-function session(id=sessionId) {return {id,title:'Current native work',owner_id:'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{}),...(state.sessionOverrides?.[id]||{})};}
+function session(id=sessionId) {return {id,title:'Current native work',owner_id:state.ownerId??'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{}),...(state.sessionOverrides?.[id]||{}),...(state.titles?.[id]===undefined?{}:{title:state.titles[id]})};}
 async function handle(req,res,next) {
   const url=new URL(req.url,'http://localhost');
   if(!url.pathname.startsWith('/api/'))return next();
@@ -34,7 +34,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
     if(url.pathname==='/api/history/sessions'&&state.inventoryRows)return json({sessions:state.inventoryRows,ancestors:state.inventoryAncestors||[],has_more:false});
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
-      {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId,title:'Current native work'}];
+      {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId}];
     if(state.createdSession)rows.push({...session('c'.repeat(32)),key:'native:'+'c'.repeat(32),source:'native',url:'/#'+'c'.repeat(32)});
     if(url.pathname==='/api/history/sessions'&&url.searchParams.get('limit')==='100'&&state.inventoryPages) {
       const page=url.searchParams.get('cursor')==='page-2'?1:0;
@@ -94,9 +94,17 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname.endsWith('/activity'))return json([]);
     if(url.pathname.endsWith('/read'))return json({});
-    if(req.method==='PATCH')return json({...session(),...data});
+    if(req.method==='PATCH') {
+      if(state.holdRename)await state.holdRename;
+      if(state.renameError)return json({detail:'Could not save the session name.'},503);
+      const id=url.pathname.split('/')[3];
+      if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
+      return json({updated:true});
+    }
     const row=session(url.pathname.split('/')[3]);
-    return json({session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,has_unsettled_effects:state.effects?.length>0,effects:state.effects});
+    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    if(state.holdSessionRead)await state.holdSessionRead;
+    return json(result);
   }
   return json({detail:'Fixture endpoint not implemented: '+url.pathname},404);
 }
@@ -114,6 +122,122 @@ before(async()=>{
   await server.listen();base=`http://127.0.0.1:${server.httpServer.address().port}`;browser=await chromium.launch({headless:true});
 });
 after(async()=>{for(const client of clients)client.end();await browser?.close();await server?.close();});
+
+const renameRequests=()=>state.requests.filter(row=>row.method==='PATCH'&&row.body?.title!==undefined);
+async function editTitle(page) {
+  await page.getByRole('button',{name:/^Rename session:/}).click();
+  const input=page.getByRole('textbox',{name:'Session name',exact:true});
+  await input.waitFor();
+  return input;
+}
+
+test('header rename trims, updates sidebar and document title, survives reload, and saves once on blur',async t=>{
+  reset();const page=await pageFor(t);const input=await editTitle(page);
+  assert.deepEqual(await input.evaluate(el=>[el.selectionStart,el.selectionEnd]),[0,'Current native work'.length]);
+  await input.fill('  Release checklist  ');await input.press('Enter');
+  await page.getByRole('button',{name:'Rename session: Release checklist',exact:true}).waitFor();
+  assert.equal(await page.title(),'Release checklist · Moyai');
+  assert.equal(await page.locator('.session-row.selected .session-title').innerText(),'Release checklist');
+  assert.equal(await page.getByRole('button',{name:'Rename session: Release checklist',exact:true}).evaluate(el=>el===document.activeElement),true);
+  assert.deepEqual(renameRequests().map(row=>row.body.title),['Release checklist']);
+  await page.reload();
+  await page.getByRole('button',{name:'Rename session: Release checklist',exact:true}).waitFor();
+  const again=await editTitle(page);await again.fill('Release notes');
+  await page.getByRole('textbox',{name:'Message Moyai',exact:true}).click();
+  await page.getByRole('button',{name:'Rename session: Release notes',exact:true}).waitFor();
+  assert.equal(renameRequests().length,2);
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai',exact:true}).evaluate(el=>el===document.activeElement),true);
+});
+
+test('header editing cancels Escape, ignores blank and unchanged names, and retains the 300-character limit',async t=>{
+  reset();const page=await pageFor(t);
+  const trigger=page.getByRole('button',{name:'Rename session: Current native work',exact:true});
+  await trigger.waitFor();await trigger.focus();await page.keyboard.press('Enter');
+  const input=page.getByRole('textbox',{name:'Session name',exact:true});
+  assert.equal(await input.getAttribute('maxlength'),'300');
+  await input.fill('Do not save');await input.press('Escape');
+  await trigger.waitFor();assert.equal(await trigger.evaluate(el=>el===document.activeElement),true);
+  await trigger.press('Space');await input.fill('   ');await input.press('Enter');await trigger.waitFor();
+  await trigger.click();await input.press('Enter');await trigger.waitFor();
+  assert.equal(renameRequests().length,0);
+});
+
+test('header draft survives polls and failed saves, and IME Enter does not commit',async t=>{
+  reset({renameError:true});const page=await pageFor(t);const input=await editTitle(page);
+  await input.fill('Keep this draft');
+  const reads=()=>state.requests.filter(row=>row.path===`/api/sessions/${sessionId}`&&row.method==='GET').length;
+  const count=reads();state.titles={[sessionId]:'Background title'};
+  await waitFor(()=>reads()>count,'background session poll');
+  assert.equal(await input.inputValue(),'Keep this draft');
+  await input.dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
+  assert.equal(renameRequests().length,0);
+  await input.press('Enter');await page.getByRole('alert').filter({hasText:'Could not save the session name.'}).waitFor();
+  assert.equal(await input.inputValue(),'Keep this draft');
+  state.renameError=false;
+  await input.press('Enter');await page.getByRole('button',{name:'Rename session: Keep this draft',exact:true}).waitFor();
+  assert.equal(renameRequests().length,2);
+});
+
+test('pending header save cannot be submitted twice or rename a newly opened session',async t=>{
+  let release;reset({createdSession:true,holdRename:new Promise(resolve=>{release=resolve;})});
+  t.after(()=>release());const page=await pageFor(t);const input=await editTitle(page);
+  await input.fill('Saved on the first session');await input.press('Enter');
+  await waitFor(()=>renameRequests().length===1,'pending title write');
+  await input.press('Enter');await input.press('Tab');
+  assert.equal(renameRequests().length,1);
+  await page.locator(`.session-row a[href="#${'c'.repeat(32)}"]`).click();
+  await page.waitForURL('**/#'+'c'.repeat(32));
+  await page.getByRole('button',{name:'Rename session: Current native work',exact:true}).waitFor();
+  release();
+  await waitFor(()=>state.titles?.[sessionId]==='Saved on the first session','original write committed');
+  await waitFor(()=>state.requests.filter(row=>row.path==='/api/history/sessions').length>1,'sidebar refreshed');
+  assert.equal(await page.locator('.topbar h1').innerText(),'Current native work');
+  assert.equal(state.titles?.['c'.repeat(32)],undefined);
+});
+
+test('a session read started before rename cannot restore the old title after save',async t=>{
+  reset();const page=await pageFor(t);const input=await editTitle(page);
+  let release;state.holdSessionRead=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const reads=()=>state.requests.filter(row=>row.path===`/api/sessions/${sessionId}`&&row.method==='GET').length;
+  const count=reads();await input.fill('Keep the saved title');
+  await waitFor(()=>reads()>count,'old session read in flight');
+  await input.press('Enter');await page.getByRole('button',{name:'Rename session: Keep the saved title',exact:true}).waitFor();
+  const response=page.waitForResponse(res=>new URL(res.url()).pathname===`/api/sessions/${sessionId}`&&res.request().method()==='GET');
+  release();delete state.holdSessionRead;
+  await (await response).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await page.locator('.topbar h1').innerText(),'Keep the saved title');
+  assert.equal(await page.title(),'Keep the saved title · Moyai');
+});
+
+test('losing ownership clears an open title draft without saving it',async t=>{
+  reset();const page=await pageFor(t);const input=await editTitle(page);
+  await input.fill('Private unsaved draft');state.ownerId='someone-else';
+  await input.waitFor({state:'detached'});
+  assert.equal(await page.getByRole('button',{name:/^Rename session:/}).count(),0);
+  assert.equal(await page.locator('.topbar h1').innerText(),'Current native work');
+  assert.equal(renameRequests().length,0);
+});
+
+test('non-owners and historical sessions have no editable header title',async t=>{
+  reset({ownerId:'someone-else'});const page=await pageFor(t);
+  await page.locator('.topbar h1').waitFor();await page.locator('.topbar h1').click();
+  assert.equal(await page.getByRole('button',{name:/^Rename session:/}).count(),0);
+  assert.equal(await page.getByRole('textbox',{name:'Session name',exact:true}).count(),0);
+  await page.goto(base+'/#run='+legacyId);await page.getByText('Historical saved answer',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/^Rename session:/}).count(),0);
+  assert.equal(renameRequests().length,0);
+});
+
+for(const width of [1440,768,320])test(`header editing fits at ${width}px with a long title`,async t=>{
+  reset({titles:{[sessionId]:'A long session name '.repeat(15)}});const page=await pageFor(t,'#'+sessionId,width);
+  const input=await editTitle(page);await input.fill('Another long title '.repeat(15));
+  const bounds=await input.boundingBox();assert(bounds.width>50&&bounds.x>=0&&bounds.x+bounds.width<=width);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(width===320)assert.equal(await input.evaluate(el=>getComputedStyle(el).fontSize),'16px');
+  await input.press('Enter');await page.getByRole('button',{name:/^Rename session: Another long title/}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
 
 function swarm() {
   return {id:sessionId,status:'active',reason:'',revision:0,generation:1,round:1,goal:'Check the sum with independent methods.',

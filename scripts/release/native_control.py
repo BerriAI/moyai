@@ -16,6 +16,23 @@ RECEIPT_KEYS = {
 }
 STATUS_COUNTS = {'queued', 'parked', 'unsafe_turns', 'effects', 'requests'}
 
+# Adoption must work before the candidate application is installed. The original
+# v1 CLI omitted answer_settlement's terminal "included" steering-input status,
+# blocking both drain and recovery forever. Correct only that known enumeration
+# in this one CLI process; installed files, saved turns, and every transactional
+# ownership/generation/effect/request guard remain unchanged.
+INSTALLED_CONTROL_SOURCE = '''
+from moyai import product_drain
+previous = ("completed", "failed", "stopped", "resumed")
+corrected = previous + ("included",)
+if (product_drain.DRAIN_VERSION != "moyai-product-maintenance-v1"
+        or product_drain.TERMINAL_TURNS not in (previous, corrected)):
+    raise SystemExit("The installed native maintenance contract is not qualified.")
+product_drain.TERMINAL_TURNS = corrected
+from moyai.product_drain_cli import main
+main()
+'''
+
 
 def require(condition):
     if not condition:
@@ -117,7 +134,7 @@ def execute(options, *, probe_fn):
     from pathlib import Path
     previous = Path('/app/native/.venv/bin/python')
     executable = str(previous) if previous.is_file() else '/app/.venv/bin/python'
-    result = subprocess.run([executable, '-m', 'moyai.product_drain', command],
+    result = subprocess.run([executable, '-c', INSTALLED_CONTROL_SOURCE, command],
         input=encoded, cwd='/app', capture_output=True, text=True, timeout=25)
     require(result.returncode == 0 and len(result.stdout.encode()) <= 16384)
     receipt = json.loads(result.stdout)

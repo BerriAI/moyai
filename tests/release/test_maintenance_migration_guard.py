@@ -149,6 +149,33 @@ def test_actual_locked_guard_rechecks_work_after_outer_probe_before_any_migratio
         assert writer.execute('SELECT prompt FROM runs WHERE id=%s', (run['id'],)).fetchone() == (run['prompt'],)
 
 
+def test_billing_observer_must_identify_the_actual_exclusive_transaction(settings, monkeypatch):
+    from scripts.release.maintenance_migration import check_locked
+    from scripts.release.maintenance_probe import drain_counts
+
+    monkeypatch.delenv('MOYAI_NATIVE_SCHEMA', raising=False)
+    schema_migrations.migrate(settings)
+    url, schema = settings.moyai_database_url, settings.moyai_database_schema
+    expected = {'schema': schema_migrations.SCHEMA_REVISION, 'policy': 'f' * 64,
+                'contracts': {role: char * 64 for role, char in
+                              zip(('api', 'worker', 'broker', 'coordinator'), 'abcd')}}
+    with psycopg.connect(url, autocommit=True) as owner, psycopg.connect(url, autocommit=True) as observer:
+        owner.execute(sql.SQL('SET search_path TO {},pg_catalog').format(sql.Identifier(schema)))
+        owner.execute('INSERT INTO runtime_policy VALUES(1,%s)', (expected['policy'],))
+        for role, fingerprint in expected['contracts'].items():
+            owner.execute(sql.SQL('INSERT INTO {} VALUES(1,%s,%s)')
+                          .format(sql.Identifier('runtime_' + role + '_policy')),
+                          (expected['policy'], fingerprint))
+        with owner.transaction():
+            owner.execute('SELECT pg_advisory_xact_lock(726940,%s::regnamespace::oid::int)', (schema,))
+            check_locked(observer, schema, expected, drain_counts=drain_counts, owner_pid=owner.info.backend_pid)
+            for wrong in (observer.info.backend_pid, owner.info.backend_pid + 1, True, 0):
+                with pytest.raises(ValueError):
+                    check_locked(observer, schema, expected, drain_counts=drain_counts, owner_pid=wrong)
+        with pytest.raises(ValueError):
+            check_locked(observer, schema, expected, drain_counts=drain_counts, owner_pid=owner.info.backend_pid)
+
+
 @pytest.mark.parametrize('constructor', ['store', 'database'])
 @pytest.mark.parametrize('mode,instance,role,guard', [
     ('auto', True, 'standalone', lambda *args: None),

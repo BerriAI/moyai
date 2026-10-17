@@ -55,11 +55,14 @@ def test_maintenance_entrypoint_selects_packaged_probe_and_single_shot_migrator(
     from scripts.release import deploy, maintenance_deploy
     from scripts.release.maintenance_probe import SSHMaintenanceProbe
     from scripts.release.maintenance_migration import SSHMaintenanceMigration
+    from scripts.release.billing_migration import SSHBillingStorage
     calls = []
     class Controller:
         def __init__(self, render, github, probe, receipt, **kwargs):
             assert isinstance(probe, SSHMaintenanceProbe)
             assert isinstance(kwargs['offline_migrate'], SSHMaintenanceMigration)
+            assert isinstance(kwargs['billing_storage'], SSHBillingStorage)
+            assert kwargs['consolidate_billing'] is True
             assert kwargs['preflight_only'] is True
             assert kwargs['api_service_id'] == 'srv-syntheticapi'
             self.record = {'status': 'preflight_passed', 'phase': 'synthetic preflight'}
@@ -73,6 +76,7 @@ def test_maintenance_entrypoint_selects_packaged_probe_and_single_shot_migrator(
         monkeypatch.setenv(key, value)
     monkeypatch.delenv('GITHUB_STEP_SUMMARY', raising=False)
     monkeypatch.setattr(sys, 'argv', ['deploy', '--release-type', 'maintenance', '--preflight',
+                                    '--consolidate-billing',
                                     '--receipt', str(tmp_path / 'receipt.json')])
     handlers = {signum: deploy.signal.getsignal(signum)
                 for signum in (deploy.signal.SIGINT, deploy.signal.SIGTERM)}
@@ -84,6 +88,15 @@ def test_maintenance_entrypoint_selects_packaged_probe_and_single_shot_migrator(
         for signum, handler in handlers.items():
             deploy.signal.signal(signum, handler)
     assert calls == ['maintenance']
+
+
+@pytest.mark.parametrize('release_type', ['rolling', 'api', 'coordinated'])
+def test_billing_flag_is_rejected_before_deployment_credentials(release_type, monkeypatch):
+    from scripts.release.deploy import main, ReleaseError
+    monkeypatch.setattr(sys, 'argv', ['deploy', '--release-type', release_type, '--consolidate-billing'])
+    monkeypatch.delenv('RENDER_DEPLOY_SSH_KEY', raising=False)
+    with pytest.raises(ReleaseError, match='Billing consolidation requires a maintenance'):
+        main()
 
 
 def test_rolling_entrypoint_selects_native_receipt_and_membership_checks(tmp_path, monkeypatch):

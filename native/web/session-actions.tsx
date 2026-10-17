@@ -23,7 +23,7 @@ type Editor = { action: Action; session?: SidebarSession; folder?: SessionFolder
 type Actions = {
   userId: string; busy: boolean
   openEditor: (editor: Editor) => void
-  edit: (row: SidebarSession, body: object, message: string) => Promise<void>
+  edit: (row: SidebarSession, body: object, message: string) => Promise<boolean>
   copy: (row: SidebarSession) => void
   openComputer: (id: string) => void
   newSession: () => void
@@ -95,15 +95,15 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
   const [notice, setNotice] = useState("")
   const openEditor = (value: Editor) => { if (busyRef.current || (value.session && sessionIsReadOnly(value.session))) return; setError(""); setName(value.action === "folder-create" ? "" : value.folder?.name ?? value.session?.title ?? ""); setEditor(value) }
   async function mutate(action: () => Promise<unknown>, message: string) {
-    if (busyRef.current) return
+    if (busyRef.current) return false
     busyRef.current = true
     setBusy(true); setError(""); setNotice("")
-    try { await action(); setEditor(null); await refresh(); setNotice(message) }
-    catch (error) { setError(String(error)) }
+    try { await action(); setEditor(null); await refresh(); setNotice(message); return true }
+    catch (error) { setError(String(error)); return false }
     finally { busyRef.current = false; setBusy(false) }
   }
   const edit = (row: SidebarSession, body: object, message: string) => sessionIsReadOnly(row)
-    ? Promise.resolve()
+    ? Promise.resolve(false)
     : mutate(() => api(`/sessions/${row.id}`, "PATCH", body), message)
   const title = editor ? ({
     rename: "Rename session", move: "Move session", archive: editor.session?.archived ? "Restore session?" : "Archive session?",

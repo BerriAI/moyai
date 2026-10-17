@@ -156,7 +156,11 @@ or feed a mismatched baseline into a new release.
    maintenance responses and own no runtime.
 3. With all owners gone, take exclusive runtime ownership, apply any reviewed
    canonical/native migrations, and verify their receipts. No schema fingerprint
-   or old receipt is rewritten to force compatibility.
+   or old receipt is rewritten to force compatibility. Native maintenance uses
+   this offline boundary for canonical schema upgrades even when the compatibility
+   floor is unchanged; it does not require an additive online migration plan.
+   Schema provisioning does not run the separate
+   [billing history backfill and physical consolidation](billing-storage.md).
 4. Activate coordinator, then broker, then worker and API together with matching
    contracts. The persisted native pause survives worker replacement without
    toggling its drain environment flag. Verify all four roles and ownership,
@@ -170,12 +174,50 @@ The first legacy-to-native adoption has additional source-automation pause and
 original-queue preservation checks. Follow the full [deployment contract](pydantic-deployment.md)
 for that transition. A maintenance release includes a service interruption.
 
+## Finish physical billing consolidation
+
+First deploy the canonical/native billing schemas, retain a current database
+backup, and complete both backfills using the [billing storage procedure](billing-storage.md).
+Then select **maintenance**, **pydantic** (or **preserve** on a native cluster),
+and **consolidate_billing: true** in the deployment workflow. Start with
+**preflight_only: true** to inspect the saved billing comparison.
+
+This option requires an existing native cluster with the candidate's schema
+receipts already provisioned. Preflight reads the storage receipt, verifies both
+backfills and mirrors, checks source table definitions and compares every mapped
+field. It performs no backfill or financial-data mutation. Ordinary releases
+default this option to false.
+
+The actual release drains and stages all four roles, verifies zero owners, and
+then records one billing cutover intent before invoking the installed migrator.
+The migrator rechecks the release's policy, ownership, safe-work counts, native
+receipts and paused generation while holding its exclusive canonical lock. Its
+atomic cutover verifies the data again and replaces the two original stores with
+compatibility views. Activation follows only a confirmed one-store receipt.
+Unsupported constraints or dependent objects can still reject the final DDL;
+the transaction then retains the original stores.
+
+An explicit request performs this maintenance sequence even when the selected
+build is already deployed. If that build already has a verified consolidated
+ledger, the workflow only verifies it. An uncertain cutover response leaves the
+services staged for inspection and never retries or restores tables automatically.
+The CLI equivalent is `--release-type maintenance --consolidate-billing`.
+
 ## Failure and recovery
 
 An uncertain control-plane write or migration result stops the release at its
 recorded intent. Inspect the receipt and actual processes before another action;
 uncertainty does not prove rollback. Retain database backups, both encryption
 keys, object populations and Temporal histories together.
+
+Completed steering inputs use the terminal `included` state. They do not require
+their own workflow checkpoint; their parent turn and any unsettled effects or
+model requests remain independently checked. For older v1 workers, the release
+helper corrects the known terminal-state enumeration inside its maintenance CLI
+process before running status or a guarded control command. It does not edit
+installed files, saved turns or receipts, and rejects unknown maintenance
+contracts. Running an older installed CLI directly retains its original
+classification, so recovery must use the qualified release helper.
 
 Concurrent members have separate intents under `batches[].deployments`. Peers
 already requested can continue replacing after a failure. Inspect every member;
