@@ -1,4 +1,4 @@
-.swarm-space-mode > .swarm-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.swarm-space-mode > .swarm-panel, .swarm-space-mode > .chat-layout > .chat-content > .swarm-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .swarm-space-mode > .transcript[hidden] { display: none; }
 .swarm-space-mode .composer :is(textarea, .skill-editor) { min-height: 48px; height: 48px; padding-block: 10px; }
 .swarm-space-mode .skill-editor-placeholder { top: 10px; }
@@ -6,7 +6,7 @@
 .swarm-space-details > .swarm-window { flex: none; padding-bottom: 10px; }
 .swarm-space { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
 .swarm-space-mission { text-align: center; padding: 10px 16px 8px; }
-.swarm-space-kicker { color: var(--ui-muted); font-family: "Geist Mono", monospace; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 10px; }
+.swarm-space-kicker { color: var(--ui-muted); font-family: var(--ui-font); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 10px; }
 .swarm-space-goal { max-width: 760px; margin: 0 auto; font-size: clamp(15px, 1.7vw, 23px); font-weight: 400; line-height: 1.4; overflow-wrap: anywhere; }
 .swarm-details .swarm-space-goal summary { display: flex; gap: 6px; justify-content: center; font-size: inherit; padding: 0; }
 .swarm-space-goal summary::after { content: "+"; color: var(--ui-muted); }

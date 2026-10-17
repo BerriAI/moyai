@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useReducer, useRef, useState } fr
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, ListTree, LockKeyhole, LogOut, Menu, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -20,7 +20,7 @@ import { Home } from "./home"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
-import { WorkspaceOverview, SubagentPanel } from "./workspace"
+import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
 import { FilesPanel, OutputPanel } from "./output"
@@ -287,9 +287,10 @@ function App() {
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
     {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-      <a href="#" className="brand"><img src={logo} alt="" /><span>Moyai<small>LiteLLM</small></span></a>
+      <a href="#" className="brand"><span>Moyai</span><small>LiteLLM</small></a>
       <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <Button variant="ghost" className="rail-palette-trigger" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={16} /><span>Search sessions & commands</span><span className="key-hint">⌘K</span></Button>
+      <span className="rail-section-label">Workspace</span>
       <nav className="rail-destinations" aria-label="Workspace tools">
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><BookOpen />Skills</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
@@ -658,6 +659,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
     && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
   const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
+      <div className="chat-layout"><div className="chat-content">
         {fileDrop.dragging && <FileDropOverlay />}
         {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
           space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
@@ -725,12 +727,21 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           </details>}
           <p className="composer-hint">{pictures.uploading ? "Uploading files…" : "Drop files or paste images · Enter to send · Shift+Enter for a new line"}</p>
         </form>
+      </div>
+      {!sideMode && <WorkspaceOverlayContent>
+        <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
+          onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
+          onSubagent={agent => openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })}
+          onOutput={openOutput} />
+      </WorkspaceOverlayContent>}
+      </div>
       </section>
   if (sideMode) return <div className="conversation side-conversation">
     <header className="side-chat-heading"><h2 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h2><a href={`#${id}`} title="Open as main conversation" aria-label="Open side chat as main conversation"><ExternalLink size={15} /></a></header>
     {chat}
   </div>
   return <div className="conversation">
+    <WorkspaceResourceProvider id={id} visible={visible} expanded={workspaceOpen}>
     <WorkspaceOverlay open={workspaceOpen} onOpenChange={setWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
     <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
       <header className="topbar">
@@ -739,19 +750,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
         </div>
         <div className="header-controls">
+          <Button variant={panelState.visible ? "secondary" : "ghost"} size="icon-sm" aria-label={panelState.visible ? "Hide side panel" : "Open side panel"} title={panelState.visible ? "Hide panel" : "Open panel"} onClick={() => dispatchPanel({ type: panelState.visible ? "hide" : "show" })}><PanelRight size={16} /></Button>
+          <WorkspaceOverlayTrigger asChild><WorkspaceMenuKey open={workspaceOpen} sessionFailed={session.status === "failed"}
+            aria-label={workspaceOpen ? "Close workspace" : "Open workspace"} /></WorkspaceOverlayTrigger>
           <Button className="header-new-session" type="button" variant="ghost" size="icon-sm" aria-label="New session" title="New session" onClick={sessionActions.newSession}><SquarePen size={16} /></Button>
           <SessionMenu session={session} header />
-          <WorkspaceOverlayTrigger asChild><Button className="workspace-toggle" type="button" variant={workspaceOpen ? "secondary" : "ghost"} size="icon-sm" aria-label={workspaceOpen ? "Close workspace" : "Open workspace"} title="Workspace"><ListTree size={17} /></Button></WorkspaceOverlayTrigger>
-          <Button variant={panelState.visible ? "secondary" : "ghost"} size="icon-sm" aria-label={panelState.visible ? "Hide side panel" : "Open side panel"} title={panelState.visible ? "Hide panel" : "Open panel"} onClick={() => dispatchPanel({ type: panelState.visible ? "hide" : "show" })}><PanelRight size={16} /></Button>
         </div>
       </header>
       {chat}
-      <WorkspaceOverlayContent>
-        <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
-          onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
-          onSubagent={agent => openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })}
-          onOutput={openOutput} />
-      </WorkspaceOverlayContent>
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
       <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
         if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); setWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
@@ -769,6 +775,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       }}</PanelTabs>
     </div>
     </WorkspaceOverlay>
+    </WorkspaceResourceProvider>
   </div>
 }
 

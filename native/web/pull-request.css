@@ -34,7 +34,7 @@
 .pr-view .pr-disclosure-trigger { display: inline-block; text-align: left; font-weight: 400; cursor: pointer; }
 .pr-view .pr-chevron { display: inline-block; width: 12px; height: 12px; margin-inline-end: 4px; vertical-align: -1px; }
 .pr-view [data-slot="collapsible-trigger"][data-state="open"] .pr-chevron { transform: rotate(90deg); }
-.pr-view .pr-filename { font-family: "Geist Mono", monospace; font-size: 12px; overflow-wrap: anywhere; }
+.pr-view .pr-filename { font-family: var(--ui-font); font-size: 12px; overflow-wrap: anywhere; }
 .pr-view .pr-file-stats { display: inline-flex; flex-wrap: wrap; gap: 12px; margin-inline-start: 12px; color: var(--ui-muted); font-size: 12px; }
 .pr-view .pr-file .pr-notice { margin: 12px; }
 .pr-view .pr-diff { margin: 0; padding: 12px 0; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; font-size: 12px; line-height: 1.65; }
