@@ -82,7 +82,7 @@ async def test_native_tools_skills_memory_delegation_and_replay(runtime, active)
     assert memory is not None and "proof succeeded" in memory.content
 
 
-@pytest.mark.parametrize("runtime", ["question"], indirect=True)
+@pytest.mark.parametrize("runtime", ["question", "optional_question"], indirect=True)
 async def test_native_question_pauses_durably(runtime, active):
     session, turn, _prepared = active
     environment = await WorkflowEnvironment.start_local(
@@ -92,10 +92,16 @@ async def test_native_question_pauses_durably(runtime, active):
     async with environment:
         runtime.client = environment.client
         async with make_worker(runtime):
-            result = await asyncio.wait_for(runtime.client.execute_workflow(
+            handle = await runtime.client.start_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id,
                 task_queue=runtime.settings.temporal_queue,
-            ), timeout=45)
+            )
+            result = await asyncio.wait_for(handle.result(), timeout=45)
+            history = await handle.fetch_history()
+        await Replayer(
+            interceptors=[ActivityCapacity()], workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()],
+            data_converter=DataConverter(payload_codec=EncryptedPayloadCodec(runtime.security, runtime.objects)),
+        ).replay_workflow(history)
     assert result["status"] == "waiting"
     async with runtime.database.sessions() as db:
         saved = await db.get(Session, session.id)

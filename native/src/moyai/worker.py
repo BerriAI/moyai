@@ -207,12 +207,15 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
 
 async def dispatcher(runtime: Runtime, *, wakeups: DispatchWakeups | None = None) -> None:
     state = DispatchState()
+    question_cursor = 0
     async with wakeups or DispatchWakeups(runtime.settings) as listener:
         while True:
             # Clear before reading durable rows, so a commit during/after the
             # scan cannot be lost between deciding to wait and actually waiting.
             listener.event.clear()
             try:
+                from .questions import expire_optional_questions
+                question_cursor = await expire_optional_questions(runtime.database, after=question_cursor)
                 await dispatch_once(runtime, state)
             except asyncio.CancelledError:
                 raise

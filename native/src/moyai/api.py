@@ -35,6 +35,7 @@ from .models import (
     Artifact,
     Connection,
     Effect,
+    Event,
     Message,
     Session,
     SessionPreference,
@@ -453,6 +454,14 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if result["can_answer"]:
                 conversation = ConversationTypeAdapter.validate_json(runtime.security.unseal(row.conversation))
                 result["pending"] = TypeAdapter(Any).dump_python(conversation.deferred_tool_requests, mode="json")
+                from .questions import can_reply_with_text
+                result["can_reply_with_text"] = can_reply_with_text(conversation.deferred_tool_requests)
+                async with runtime.database.sessions() as db:
+                    deadline = await db.scalar(select(Event).where(
+                        Event.identity == f"optional-question:{active_turn.id}",
+                    ))
+                if deadline is not None:
+                    result["question_deadline"] = json.loads(runtime.security.unseal(deadline.content))["deadline"]
             elif runtime.product_secrets is not None and user.role == "admin":
                 # Organization access assistance does not confer permission to
                 # answer another requester's questions or approve their tools.
@@ -539,7 +548,14 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
         from .skill_invocations import has_invocations
-        if has_invocations(body.prompt):
+        if body.reply_to is not None:
+            async with runtime.database.sessions() as db:
+                await runtime.database.allowed_session(db, session_id, user)
+                pending = await db.get(Turn, body.reply_to)
+                if pending is None or pending.session_id != session_id:
+                    raise HTTPException(409, "That question is no longer available.")
+            user = await answer_actor(runtime, user, pending)
+        elif has_invocations(body.prompt):
             async with runtime.database.sessions() as db:
                 session = await runtime.database.allowed_session(db, session_id, user)
             body = body.model_copy(update={"prompt": await runtime.skill_invocations.normalize(body.prompt, user, session)})
