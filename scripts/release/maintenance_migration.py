@@ -40,7 +40,7 @@ def check_snapshot(state, expected, revision):
     require(state.get('source_schema') == expected['source_schema'])
 
 
-def check_locked(connection, schema, expected, *, drain_counts):
+def check_locked(connection, schema, expected, *, drain_counts, owner_pid=None):
     """Recheck after exclusive admission, before the dirty marker or any DDL."""
     from psycopg import sql
     with connection.transaction():
@@ -58,7 +58,12 @@ def check_locked(connection, schema, expected, *, drain_counts):
             WHERE locktype='advisory' AND classid IN (726940,726943,726944,726946)
             AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
             AND objid=%s::regnamespace::oid AND objsubid=2 AND granted''', (schema,)).fetchall()
-        require(locks == [(726940, connection.info.backend_pid, 'ExclusiveLock')])
+        # Billing cutover holds this lock on its SQLAlchemy transaction. Its
+        # callback supplies that transaction's actual pg_backend_pid; ordinary
+        # schema migration continues to require this observer's own connection.
+        owner_pid = connection.info.backend_pid if owner_pid is None else owner_pid
+        require(type(owner_pid) is int and owner_pid > 0)
+        require(locks == [(726940, owner_pid, 'ExclusiveLock')])
         counts = drain_counts(connection)
         require(drained(counts, expected))
 

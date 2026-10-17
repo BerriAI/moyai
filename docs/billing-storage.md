@@ -66,8 +66,15 @@ original tables remain current.
 
 ## Complete physical consolidation
 
-Drain and stop all Moyai runtime owners through the existing maintenance workflow,
-then run:
+For the managed Render installation, use **Deploy production** with
+**release_type: maintenance**, **execution_core: pydantic**, and
+**consolidate_billing: true** after both backfills finish. A preflight-only run
+checks the prepared storage without pausing work. The actual run invokes physical
+consolidation at its verified zero-owner boundary before activating any role.
+See the [release procedure](production-deploy.md#finish-physical-billing-consolidation).
+
+For an independently coordinated installation, drain and stop all Moyai runtime
+owners, then run the same installed migration command:
 
 ```sh
 python -m moyai.billing_storage consolidate --apply

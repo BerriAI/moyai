@@ -69,6 +69,35 @@ async def test_cutover_leaves_one_store_and_exact_reports(cutover):
         await rollback(ctx.engine, ctx.storage)
 
 
+async def test_guard_runs_inside_exclusive_ownership_before_any_table_retirement(cutover):
+    ctx = cutover
+    before = await projection(ctx)
+    called = []
+
+    async def reject(connection):
+        pid = await connection.scalar(text("SELECT pg_backend_pid()"))
+        held = (await connection.execute(text(
+            "SELECT pid,mode FROM pg_locks WHERE locktype='advisory' AND classid=726940 "
+            "AND objid='moyai'::regnamespace::oid AND objsubid=2 AND granted"
+        ))).all()
+        assert held == [(pid, "ExclusiveLock")]
+        assert await connection.scalar(text(
+            "SELECT relkind::text FROM pg_class WHERE oid='moyai.model_requests'::regclass"
+        )) == "r"
+        called.append(pid)
+        raise BillingStorageError("Synthetic release guard refused cutover.")
+
+    with pytest.raises(BillingStorageError, match="release guard"):
+        await consolidate(ctx.engine, ctx.storage, before_consolidate=reject)
+    assert len(called) == 1 and (await status(ctx.engine, ctx.storage))["phase"] == "shadow"
+    assert await projection(ctx) == before
+    comparison = await consolidate(ctx.engine, ctx.storage)
+    assert comparison == {
+        "legacy": {"source_rows": 1, "mismatches": 0, "extra_rows": 0},
+        "native": {"source_rows": 1, "mismatches": 0, "extra_rows": 0},
+    }
+
+
 async def test_native_insert_upsert_locks_and_recovery_updates_use_the_same_row(cutover):
     ctx = cutover
     await consolidate(ctx.engine, ctx.storage)
