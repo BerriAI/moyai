@@ -430,8 +430,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 active_turn = await db.get(Turn, row.active_turn, options=[turn_columns])
                 if active_turn is not None:
                     turns.append(active_turn)
+            guidance = dict((await db.execute(select(Event.turn_id, Event.created_at).where(
+                Event.turn_id.in_([turn.id for turn in turns]), Event.kind == "steering_admitted",
+            ).order_by(Event.id))).all())
             result: dict[str, Any] = {
-                "session": session_view(row), "turns": [turn_view(turn) for turn in turns],
+                "session": session_view(row), "turns": [
+                    {**turn_view(turn), "guidance_at": guidance.get(turn.id)} for turn in turns
+                ],
             }
             swarm_member = await runtime.database.swarms.member(db, session_id)
             if swarm_member is not None:

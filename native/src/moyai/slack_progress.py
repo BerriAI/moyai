@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .models import Delivery, SlackThread, Turn, new_id, now
+from .models import Delivery, Event, SlackThread, Turn, new_id, now
 from .slack_messages import session_url, thread_message
 
 if TYPE_CHECKING:
@@ -27,11 +27,12 @@ def anchor_identity(turn_id: str, product: bool) -> str:
 
 async def latest_segment(db: AsyncSession, root: Turn) -> Turn:
     """Admission freezes the preceding slot, before native steering is acknowledged."""
+    from .database import Database
     return await db.scalar(select(Turn).where(
         Turn.parent_turn == root.id, Turn.actor_id == root.actor_id,
         Turn.session_id == root.session_id,
-        Turn.status.in_(["steering", "signal_sent", "accepted", "unconfirmed"]),
-    ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1)) or root
+        Turn.status.in_(["steering", "signal_sent", "accepted", "included", "unconfirmed"]),
+    ).order_by(Database.guidance_order().desc().nulls_last(), Turn.created_at.desc(), Turn.id.desc()).limit(1)) or root
 
 
 async def execution_turn(db: AsyncSession, delivery: Delivery) -> Turn | None:
@@ -88,6 +89,9 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
         url = session_url(public_url, turn.session_id, source_run_id)
         async with runtime.database.sessions() as db:
             segment = await latest_segment(db, turn)
+            boundary = await db.scalar(select(Event.created_at).where(
+                Event.turn_id == segment.id, Event.kind == "steering_admitted",
+            ).order_by(Event.id.desc()).limit(1)) or segment.accepted_at or segment.created_at
             primary = anchor_identity(segment.id, product)
             prefix = (
                 f"product-slack:{turn.id}:progress:{segment.id}:"
@@ -131,7 +135,7 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
         if segment.id != turn.id:
             messages = [
                 message for message in messages
-                if message.get("created_at", "") >= segment.created_at
+                if message.get("created_at", "") >= boundary
             ]
         if not messages:
             continue

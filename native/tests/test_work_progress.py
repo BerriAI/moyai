@@ -14,6 +14,8 @@ from test_sidebar import member_client
 from test_workspace_overview import native_run
 
 from moyai.commentary import Commentary
+from moyai.contracts import NewMessage
+from moyai.delegation import DelegationService
 from moyai.models import Session, User
 from moyai.work_progress import TOOL_LIMIT, WorkProgress, tools
 
@@ -170,3 +172,34 @@ def test_tool_lifecycle_is_bounded_and_does_not_invent_success_after_interruptio
     assert projected[-1]["status"] == "failed"
     assert all(item["status"] == "interrupted" for item in projected[:-1])
     assert "private" not in json.dumps(projected)
+
+
+async def test_interactive_child_progress_excludes_later_private_conversations(runtime, active, actor):
+    from test_delegated_sessions import finish
+
+    _, root, prepared = active
+    child = await DelegationService(runtime.database).start(prepared.scope, "one", "Inspect the assigned task.")
+    initial = await runtime.database.claim_next()
+    context = await runtime.database.prepare(initial.id)
+    await Commentary(runtime.database).save(context.scope, 1, [{
+        "id": "unused", "text": "Inspecting the delegated task.", "created_at": initial.created_at,
+    }])
+    reader = WorkProgress(runtime)
+    value = await reader.read(root)
+    assert len(value["subagents"]) == 1
+    agent = value["subagents"][0]
+    assert agent["session_id"] == child["session_id"] and agent["name"] == child["name"]
+    assert agent["status"] == "running"
+    assert agent["messages"][-1]["text"] == "Inspecting the delegated task."
+    await finish(runtime, context, "The assignment is verified.")
+    follow = await runtime.database.submit(actor, child["session_id"], NewMessage(
+        prompt="Unrelated private follow-up", request_key="later",
+    ))
+    await runtime.database.claim_next()
+    await finish(runtime, await runtime.database.prepare(follow.id), "private-followup-answer")
+    value = await reader.read(root)
+    assert value["subagents"][0]["messages"][-1]["text"] == "The assignment is verified."
+    assert "private-followup" not in json.dumps(value)
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Session, child["session_id"])).deleted = True
+    assert (await reader.read(root))["subagents"] == []

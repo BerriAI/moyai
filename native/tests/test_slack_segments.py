@@ -48,6 +48,8 @@ async def pending(runtime, deliver, client):
 
 @pytest.mark.parametrize("product", [False, True])
 async def test_steering_freezes_previous_slot_and_final_replaces_new_slot(runtime, active, slack, product):
+    from test_delegated_sessions import finish
+
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
     initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
@@ -59,6 +61,7 @@ async def test_steering_freezes_previous_slot_and_final_replaces_new_slot(runtim
         await deliver(client, update)
         earlier_ts = next(iter(messages))
         correction = await steer(runtime, active, slack)
+        await runtime.database.steering_receipt(correction.id, "accepted-test-guidance")
         await Commentary(runtime.database).save(active[2].scope, 2, [{
             "id": "unused", "text": "Checking the requested word count.", "created_at": now(),
         }])
@@ -67,10 +70,9 @@ async def test_steering_freezes_previous_slot_and_final_replaces_new_slot(runtim
         assert len(messages) == 2
         assert messages[earlier_ts]["text"] == "Checking the file."
         assert "Checking the requested word count." in list(messages.values())[-1]["text"]
-        async with runtime.database.sessions.begin() as db:
-            root = await db.get(Turn, active[1].id)
-            root.status, root.finished_at = "completed", now()
-            root.result = runtime.security.seal("Final result: three words.")
+        await finish(runtime, active[2], "Final result: three words.")
+        async with runtime.database.sessions() as db:
+            assert (await db.get(Turn, correction.id)).status == "included"
         if product:
             await slack.service.stage()
         else:

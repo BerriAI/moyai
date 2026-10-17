@@ -16,6 +16,23 @@ const steering = {id:'steer',actor_id:'viewer',status:'accepted',parent_turn:'ro
 const input = (id,turn,time) => ({id,turn_id:turn,role:'user',author_id:'viewer',content:'Input',created_at:time});
 const progress = (id,text,time) => ({id,text,phase:'commentary',created_at:time});
 
+test('admission order places a promoted input after newer typed guidance and ignores receipt retries',async()=>{
+  const {orderedWorkMessages,workSegments} = await loaded;
+  const promoted={...steering,id:'promoted',created_at:at(5),guidance_at:at(30),accepted_at:at(35)};
+  const newer={...steering,guidance_at:at(20),accepted_at:at(40)};
+  const messages=orderedWorkMessages([input(1,'root',at(0)),input(2,'promoted',at(5)),input(3,'steer',at(20))],[root,promoted,newer]);
+  assert.deepEqual(messages.map(message=>message.id),[1,3,2]);
+  const segments=workSegments(messages,[root,promoted,newer]);
+  assert.equal(segments.get(3).before,Date.parse(at(30)));
+  assert.equal(segments.get(2).after,Date.parse(at(30)));
+});
+
+test('delegated assignment gets the same working section without being treated as human input',async()=>{
+  const {workSegments} = await loaded;
+  const message={id:1,turn_id:'root',role:'system',source:'delegation',author_id:null,content:'Assigned task',created_at:at(0)};
+  assert.equal(workSegments([message],[root]).get(1).turn.id,'root');
+});
+
 test('steering preserves the earlier segment and only the answered segment collapses',async()=>{
   const {workSegments,workItems} = await loaded;
   const messages=[input(1,'root',at(0)),input(2,'steer',at(20))];

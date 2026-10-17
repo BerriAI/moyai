@@ -16,8 +16,10 @@ from typing import TYPE_CHECKING, Literal, TypedDict
 
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
+from sqlalchemy import select
 
-from .models import Turn
+from .delegation_models import DelegatedSession, DelegatedTurn
+from .models import Session, Turn
 from .presentation import redact
 from .progress import progress_secrets, turn_progress
 from .workspace import agent_labels, run_lineage
@@ -42,6 +44,7 @@ class ToolProgress(TypedDict):
 
 class AgentProgress(TypedDict):
     id: str
+    session_id: str | None
     parent_id: str | None
     parent_name: str | None
     name: str
@@ -110,6 +113,93 @@ class WorkProgress:
 
     def clear(self) -> None:
         self._snapshots.clear()
+
+    async def _delegated(self, turn: Turn, *, limit: int) -> tuple[list[AgentProgress], bool]:
+        """Read only the assignment's generated turns, never later private chat."""
+        queue = [(turn.id, None, 0)]
+        found: list[AgentProgress] = []
+        visible_sessions: list[str] = []
+        seen: set[str] = set()
+        limited = False
+        while queue and len(found) < limit:
+            parent_turn, parent_name, depth = queue.pop(0)
+            async with self.runtime.database.sessions() as db:
+                links = list(await db.scalars(select(DelegatedSession).join(
+                    Session, Session.id == DelegatedSession.session_id,
+                ).where(
+                    DelegatedSession.parent_turn_id == parent_turn,
+                    DelegatedSession.actor_id == turn.actor_id,
+                    Session.owner_id == turn.actor_id, Session.deleted.is_(False),
+                ).order_by(DelegatedSession.created_at).limit(limit + 1)))
+            for link in links:
+                if len(found) >= limit:
+                    limited = True
+                    break
+                if link.session_id in seen:
+                    continue
+                seen.add(link.session_id)
+                async with self.runtime.database.sessions() as db:
+                    generated = list(await db.scalars(select(Turn).join(
+                        DelegatedTurn, DelegatedTurn.turn_id == Turn.id,
+                    ).where(
+                        DelegatedTurn.session_id == link.session_id,
+                        Turn.session_id == link.session_id, Turn.actor_id == turn.actor_id,
+                    ).order_by(Turn.created_at.desc()).limit(17)))
+                history_limited = len(generated) > 16
+                generated = list(reversed(generated[:16]))
+                if not generated:
+                    continue
+                messages, activity = [], []
+                tools_limited = False
+                updated = link.created_at
+                for child in generated:
+                    child_messages = await turn_progress(self.runtime, child)
+                    messages.extend(child_messages)
+                    events = await self.runtime.stores.steps.list_events(run_id=child.id)
+                    child_tools, clipped = tools(
+                        events, terminal=child.status in {"completed", "failed", "stopped", "resumed"},
+                        secrets=progress_secrets(self.runtime, child),
+                    )
+                    activity.extend({**item, "id": f"{child.id}:{item['id']}"} for item in child_tools)
+                    tools_limited = tools_limited or clipped
+                    updated = max(updated, child.finished_at or child.created_at,
+                                  stamp(events[-1].timestamp) if events else "")
+                    if child.result and child.result_accepted and child.status in {"completed", "saving", "resumed"}:
+                        messages.append({
+                            "id": f"result:{child.id}", "phase": "final_answer", "created_at": updated,
+                            "text": str(redact(
+                                self.runtime.security.unseal(child.result).decode(),
+                                progress_secrets(self.runtime, child),
+                            )),
+                        })
+                    if depth < 12:
+                        queue.append((child.id, link.name, depth + 1))
+                messages_limited = history_limited or len(messages) > MESSAGE_LIMIT
+                recent, remaining = [], TEXT_LIMIT
+                for message in reversed(messages[-MESSAGE_LIMIT:]):
+                    if remaining <= 0:
+                        messages_limited = True
+                        break
+                    text = message["text"][:remaining]
+                    messages_limited = messages_limited or len(text) < len(message["text"])
+                    recent.append({**message, "text": text})
+                    remaining -= len(text)
+                visible_sessions.append(link.session_id)
+                found.append({
+                    "id": link.initial_turn_id, "session_id": link.session_id,
+                    "parent_id": parent_turn, "parent_name": parent_name,
+                    "name": link.name, "avatar": link.avatar, "depth": depth,
+                    "status": generated[-1].status, "created_at": link.created_at, "updated_at": updated,
+                    "messages": list(reversed(recent)), "tools": activity[-TOOL_LIMIT:],
+                    "messages_limited": messages_limited,
+                    "tools_limited": tools_limited or len(activity) > TOOL_LIMIT,
+                })
+        # A child can be deleted while its asynchronous native reads are pending.
+        async with self.runtime.database.sessions() as db:
+            allowed = set(await db.scalars(select(Session.id).where(
+                Session.id.in_(visible_sessions), Session.owner_id == turn.actor_id, Session.deleted.is_(False),
+            )))
+        return [item for item in found if item["session_id"] in allowed], limited or bool(queue)
 
     async def _messages(
         self, turn: Turn, record: RunRecord, events: list[StepEvent], secrets: list[str],
@@ -201,7 +291,7 @@ class WorkProgress:
             label = labels[record.run_id]
             parent = labels.get(record.parent_run_id or "")
             return {
-                "id": record.run_id, "parent_id": record.parent_run_id,
+                "id": record.run_id, "session_id": None, "parent_id": record.parent_run_id,
                 "parent_name": parent.name if parent else None,
                 "name": label.name, "avatar": label.avatar, "depth": depth, "status": status,
                 "created_at": stamp(record.started_at),
@@ -214,8 +304,9 @@ class WorkProgress:
         activity, tools_limited = tools(
             root_events, terminal=turn.status in {"completed", "failed", "stopped", "resumed"}, secrets=secrets,
         )
-        children = await asyncio.gather(*(child(record, depth) for record, _, depth in lineage))
+        children = list(await asyncio.gather(*(child(record, depth) for record, _, depth in lineage)))
+        delegated, delegated_limited = await self._delegated(turn, limit=max(0, RUN_LIMIT - len(children)))
         return {
-            "messages": messages, "tools": activity, "subagents": list(children),
-            "tools_limited": tools_limited, "subagents_limited": limited,
+            "messages": messages, "tools": activity, "subagents": children + delegated,
+            "tools_limited": tools_limited, "subagents_limited": limited or delegated_limited,
         }

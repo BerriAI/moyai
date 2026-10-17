@@ -6,7 +6,7 @@ export type ToolProgress = {
   created_at: string; finished_at: string | null
 }
 export type AgentProgress = {
-  id: string; parent_id: string | null; parent_name: string | null; name: string; avatar: number
+  id: string; session_id?: string | null; parent_id: string | null; parent_name: string | null; name: string; avatar: number
   depth: number; status: string; created_at: string; updated_at: string
   messages: (Omit<ProgressMessage, "phase"> & { phase: "commentary" | "final_answer" })[]
   tools: ToolProgress[]; messages_limited: boolean; tools_limited: boolean
@@ -47,15 +47,38 @@ export function rootTurn(turn: Turn | undefined, turns: Turn[]): Turn | undefine
   return turn
 }
 
+/** A promoted queued input takes its place when admitted into the running work. */
+export function orderedWorkMessages(messages: Message[], turns: Turn[]): Message[] {
+  const result = [...messages]
+  const groups = new Map<string, { index: number; message: Message; at: number }[]>()
+  messages.forEach((message, index) => {
+    if (message.role !== "user" && message.source !== "delegation") return
+    const input = turns.find(turn => turn.id === message.turn_id)
+    const root = rootTurn(input, turns)
+    if (!input || !root || input.status === "queued") return
+    const at = instant(input.parent_turn ? input.guidance_at ?? input.accepted_at : undefined)
+      ?? instant(message.created_at) ?? instant(input.created_at)
+    if (at === null) return
+    const group = groups.get(root.id) ?? []
+    group.push({ index, message, at })
+    groups.set(root.id, group)
+  })
+  for (const group of groups.values()) {
+    const ordered = [...group].sort((a, b) => a.at - b.at || a.index - b.index)
+    group.forEach((item, index) => { result[item.index] = ordered[index].message })
+  }
+  return result
+}
+
 /** Keep a distinct activity segment on each side of an admitted steering input. */
 export function workSegments(messages: Message[], turns: Turn[]): Map<number, WorkSegment> {
   const groups = new Map<string, { message: Message; turn: Turn; at: number | null }[]>()
   for (const message of messages) {
-    if (message.role !== "user") continue
+    if (message.role !== "user" && message.source !== "delegation") continue
     const input = turns.find(turn => turn.id === message.turn_id)
     const root = rootTurn(input, turns)
     if (!input || !root || input.status === "queued") continue
-    const at = instant(input.parent_turn ? input.accepted_at : undefined)
+    const at = instant(input.parent_turn ? input.guidance_at ?? input.accepted_at : undefined)
       ?? instant(message.created_at) ?? instant(input.created_at)
     const group = groups.get(root.id) ?? []
     group.push({ message, turn: root, at })

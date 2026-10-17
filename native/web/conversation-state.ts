@@ -9,7 +9,7 @@ export type Session = SidebarSession & {
 }
 export type Turn = {
   id: string; actor_id: string; status: string; mode?: string; model?: string; connections: string[]; error?: string
-  parent_turn?: string | null; accepted_at?: string | null
+  parent_turn?: string | null; accepted_at?: string | null; guidance_at?: string | null
   created_at?: string; finished_at?: string | null
   usage: { requests?: number; input_tokens?: number; output_tokens?: number }
 }

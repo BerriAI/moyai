@@ -32,7 +32,7 @@ import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type Pa
 import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
 import { TurnProgress } from "./turn-progress"
 import { useWorkProgress } from "./use-work-progress"
-import { workSegments } from "./work-timeline"
+import { orderedWorkMessages, workSegments } from "./work-timeline"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
@@ -673,7 +673,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const displayedActivity = mergeActivity(activity, liveText.activity)
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
     turn.id === message.turn_id && waitsBehindActive(turn, active, sendingNow.has(turn.id))))
-  const visibleMessages = messages.filter(message => (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id))
+  const visibleMessages = orderedWorkMessages(messages.filter(message =>
+    (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
   const segments = workSegments(visibleMessages, view.turns)
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
@@ -725,7 +726,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               entry={work.entries[segment.turn.id]} request={work.load}
               live={liveText.turnId === segment.turn.id ? liveText : undefined}
               onContentChange={followWork}
-              onSubagent={agent => openTab({
+              onSubagent={agent => openTab(agent.session_id ? {
+                id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,
+              } : {
                 id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id,
                 name: agent.name, status: agent.status, avatar: agent.avatar,
               })}
