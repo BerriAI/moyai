@@ -6,6 +6,7 @@ import os
 import pytest
 import test_product_authority as fixtures
 from fastapi import HTTPException
+from pydantic_ai.exceptions import ToolFailed
 from sqlalchemy import func, select, text
 from test_product_authority import demote
 
@@ -19,12 +20,37 @@ from moyai.product_schema import (
     verify_product_schema,
 )
 from moyai.swarm_contracts import NewSwarm
+from moyai.swarm_launch import launch
 from moyai.swarm_models import SwarmMember, SwarmMission
 from moyai.swarm_tools import operate
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
 product_database = fixtures.product_database
 admitted_product = fixtures.admitted_product
+
+
+async def test_chat_launch_serializes_receipts_and_retains_product_authority(admitted_product):
+    product = admitted_product
+    _, turn, prepared = await fixtures.active_turn(product, private=True)
+    arguments = {
+        "goal": "Investigate onboarding.", "workers": 20, "budget_seconds": 7200, "input_id": turn.id,
+    }
+    one, two = await asyncio.gather(*(
+        launch(product.database.swarms, prepared.scope, turn.id, "same-tool-call", **arguments)
+        for _ in range(2)
+    ))
+    assert one == two
+    async with product.database.sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(SwarmMember)) == 21
+        assert await db.scalar(select(func.count()).select_from(SwarmMission)) == 1
+        grants = list(await db.scalars(select(ProductTurnAuthority)))
+        assert len(grants) == 22
+        assert all(grant.authority_version == prepared.scope.product_grant.authority_version for grant in grants)
+    await demote(product)
+    with pytest.raises(ToolFailed):
+        await launch(product.database.swarms, prepared.scope, turn.id, "after-demotion", **arguments)
+    async with product.database.sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(SwarmMission)) == 1
 
 
 async def receipt_rows(product):

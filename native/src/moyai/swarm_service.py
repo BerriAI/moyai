@@ -101,10 +101,11 @@ class SwarmService:
 
     async def start(
         self, actor: User, request: NewSwarm, *, received_at: str | None = None,
+        transaction: AsyncSession | None = None,
     ) -> tuple[Session, Turn]:
         fingerprint = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
         try:
-            async with self.database._admission_session(None) as db:
+            async with self.database._admission_session(transaction) as db:
                 await self.database._actor_product_grant(db, actor)
                 locked = await db.scalar(update(User).where(
                     User.id == actor.id, User.enabled.is_(True), User.auth_version == actor.auth_version,
@@ -165,6 +166,9 @@ class SwarmService:
                 await db.flush()
                 return root, turn
         except IntegrityError:
+            if transaction is not None:
+                # An enclosing tool admission owns rollback and its receipt.
+                raise
             async with self.database.sessions() as db:
                 previous = await db.scalar(select(SwarmMission).where(
                     SwarmMission.owner_id == actor.id, SwarmMission.request_key == request.request_key,
@@ -185,7 +189,7 @@ class SwarmService:
         return root, turn
 
     async def copy_uploads(
-        self, db: AsyncSession, actor: User, ids: list[str], session_id: str,
+        self, db: AsyncSession, actor: User, ids: list[str], session_id: str | None,
     ) -> list[str]:
         copies = []
         for upload_id in ids:

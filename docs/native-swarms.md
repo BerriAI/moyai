@@ -1,5 +1,20 @@
 # Swarms on Pydantic AI
 
+In an ordinary web chat, ask: **“Start a swarm of 20 workers with a two-hour work
+window to investigate X.”** The agent can call
+`start_swarm(goal, workers=20, budget_seconds=7200)` and return a link to the
+persistent team. Launch returns immediately; the team continues in its own
+conversations. It inherits the chat's model, visibility and selected accounts.
+The original authenticated request and directions travel with the assignment;
+the agent's proposed goal is reference data, not new human authorization.
+Current-turn attachments receive independent member-scoped references.
+
+The tool is available only in direct web chats. Swarm members, delegated agents,
+Slack and automated executions cannot launch another swarm. A retried native
+tool call recovers the same team. Stop or new guidance before admission fences
+creation; once created, the team has its own Pause/Stop controls at the returned
+link. The chat's Stop button does not stop an already-created independent team.
+
 Choose **Swarm** on the new-session screen, describe one shared goal, type any
 whole number of at least 2 workers, and choose a work window. There is no fixed
 maximum team size. The default is 20 workers, plus the
@@ -83,6 +98,12 @@ references to the same encrypted objects. Coding work must be coordinated
 explicitly because each member has an independent filesystem.
 
 ## Native implementation
+
+`SwarmLaunchCapability` exposes `start_swarm(goal, workers=20, budget_seconds=0)`
+to ordinary direct web chats. Zero means no time limit; finite windows must be
+60–2,592,000 seconds. It uses `SwarmService.start` inside the source chat's
+authority/session fence and commits its tool receipt in the same transaction as
+the team. It does not add a second execution engine or change concurrency limits.
 
 `SwarmCapability` contributes a registered Pydantic `FunctionToolset`:
 
