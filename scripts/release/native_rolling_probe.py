@@ -40,12 +40,26 @@ def snapshot(connection, schema):
     return state
 
 
+def worker_shutdown_seconds():
+    """Read the installed application's effective settings without starting it."""
+    from moyai.product_config import load_product_config
+    from moyai.settings import Settings
+
+    config = load_product_config()
+    require(config is not None and config.role == 'worker')
+    return Settings(_env_file=None, **config.native_overrides()).worker_shutdown_seconds
+
+
 def probe(options):
     _native_api_probe.require_configuration()
     state = _rolling_probe.probe(
         options, snapshot_fn=snapshot, health_fn=_native_api_probe.health_identity)
-    if options['role'] == 'worker' and state['ready'] is True:
-        require(state['identity'] in state['native_workers'])
+    if options['role'] == 'worker':
+        # rolling_probe has normalized the installed Render entrypoint's
+        # environment, including defaults absent from control-plane metadata.
+        state['worker_shutdown_seconds'] = worker_shutdown_seconds()
+        if state['ready'] is True:
+            require(state['identity'] in state['native_workers'])
     return state
 
 

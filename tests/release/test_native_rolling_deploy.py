@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from scripts.release.deploy import BROKER, COORDINATOR, WORKER, ReleaseError
-from scripts.release.native_rolling_deploy import NativeRollingRelease
+from scripts.release.native_rolling_deploy import NativeRollingRelease, candidate_worker_shutdown
 from scripts.release.rehearse import Candidate, NEW, OLD
 from scripts.release.rehearse_api import API_ID
 from test_rolling_deploy import CONTRACT, RollingRender
@@ -30,11 +30,12 @@ def native_rolling(tmp_path):
             return state
         return {**state, 'core': 'pydantic-v1', 'role': service.role,
                 'native': deepcopy(NATIVE), 'native_drain': deepcopy(DRAIN),
-                'native_workers': list(render.owners[WORKER])}
+                'native_workers': list(render.owners[WORKER]), 'worker_shutdown_seconds': 240}
     release = NativeRollingRelease(
         render, github, probe, tmp_path / 'receipt.json', api_service_id=API_ID,
         contract=lambda env: deepcopy(CONTRACT),
         manifest=lambda env: {key: deepcopy(NATIVE[key]) for key in ('schema', 'app', 'harness')},
+        worker_shutdown=lambda env: 240,
         wait_seconds=1, readiness_timeout=4, retirement_timeout=6, deploy_timeout=4,
         clock=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
         log=lambda *args, **kwargs: None)
@@ -186,3 +187,52 @@ def test_lost_deployment_response_is_not_retried_or_rolled_back(native_rolling):
     assert len([call for call in render.calls if call[0] == 'POST']) == 1
     assert release.record['deploys'][0]['id'] is None
     assert release.record['status'] == 'failed'
+
+
+@pytest.mark.parametrize('seconds', [None, 0, 60, 239, 241, True, '240'])
+def test_unqualified_running_worker_shutdown_stops_before_mutation(native_rolling, seconds):
+    release, render, _ = native_rolling
+    original = release.probe
+    def unqualified(service):
+        state = original(service)
+        if service.role == 'worker':
+            state['worker_shutdown_seconds'] = seconds
+        return state
+    release.probe = unqualified
+    with pytest.raises(ReleaseError, match='shutdown budget'):
+        release.run()
+    assert not render.calls
+
+
+@pytest.mark.parametrize('seconds', [0, 60, 239])
+def test_unqualified_candidate_worker_shutdown_stops_before_mutation(native_rolling, seconds):
+    release, render, _ = native_rolling
+    release.worker_shutdown = lambda env: seconds
+    with pytest.raises(ReleaseError, match='Candidate native worker'):
+        release.run()
+    assert not render.calls
+
+
+@pytest.mark.parametrize('configured,expected', [(None, 240), ('0', 0), ('120', 120)])
+def test_candidate_budget_uses_real_installed_settings_without_runtime_startup(configured, expected, tmp_path):
+    from cryptography.fernet import Fernet
+    environment = {
+        'DATA_DIR': str(tmp_path), 'MOYAI_CORE': 'pydantic', 'MOYAI_PRODUCT_MODE': 'existing',
+        'MOYAI_RUNTIME_ROLE': 'worker', 'MOYAI_DATABASE_URL': 'postgresql://synthetic:password@127.0.0.1:1/isolated',
+        'MOYAI_DATABASE_SCHEMA': 'moyai_shutdown', 'MOYAI_NATIVE_SCHEMA': 'native_shutdown',
+        'MOYAI_SCHEMA_MODE': 'verify', 'MOYAI_DATABASE_INITIALIZE': 'false',
+        'MOYAI_SEPARATE_BROKER': 'true', 'MOYAI_COORDINATOR_HANDOFF': 'true',
+        'SESSION_SECRET': 'synthetic-source-session-secret', 'ENCRYPTION_KEY': Fernet.generate_key().decode(),
+        'MOYAI_NATIVE_ENCRYPTION_KEY': 'synthetic-native-key-at-least-32-characters',
+        'MOYAI_NATIVE_KEY_FORMAT': 'sha256-text-fernet-v1',
+        'MOYAI_NATIVE_OBJECT_FORMAT': 'fernet-hmac-sha256-v1',
+        'MOYAI_NATIVE_OBJECT_PREFIX': 'native-test', 'OBJECT_STORAGE_PREFIX': 'source-test',
+        'OBJECT_STORAGE_BUCKET': 'synthetic-unused', 'OBJECT_STORAGE_ENDPOINT': 'http://127.0.0.1:1',
+        'TEMPORAL_ENABLED': 'true', 'TEMPORAL_ADDRESS': '127.0.0.1:1', 'TEMPORAL_NAMESPACE': 'synthetic',
+        'TEMPORAL_TASK_QUEUE': 'source-test', 'MOYAI_NATIVE_TASK_QUEUE': 'native-test',
+        'MOYAI_PUBLIC_URL': 'https://synthetic.invalid',
+    }
+    if configured is not None:
+        environment['MOYAI_WORKER_SHUTDOWN_SECONDS'] = configured
+    assert candidate_worker_shutdown(environment) == expected
+    assert not list(tmp_path.iterdir())

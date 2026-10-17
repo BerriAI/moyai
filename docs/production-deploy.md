@@ -101,6 +101,15 @@ canonical/native schemas, four distinct healthy role owners, one registered
 native worker and an unpaused native maintenance generation. Exact-commit
 Docker, native runtime, PostgreSQL runtime and release-controller CI must pass.
 
+Both the running worker and candidate must use the qualified 240-second total
+worker shutdown budget. The Render entrypoint now supplies that default while
+preserving explicit settings. A source worker with the earlier zero-second
+default is rejected before any changes: adopt the new entrypoint through
+maintenance first. The four Temporal poller groups share this budget, giving
+each group up to 60 seconds to finish active work. Qualify longer activities
+separately; an already-dispatched model request is never replayed to hide an
+interrupted stream.
+
 The candidate must retain every role compatibility contract, canonical schema
 revision, native application migration manifest and Harness/framework version.
 This path performs no schema migration, global drain, pause or resume. Use

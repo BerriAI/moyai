@@ -10,7 +10,8 @@ def restore_render_environment(monkeypatch):
     # configure_environment writes these process-wide values. Register them with
     # monkeypatch so startup tests do not change later tests' Settings defaults.
     import os
-    for key in ('PUBLIC_URL', 'TRUST_MODAL_PROXY', 'CHECKPOINT_DIR', 'MODAL_VOLUME_NAME', 'DATA_DIR'):
+    for key in ('PUBLIC_URL', 'TRUST_MODAL_PROXY', 'CHECKPOINT_DIR', 'MODAL_VOLUME_NAME', 'DATA_DIR',
+                'MOYAI_WORKER_SHUTDOWN_SECONDS'):
         monkeypatch.setenv(key, os.environ.get(key, ''))
         if not os.environ[key]:
             os.environ.pop(key)
@@ -103,3 +104,15 @@ def test_render_api_shutdown_budget_leaves_time_for_cleanup(monkeypatch, role, s
         assert calls[0].listener_grace_seconds + seconds == 270
     elif role == 'coordinator':
         assert calls[0].listener_grace_seconds + seconds == 50
+
+
+@pytest.mark.parametrize('configured,expected', [(None, '240'), ('120', '120'), ('0', '0')])
+def test_render_worker_gets_bounded_activity_drain_without_overwriting_explicit_settings(monkeypatch, configured, expected):
+    import os
+    monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example')
+    monkeypatch.setenv('MOYAI_RUNTIME_ROLE', 'worker')
+    monkeypatch.delenv('MOYAI_WORKER_SHUTDOWN_SECONDS', raising=False)
+    if configured is not None:
+        monkeypatch.setenv('MOYAI_WORKER_SHUTDOWN_SECONDS', configured)
+    configure_environment()
+    assert os.environ['MOYAI_WORKER_SHUTDOWN_SECONDS'] == expected

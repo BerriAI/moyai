@@ -64,7 +64,10 @@ upgrades use maintenance. A [compatible API-only release](production-deploy.md#c
 or [compatible four-role rolling release](production-deploy.md#compatible-four-role-rolling-updates)
 preserves every activated contract, both schemas' receipts and the running
 maintenance generation. Neither performs a migration or global drain. Rolling
-releases also verify native worker registrations during overlap and retirement.
+releases also verify native worker registrations during overlap and retirement,
+and require the qualified 240-second worker shutdown budget on both source and
+candidate. A source with the earlier zero-second default must adopt it through
+maintenance before using four-role rolling deployment.
 The historical coordinated release still rejects a native source.
 
 Native execution protocol 2 records split activity queues, bundled skill startup,

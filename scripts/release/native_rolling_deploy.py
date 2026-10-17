@@ -1,16 +1,46 @@
 """Roll compatible native roles without changing schemas or pausing the cluster."""
 from copy import deepcopy
+import json
+import os
+from pathlib import Path
+import subprocess
 
 from scripts.release.deploy import COORDINATOR, WORKER, ReleaseError
-from scripts.release.native_migration import candidate_manifest
+from scripts.release.native_migration import candidate_manifest, native_python
 from scripts.release.rolling_deploy import RollingRelease, candidate_contract
+
+
+WORKER_SHUTDOWN_SECONDS = 240
+
+
+def candidate_worker_shutdown(environment):
+    root = Path(__file__).resolve().parents[2]
+    source = '''
+import json
+from render_start import configure_environment
+from scripts.release.native_rolling_probe import worker_shutdown_seconds
+configure_environment()
+print(json.dumps(worker_shutdown_seconds()))
+'''
+    try:
+        result = subprocess.run([native_python(root), '-c', source], cwd=root,
+            env={**environment, 'PATH': os.defpath, 'PYTHONPATH': str(root)},
+            capture_output=True, text=True, timeout=30)
+        value = json.loads(result.stdout)
+        if result.returncode or type(value) is not int:
+            raise ValueError()
+        return value
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise ReleaseError('Candidate native worker shutdown settings could not be verified; no changes made.') from None
 
 
 class NativeRollingRelease(RollingRelease):
     native_release = True
 
-    def __init__(self, *args, contract=candidate_contract, manifest=candidate_manifest, **kwargs):
+    def __init__(self, *args, contract=candidate_contract, manifest=candidate_manifest,
+                 worker_shutdown=candidate_worker_shutdown, **kwargs):
         self.source_contract, self.manifest = contract, manifest
+        self.worker_shutdown = worker_shutdown
         super().__init__(*args, contract=self.compatible_contract, **kwargs)
 
     def inspect(self, service_id, role):
@@ -31,6 +61,9 @@ class NativeRollingRelease(RollingRelease):
         expected = {key: self.baseline['native'][key] for key in ('schema', 'app', 'harness')}
         if native != expected:
             raise ReleaseError('Native application or Harness receipts differ; use a maintenance release.')
+        if (environment.get('MOYAI_RUNTIME_ROLE') == 'worker'
+                and self.worker_shutdown(environment) != WORKER_SHUTDOWN_SECONDS):
+            raise ReleaseError('Candidate native worker requires the qualified 240-second shutdown budget; use maintenance.')
         return candidate
 
     def plan_schema(self, states):
@@ -71,6 +104,11 @@ class NativeRollingRelease(RollingRelease):
             raise ReleaseError('An unaffected native worker changed or lost registration.')
         if state['role'] == 'worker' and state.get('ready') is True and state.get('identity') not in registered:
             raise ReleaseError('A ready native worker has not registered its exact process identity.')
+        if state['role'] == 'worker':
+            if (type(state.get('worker_shutdown_seconds')) is not int
+                    or state['worker_shutdown_seconds'] != WORKER_SHUTDOWN_SECONDS):
+                raise ReleaseError('Running native workers require the qualified 240-second shutdown budget; adopt it with maintenance first.')
+            self.record.setdefault('worker_shutdown_seconds', WORKER_SHUTDOWN_SECONDS)
         self.record.setdefault('core', 'pydantic-v1')
         self.record.setdefault('native', deepcopy(self.baseline['native']))
         self.record.setdefault('native_drain', deepcopy(self.baseline['native_drain']))
