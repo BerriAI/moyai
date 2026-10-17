@@ -8,7 +8,7 @@ export type Session = SidebarSession & {
   swarm_id?: string
 }
 export type Turn = {
-  id: string; actor_id: string; status: string; mode?: string; connections: string[]; error?: string
+  id: string; actor_id: string; status: string; mode?: string; model?: string; connections: string[]; error?: string
   created_at?: string; finished_at?: string | null
   usage: { requests?: number; input_tokens?: number; output_tokens?: number }
 }
@@ -17,8 +17,9 @@ export type NewConversation = { session: Session; turn: Turn; prompt: string; at
 
 /** Durable queued admission is normal startup, not necessarily a user queue. */
 export function waitsBehindActive(turn: Turn, active: Turn | undefined, sendingNow = false): boolean {
-  return turn.status === "queued" && turn.mode !== "asap" && !sendingNow
-    && Boolean(active && active.id !== turn.id && ["starting", "running", "saving", "waiting", "stopping"].includes(active.status))
+  const blocked = active?.status === "waiting"
+  return turn.status === "queued" && (blocked || (turn.mode !== "asap" && !sendingNow))
+    && Boolean(active && active.id !== turn.id && ["queued", "starting", "running", "saving", "waiting", "stopping"].includes(active.status))
 }
 
 /** Only seed after the server has accepted the first message and assigned its turn. */

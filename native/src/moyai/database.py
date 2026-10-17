@@ -338,7 +338,11 @@ class Database:
         received_at: str | None = None,
     ) -> Turn:
         admitted_at = now()
-        fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+        # Preserve transport receipts admitted before clarification replies
+        # acquired an explicit target.
+        fingerprint = hashlib.sha256(body.model_dump_json(
+            exclude={"reply_to"} if body.reply_to is None else None,
+        ).encode()).hexdigest()
         if db is not None:
             # Do not recover a conflicting receipt in an independent transaction.
             # The caller must roll back/retry its complete occurrence admission.
@@ -418,6 +422,28 @@ class Database:
                     409, "Select this computer's original account context, "
                     "or start a new conversation for the changed accounts."
                 )
+            active = await transaction.get(Turn, session.active_turn) if session.active_turn else None
+            if body.reply_to is not None and (
+                active is None or active.id != body.reply_to or active.status != "waiting"
+            ):
+                raise HTTPException(409, "That question is no longer waiting. Review the current conversation.")
+            if active and active.status == "waiting" and (body.reply_to or body.mode == "asap"):
+                from .questions import can_reply_with_text, pending_questions, text_results
+                pending = pending_questions(self, active)
+                eligible = (
+                    not swarm_generated and active.actor_id == actor.id
+                    and active.model == model and not body.attachments
+                    and set(json.loads(active.connections)) == set(selected_ids)
+                    and can_reply_with_text(pending)
+                )
+                if body.reply_to and not eligible:
+                    raise HTTPException(409, "Use the question form with the original model and account context.")
+                if eligible and pending is not None:
+                    return await self._resume(
+                        actor, session_id, active.id, body.request_key,
+                        text_results(pending, body.prompt), fingerprint,
+                        received_at=received_at, admitted_at=admitted_at, transaction=transaction, reply=body,
+                    )
             turn_id = new_id()
             turn = Turn(
                 id=turn_id, session_id=session_id, actor_id=actor.id,
@@ -556,7 +582,8 @@ class Database:
                 candidates = (await db.scalars(select(Turn).join(
                     Session, Session.id == Turn.session_id
                 ).where(
-                    Turn.status == "queued", Session.active_turn.is_(None),
+                    Turn.status == "queued",
+                    or_(Session.active_turn.is_(None), Session.active_turn == Turn.id),
                     Session.deleted.is_(False),
                     dispatchable(),
                 ).order_by(Turn.created_at, Turn.id).limit(limit - len(claimed_turns))
@@ -567,7 +594,8 @@ class Database:
                     if turn.session_id in claimed_sessions:
                         continue
                     claimed = await db.scalar(update(Session).where(
-                        Session.id == turn.session_id, Session.active_turn.is_(None),
+                        Session.id == turn.session_id,
+                        or_(Session.active_turn.is_(None), Session.active_turn == turn.id),
                         Session.deleted.is_(False),
                     ).values(revision=Session.revision + 1).returning(Session.id))
                     if claimed is None:
@@ -986,15 +1014,15 @@ class Database:
         self, actor: User, session_id: str, previous_id: str,
         request_key: str, results: dict[str, Any], fingerprint: str,
         *, received_at: str | None = None, admitted_at: str | None = None,
+        transaction: AsyncSession | None = None, reply: NewMessage | None = None,
     ) -> Turn:
-        async with self._admission_session(None) as db:
+        async with self._admission_session(transaction) as db:
             product_grant = await self._actor_product_grant(db, actor)
-            if self.product_authority_enabled:
-                locked_actor = await db.scalar(update(User).where(
-                    User.id == actor.id, User.enabled.is_(True), User.auth_version == actor.auth_version,
-                ).values(auth_version=User.auth_version).returning(User.id))
-                if locked_actor is None:
-                    raise HTTPException(401, "Your access changed. Sign in again.")
+            locked_actor = await db.scalar(update(User).where(
+                User.id == actor.id, User.enabled.is_(True), User.auth_version == actor.auth_version,
+            ).values(auth_version=User.auth_version).returning(User.id))
+            if locked_actor is None:
+                raise HTTPException(401, "Your access changed. Sign in again.")
             session = await self.allowed_session(db, session_id, actor)
             existing = await db.scalar(select(Turn).where(
                 Turn.session_id == session_id, Turn.actor_id == actor.id, Turn.request_key == request_key
@@ -1041,7 +1069,7 @@ class Database:
             )
             claimed = await db.scalar(update(Session).where(
                 Session.id == session.id, Session.active_turn == previous.id, Session.status == "waiting",
-            ).values(active_turn=None, status="queued", updated_at=now()).returning(Session.id))
+            ).values(active_turn=turn_id, status="queued", updated_at=now()).returning(Session.id))
             if claimed is None:
                 raise HTTPException(409, "Another response already resumed this request.")
             db.add(turn)
@@ -1052,6 +1080,11 @@ class Database:
                 source="http" if received_at else "admission", surface=session.surface,
             )
             self._bind_product_grant(db, turn, product_grant)
+            if reply is not None:
+                db.add(Message(
+                    session_id=session.id, turn_id=turn.id, author_id=actor.id,
+                    role="user", content=self.security.seal(reply.prompt), identity=f"user:{turn.id}",
+                ))
             if member is not None:
                 await self.swarms.bind(db, mission, turn, generated=True)
             previous.status = "resumed"
