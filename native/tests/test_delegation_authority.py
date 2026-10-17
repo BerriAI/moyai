@@ -151,3 +151,14 @@ async def test_promoting_an_older_message_makes_it_the_latest_guidance(runtime, 
     await database.steering_receipt(newer.id, "second")
     with pytest.raises(GuidanceChanged):
         await service.start(prepared.scope, "stale-again", "Old work", input_id=newer.id)
+
+
+async def test_pending_guidance_dispatches_in_admission_order(runtime, actor, active):
+    session, _, _ = active
+    database = runtime.database
+    older = await database.submit(actor, session.id, NewMessage(prompt="Queued first", request_key="older"))
+    newer = await database.submit(actor, session.id, NewMessage(
+        prompt="Correction sent second", request_key="newer", mode="asap",
+    ))
+    await database.steer_queued(actor, older.id)
+    assert [child.id for child, _ in await database.pending_steering()] == [newer.id, older.id]

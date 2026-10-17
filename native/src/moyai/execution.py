@@ -49,7 +49,11 @@ class AuthorizedActivity(ActivityInboundInterceptor):
                 context = getattr(input.args[0], "serialized_run_context", {})
                 input_id = (context.get("metadata") or {}).get("moyai_input_id")
             try:
-                await self.database.authorize_scope(scope, input_id=input_id)
+                # Admission owns both original-identity receipt recovery and
+                # live authorization for NEW work. Prechecking a retry here
+                # would discard a child committed before steering or Stop.
+                if name != "agent__moyai__capability__moyai_interactive_delegation__start":
+                    await self.database.authorize_scope(scope, input_id=input_id)
             except (PermissionError, HTTPException) as error:
                 raise ApplicationError(
                     "Execution authority changed before this activity attempt.",

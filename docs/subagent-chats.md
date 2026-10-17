@@ -71,6 +71,13 @@ settlement serialize on that same row. Admitted guidance has a durable ordering
 receipt, so promoting an older queued message supersedes newer typed input;
 retrying an older delivery receipt cannot reorder guidance. Reporting
 already-admitted children remains independent of that fence.
+The dispatcher and memory mutation guards use the same admission-order selector.
+An already-committed start recovers its original ID/name receipt before applying
+new-work eligibility checks; recovery validates the original parent, requester,
+product grant and task. It cannot authorize new work or release child content
+after Stop or revocation. The activity interceptor leaves this decision to
+admission. A separate Temporal marker enables three bounded attempts for this
+idempotent command without changing retries for models or external effects.
 The input identity travels as an explicit durable-operation argument and is
 validated by admission itself, including direct calls and retries. Older pending
 activities recover it from the SDK-injected run context; if neither carries an
@@ -95,3 +102,7 @@ ordinary delegation and steering through the pinned SDK and replay their histori
 Browser tests exercise nested navigation, both entrypoints to side chat, draft
 isolation, access loss and responsive layouts. These tests supplement the required
 baseline/final real-application recording; they do not replace it.
+`test_delegation_retries.py` exercises receipt recovery through the actual activity
+interceptor and a lost-reply Temporal retry, including history replay. PostgreSQL
+tests also cover a concurrent retry whose first receipt lookup misses. Memory
+mutation tests prove that a promoted older input supersedes a newer-created one.

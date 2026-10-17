@@ -830,17 +830,24 @@ class Database:
             if [(g.id, g.revision) for g in current] != [(g.id, g.revision) for g in scope.grants]:
                 raise PermissionError("Connection access changed. Start a fresh authorized turn.")
             if input_id is not None:
-                admission_order = select(func.max(Event.id)).where(
-                    Event.turn_id == Turn.id, Event.kind == "steering_admitted",
-                ).scalar_subquery()
-                pending = await db.scalar(select(Turn).where(
-                    Turn.parent_turn == turn.id,
-                    Turn.status.in_(["steering", "signal_sent", "accepted"]),
-                ).order_by(
-                    admission_order.desc().nulls_last(), Turn.created_at.desc(), Turn.id.desc(),
-                ).limit(1))
-                if pending and pending.id != input_id:
+                pending = await self.latest_guidance(db, turn.id)
+                if pending and pending != input_id:
                     raise GuidanceChanged("New guidance arrived before this action was dispatched.")
+
+    @staticmethod
+    def guidance_order():
+        return select(func.max(Event.id)).where(
+            Event.turn_id == Turn.id, Event.kind == "steering_admitted",
+        ).scalar_subquery()
+
+    async def latest_guidance(self, db: AsyncSession, parent_turn_id: str) -> str | None:
+        """One admission-order rule for every effect and memory mutation fence."""
+        return await db.scalar(select(Turn.id).where(
+            Turn.parent_turn == parent_turn_id,
+            Turn.status.in_(["steering", "signal_sent", "accepted"]),
+        ).order_by(
+            self.guidance_order().desc().nulls_last(), Turn.created_at.desc(), Turn.id.desc(),
+        ).limit(1))
 
     async def save_workspace_reference(self, scope: RunScope, reference: dict[str, Any]) -> None:
         await self.authorize_scope(scope)
@@ -961,7 +968,9 @@ class Database:
                 and_(Turn.status == "signal_sent", or_(
                     Turn.accepted_at.is_(None), Turn.accepted_at < cutoff,
                 )),
-            )).limit(100))
+            )).order_by(
+                self.guidance_order().asc().nulls_first(), Turn.created_at, Turn.id,
+            ).limit(100))
             result = []
             for child in children:
                 parent = await db.get(Turn, child.parent_turn)

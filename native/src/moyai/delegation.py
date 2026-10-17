@@ -61,6 +61,25 @@ class DelegationService:
     def __init__(self, database: Database):
         self.database = database
 
+    async def receipt(
+        self, db: AsyncSession, scope: RunScope, call_id: str, fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """Recover an admitted command, without authorizing another execution."""
+        previous = await db.scalar(select(DelegatedSession).where(
+            DelegatedSession.parent_turn_id == scope.turn_id,
+            DelegatedSession.tool_call_id == call_id,
+        ))
+        if previous is None:
+            return None
+        if (
+            previous.fingerprint != fingerprint or previous.actor_id != scope.actor_id
+            or previous.parent_session_id != scope.session_id
+        ):
+            raise ValueError("A delegation identity cannot change its task or requester.")
+        # This is only the original command's immutable ID/name, not child
+        # content or permission to run/read it after Stop or authority changes.
+        return {"session_id": previous.session_id, "name": previous.name}
+
     async def shared_artifact(
         self, db: AsyncSession, actor: User, destination: str, source: str | None,
     ) -> bool:
@@ -91,19 +110,39 @@ class DelegationService:
         async with database._admission_session(None) as db:
             actor = await db.get(User, scope.actor_id)
             parent_turn = await db.get(Turn, scope.turn_id)
-            if actor is None or parent_turn is None:
+            if (
+                actor is None or parent_turn is None or parent_turn.actor_id != scope.actor_id
+                or parent_turn.session_id != scope.session_id
+            ):
                 raise PermissionError("The original requester is unavailable.")
             # Bind new work to the admitted identity, never a refreshed account.
             grant = await database._saved_product_grant(db, parent_turn)
             if grant != scope.product_grant:
                 raise PermissionError("The original requester authority changed.")
+            previous = await self.receipt(db, scope, call_id, fingerprint)
+            if previous is not None:
+                return previous
             if grant is not None:
                 cast(Any, actor).product_grant = grant
-            await database._check_product_turn(db, parent_turn, grant)
-            await database._actor_product_grant(db, actor)
+            try:
+                await database._check_product_turn(db, parent_turn, grant)
+                await database._actor_product_grant(db, actor)
+            except (HTTPException, PermissionError):
+                # A competing first attempt may have committed while this
+                # attempt waited on canonical authority. Recover its receipt.
+                previous = await self.receipt(db, scope, call_id, fingerprint)
+                if previous is not None:
+                    return previous
+                raise
             locked = await db.scalar(update(User).where(
                 User.id == actor.id, User.enabled.is_(True), User.auth_version == actor.auth_version,
             ).values(auth_version=User.auth_version).returning(User.id))
+            # The actor fence serializes concurrent first attempts. Re-read
+            # before any live-parent/guidance checks, including a lost reply
+            # followed by Stop, steering, deletion or account revocation.
+            previous = await self.receipt(db, scope, call_id, fingerprint)
+            if previous is not None:
+                return previous
             if locked is None:
                 raise PermissionError("The original requester authority changed.")
             parent = await database.allowed_session(db, scope.session_id, actor)
@@ -119,14 +158,6 @@ class DelegationService:
             # through the entire child admission. A read before taking this
             # lock cannot decide whether the model acted on current guidance.
             await database.authorize_scope(scope, input_id=input_id or scope.turn_id, db=db)
-            previous = await db.scalar(select(DelegatedSession).where(
-                DelegatedSession.parent_turn_id == scope.turn_id,
-                DelegatedSession.tool_call_id == call_id,
-            ))
-            if previous:
-                if previous.fingerprint != fingerprint or previous.actor_id != actor.id:
-                    raise ValueError("A delegation identity cannot change its task.")
-                return {"session_id": previous.session_id, "name": previous.name}
             ancestry = await db.get(DelegatedSession, parent.id)
             depth = ancestry.depth + 1 if ancestry else 1
             if depth > MAX_DEPTH or scope.swarm_id:

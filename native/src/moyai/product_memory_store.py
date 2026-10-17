@@ -455,10 +455,8 @@ class ProductMemoryStore:
         if self.context is not None:
             from .input_identity import input_identity
             input_id = (self.context.metadata or {}).get("moyai_input_id") or input_identity(self.context)
-        pending = await db.scalar(select(Turn).where(
-            Turn.parent_turn == self.scope.turn_id, Turn.status.in_(["steering", "signal_sent", "accepted"]),
-        ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
-        if pending is not None and pending.id != input_id:
+        pending = await self.service.database.latest_guidance(db, self.scope.turn_id)
+        if pending is not None and pending != input_id:
             raise ToolFailed("New owner guidance arrived before this memory mutation.")
         prefs = await self.service._preferences(db, owner)
         if not prefs["enabled"] or (saving and not prefs["auto_save"]):

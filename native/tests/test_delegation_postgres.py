@@ -13,7 +13,7 @@ from test_product_authority import active_turn
 from moyai.contracts import GuidanceChanged, NewMessage
 from moyai.delegation import DelegationService
 from moyai.delegation_models import DelegatedSession
-from moyai.models import Session
+from moyai.models import Session, User
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable PostgreSQL required.")
 admitted_product = fixtures.admitted_product
@@ -53,6 +53,46 @@ async def test_correction_committing_before_admission_fence_rejects_old_model_wo
         prepared.scope, "current", "Corrected work", input_id=correction.id,
     )
     assert child["session_id"]
+
+
+@pytest.mark.parametrize("change", ["guidance", "stop", "disable"])
+async def test_concurrent_retry_recovers_receipt_after_initial_lookup_misses(
+    admitted_product, monkeypatch, change,
+):
+    product = admitted_product
+    database = product.database
+    session, _, prepared = await active_turn(product)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = database._actor_product_grant
+
+    async def pause(db, actor):
+        value = await original(db, actor)
+        if asyncio.current_task().get_name() == "retry":
+            entered.set()
+            await release.wait()
+        return value
+
+    monkeypatch.setattr(database, "_actor_product_grant", pause)
+    service = DelegationService(database)
+    retry = asyncio.create_task(service.start(prepared.scope, "same", "Original work"), name="retry")
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        first = await service.start(prepared.scope, "same", "Original work")
+        if change == "guidance":
+            correction = await database.submit(product.actor, session.id, NewMessage(
+                prompt="Changed guidance", request_key="correction", mode="asap",
+            ))
+            await database.steering_receipt(correction.id, "accepted")
+        elif change == "stop":
+            await database.stop(product.actor, session.id)
+        else:
+            async with database.sessions.begin() as db:
+                (await db.get(User, product.actor.id)).enabled = False
+    finally:
+        release.set()
+    assert await asyncio.wait_for(retry, 5) == first
+    async with database.sessions() as db:
+        assert len(list(await db.scalars(select(DelegatedSession)))) == 1
 
 
 @pytest.mark.parametrize("transition", ["receipt", "signal", "uncertain"])

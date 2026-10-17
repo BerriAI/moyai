@@ -6,11 +6,13 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import replace
+from datetime import timedelta
 from types import TracebackType
 from typing import Literal, Self
 
 import anyio
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 from temporalio.worker import (
     Interceptor,
     StartActivityInput,
@@ -23,6 +25,7 @@ from temporalio.worker import (
 
 ROUTING_VERSION = "moyai-activity-capacity-isolation-v1"
 WORKER_SHUTDOWN_VERSION = "moyai-worker-shared-drain-v1"
+DELEGATION_RETRY_VERSION = "moyai-delegation-receipt-retries-v1"
 ActivityPool = Literal["model", "tools", "control"]
 
 
@@ -89,6 +92,15 @@ class CapacityOutbound(WorkflowOutboundInterceptor):
         # remains authoritative. New histories record this decision in Temporal.
         if input.task_queue in (None, queue) and workflow.patched(ROUTING_VERSION):
             input = replace(input, task_queue=f"{queue}-{pool}")
+        if (
+            input.activity == "agent__moyai__capability__moyai_interactive_delegation__start"
+            and workflow.patched(DELEGATION_RETRY_VERSION)
+        ):
+            # Only this native database command has an immutable admission
+            # receipt. Never inherit this policy into model or external writes.
+            input = replace(input, retry_policy=RetryPolicy(
+                maximum_attempts=3, initial_interval=timedelta(seconds=1),
+            ))
         return self.next.start_activity(input)
 
 
