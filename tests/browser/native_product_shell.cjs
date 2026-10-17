@@ -33,7 +33,7 @@ async function handle(req,res,next) {
     if(state.connectionError && (url.searchParams.has('shared') || url.searchParams.has('session_id')))return json({detail:'Connections temporarily unavailable.'},503);
     return json(state.connectionsBySession?.[url.searchParams.get('session_id')]||state.connections||[]);
   }
-  if(url.pathname==='/api/session-folders')return json([]);
+  if(url.pathname==='/api/session-folders')return json(state.folders||[]);
   if(url.pathname==='/api/pull-requests/statuses')return json(state.prStatuses||{});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
     if(url.pathname==='/api/history/sessions'&&state.inventoryRows)return json({sessions:state.inventoryRows,ancestors:state.inventoryAncestors||[],has_more:false});
@@ -133,10 +133,17 @@ async function handle(req,res,next) {
       return json({status:'stopping'});
     }
     if(req.method==='PATCH') {
+      if(state.holdPreference&&(data.pinned!==undefined||data.folder!==undefined))await state.holdPreference;
+      if(state.preferenceError&&(data.pinned!==undefined||data.folder!==undefined))return json({detail:'Could not save sidebar preference.'},503);
       if(state.holdRename)await state.holdRename;
       if(state.renameError)return json({detail:'Could not save the session name.'},503);
       const id=url.pathname.split('/')[3];
       if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
+      if(data.pinned!==undefined||data.folder!==undefined) {
+        const patch={...(data.pinned===undefined?{}:{pinned:data.pinned}),...(data.folder===undefined?{}:{folder:data.folder})};
+        state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],...patch}};
+        if(state.inventoryRows)state.inventoryRows=state.inventoryRows.map(row=>row.id===id&&row.source!=='legacy'?{...row,...patch}:row);
+      }
       return json({updated:true});
     }
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
@@ -193,6 +200,83 @@ before(async()=>{
 after(async()=>{for(const client of clients)client.end();await browser?.close();await server?.close();});
 
 const renameRequests=()=>state.requests.filter(row=>row.method==='PATCH'&&row.body?.title!==undefined);
+const preferenceRequests=()=>state.requests.filter(row=>row.method==='PATCH'&&(row.body?.pinned!==undefined||row.body?.folder!==undefined));
+async function clickSidebarPin(page, name) {
+  await page.locator('.session-row').filter({has:page.getByRole('button',{name,exact:true})}).hover();
+  await page.getByRole('button',{name,exact:true}).click({timeout:5000});
+}
+
+test('sidebar pin and unpin render before a held save without blocking other actions or refreshing catalogs',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holdPreference:held});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
+  const catalogReads=()=>state.requests.filter(row=>['/api/connections','/api/session-folders','/api/history/sessions'].includes(row.path)).length;
+  const reads=catalogReads();
+  await clickSidebarPin(page,'Pin Current native work');
+  const unpin=page.getByRole('button',{name:'Unpin Current native work',exact:true});
+  await unpin.waitFor({timeout:500});
+  assert.equal(await unpin.isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'New folder',exact:true}).isEnabled(),true);
+  await clickSidebarPin(page,'Unpin Current native work');
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor({timeout:500});
+  assert.equal(preferenceRequests().length,1,'the second save waits for the first');
+  release();
+  await waitFor(()=>preferenceRequests().length===2);
+  await page.getByText('Session unpinned.',{exact:true}).waitFor();
+  assert.deepEqual(preferenceRequests().map(row=>row.body),[{pinned:true},{pinned:false}]);
+  assert.equal(catalogReads(),reads,'personal edits do not refetch the inventory or catalogs');
+  await page.reload();
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
+});
+
+test('sidebar drag into and out of a folder renders while saves are held and preserves the pin',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const id='11111111-1111-4111-8111-111111111111';
+  reset({status:'idle',holdPreference:held,folders:[{id:'today',name:'Today'}],
+    inventoryRows:[{...session(id),title:'Folder latency test',pinned:true,folder:'',source:'native'}]});
+  const page=await pageFor(t,'#');
+  const row=page.locator(`[data-session-key="native:${id}"]`);
+  await row.waitFor();
+  const today=page.locator('.session-group').filter({has:page.getByRole('button',{name:/^Today/})});
+  const recent=page.locator('.session-group').filter({has:page.getByRole('button',{name:/^Recent/})});
+  await row.dragTo(today.locator('.session-group-heading'));
+  await today.locator(`[data-session-key="native:${id}"]`).waitFor({timeout:500});
+  assert.equal(await row.getByRole('button',{name:'Unpin Folder latency test',exact:true}).isEnabled(),true);
+  await row.dragTo(recent.locator('.session-group-heading'));
+  await page.locator('#sessions-pinned').locator(`[data-session-key="native:${id}"]`).waitFor({timeout:500});
+  release();
+  await waitFor(()=>preferenceRequests().length===2);
+  await page.getByText('Moved to Pinned.',{exact:true}).waitFor();
+  assert.deepEqual(preferenceRequests().map(row=>row.body),[{folder:'Today'},{folder:''}]);
+  await page.reload();
+  await page.locator('#sessions-pinned').locator(`[data-session-key="native:${id}"]`).waitFor();
+});
+
+test('a rejected sidebar save restores placement and shows an error',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holdPreference:held,preferenceError:true});
+  const page=await pageFor(t);
+  await clickSidebarPin(page,'Pin Current native work');
+  await page.getByRole('button',{name:'Unpin Current native work',exact:true}).waitFor({timeout:500});
+  release();
+  await page.getByRole('alert').filter({hasText:'Could not save sidebar preference.'}).waitFor();
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
+  assert.equal(await page.locator('#sessions-pinned').count(),0);
+});
+
+test('header and command palette see the current pin even when their conversation read is older',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holdPreference:held});
+  const page=await pageFor(t);
+  await clickSidebarPin(page,'Pin Current native work');
+  await page.getByRole('button',{name:'Session actions',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Unpin',exact:true}).waitFor({timeout:500});
+  await page.keyboard.press('Escape');
+  const dialog=await palette(page);
+  await dialog.getByRole('option',{name:'Unpin session',exact:true}).waitFor({timeout:500});
+  release();
+});
 async function editTitle(page) {
   await page.getByRole('button',{name:/^Rename session:/}).click();
   const input=page.getByRole('textbox',{name:'Session name',exact:true});

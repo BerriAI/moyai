@@ -203,8 +203,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
     })
     if (!move.changed) { setDropNotice(move.message); return }
     setDropNotice("")
-    // SessionActions owns the save, refresh and truthful success/error toast.
-    // Rows do not move optimistically, so a failed PATCH leaves their placement intact.
+    // SessionActions applies the move immediately and rolls it back if saving fails.
     void edit(move.row, move.body, move.message)
   }
   function onListBackground(event: React.DragEvent<HTMLElement>): boolean {
