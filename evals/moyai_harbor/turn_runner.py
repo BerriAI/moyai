@@ -35,7 +35,9 @@ from app.credentials import SaveSecret
 from .workspace import HarborWorkspace
 
 EVALS = Path(__file__).resolve().parents[1]
-product_database_state = import_module("product_database_fixtures").product_database_state
+database_fixtures = import_module("product_database_fixtures")
+product_database_state = database_fixtures.product_database_state
+seed_runtime_store_schema = database_fixtures.seed_runtime_store_schema
 CREDENTIAL_TOOLS = ("credentials_list", "credentials_request", "credentials_run")
 BOT_USER = "UBOT00001"
 SLACK_USER = "UTEST0001"
@@ -145,6 +147,7 @@ async def run_moyai_turn(
     root_dir = EVALS / "jobs" / "runner" / f"{case['id']}-{trial}-{uuid4().hex[:8]}"
     root_dir.mkdir(parents=True, exist_ok=True)
     async with product_database_state(root_dir) as product:
+        await seed_runtime_store_schema(product.source)
         await migrate_product_schema(
             product.source, schema=product.schema, source_schema="moyai",
         )

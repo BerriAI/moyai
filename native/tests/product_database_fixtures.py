@@ -21,6 +21,16 @@ from moyai.security import Security
 from moyai.settings import Settings
 
 
+async def seed_runtime_store_schema(source):
+    async with source.begin() as connection:
+        await connection.execute(text(
+            "CREATE TABLE IF NOT EXISTS moyai.runs ("
+            "id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'completed', "
+            "private_owner_id TEXT NOT NULL DEFAULT '', deleted_at TEXT NOT NULL DEFAULT '', "
+            "deletion_requested_at TEXT NOT NULL DEFAULT '')"
+        ))
+
+
 @asynccontextmanager
 async def product_database_state(tmp_path, *, template="template0"):
     base = urlsplit(os.environ["MOYAI_TEST_POSTGRES"])
