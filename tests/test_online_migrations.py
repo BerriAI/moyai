@@ -105,7 +105,7 @@ def test_candidate_plans_require_contiguous_reviewed_source_digests(monkeypatch)
         online.plan(BASE)
 
 
-def test_performance_expansion_preserves_old_writer_and_matches_initializer(database, tmp_path):
+def test_performance_expansion_preserves_old_writer_and_matches_initializer(database, tmp_path, monkeypatch):
     """Exercise the real 20 -> 21 declaration, not only a synthetic future plan."""
     from app import performance
     url, schema = database
@@ -121,10 +121,15 @@ def test_performance_expansion_preserves_old_writer_and_matches_initializer(data
         conn.execute("INSERT INTO performance_samples(message_id,run_id,kind,persisted_at,first_model_at) "
                      "VALUES(1,'saved','new_chat','2026-10-15T00:00:00+00:00','2026-10-15T00:00:01+00:00')")
         # Same connection remains a live old writer across the additive DDL.
-        plan = online.plan(20)
+        plan = online.plan(20, 21)
         assert online.apply_plan(conn, schema, plan)['status'] == 'applied'
         assert online.schema_is_compatible(conn, schema, 20, 20)
         assert online.schema_is_compatible(conn, schema, 21, 20)
+        if schema_migrations.SCHEMA_REVISION > 21:
+            assert not online.schema_is_compatible(
+                conn, schema, schema_migrations.SCHEMA_REVISION,
+                schema_migrations.SCHEMA_COMPATIBILITY_REVISION,
+            )
         conn.execute("UPDATE performance_samples SET first_model_at='2026-10-15T00:00:02+00:00' WHERE message_id=1")
         assert conn.execute('SELECT timing_version,dispatch_at FROM performance_samples').fetchone() == (None, None)
         actual = {row[0] for row in conn.execute(
@@ -136,15 +141,19 @@ def test_performance_expansion_preserves_old_writer_and_matches_initializer(data
             assert actual == set(conn.column_names('performance_samples'))
     finally:
         sqlite.close()
-    new = Store(tmp_path / 'new-reader', database_url=url, database_schema=schema, schema_mode='verify')
-    try:
-        performance.model_dispatched(new, {'id': 'saved', 'active_message_id': 1},
-                                     '2026-10-15T00:00:01+00:00', '2026-10-15T00:00:03+00:00', 'request')
-        assert new.rows('SELECT first_model_at,dispatch_at,timing_version FROM performance_samples') == [
-            {'first_model_at': '2026-10-15T00:00:02+00:00', 'dispatch_at': '2026-10-15T00:00:03+00:00',
-             'timing_version': 2}]
-    finally:
-        new.close()
+    # Exercise the v21 reader this historical expansion admitted. A later
+    # release must still require its own migration, as checked above.
+    with monkeypatch.context() as historical:
+        historical.setattr(schema_migrations, 'SCHEMA_REVISION', 21)
+        new = Store(tmp_path / 'new-reader', database_url=url, database_schema=schema, schema_mode='verify')
+        try:
+            performance.model_dispatched(new, {'id': 'saved', 'active_message_id': 1},
+                                         '2026-10-15T00:00:01+00:00', '2026-10-15T00:00:03+00:00', 'request')
+            assert new.rows('SELECT first_model_at,dispatch_at,timing_version FROM performance_samples') == [
+                {'first_model_at': '2026-10-15T00:00:02+00:00', 'dispatch_at': '2026-10-15T00:00:03+00:00',
+                 'timing_version': 2}]
+        finally:
+            new.close()
 
 
 @pytest.mark.parametrize('mutation', ['drop','default','not_null','index_existing','sql_type',
