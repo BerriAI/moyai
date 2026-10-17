@@ -100,7 +100,7 @@ def product_environment(
         "TEMPORAL_ADDRESS": "127.0.0.1:7233",
         "TEMPORAL_NAMESPACE": "default",
         "TEMPORAL_TASK_QUEUE": "existing-sessions-v1",
-        "MOYAI_PUBLIC_URL": "https://moyai.invalid",
+        "MOYAI_PUBLIC_URL": "http://127.0.0.1:8796",
         "LITELLM_API_BASE": gateway_url,
         "LITELLM_API_KEY": gateway_key,
         "AGENT_MODEL": agent_model,
