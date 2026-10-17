@@ -401,14 +401,29 @@ test('textured rock renders front, side and back and restores Home after remount
   assert.deepEqual(errors,[]);
 });
 
-test('decode animation plays once and stays settled after editing a draft',async t=>{
+test('headline plays once, cursor flashes five times, and neither restarts after editing a draft',async t=>{
   reset({status:'idle'});
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'no-preference'});
   t.after(()=>page.close());
   await page.goto(base+'/');
-  await page.waitForFunction(()=>document.querySelector('.decode-headline')?.classList.contains('decoded'));
+  const caret=page.locator('.decode-caret');
+  await caret.waitFor({state:'attached'});
+  const blinking=await caret.evaluate(el=>new Promise((resolve,reject)=>{
+    let flashes=0,lit=false,frame;
+    const timeout=setTimeout(()=>{cancelAnimationFrame(frame);reject(new Error('Cursor did not stop blinking.'));},12000);
+    const sample=()=>{
+      const visible=getComputedStyle(el).opacity==='1';
+      if(visible&&!lit)flashes++;
+      lit=visible;frame=requestAnimationFrame(sample);
+    };
+    el.addEventListener('animationend',()=>{
+      clearTimeout(timeout);cancelAnimationFrame(frame);
+      resolve({flashes,opacity:getComputedStyle(el).opacity});
+    },{once:true});
+    sample();
+  }));
+  assert.deepEqual(blinking,{flashes:5,opacity:'0'});
   const settled=['> what are we','  working on?▌'];
-  await page.waitForTimeout(4500);
   assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
   assert.equal(await page.locator('.home-header').count(),0);
   const input=page.getByRole('textbox',{name:'Message Moyai'});
@@ -417,7 +432,8 @@ test('decode animation plays once and stays settled after editing a draft',async
   await input.fill('');
   await page.waitForTimeout(400);
   assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
-  assert.equal(await page.locator('.decode-caret').evaluate(el=>getComputedStyle(el).animationName),'none');
+  assert.equal(await caret.evaluate(el=>getComputedStyle(el).opacity),'0');
+  assert.equal(await caret.evaluate(el=>el.getAnimations()[0]?.playState),'finished');
 });
 
 for(const width of [1440,320])test(`selected chat keeps its highlight while actions hide at ${width}px`,async t=>{

@@ -34,7 +34,8 @@ the loading and WebGL fallback. See the
 A faint atmospheric layer sits over the rock and stars, beneath the sharp text
 and composer, to give the scene depth without blocking rotation controls.
 
-The headline decodes once per home-screen visit, then stays still. The rock
+The headline decodes once per home-screen visit; its cursor blinks five times,
+then disappears. The rock
 floats vertically by five pixels in each direction over a twelve-second cycle, using CSS so idle
 WebGL scenes do not continuously render. Motion stops offscreen, in background
 tabs, and when reduced motion is enabled. Geometry, materials, textures,

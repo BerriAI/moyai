@@ -7,7 +7,7 @@ There is no photograph overlay or material change based on viewing angle.
 
 The conversion reduces 1,433,008 triangles to 49,998 and scales the texture maps
 to 2048 pixels. The GLB is about 3.4 MB. Its matching transparent render is used
-for the loading fallback, sign-in screen and empty chats.
+only as the home scene's loading and WebGL fallback.
 
 To rebuild with Blender 4.5, extract the archive and run from the repository root:
 

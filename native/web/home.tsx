@@ -52,7 +52,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     // The composer is useful before the decorative WebGL module is downloaded.
     void import("@/moyai-sculpture").then(({ mountSculpture }) => {
       if (!disposed) cleanupSculpture = mountSculpture(sculpture.current)
-    }).catch(() => {}) // The static logo remains a complete fallback.
+    }).catch(() => {}) // The static image remains a complete fallback.
     return () => { disposed = true; mounted.current = false; cleanupSculpture() }
   }, [])
   useEffect(() => {
@@ -95,7 +95,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
     <div className="home-content">
       <p className="home-eyebrow">A space for your next big idea</p>
-      <DecodeHeadline paused={busy || Boolean(draft)} />
+      <DecodeHeadline paused={busy || Boolean(draft.trim())} />
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         {error && <p className="error" role="alert">{error}</p>}
         {productMode === "existing" && catalog.scope === accountScope && catalog.error && !skipAccounts && <div className="home-connection-error" role="alert">

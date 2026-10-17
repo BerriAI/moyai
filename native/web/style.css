@@ -101,7 +101,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .transcript { flex: 1; overflow-y: auto; scrollbar-gutter: stable; padding: 32px var(--chat-gutter); scroll-behavior: auto; }
 .transcript > *, .composer-wrap > * { max-width: var(--chat-width); margin-inline: auto; }
 .empty-chat { max-width: 680px; margin: 14vh auto 0; text-align: center; }
-.empty-chat img { width: 56px; height: 56px; object-fit: contain; opacity: .8; margin-bottom: 20px; }
 .empty-chat p { margin-top: 12px; }
 .message { max-width: var(--chat-width); margin: 0 auto 32px; }
 .message-author { display: flex; gap: 12px; align-items: center; font-weight: 550; font-size: 12px; color: var(--ui-muted); margin-bottom: 10px; }
@@ -161,7 +160,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .notice { color: var(--ui-warning); background: var(--ui-warning-bg); }
 .global-error { position: absolute; z-index: 20; top: 6px; left: 20px; right: 20px; display: flex; justify-content: space-between; }
 .login { width: min(360px, calc(100vw - 48px)); display: flex; flex-direction: column; gap: 20px; }
-.login img { width: 52px; height: 52px; object-fit: contain; margin-bottom: 4px; }
 .login h1 { font-size: 28px; }
 .login label { font-size: 13px; }
 .login p { margin-top: -8px; }

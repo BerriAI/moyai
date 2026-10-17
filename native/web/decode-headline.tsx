@@ -37,6 +37,7 @@ export const DecodeHeadline = memo(function DecodeHeadline({ paused }: { paused:
     }
     const sync = () => {
       stop()
+      root.current?.style.setProperty("--decode-caret-play-state", visible && !document.hidden ? "running" : "paused")
       if (paused || motion.matches) { completed.current = true; setFrame(finished); return }
       if (completed.current || document.hidden || !visible) return
       step()
@@ -57,7 +58,7 @@ export const DecodeHeadline = memo(function DecodeHeadline({ paused }: { paused:
     }
   }, [paused])
 
-  return <h1 ref={root} className={`decode-headline ${frame.done && !paused ? "decoded" : ""}`} aria-label="What are we working on?">
+  return <h1 ref={root} className={`decode-headline ${frame.done ? "decoded" : ""}`} aria-label="What are we working on?">
     {lines.map((line, index) => <span key={line} className="decode-line" aria-hidden="true">
       <span className="decode-reserve">{line}{index === 1 ? "▌" : ""}</span>
       <span className="decode-text">{frame.lines[index]}{index === 1 && <span className="decode-caret">▌</span>}</span>

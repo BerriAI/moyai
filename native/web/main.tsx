@@ -13,7 +13,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
-import logo from "./assets/moyai-meteor-poster.webp"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { Home } from "./home"
@@ -379,7 +378,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
     return () => controller.abort()
   }, [retry])
   return <main className="center"><section className="login" aria-labelledby="login-title">
-    <img src={logo} alt="" /><h1 id="login-title">Welcome to Moyai</h1><p className="muted">Sign in to your workspace.</p>
+    <h1 id="login-title">Welcome to Moyai</h1><p className="muted">Sign in to your workspace.</p>
     {!config && !error && <p role="status">Loading sign-in options…</p>}
     {config?.google_enabled && <Button variant="outline" disabled={busy} onClick={async () => {
       setBusy(true); setError("")
@@ -712,7 +711,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             followingWork.current = element.scrollHeight - element.scrollTop - element.clientHeight < 180
           }}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
-          {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
+          {!messages.length && <div className="empty-chat"><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             const segment = segments.get(message.id)

@@ -67,6 +67,8 @@ or a Next.js-specific pattern to this Vite app solely to satisfy an example.
 Run `npm run typecheck`, relevant `npm test` cases, `npm run build` and
 `npm run test:ui`. The browser fixtures serve the actual React app against synthetic
 APIs; they do not prove provider authorization or production execution.
+Finish the build before API tests that mount generated static files. Avoid source
+edits during browser suites, since hot reload can invalidate in-flight checks.
 
 Inspect affected screens at 1440px, 768px and 320px. Include the front page when
 changing shared styles. Open affected dialogs, filter a populated list, recover
