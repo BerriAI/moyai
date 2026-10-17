@@ -68,11 +68,23 @@ def test_session_route_and_long_fenced_answer():
     assert session_url("https://moyai.example", "native", "invalid").endswith("/#native")
     assert session_url("", "native") == ""
     value = thread_message("```python\n" + "x" * 3400 + "\n```", URL)
-    assert all(len(block["text"]["text"]) <= 3000 for block in value["blocks"] if block["type"] == "section")
-    assert buttons(value)[0]["text"]["text"] == "Open session"
+    sections = [block for block in value["blocks"] if block["type"] == "section"]
+    assert all(len(block["text"]["text"]) <= 3000 for block in sections)
+    assert sections[-1]["text"]["text"].endswith(f"\n```\n<{URL}|[↗︎]>")
+    assert not any(block["type"] == "actions" for block in value["blocks"])
+    assert sections[-1]["text"]["verbatim"] is True
     assert value["text"].endswith(URL)
     assert value["attachments"] == []
-    assert "style" not in buttons(value)[0]
+
+
+def test_empty_text_has_only_the_ambient_session_link():
+    message = thread_message("", URL)
+    assert message["blocks"] == [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"<{URL}|[↗︎]>", "verbatim": True},
+    }]
+    assert message["text"] == "\n\nOpen session: " + URL
+    assert message["attachments"] == []
 
 
 @pytest.mark.parametrize("reference", [
@@ -92,7 +104,8 @@ def test_card_replaces_standalone_reference_line(reference):
         "text": {"type": "mrkdwn", "text": "Both checks passed.", "verbatim": True},
     }]
     assert PR.casefold() in message["text"].casefold()
-    assert buttons(message)[0]["text"]["text"] == "View PR"
+    assert [item["text"]["text"] for item in buttons(message)] == ["View PR", "Open Moyai session"]
+    assert message["blocks"][0]["text"]["text"] == "Both checks passed."
 
 
 def test_reference_only_answer_is_a_card_without_empty_body():
@@ -196,11 +209,11 @@ async def test_final_markdown_formats_inline_code_and_fences_in_delivered_reply(
     assert len(messages) == 1 and requests[-1][1]["ts"] == next(iter(messages))
     message = requests[-1][1]
     section = message["blocks"][0]
-    assert section["text"] == {"type": "mrkdwn", "text": expected, "verbatim": True}
+    link = f"<https://moyai.example/#{thread.session_id}|[↗︎]>"
+    assert section["text"] == {"type": "mrkdwn", "text": expected + " " + link, "verbatim": True}
     assert message["text"] == expected + f"\n\nOpen session: https://moyai.example/#{thread.session_id}"
     assert message["attachments"] == []
-    assert buttons(message)[0]["text"]["text"] == "Open session"
-    assert buttons(message)[0]["url"] == f"https://moyai.example/#{thread.session_id}"
+    assert buttons(message) == []
     assert requests[0][1]["unfurl_links"] is False and requests[0][1]["unfurl_media"] is False
     if product:
         assert section["expand"] is True
@@ -210,7 +223,9 @@ async def test_final_markdown_formats_inline_code_and_fences_in_delivered_reply(
 
 
 @pytest.mark.parametrize("product", [False, True])
-async def test_progress_keeps_session_button_and_final_clears_old_attachments(runtime, active, slack, monkeypatch, product):
+async def test_progress_uses_ambient_session_link_and_final_clears_old_attachments(
+    runtime, active, slack, monkeypatch, product,
+):
     await bind(slack, active)
     runtime.settings.public_url = slack.service.settings.public_url = "https://moyai.example"
     await queued(runtime, active, product=product, kind="anchor", text="Working.")
@@ -228,9 +243,11 @@ async def test_progress_keeps_session_button_and_final_clears_old_attachments(ru
         row = await db.scalar(select(Delivery).where(Delivery.destination.contains('"progress": true')))
     payload = json.loads(runtime.security.unseal(row.content))
     expected = "#run=" + "a" * 32 if product else "#" + active[0].id
-    assert buttons(payload)[0]["url"].endswith(expected)
+    assert payload["blocks"][0]["text"]["text"].endswith(
+        f"<https://moyai.example/{expected}|[↗︎]>"
+    )
+    assert not buttons(payload)
     assert payload["attachments"] == []
-    assert all("style" not in action for action in buttons(payload))
     # A plain legacy row must clear rich content when it edits the same timestamp.
     final = await queued(runtime, active, product=product, kind="final", text="Done.")
     assert "rich_reply" not in json.loads(final.destination)
@@ -269,10 +286,11 @@ async def test_product_long_answer_has_one_card_and_preserves_approval_controls(
     assert PR.casefold() in contents[0]["text"].casefold()  # Accessible fallback still has the destination.
     control = {"type": "button", "action_id": "moyai_native_approve", "value": "turn", "style": "primary",
                "text": {"type": "plain_text", "text": "Approve"}}
-    message = thread_message("Approval required.", URL, controls=[control])
-    assert buttons(message) == [control, buttons(message)[1]]
-    assert buttons(message)[1]["action_id"] == "moyai_open_session"
-    assert "style" not in buttons(message)[1]
+    decline = {"type": "button", "action_id": "moyai_native_decline", "value": "turn",
+               "text": {"type": "plain_text", "text": "Decline"}}
+    message = thread_message("Approval required.", URL, controls=[control, decline])
+    assert buttons(message) == [control, decline]
+    assert message["blocks"][0]["text"]["text"].endswith(f"<{URL}|[↗︎]>")
     assert message["blocks"][-1]["elements"] == buttons(message)
     assert message["attachments"] == []
 

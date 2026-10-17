@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Tabs as TabsPrimitive } from "radix-ui"
-import { Activity, CheckSquare, File, Files, GitPullRequest, Maximize2, MessageSquare, Minimize2, Monitor, PanelRightClose, Plus, Search, Sparkles, X } from "lucide-react"
+import { Activity, CheckSquare, File, Files, GitPullRequest, Maximize2, MessageSquare, Minimize2, Monitor, PanelRightClose, Plus, Search, Sparkles, Terminal, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -55,7 +55,7 @@ export function panelReducer(state: PanelState, action: PanelAction): PanelState
 
 const icons = {
   "pull-request": GitPullRequest, subagent: Sparkles, output: File, computer: Monitor,
-  activity: Activity, plan: CheckSquare, files: Files, "side-chat": MessageSquare,
+  action: Terminal, activity: Activity, plan: CheckSquare, files: Files, "side-chat": MessageSquare,
 }
 export type AddTabKind = "side-chat" | "files" | "computer" | "activity" | "plan"
 const choices: { kind: AddTabKind; label: string; description: string }[] = [

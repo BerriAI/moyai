@@ -528,6 +528,29 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         await runtime.database.session(fresh, session_id)
         return result
 
+    @app.get("/api/sessions/{session_id}/progress/{turn_id}/actions/{action_id}")
+    async def action_detail(
+        session_id: str, turn_id: str, action_id: str, request: Request,
+        agent_id: str | None = None, user: User = Depends(actor),
+    ):
+        await runtime.database.session(user, session_id)
+        async with runtime.database.sessions() as db:
+            turn = await db.get(Turn, turn_id)
+            if turn is None or turn.session_id != session_id:
+                raise HTTPException(404, "Turn not found.")
+            if turn.actor_id != user.id:
+                raise HTTPException(403, "Working activity is visible only to its requester.")
+        result, source_session = await work_progress.action(turn, action_id, agent_id)
+        fresh = await runtime.database.user(user.id)
+        if fresh.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        if runtime.product_identity is not None:
+            await runtime.product_identity.require_request_current(request)
+        await runtime.database.session(fresh, session_id)
+        if source_session != session_id:
+            await runtime.database.session(fresh, source_session)
+        return result
+
     @app.get("/api/sessions/{session_id}/activity")
     async def session_activity(session_id: str, user: User = Depends(actor)):
         await runtime.database.session(user, session_id)
