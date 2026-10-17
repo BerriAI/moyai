@@ -8,6 +8,7 @@ export type Session = SidebarSession & {
 }
 export type Turn = {
   id: string; actor_id: string; status: string; mode?: string; connections: string[]; error?: string
+  created_at?: string; finished_at?: string | null
   usage: { requests?: number; input_tokens?: number; output_tokens?: number }
 }
 export type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; attachments?: UploadedFile[] }
