@@ -56,6 +56,10 @@ the heading; bare links show the PR number and repository. These are links
 from the answer, not claims of creation, approval, CI status, or merge. No
 GitHub lookup or personal credential is needed. Code examples do not make
 cards. Slack controls native button colors and fonts.
+Standalone PR-reference lines are replaced by the corresponding cards, including
+references at the end of a long answer. Links within explanatory sentences and
+code examples remain in the answer. References without a displayed card remain
+visible, and the text fallback retains PR destinations for accessibility.
 
 Blocks and attachments are saved in the same durable outbox as the text.
 Edits explicitly replace both fields so an earlier card or approval cannot

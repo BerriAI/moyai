@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from html import unescape
 from typing import Any
 
 from fastapi import HTTPException
@@ -12,6 +13,12 @@ from .pull_requests import parse_pr_url
 
 VIOLET = "#5B3FD1"
 NAVIGATION_ACTIONS = {"moyai_open_session", "moyai_view_pr", "moyai_review_pr"}
+PR_REFERENCE_LABEL = re.compile(
+    r"(?:reference(?:\s+(?:PR|pull request))?|PR|pull request)"
+    r"(?:\s*\(not created or reviewed(?: here)?\))?\s*:",
+    re.IGNORECASE,
+)
+PR_TEXT_LINK = re.compile(r"<(https://github\.com/[^\s<>|]+)(?:\|[^>\n]*)?>|(https://github\.com/[^\s<>]+)")
 
 
 def session_url(public_url: str, session_id: str, source_run_id: str = "") -> str:
@@ -93,6 +100,39 @@ def pr_cards(answer: str, url: str) -> list[dict[str, Any]]:
     return cards
 
 
+def without_pr_references(text: str, cards: list[dict[str, Any]] | None) -> str:
+    """Replace standalone PR-link lines with their cards, not surrounding prose."""
+    urls = {
+        element["url"] for card in cards or [] for block in card["blocks"]
+        if block["type"] == "actions" for element in block["elements"]
+        if element.get("action_id") == "moyai_view_pr"
+    }
+    if not urls:
+        return text
+    kept, fenced = [], False
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        links = list(PR_TEXT_LINK.finditer(line))
+        if fenced or "`" in line or len(links) != 1:
+            kept.append(line)
+            continue
+        link = links[0]
+        prefix = re.sub(r"^\s*(?:[-+*]|\d+[.)])\s+", "", line[:link.start()]).replace("*", "").strip()
+        suffix = line[link.end():].strip().strip(".*")
+        try:
+            pr = parse_pr_url(unescape((link[1] or link[2]).rstrip(".,;!")))
+        except HTTPException:
+            kept.append(line)
+            continue
+        if (
+            pr.url not in urls or suffix
+            or (prefix and not PR_REFERENCE_LABEL.fullmatch(prefix))
+        ):
+            kept.append(line)
+    return "".join(kept).strip()
+
+
 def thread_message(
     text: str, url: str, *, cards: list[dict[str, Any]] | None = None,
     controls: list[dict[str, Any]] | None = None,
@@ -100,17 +140,23 @@ def thread_message(
     """Keep fallback text accessible and all section text inside Slack's limit."""
     from app.slack_format import split_reply
 
+    visible = without_pr_references(text, cards)
+    parts = split_reply(visible, limit=2900) if visible.strip() or not cards else []
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": part, "verbatim": True}}
-        for part in split_reply(text, limit=2900)
+        for part in parts
     ]
     actions = list(controls or [])
     if url and not cards:
         actions.append(button("Open session", url, "moyai_open_session", primary=not controls))
     if actions:
         blocks.append({"type": "actions", "elements": actions})
+    fallback = text
+    for card in cards or []:
+        if card["fallback"].rsplit(": ", 1)[-1].casefold() not in fallback.casefold():
+            fallback += "\n\n" + card["fallback"]
     return {
-        "text": text + ("\n\nOpen session: " + url if url else ""),
+        "text": fallback + ("\n\nOpen session: " + url if url else ""),
         "blocks": blocks, "attachments": cards or [],
     }
 

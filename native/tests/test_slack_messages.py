@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+from app.slack_format import slack_text
 from pydantic import SecretStr
 from sqlalchemy import func, select
 from test_product_slack import bind
@@ -72,6 +73,44 @@ def test_session_route_and_long_fenced_answer():
     assert value["text"].endswith(URL) and value["attachments"] == []
 
 
+@pytest.mark.parametrize("reference", [
+    "Reference PR (not created or reviewed here): [{title}]({url}).",
+    "Reference PR: [{title}]({url})",
+    "Reference: [{title}]({url})",
+    "**PR:** [{title}]({url})",
+    "- [{title}]({url})",
+    "{url}",
+])
+def test_card_replaces_standalone_reference_line(reference):
+    answer = "Both checks passed.\n\n" + reference.format(title="Keep native commentary", url=PR)
+    message = thread_message(slack_text(answer), URL, cards=pr_cards(answer, URL))
+    assert message["blocks"] == [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "Both checks passed.", "verbatim": True},
+    }]
+    assert PR.casefold() in message["text"].casefold()
+    assert buttons(message)[0]["text"]["text"] == "View PR"
+
+
+def test_reference_only_answer_is_a_card_without_empty_body():
+    answer = f"[Changes]({PR})"
+    message = thread_message(slack_text(answer), URL, cards=pr_cards(answer, URL))
+    assert message["blocks"] == [] and len(message["attachments"]) == 1
+    assert PR in message["text"]
+
+
+def test_reference_cleanup_preserves_explanation_code_and_unrepresented_links():
+    other = "https://github.com/BerriAI/moyai/pull/496"
+    answer = (
+        f"See [these changes]({PR}) for why cancellation is safe.\n\n"
+        f"PR: [{PR}]({PR}) — do not merge until review.\n\n"
+        f"```\nReference PR: {PR}\n```\n\n"
+        f"Reference PR: {other}"
+    )
+    message = thread_message(slack_text(answer), URL, cards=pr_cards(PR, URL))
+    assert message["blocks"][0]["text"]["text"] == slack_text(answer)
+
+
 @pytest.mark.parametrize("product", [False, True])
 async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, slack, product):
     thread = await bind(slack, active)
@@ -84,7 +123,9 @@ async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, s
         async with runtime.database.sessions.begin() as db:
             turn = await db.get(Turn, active[1].id)
             turn.status = "completed"
-            turn.result = runtime.security.seal(f"Result: [Keep native commentary]({PR}).")
+            turn.result = runtime.security.seal(
+                f"Both checks passed.\n\nReference PR (not created or reviewed here): [Keep native commentary]({PR}).",
+            )
         await (slack.service.stage() if product else stage_deliveries(runtime))
         identity = f"product-slack:{turn.id}:completed:0" if product else f"slack-answer:{turn.id}"
         async with runtime.database.sessions() as db:
@@ -97,6 +138,7 @@ async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, s
     assert buttons(message)[0]["text"]["text"] == "View PR"
     assert buttons(message)[-1]["url"] == f"https://moyai.example/#{thread.session_id}"
     assert "Open conversation:" not in message["text"]
+    assert message["blocks"][0]["text"]["text"] == "Both checks passed."
     assert not any("Open session:" in block.get("text", {}).get("text", "") for block in message["blocks"])
 
 
@@ -155,7 +197,8 @@ async def test_product_long_answer_has_one_card_and_preserves_approval_controls(
     contents = [json.loads(runtime.security.unseal(row.content)) for row in rows]
     assert len(contents) > 1
     assert sum(len(item.get("attachments", [])) for item in contents) == 1
-    assert contents[0]["attachments"] and "Changes" in contents[-1]["text"]
+    assert contents[0]["attachments"] and "Changes" not in contents[-1]["text"]
+    assert PR.casefold() in contents[0]["text"].casefold()  # Accessible fallback still has the destination.
     control = {"type": "button", "action_id": "moyai_native_approve", "value": "turn",
                "text": {"type": "plain_text", "text": "Approve"}}
     message = thread_message("Approval required.", URL, controls=[control])

@@ -44,7 +44,7 @@ from .models import (
 from .product_connections import ProductConnections
 from .product_identity import ProductGrant, ProductPrincipal
 from .product_slack_models import ProductSlackBinding
-from .slack_messages import navigation_action, pr_cards, session_url, thread_message
+from .slack_messages import navigation_action, pr_cards, session_url, thread_message, without_pr_references
 
 if TYPE_CHECKING:
     from .product_identity import ProductIdentityAdapter
@@ -659,7 +659,8 @@ class ProductSlack:
                         "\n<" + self.settings.public_url.rstrip("/") + "/api/files/" + artifact.id
                         + "|" + html.escape(artifact.name, quote=False).replace("|", "¦") + ">"
                     )
-            parts = split_reply(content["text"], limit=2900)
+            visible = without_pr_references(content["text"], cards)
+            parts = split_reply(visible, limit=2900) if visible.strip() else [""]
             await self.queue_batch(turn, thread, [
                 (f"{turn.status}:{index}", thread_message(part, url, cards=cards, controls=controls)
                  if index == 0 else {"text": part})
