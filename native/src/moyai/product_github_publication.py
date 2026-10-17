@@ -35,7 +35,7 @@ from .github_workflow_types import (
     Rebase,
 )
 from .models import Effect, Turn, User, now
-from .pr_publications import creation_receipt, persist_publication, positive_id
+from .pr_publications import creation_receipt, persist_publication
 from .product_github_models import ProductGitOperation as Operation
 
 if TYPE_CHECKING:
@@ -294,13 +294,11 @@ class Publications:
         return sha
 
     def verified_pr(self, value: dict, branch: str, base: str, commit: str) -> dict:
-        number = positive_id(value.get("number"))
-        head, target = value.get("head") or {}, value.get("base") or {}
+        from .product_github_workflows import parse
+        pr = parse(PullRequest, value)
         if (
-            not number or value.get("state") not in {"open", "closed"} or value.get("draft") is not False
-            or head.get("ref") != branch or head.get("sha") != commit or (head.get("repo") or {}).get("id") != self.target
-            or target.get("ref") != base or (target.get("repo") or {}).get("id") != self.target
-            or not isinstance(value.get("html_url"), str)
+            pr.draft or pr.head.ref != branch or pr.head.sha != commit or pr.head.repo.id != self.target
+            or pr.base.ref != base or pr.base.repo.id != self.target
         ):
             raise ToolFailed("GitHub did not confirm the exact ready-for-review PR identity.")
         return value
@@ -385,10 +383,10 @@ class Publications:
             from .product_github_workflows import parse
             acknowledged = parse(GitReference, acknowledgement)
             commit = document["steps"]["commit"]["sha"]
-            token = await self.token()
-            value = document.get("update_scope") or await self.request(
-                "GET", f"/repositories/{self.target}/pulls/{request.number}", token,
-            )
+            value = document.get("update_scope")
+            if value is None:
+                token = await self.token()
+                value = await self.request("GET", f"/repositories/{self.target}/pulls/{request.number}", token)
             pr = parse(PullRequest, value)
             if (
                 acknowledged.object.sha != commit or acknowledged.ref != "refs/heads/" + pr.head.ref
@@ -476,7 +474,11 @@ def toolset(service: ProductConnections, scope: RunScope, grant: Grant):
 
     @tools.tool(metadata=READ)
     async def publication_status(ctx: RunContext[RunScope], request: PublicationStatus) -> dict:
-        """Inspect a native publication receipt without repeating an uncertain write."""
+        """Inspect a saved receipt without repeating an uncertain write.
+
+        Set operation to the original unprefixed tool name and retain its request_key.
+        Follow-up publishes use update_pull_request; an incomplete receipt is not permission to start a new write.
+        """
         return await publisher.status(request)
 
     if not grant.read_only:

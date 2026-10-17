@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
 
-from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ToolFailed
 from sqlalchemy import select
@@ -15,7 +15,9 @@ from sqlalchemy import select
 from .contracts import RunScope
 from .github_request_policy import ADVANCE, DRAFT, REBASE
 from .github_workflow_types import (
+    SHA,
     AuthorityRef,
+    Branch,
     Commit,
     CreateBranch,
     CreateReview,
@@ -24,6 +26,7 @@ from .github_workflow_types import (
     GitReference,
     OpenPullRequest,
     PendingReview,
+    ProviderObject,
     PRWrite,
     Publish,
     PublishBranch,
@@ -43,6 +46,30 @@ if TYPE_CHECKING:
 JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 
 
+class PublicationSteps(ProviderObject):
+    commit: Commit | None = None
+    branch: GitReference | None = None
+    pull_request: dict[str, JsonValue] | None = Field(default=None, alias="pull-request")
+    branch_update: RebaseResponse | None = Field(default=None, alias="branch-update")
+
+
+class PublicationSnapshot(ProviderObject):
+    steps: PublicationSteps
+    intent: dict[str, JsonValue] = Field(default_factory=dict)
+    result: dict[str, JsonValue] | None = None
+    branch: Branch | None = None
+    base_branch: Branch | None = None
+
+
+class RefReceiptScope(ProviderObject):
+    branch: Branch
+    commit: SHA
+
+
+class PRReceiptScope(RefReceiptScope):
+    base: Branch
+
+
 def parse[T: BaseModel](schema: type[T], value: object) -> T:
     try:
         return schema.model_validate(value)
@@ -57,6 +84,50 @@ class Workflows:
     @property
     def prefix(self) -> str:
         return f"/repositories/{self.publisher.target}"
+
+    async def resume_publication(self, row: Operation) -> dict[str, JsonValue] | None:
+        """Settle a saved terminal acknowledgment without consulting mutable provider state."""
+        p = self.publisher
+        async with p.database.sessions() as db:
+            current = await db.get(Operation, row.id)
+            if current is None:
+                raise ToolFailed("The publication reservation disappeared.")
+            row.document = current.document
+            saved = parse(PublicationSnapshot, p.document(current))
+        if saved.result:
+            return await p.finish(row, saved.result)
+        if row.kind in {"create_pull_request", "open_pull_request"}:
+            if saved.steps.pull_request is None:
+                return None
+            commit = (
+                saved.steps.commit.sha if row.kind == "create_pull_request" and saved.steps.commit
+                else saved.intent.get("commit") if row.kind == "open_pull_request" else None
+            )
+            scope = parse(PRReceiptScope, {"base": saved.base_branch, "branch": saved.branch, "commit": commit})
+            result = p.verified_pr(saved.steps.pull_request, scope.branch, scope.base, scope.commit)
+            return await p.finish(row, result)
+        if row.kind not in {"create_branch", "publish_branch"}:
+            return None
+        if saved.steps.branch is None and saved.steps.branch_update is None:
+            return None
+        commit = (
+            saved.intent.get("commit") if row.kind == "create_branch"
+            else saved.steps.commit.sha if saved.steps.commit else None
+        )
+        scope = parse(RefReceiptScope, {"branch": saved.intent.get("branch"), "commit": commit})
+        if saved.steps.branch_update is not None:
+            response = saved.steps.branch_update
+            if (
+                row.kind != "publish_branch" or response.errors
+                or response.data is None or response.data.updateRefs is None
+            ):
+                raise ToolFailed("The saved branch update was not confirmed; it will not be repeated.")
+            parse(Commit, {"sha": saved.intent.get("expected_head_sha")})
+        elif saved.steps.branch is None or (
+            saved.steps.branch.ref != "refs/heads/" + scope.branch or saved.steps.branch.object.sha != scope.commit
+        ):
+            raise ToolFailed("The saved branch acknowledgment differs from the frozen publication.")
+        return await p.finish(row, {"repository_id": p.target, "branch": scope.branch, "commit": scope.commit})
 
     async def repository(self, token: str) -> RepositoryIdentity:
         repo = parse(RepositoryIdentity, await self.publisher.request("GET", self.prefix, token))
@@ -196,9 +267,9 @@ class Workflows:
     async def create_branch(self, ctx: RunContext[RunScope], request: CreateBranch) -> dict[str, JsonValue]:
         p = self.publisher
         row = await p.operation(ctx, "create_branch", request)
-        saved = p.document(row).get("result")
-        if saved:
-            return await p.finish(row, saved)
+        recovered = await self.resume_publication(row)
+        if recovered is not None:
+            return recovered
         token = await p.token()
         commit = await self.commit_at(token, request.commit_sha)
         if commit != request.commit_sha:
@@ -211,9 +282,9 @@ class Workflows:
         from app.github import workflow_changes
         p = self.publisher
         row = await p.operation(ctx, "publish_branch", request)
-        saved = p.document(row).get("result")
-        if saved:
-            return await p.finish(row, saved)
+        recovered = await self.resume_publication(row)
+        if recovered is not None:
+            return recovered
         token = await p.token(workflows=workflow_changes(request))
         if request.expected_head_sha is not None:
             return await self.advance_branch(row, token, request)
@@ -227,15 +298,6 @@ class Workflows:
         self, row: Operation, token: str, request: PublishBranch,
     ) -> dict[str, JsonValue]:
         p = self.publisher
-        document = p.document(row)
-        acknowledged = document["steps"].get("branch-update")
-        if acknowledged:
-            response = parse(RebaseResponse, acknowledged)
-            if response.errors or response.data is None or response.data.updateRefs is None:
-                raise ToolFailed("The prior branch update was not confirmed; it will not be repeated.")
-            return await p.finish(row, {
-                "repository_id": p.target, "branch": request.branch, "commit": document["steps"]["commit"]["sha"],
-            })
         if not await self.branch_owned(request.branch, request.expected_head_sha):
             raise ToolFailed("An existing branch requires exact acknowledged Moyai ownership.")
         await self.writable(token, request.branch, existing=True)
@@ -259,9 +321,9 @@ class Workflows:
         from app.github import workflow_changes
         p = self.publisher
         row = await p.operation(ctx, "create_pull_request", request)
-        saved = p.document(row).get("result")
-        if saved:
-            return await p.finish(row, saved)
+        recovered = await self.resume_publication(row)
+        if recovered is not None:
+            return recovered
         token = await p.token(workflows=workflow_changes(request))
         repo = await self.repository(token)
         base = request.base_branch or repo.default_branch
@@ -283,9 +345,9 @@ class Workflows:
     async def open_existing(self, ctx: RunContext[RunScope], request: OpenPullRequest) -> dict[str, JsonValue]:
         p = self.publisher
         row = await p.operation(ctx, "open_pull_request", request)
-        saved = p.document(row).get("result")
-        if saved:
-            return await p.finish(row, saved)
+        recovered = await self.resume_publication(row)
+        if recovered is not None:
+            return recovered
         token = await p.token()
         repo = await self.repository(token)
         await self.commit_at(token, request.base_branch)
@@ -304,20 +366,21 @@ class Workflows:
         commit: str, title: str, body: str,
     ) -> dict[str, JsonValue]:
         p = self.publisher
+        recovered = await self.resume_publication(row)
+        if recovered is not None:
+            return recovered
         head = await self.ref(token, branch)
         if head is None or head.object.sha != commit:
             raise ToolFailed("The selected head changed before PR creation.")
         pulls = await p.request("GET", self.prefix + "/pulls", token, params={
             "state": "all", "head": repo.full_name.split("/")[0] + ":" + branch, "base": base,
         })
-        document = p.document(row)
         if not isinstance(pulls, list) or len(pulls) > 1:
             raise ToolFailed("GitHub did not return a unique PR readback.")
-        acknowledged = document.get("steps", {}).get("pull-request")
-        if pulls and not acknowledged:
+        if pulls:
             # Readback cannot establish authorship of a preexisting or ambiguous creation.
             raise ToolFailed("A matching PR exists without this operation's creation acknowledgment. Inspect GitHub.")
-        value = acknowledged or await p.step(row, "pull-request", "POST", self.prefix + "/pulls", token, {
+        value = await p.step(row, "pull-request", "POST", self.prefix + "/pulls", token, {
             "title": title, "body": body, "head": branch, "base": base,
             "draft": False, "maintainer_can_modify": True,
         })
@@ -352,7 +415,6 @@ class Workflows:
         saved = p.document(row).get("result")
         if saved:
             return await p.finish(row, saved)
-        token = await p.token(workflows=workflow_changes(request))
         acknowledged = p.document(row).get("steps", {}).get("rebase")
         if acknowledged:
             document = p.document(row)
@@ -364,6 +426,7 @@ class Workflows:
             return await p.finish(row, {
                 "repository_id": p.target, "number": request.number, "branch": branch, "commit": commit,
             })
+        token = await p.token(workflows=workflow_changes(request))
         pr = await self.pr(token, request.number, request.expected_head_sha, branch_write=True, operation=row)
         if pr.base.ref != request.base_branch or await self.commit_at(token, request.base_branch) != request.base_sha:
             raise ToolFailed("Rebase requires the PR's current base branch and exact current base commit.")
@@ -397,7 +460,6 @@ class Workflows:
         saved = p.document(row).get("result")
         if saved:
             return await p.finish(row, saved)
-        token = await p.token()
         if isinstance(request, Retarget):
             previous = p.document(row)
             acknowledgment = previous.get("steps", {}).get("pull-request")
@@ -413,6 +475,7 @@ class Workflows:
         if acknowledged:
             self.lifecycle_receipt(kind, request, acknowledged, p.document(row)["lifecycle_scope"])
             return await p.finish(row, acknowledged)
+        token = await p.token()
         pr = await self.pr(
             token, request.number, request.head_sha, closed=kind == "reopen_pull_request",
             lifecycle=True, operation=row,

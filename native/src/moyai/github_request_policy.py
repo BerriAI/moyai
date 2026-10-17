@@ -67,11 +67,15 @@ class ProtectionVariables(BaseModel):
 
 
 def validate_request(method: str, path: str, payload: object = None) -> None:
-    decoded = unquote(path)
+    try:
+        decoded = unquote(path, errors="strict")
+    except UnicodeDecodeError:
+        raise ToolFailed("Invalid GitHub request path.") from None
     if (
         not path.startswith("/") or path.startswith("//")
-        or any(character in decoded for character in "?#\\")
-        or any(ord(character) < 32 for character in decoded)
+        or any(character in path for character in "?#\\")
+        or "\\" in decoded or re.search(r"%(?![0-9A-Fa-f]{2})", path)
+        or any(ord(character) < 32 or ord(character) == 127 for character in decoded)
         or any(part in {".", ".."} for part in decoded.split("/"))
     ):
         raise ToolFailed("Invalid GitHub request path.")

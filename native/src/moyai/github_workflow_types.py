@@ -163,11 +163,16 @@ class Checkout(Repository):
 
 class PublicationStatus(Write):
     operation: Literal[
-        "create_pull_request", "create_branch", "publish_branch", "open_pull_request", "rebase_pull_request",
+        "create_pull_request", "update_pull_request", "create_branch", "publish_branch",
+        "open_pull_request", "rebase_pull_request",
         "close_pull_request", "reopen_pull_request", "retarget_pull_request", "convert_pull_request_to_draft",
         "create_review", "submit_review", "edit_pending_review", "delete_pending_review",
         "create_stack", "add_to_stack",
-    ] = "create_pull_request"
+    ] = Field(
+        default="create_pull_request",
+        description="Original unprefixed write-tool name, such as update_pull_request for a follow-up. "
+                    "Use that operation's unchanged request_key; this lookup never repeats a provider write.",
+    )
 
 
 class ProviderObject(BaseModel):

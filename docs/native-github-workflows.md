@@ -47,6 +47,13 @@ Saved acknowledgments can finish interrupted operations. A branch merely
 appearing in readback is not proof that Moyai created it; an existing PR likewise
 does not establish new PR authorship.
 
+Status lookup uses the original operation name and request key; follow-ups use
+`operation="update_pull_request"`. A saved terminal acknowledgment is checked
+against its frozen repository, refs and commit before recovery consults live
+state. Later pushes, branch deletion, protection changes or token unavailability
+cannot erase a confirmed outcome. The recovered receipt describes that original
+action; read GitHub separately for the current PR or branch state.
+
 No tool permits review approval, merging, auto-merge, merge queue actions,
 arbitrary credential-bearing API calls, or unconditional forced ref updates.
 Unstack is intentionally unavailable: the provider's whole-stack mutation

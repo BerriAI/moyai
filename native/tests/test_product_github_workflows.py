@@ -7,13 +7,14 @@ import hashlib
 import json
 import os
 from dataclasses import replace
+from typing import get_args
 
 import pytest
 import test_product_github_publication as support
 from app.github import Update
 from pydantic import ValidationError
 from pydantic_ai.exceptions import ToolFailed
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from moyai.github_request_policy import ADVANCE, PROTECTION, REBASE
 from moyai.github_workflow_types import (
@@ -37,6 +38,7 @@ from moyai.github_workflow_types import (
     StackRead,
     SubmitReview,
 )
+from moyai.models import Effect
 from moyai.pr_publications import PRPublication
 from moyai.product_github_models import ProductGitOperation
 from moyai.product_github_publication import Publications, toolset
@@ -87,6 +89,163 @@ async def test_native_catalog_exposes_typed_workflows_and_readonly_hides_all_wri
     assert set(await toolset(f.service, f.scope, replace(f.grant, read_only=True)).get_tools(f.ctx)) == {
         "publication_status", "checkout", "stacks", "stack",
     }
+    provider_writes = {
+        name for name, tool in names.items()
+        if not tool.tool_def.metadata["annotations"]["readOnlyHint"]
+        and name not in {"request_pull_request_write_access", "request_pr_lifecycle_access"}
+    }
+    assert set(get_args(PublicationStatus.model_fields["operation"].annotation)) == provider_writes
+
+
+async def interrupt_after_ack(f, request, kind):
+    """Recreate the durable state after a saved provider reply but before finish."""
+    async with f.product.database.sessions.begin() as db:
+        row = await db.scalar(select(ProductGitOperation).where(
+            ProductGitOperation.kind == kind, ProductGitOperation.request_key == request.request_key,
+        ))
+        document = f.publisher.document(row)
+        del document["result"]
+        row.document = f.product.database.security.seal(document)
+        effect = await db.get(Effect, row.original_effect_id)
+        effect.state, effect.settled_at = "pending", None
+        await db.execute(delete(PRPublication).where(PRPublication.id == row.original_effect_id))
+    return row
+
+
+async def test_status_finds_interrupted_updates_and_original_key_recovers_once(publication):
+    f = publication
+    pr = await owned(f)
+    request = Update(repository_id=123, number=pr["number"], base_sha=pr["head"]["sha"],
+                     title="Follow-up", request_key="status-update", files=[{"path": "two.txt", "content": "Two"}])
+    f.ctx.tool_call_id = "status-update"
+    await reserve(f, "update_pull_request", request)
+    expected = await f.publisher.update(f.ctx, request)
+    row = await interrupt_after_ack(f, request, "update_pull_request")
+    f.current["token_unavailable"] = True
+    f.provider.calls.clear()
+    status = await f.publisher.status(PublicationStatus(
+        repository_id=123, operation="update_pull_request", request_key=request.request_key,
+    ))
+    assert status["status"] == "incomplete" and "advance-branch" in status["confirmed_steps"]
+    assert await f.publisher.update(f.ctx, request) == expected
+    assert (await f.publisher.status(PublicationStatus(
+        repository_id=123, operation="update_pull_request", request_key=request.request_key,
+    )))["status"] == "confirmed"
+    async with f.product.database.sessions() as db:
+        assert (await db.get(Effect, row.original_effect_id)).state == "confirmed"
+    assert f.provider.calls == []
+
+
+@pytest.mark.parametrize("kind", [
+    "create_pull_request", "open_pull_request", "create_branch", "publish_branch", "publish_branch_update",
+])
+@pytest.mark.parametrize("head_change", ["pushed", "deleted"])
+async def test_saved_publication_ack_is_independent_of_mutable_provider_state(publication, kind, head_change):
+    f = publication
+    branch = "feature/recovery"
+    if kind == "create_pull_request":
+        request = Publish(**create_request().model_dump(), head_branch=branch)
+    elif kind == "open_pull_request":
+        f.provider.refs[branch] = "a" * 40
+        request = OpenPullRequest(repository_id=123, request_key="open-recovery", base_branch="main",
+                                  head_branch=branch, expected_head_sha="a" * 40, title="Existing head", body="Proof")
+    elif kind == "create_branch":
+        request = CreateBranch(repository_id=123, request_key="branch-recovery", branch=branch, commit_sha="a" * 40)
+    else:
+        if kind == "publish_branch_update":
+            await invoke(f, "create_branch", CreateBranch(
+                repository_id=123, request_key="seed-owned-branch", branch=branch, commit_sha="a" * 40,
+            ))
+        request = PublishBranch(repository_id=123, request_key="files-recovery", branch=branch, base_sha="a" * 40,
+                                title="Prepared files", files=[{"path": "hello.txt", "content": "New"}],
+                                expected_head_sha="a" * 40 if kind == "publish_branch_update" else None)
+        kind = "publish_branch"
+    expected = await invoke(f, kind, request)
+    row = await interrupt_after_ack(f, request, kind)
+    if head_change == "pushed":
+        f.provider.refs[branch] = "9" * 40
+    else:
+        del f.provider.refs[branch]
+    f.provider.default_branch = "release"
+    f.provider.protected.add(branch)
+    for pr in f.provider.pulls:
+        pr["head"]["sha"], pr["base"]["ref"], pr["state"], pr["draft"] = "9" * 40, "release", "closed", True
+    f.current["token_unavailable"] = True
+    f.provider.calls.clear()
+    assert await invoke(f, kind, request) == expected
+    assert await invoke(f, kind, request) == expected
+    async with f.product.database.sessions() as db:
+        assert (await db.get(Effect, row.original_effect_id)).state == "confirmed"
+        assert await db.scalar(select(func.count()).select_from(PRPublication)) == (
+            1 if kind in {"create_pull_request", "open_pull_request"} else 0
+        )
+    assert f.provider.calls == []
+
+
+async def test_saved_branch_ack_cannot_confirm_a_different_ref(publication):
+    f = publication
+    request = CreateBranch(repository_id=123, branch="feature/original", commit_sha="a" * 40,
+                           request_key="branch-identity")
+    await invoke(f, "create_branch", request)
+    row = await interrupt_after_ack(f, request, "create_branch")
+    async with f.product.database.sessions.begin() as db:
+        current = await db.get(ProductGitOperation, row.id)
+        document = f.publisher.document(current)
+        document["steps"]["branch"]["ref"] = "refs/heads/someone-else"
+        current.document = f.product.database.security.seal(document)
+    f.provider.calls.clear()
+    with pytest.raises(ToolFailed):
+        await invoke(f, "create_branch", request)
+    assert not f.provider.calls
+    async with f.product.database.sessions() as db:
+        assert (await db.get(Effect, row.original_effect_id)).state == "pending"
+
+
+@pytest.mark.parametrize("mismatch", ["head", "base", "repository", "shape", "draft"])
+async def test_saved_pr_ack_must_match_its_original_frozen_identity(publication, mismatch):
+    f = publication
+    request = Publish(**create_request().model_dump(), head_branch="feature/verified-receipt")
+    await invoke(f, "create_pull_request", request)
+    row = await interrupt_after_ack(f, request, "create_pull_request")
+    async with f.product.database.sessions.begin() as db:
+        current = await db.get(ProductGitOperation, row.id)
+        document = f.publisher.document(current)
+        pr = document["steps"]["pull-request"]
+        if mismatch == "head":
+            pr["head"]["sha"] = "9" * 40
+        elif mismatch == "base":
+            pr["base"]["ref"] = "unrelated"
+        elif mismatch == "repository":
+            pr["head"]["repo"]["id"] = 999
+        elif mismatch == "shape":
+            pr["head"] = "not a reference"
+        else:
+            pr["draft"] = True
+        current.document = f.product.database.security.seal(document)
+    f.provider.calls.clear()
+    with pytest.raises(ToolFailed):
+        await invoke(f, "create_pull_request", request)
+    async with f.product.database.sessions() as db:
+        assert (await db.get(Effect, row.original_effect_id)).state == "pending"
+        assert await db.scalar(select(func.count()).select_from(PRPublication)) == 0
+    assert f.provider.calls == []
+
+
+async def test_hash_branch_name_round_trips_through_publication_and_update(publication):
+    f = publication
+    branch = "feature/fix#123"
+    created = await invoke(f, "create_pull_request", Publish(
+        **create_request().model_dump(), head_branch=branch,
+    ))
+    request = Update(repository_id=123, number=created["number"], base_sha=created["head"]["sha"],
+                     title="Hash branch update", request_key="hash-branch-update",
+                     files=[{"path": "hello.txt", "content": "Next"}])
+    f.ctx.tool_call_id = "hash-branch-update"
+    await reserve(f, "update_pull_request", request)
+    updated = await f.publisher.update(f.ctx, request)
+    assert updated["branch"] == branch and f.provider.refs[branch] == updated["commit"]
+    assert any("%23" in path for _, path, _ in f.provider.calls)
+    assert all("#" not in path for _, path, _ in f.provider.calls)
 
 
 async def test_selected_base_and_head_reach_provider_and_original_key_remains_compatible(publication):
@@ -143,6 +302,11 @@ async def test_branch_only_updates_use_atomic_nonforced_expected_head(publicatio
         with pytest.raises(ToolFailed, match="atomic"):
             await invoke(f, "publish_branch", update)
         assert f.provider.refs[first.branch] == "9" * 40
+        calls = len(f.provider.calls)
+        f.current["token_unavailable"] = True
+        with pytest.raises(ToolFailed, match="not confirmed"):
+            await invoke(f, "publish_branch", update)
+        assert len(f.provider.calls) == calls
     else:
         result = await invoke(f, "publish_branch", update)
         assert f.provider.refs[first.branch] == result["commit"] == "f" * 40
@@ -212,7 +376,7 @@ async def test_branch_creation_refuses_default_protected_and_existing_before_wri
 async def test_deleted_acknowledged_branch_is_not_recreated(publication):
     f = publication
     request = CreateBranch(repository_id=123, branch="feature/deleted", commit_sha="a" * 40, request_key="delete-ref")
-    await invoke(f, "create_branch", request)
+    expected = await invoke(f, "create_branch", request)
     async with f.product.database.sessions.begin() as db:
         row = await db.scalar(select(ProductGitOperation).where(ProductGitOperation.kind == "create_branch"))
         document = f.publisher.document(row)
@@ -220,9 +384,25 @@ async def test_deleted_acknowledged_branch_is_not_recreated(publication):
         row.document = f.product.database.security.seal(document)
     del f.provider.refs[request.branch]
     f.provider.calls.clear()
-    with pytest.raises(ToolFailed, match="deleted"):
-        await Workflows(f.publisher).create_branch(f.ctx, request)
+    assert await Workflows(f.publisher).create_branch(f.ctx, request) == expected
+    assert request.branch not in f.provider.refs
     assert not mutations(f.provider)
+
+
+async def test_deleted_intermediate_branch_cannot_be_recreated_to_finish_a_pr(publication):
+    from app.connector_errors import ConnectorError
+    f = publication
+    request = Publish(**create_request().model_dump(), head_branch="feature/intermediate")
+    f.provider.fail_before_pr = True
+    with pytest.raises(ConnectorError, match="before PR"):
+        await invoke(f, "create_pull_request", request)
+    assert not f.provider.pulls
+    del f.provider.refs[request.head_branch]
+    f.provider.fail_before_pr = False
+    f.provider.calls.clear()
+    with pytest.raises(ToolFailed, match="deleted"):
+        await invoke(f, "create_pull_request", request)
+    assert not mutations(f.provider) and not f.provider.pulls
 
 
 async def test_concurrent_brokers_claim_each_branch_effect_only_once(publication):

@@ -36,6 +36,7 @@ class Provider:
     def __init__(self):
         self.calls, self.refs, self.pulls = [], {}, []
         self.sources = {"main": "a" * 40, "release": "a" * 40}
+        self.default_branch = "main"
         self.protected = set()
         self.reviews = {}
         self.stacks = {}
@@ -43,6 +44,7 @@ class Provider:
         self.patch_head = None
         self.race_before_ref_update = False
         self.lost_create = False
+        self.fail_before_pr = False
         self.visible = True
         self.symlink = False
         self.commits = 0
@@ -51,7 +53,7 @@ class Provider:
         self.calls.append((method, path, copy.deepcopy(kwargs)))
         prefix = "/repositories/123"
         if method == "GET" and path == prefix:
-            return {"id": 123, "node_id": "R_123", "full_name": "owner/repo", "default_branch": "main"}
+            return {"id": 123, "node_id": "R_123", "full_name": "owner/repo", "default_branch": self.default_branch}
         if method == "GET" and path.startswith(prefix + "/commits/"):
             from urllib.parse import unquote
             ref = unquote(path.removeprefix(prefix + "/commits/"))
@@ -109,7 +111,8 @@ class Provider:
             self.refs[body["ref"].removeprefix("refs/heads/")] = body["sha"]
             return {"ref": body["ref"], "object": {"type": "commit", "sha": body["sha"]}}
         if method == "PATCH" and "/git/refs/heads/" in path:
-            branch, body = path.split("/git/refs/heads/", 1)[1], kwargs["json"]
+            from urllib.parse import unquote
+            branch, body = unquote(path.split("/git/refs/heads/", 1)[1]), kwargs["json"]
             assert body["force"] is False
             self.refs[branch] = body["sha"]
             for pr in self.pulls:
@@ -117,6 +120,8 @@ class Provider:
                     pr["head"]["sha"] = body["sha"]
             return {"ref": "refs/heads/" + branch, "object": {"type": "commit", "sha": body["sha"]}}
         if method == "GET" and path == prefix + "/pulls":
+            if self.fail_before_pr:
+                raise ConnectorError("Interrupted before PR creation.")
             params = kwargs.get("params", {})
             return copy.deepcopy([pr for pr in self.pulls if (
                 ("head" not in params or params["head"] == "owner:" + pr["head"]["ref"])
@@ -219,7 +224,10 @@ async def publication(admitted_product):
         def target(self, value): return 123 if value in {123, "owner/repo"} else 999
         def connection_version(self): return "current-canonical-version"
         async def request(self, *args, **kwargs): return await provider.request(*args, **kwargs)
-        async def installation_token(self, **kwargs): return "synthetic-token"
+        async def installation_token(self, **kwargs):
+            if current.get("token_unavailable"):
+                raise ConnectorError("The provider token is currently unavailable.")
+            return "synthetic-token"
         def saved_credentials(self): return {}
     service = SimpleNamespace(
         database=product.database, product=SimpleNamespace(identity=product.adapter),

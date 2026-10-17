@@ -121,23 +121,36 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         db.add(unrelated)
 
     tool_name = f"github_{connection.id[:8]}_read_repository"
+    prefix = f"github_{connection.id[:8]}_"
+    publication_writes = ("create_pull_request", "update_pull_request", "request_pull_request_write_access")
+    required_tools = {
+        tool_name, *(
+            [prefix + "publication_status", *(prefix + name for name in publication_writes if not read_only)]
+            if product else []
+        ),
+    }
 
     async def stream(messages, info):
         names = {tool.name for tool in info.function_tools}
-        if tool_name not in names:
+        if not required_tools <= names:
             assert "search_tools" in names
+            target = min(required_tools - names)
+            search_id = "discover-" + target
+            assert not any(
+                isinstance(part, ToolReturnPart) and part.tool_call_id == search_id
+                for message in messages for part in message.parts
+            ), f"Targeted discovery did not reveal {target}."
             yield {0: DeltaToolCall(
-                name="search_tools", json_args=json.dumps({"queries": [f"github_{connection.id[:8]}"]}),
-                tool_call_id="discover-selected-repository",
+                name="search_tools", json_args=json.dumps({"queries": [target]}),
+                tool_call_id=search_id,
             )}
             return
         if product:
-            prefix = f"github_{connection.id[:8]}_"
             assert "test/selected" in next(
                 tool.description for tool in info.function_tools if tool.name == tool_name
             )
             assert prefix + "publication_status" in names
-            for name in ("create_pull_request", "update_pull_request", "request_pull_request_write_access"):
+            for name in publication_writes:
                 assert (prefix + name in names) is not read_only
         reads = sum(
             isinstance(part, ToolReturnPart) and part.tool_name == tool_name

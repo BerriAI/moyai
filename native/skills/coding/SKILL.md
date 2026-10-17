@@ -22,7 +22,9 @@ Discover the selected connection's checkout and publication tools. Preserve the
 requested repository, source ref, PR base and head. Use `publish_branch` for
 branch-only delivery and `open_pull_request` for an existing head; opening a PR
 does not grant ownership of that branch. New PRs are ready for review.
-Use a stable request key only for identical intent, inspect `publication_status`
-after an uncertain write, and never automatically repeat it with a new key.
+Use a stable request key only for identical intent. After an uncertain write,
+inspect `publication_status` with the original unprefixed operation name and
+request key, including `update_pull_request` for follow-ups. Never automatically
+repeat an incomplete operation with a new key.
 Rebase publishes one prepared commit on the current base and requires the exact
 expected PR head. Never approve, merge, enable auto-merge, or clear queue blockers.
