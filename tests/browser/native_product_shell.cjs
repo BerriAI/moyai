@@ -26,8 +26,8 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/auth/google/start')return json({url:'https://accounts.google.com/fixture'});
   if(url.pathname==='/api/logout'){state.signedIn=false;return json({signed_out:true});}
   if(!state.signedIn)return json({detail:'Sign in.'},401);
-  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.mode});
-  if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;return json(session('c'.repeat(32)));}
+  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:'test-model',product_mode:state.mode});
+  if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;const id='c'.repeat(32);state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],model:data.model||'test-model'}};return json(session(id));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections') {
     if(state.connectionError && url.searchParams.has('shared'))return json({detail:'Connections temporarily unavailable.'},503);
@@ -106,13 +106,13 @@ async function handle(req,res,next) {
         }
         messages.push({id:messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
         if(data.reply_to){state.status='idle';state.pending=undefined;state.answerAccepted=true;}
-        return json({id:'turn-skill',actor_id:'viewer',status:'completed'});
+        return json({id:'turn-skill',actor_id:'viewer',status:'completed',model:data.model,connections:data.connections||[]});
       }
       return json(messages);
     }
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname.endsWith('/activity'))return json([]);
-    if(url.pathname.endsWith('/read'))return json({});
+    if(url.pathname.endsWith('/read'))return state.readError?json({detail:'Read marker unavailable.'},503):json({});
     if(url.pathname.endsWith('/stop')&&req.method==='POST') {
       state.status='stopped';
       if(state.turns)state.turns=state.turns.map(turn=>({...turn,status:'stopped'}));
@@ -127,7 +127,9 @@ async function handle(req,res,next) {
     }
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
     const row=session(url.pathname.split('/')[3]);
-    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
+      result.messages=state.messagesBySession?.[row.id]||state.messages;
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
   }
@@ -526,6 +528,157 @@ test('resolved conversation opens without plan/activity reads; plan loads only w
   release();await page.locator('.plan-row').filter({hasText:'Review the measurements'}).waitFor();
 });
 
+test('conversation bootstrap renders messages without a second transcript request',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holds:{[`/api/sessions/${sessionId}/messages`]:held}});
+  const page=await pageFor(t);
+  await page.getByText('Inspect this repository.',{exact:true}).waitFor({timeout:3000});
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).isVisible(),true);
+  const reads=state.requests.filter(req=>req.method==='GET'&&req.path.startsWith(`/api/sessions/${sessionId}`));
+  assert.equal(reads.filter(req=>req.path===`/api/sessions/${sessionId}`).length,1);
+  assert.ok(reads.some(req=>req.query.includes('resolve=true')&&req.query.includes('include_messages=true')));
+  assert.equal(reads.filter(req=>req.path.endsWith('/messages')).length,0);
+});
+
+test('an empty bootstrap transcript does not trigger a redundant history read',async t=>{
+  reset({status:'idle',messages:[]});
+  const page=await pageFor(t);
+  await page.getByText('Start with a task or a question.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(req=>req.method==='GET'&&req.path.endsWith('/messages')).length,0);
+});
+
+test('an older server without bootstrap messages still opens the conversation',async t=>{
+  reset({status:'idle',omitInitialMessages:true});
+  const page=await pageFor(t);
+  await page.getByText('Inspect this repository.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(req=>req.method==='GET'&&req.path.endsWith('/messages')).length,1);
+});
+
+function savedComposer(overrides={}) {
+  reset({status:'idle',models:['test-model','saved-model','edited-model'],
+    sessionOverrides:{[sessionId]:{model:'saved-model'}},
+    turns:[{id:turnId,actor_id:'viewer',status:'completed',connections:['saved'],usage:{}}],
+    connections:[{id:'saved',name:'Saved account',owner_id:'viewer',kind:'linear',enabled:true,shared:true,read_only:true}],
+    ...overrides});
+}
+
+for(const entry of ['resolved','older-server','standalone'])for(const failure of [false,true])
+test(`saved composer settings precede ${failure?'failed':'pending'} read receipt: ${entry}`,async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({mode:entry==='standalone'?'standalone':'existing',omitInitialMessages:entry==='older-server',
+    holds:failure?{}:{[`/api/sessions/${sessionId}/read`]:held},readError:failure});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  if(failure)await page.getByText(/Read marker unavailable/).waitFor();
+  assert.equal(await page.getByRole('combobox',{name:'Model',exact:true}).innerText(),'saved-model');
+  await page.locator('.account-selection summary').click();
+  await page.getByRole('checkbox',{name:/Saved account/}).waitFor();
+  assert.equal(await page.getByRole('checkbox',{name:/Saved account/}).isChecked(),true);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Send with the saved settings.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  const sent=state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST');
+  assert.equal(sent.body.model,'saved-model');assert.deepEqual(sent.body.connections,['saved']);
+});
+
+test('read receipt completion cannot overwrite manual composer choices',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({holds:{[`/api/sessions/${sessionId}/read`]:held}});
+  const page=await pageFor(t),model=page.getByRole('combobox',{name:'Model',exact:true});
+  await model.waitFor();await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  await model.click();await page.getByRole('option',{name:'edited-model',exact:true}).click();
+  await page.locator('.account-selection summary').click();
+  const account=page.getByRole('checkbox',{name:/Saved account/});await account.waitFor();
+  await account.uncheck();
+  const response=page.waitForResponse(r=>r.url().endsWith('/read'));
+  release();await (await response).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await model.innerText(),'edited-model');assert.equal(await account.isChecked(),false);
+});
+
+test('resolved composer never inherits another author’s selected accounts',async t=>{
+  savedComposer({turns:[{id:turnId,actor_id:'teammate',status:'completed',connections:['saved'],usage:{}}]});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await page.locator('.account-selection summary').click();
+  const account=page.getByRole('checkbox',{name:/Saved account/});await account.waitFor();
+  assert.equal(await account.isChecked(),false);
+  assert.equal(await page.getByRole('combobox',{name:'Model',exact:true}).innerText(),'saved-model');
+});
+
+test('side-chat composer initializes before its read receipt completes',async t=>{
+  const childId='d'.repeat(32);
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({sessionOverrides:{[childId]:{title:'Curie',model:'saved-model',parent_session_id:sessionId}},
+    holds:{[`/api/sessions/${childId}/read`]:held},
+    workspace:{links:[],files:[],sources:[],subagents:[{id:'child-turn',session_id:childId,parent_id:turnId,
+      name:'Curie',avatar:1,status:'idle',can_inspect:true,depth:0,started_at:''}],subagents_limited:false}});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Open Curie in side chat',exact:true}).click();
+  const panel=page.getByRole('complementary',{name:'Session panel',exact:true});
+  await panel.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await waitFor(()=>state.requests.some(req=>req.path===`/api/sessions/${childId}/read`));
+  assert.equal(await panel.getByRole('combobox',{name:'Model',exact:true}).innerText(),'saved-model');
+  await panel.locator('.account-selection summary').click();
+  const account=panel.getByRole('checkbox',{name:/Saved account/});await account.waitFor();
+  assert.equal(await account.isChecked(),true);
+});
+
+test('saved composer blocks a fast send until its selected account catalog is authorized',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({holds:{'/api/connections':held,[`/api/sessions/${sessionId}/read`]:held}});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Do not drop my saved account.');
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isEnabled(),false);
+  assert.equal(state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'),false);
+  release();
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,['saved']);
+});
+
+test('newly accepted composer preserves choices across its first read receipt',async t=>{
+  const created='c'.repeat(32);
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({holds:{[`/api/sessions/${created}/read`]:held}});
+  const page=await pageFor(t,'#'),model=page.getByRole('combobox',{name:'Model',exact:true});
+  await model.click();await page.getByRole('option',{name:'saved-model',exact:true}).click();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Start with these settings.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.waitForURL(base+'/#'+created);
+  await waitFor(()=>state.requests.some(req=>req.path===`/api/sessions/${created}/read`));
+  assert.equal(await model.innerText(),'saved-model');
+  await model.click();await page.getByRole('option',{name:'edited-model',exact:true}).click();
+  await page.locator('.account-selection summary').click();
+  const account=page.getByRole('checkbox',{name:/Saved account/});await account.waitFor();
+  assert.equal(await account.isChecked(),true);await account.uncheck();
+  const response=page.waitForResponse(r=>r.url().endsWith('/read'));
+  release();await (await response).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await model.innerText(),'edited-model');assert.equal(await account.isChecked(),false);
+});
+
+test('revoked composer clears protected state and reinitializes on an authorized retry',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({holds:{[`/api/sessions/${sessionId}/read`]:held}});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Private draft');
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  state.denied=true;release();
+  await page.getByRole('status').getByText(/Session access revoked/).waitFor();
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).count(),0);
+  assert.equal(await page.getByText('Inspect this repository.',{exact:true}).count(),0);
+  state.denied=false;state.sessionOverrides[sessionId].model='edited-model';state.turns[0].connections=[];
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  assert.equal(await page.getByRole('combobox',{name:'Model',exact:true}).innerText(),'edited-model');
+  assert.equal((await page.getByRole('textbox',{name:'Message Moyai'}).innerText()).trim(),'');
+  assert.equal(await page.locator('.account-selection summary').innerText(),'Context & connections');
+});
+
 for(const width of [1440,768,320])test(`inline skills keep surrounding text, icon and scoped identity through send/reload at ${width}px`,async t=>{
   const skills=[
     {id:'personal-team',name:'team',description:'Investigate a bug with a team.',scope:'personal',reference:'personal:team',icon:'👥'},
@@ -656,8 +809,9 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
   emit({type:'text_start',index:0,text:'Unlabelled child text'},0);
   emit({type:'response_start',run_id:turnId,step:1},1);emit({type:'text_start',index:0,text:'I will inspect.',phase:'commentary'},2);
   await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).waitFor();
-  const polls=state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length;
-  await waitFor(()=>state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length>polls,'saved poll');
+  const savedPolls=()=>state.requests.filter(req=>req.method==='GET'&&req.path===`/api/sessions/${sessionId}`&&req.query.includes('include_messages=true')).length;
+  const polls=savedPolls();
+  await waitFor(()=>savedPolls()>polls,'saved poll');
   assert.equal(await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).count(),1);
   emit({type:'tool_call',id:'call1',name:'read_file',arguments:{path:'private-tool-detail'}},3);
   await page.locator('.live-action').getByText('Using read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);

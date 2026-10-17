@@ -55,7 +55,7 @@ type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 const settingsDestinations = [
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
@@ -143,7 +143,7 @@ function App() {
     const controller = new AbortController(), key = routeKey
     // A native UUID can itself be an alias. Only the authenticated read adapter
     // may supply that mapping; ordinary session reads still enforce native ACLs.
-    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false`, "GET", undefined, controller.signal).then(value => {
+    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false&include_messages=true`, "GET", undefined, controller.signal).then(value => {
       const session = value.reference
       if (controller.signal.aborted || currentRoute() !== selected) return
       if (session.id !== selected || session.source !== "native") throw new Error("The session reference changed. Reopen the conversation.")
@@ -406,8 +406,8 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
 }
 
 function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
-  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : null)
-  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : [])
+  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages !== undefined ? resolved : null)
+  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
   const [plan, setPlan] = useState<Plan[]>([])
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState("")
@@ -418,8 +418,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
-  const [model, setModel] = useState(initial?.session.model ?? me.default_model)
-  const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
+  const [model, setModel] = useState(view?.session.model ?? me.default_model)
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>(() => {
+    const latest = view?.turns[0]
+    return latest?.actor_id === me.user.id ? latest.connections ?? [] : []
+  })
   const [accountRevision, setAccountRevision] = useState(0)
   const [accountNotice, setAccountNotice] = useState("")
   const [accountCatalog, setAccountCatalog] = useState<{ scope: string; rows: Connection[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
@@ -452,7 +455,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [])
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
-  const loaded = useRef(false)
+  const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
   const visibleNow = useRef(visible)
@@ -461,9 +464,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     ++loadVersion.current
     ++sensitiveVersion.current
     resolvedOnce.current = undefined
+    composerInitialized.current = false
+    readThrough.current = null
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
-    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
@@ -476,13 +481,21 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     try {
       const cached = resolvedOnce.current
       resolvedOnce.current = undefined
-      const [next, history] = await Promise.all([
-        cached ? Promise.resolve(cached) : api<View>(`/sessions/${id}?include_activity=false`, "GET", undefined, signal),
-        api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal),
-      ])
+      const next = cached ?? await api<View>(`/sessions/${id}?include_activity=false&include_messages=true`, "GET", undefined, signal)
+      // Older servers can omit the transcript during a rolling deployment.
+      const history = next.messages ?? await api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal)
       if (signal?.aborted || version !== loadVersion.current) return
+      // Publish a complete composer with the transcript, before read bookkeeping.
+      // Seed only once so polling and late receipts cannot overwrite user edits.
+      if (!composerInitialized.current) {
+        setModel(next.session.model)
+        const latest = next.turns[0]
+        setSelectedAccounts(latest?.actor_id === me.user.id ? latest.connections ?? [] : [])
+        composerInitialized.current = true
+      }
       viewNow.current = next
       setView(next); setMessages(history)
+      if (next.activity) setActivity(next.activity)
       setSendingNow(previous => {
         const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
         return pending.length === previous.size ? previous : new Set(pending)
@@ -493,13 +506,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         await api(`/sessions/${id}/read`, "POST", { message_id: latestMessage }, signal)
         if (signal?.aborted || version !== loadVersion.current) return
         readThrough.current = latestMessage
-      }
-      if (next.activity) setActivity(next.activity)
-      if (!loaded.current) {
-        setModel(next.session.model)
-        const latest = next.turns[0]
-        if (latest?.actor_id === me.user.id) setSelectedAccounts(latest.connections ?? [])
-        loaded.current = true
       }
     } catch (reason) {
       if (signal?.aborted || version !== loadVersion.current) return

@@ -407,6 +407,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.get("/api/sessions/{session_id}")
     async def session(
         session_id: str, request: Request, resolve: bool = False, include_activity: bool = True,
+        include_messages: bool = False,
         user: User = Depends(actor),
     ):
         reference = None
@@ -494,6 +495,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 result["credential_requests"] = [
                     {"request_id": item["request_id"]} for item in requests["requests"]
                 ]
+        if include_messages:
+            result["messages"] = await runtime.database.messages(user, session_id)
         return result
 
     @app.get("/api/sessions/{session_id}/progress/{turn_id}")
