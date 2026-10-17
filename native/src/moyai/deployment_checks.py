@@ -54,6 +54,16 @@ def settings(values: Mapping[str, str]) -> Settings:
         artifact_access_key_id=SecretStr(values.get("OBJECT_STORAGE_ACCESS_KEY_ID", "")),
         artifact_secret_access_key=SecretStr(values.get("OBJECT_STORAGE_SECRET_ACCESS_KEY", "")),
         artifact_session_token=SecretStr(values.get("OBJECT_STORAGE_SESSION_TOKEN", "")),
+        sandbox_provider=values.get("SANDBOX_PROVIDER", "modal"),
+        lambda_region=values.get("LAMBDA_REGION", "us-east-1"),
+        lambda_profile=values.get("LAMBDA_PROFILE", ""),
+        lambda_image=values.get("LAMBDA_IMAGE", ""),
+        lambda_image_version=values.get("LAMBDA_IMAGE_VERSION", ""),
+        lambda_checkpoint_bucket=values.get("LAMBDA_CHECKPOINT_BUCKET", ""),
+        lambda_checkpoint_prefix=values.get("LAMBDA_CHECKPOINT_PREFIX", "moyai-native-lambda"),
+        lambda_execution_role_arn=values.get("LAMBDA_EXECUTION_ROLE_ARN", ""),
+        lambda_egress_connector=values.get("LAMBDA_EGRESS_CONNECTOR", ""),
+        lambda_checkpoint_timeout=values.get("SNAPSHOT_TIMEOUT_SECONDS", "900"),
     ))
 
 
@@ -117,10 +127,23 @@ async def check(values: Mapping[str, str], *, providers: bool = True) -> dict[st
                     ):
                         raise InstallationError("The selected model is not available to the supplied key.")
                 report[component] = "model_listed"
-                component = "modal"
-                modal_client = await ModalClient.from_credentials.aio(values["MODAL_TOKEN_ID"], values["MODAL_TOKEN_SECRET"])
-                await modal_client.hello.aio()
-                report[component] = "authenticated"
+                if configured.sandbox_provider == "lambda":
+                    from .lambda_control import LambdaControl
+                    component = "lambda"
+                    control = LambdaControl(configured)
+                    image = await control.aws(
+                        "lambda-microvms", "get_microvm_image_version",
+                        imageIdentifier=configured.lambda_image, imageVersion=configured.lambda_image_version,
+                    )
+                    if image.get("state") != "SUCCESSFUL":
+                        raise InstallationError("The pinned Lambda image version is not ready.")
+                    await control.aws("s3", "head_bucket", Bucket=configured.lambda_checkpoint_bucket)
+                    report[component] = "image_and_bucket_verified"
+                else:
+                    component = "modal"
+                    modal_client = await ModalClient.from_credentials.aio(values["MODAL_TOKEN_ID"], values["MODAL_TOKEN_SECRET"])
+                    await modal_client.hello.aio()
+                    report[component] = "authenticated"
         return report
     except InstallationError:
         raise

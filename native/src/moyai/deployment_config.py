@@ -145,11 +145,17 @@ def configuration(environment: Mapping[str, str], state: dict | None, *, role: s
         raise InstallationError("MOYAI_DATABASE_URL must select a PostgreSQL database.") from None
     for field in (
         "OBJECT_STORAGE_BUCKET", "LITELLM_API_BASE", "LITELLM_API_KEY", "AGENT_MODEL",
-        "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET",
     ):
         _required(values, field)
-    if values.get("SANDBOX_PROVIDER", "modal") != "modal":
-        raise InstallationError("This Docker package currently supports Modal computers.")
+    provider = values.get("SANDBOX_PROVIDER", "modal")
+    if provider == "modal":
+        for field in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"):
+            _required(values, field)
+    elif provider == "lambda":
+        for field in ("LAMBDA_REGION", "LAMBDA_IMAGE", "LAMBDA_IMAGE_VERSION", "LAMBDA_CHECKPOINT_BUCKET"):
+            _required(values, field)
+    else:
+        raise InstallationError("SANDBOX_PROVIDER must be modal or lambda.")
     public_url = _public_origin(_required(values, "MOYAI_PUBLIC_URL"))
     temporal_mode = values.get("MOYAI_TEMPORAL_MODE", "external")
     if temporal_mode not in {"external", "bundled"}:

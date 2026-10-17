@@ -170,6 +170,21 @@ class ModalRecoveryTransport:
                 raise ValueError("The old execution owner could not be verified; native work is blocked.") from None
 
     async def native(self, scope: RunScope, context: dict[str, Any], reference: dict | None) -> Any:
+        provider = reference.get("provider") if reference else self.runtime.settings.sandbox_provider
+        if provider == "lambda":
+            from .lambda_control import LambdaControl
+            from .lambda_workspace import LambdaProductComputer
+            if context.get("environment_snapshot_id"):
+                raise ValueError("This prepared environment is a Modal image; select Modal or a plain repository.")
+            control = LambdaControl(self.runtime.settings)
+            vm = (
+                await control.get(reference["id"]) if reference else
+                await control.create("product-" + scope.session_id + "-" + scope.workspace_key[:12])
+            )
+            await vm.running()
+            computer = LambdaProductComputer(self.runtime.settings, vm.id)
+            await computer.filesystem.write_bytes.aio(GUEST.read_bytes(), "/opt/moyai/product_restore.py")
+            return computer
         if reference:
             if reference.get("provider") != "modal":
                 raise ValueError("Product restoration requires the native Modal workspace.")
@@ -424,7 +439,7 @@ class ProductWorkspaceRestorer:
                 raise ValueError("Repository preparation is unavailable. Select a validated environment.")
             await service.prepare_repository(scope, sandbox, context)
             await self.authorize(scope)
-        reference = {"provider": "modal", "id": sandbox.object_id}
+        reference = {"provider": getattr(sandbox, "provider", "modal"), "id": sandbox.object_id}
         digest = fingerprint({"plan": plan, "captures": [item.get("manifest_fingerprint") for item in captures],
                               "context": context.get("context_fingerprint")})
         async with self.runtime.database.sessions() as db:
