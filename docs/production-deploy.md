@@ -1,5 +1,9 @@
 # Deploy and maintain production
 
+For the staged migration of the manual workflow into private
+`BerriAI/moyai-ops`, see [private deployment setup](../deploy/github/README.md).
+The existing workflow remains active until that guide's explicit cutover.
+
 For a new installation, use the [versioned Docker guide](../deploy/docker/README.md).
 The existing Render production path has separate
 API, coordinator, broker and worker services. Every role runs the same Docker
