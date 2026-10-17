@@ -69,6 +69,7 @@ def runtime_image(base: Any = None):
         .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)
         .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
         .add_local_file(PACKAGE_ROOT / "browser_guest.py", "/opt/moyai/browser_guest.py", copy=True)
+        .add_local_file(PACKAGE_ROOT / "browser_driver.py", "/opt/moyai/browser_driver.py", copy=True)
         .add_local_file(GUEST, "/opt/moyai/product_restore.py", copy=True)
     )
 

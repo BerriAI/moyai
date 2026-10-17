@@ -21,6 +21,7 @@ BATCH_SIZE = 16
 POLL_SECONDS = 5
 REQUEST_TIMEOUT = 10
 MAX_RECEIPT_BYTES = 256 * 1024
+MAX_RECEIPT_ID_LENGTH = 4096
 
 
 class ReceiptError(ValueError):
@@ -43,7 +44,9 @@ def receipt(value: object, row: Mapping[str, object]) -> tuple[str, str]:
         raise ReceiptError('ambiguous_receipts')
     item = records[0]
     identifier = item.get('request_id')
-    if not isinstance(identifier, str) or not identifier or len(identifier) > 200:
+    # Responses gateway IDs can include a provider/model routing envelope and
+    # exceed 200 characters. They remain opaque identities, not model content.
+    if not isinstance(identifier, str) or not identifier or len(identifier) > MAX_RECEIPT_ID_LENGTH:
         raise ReceiptError('invalid_receipt')
     if item.get('api_key') != row['key_hash']:
         raise ReceiptError('scope_mismatch')

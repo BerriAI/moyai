@@ -24,7 +24,14 @@ from sqlalchemy.orm import aliased
 
 from .models import Message, Session, SessionPreference, SessionRead, Turn, User
 from .product_files import routes as file_routes
-from .product_history import MAX_MESSAGE_CHARS, MAX_OFFSET, MAX_PAGE, Principal, bounded
+from .product_history import (
+    MAX_MESSAGE_CHARS,
+    MAX_OFFSET,
+    MAX_PAGE,
+    Principal,
+    bounded,
+    prepare_history_query,
+)
 from .product_history import routes as legacy_routes
 from .swarm_models import SwarmMember
 
@@ -148,7 +155,9 @@ class ProductReadService:
             )
             folders = table("session_folders", column("id"), column("owner_id"), column("name"), schema=schema)
             old_messages = table("messages", column("run_id"), column("role"), column("user_id"), schema=schema)
-            roots = table("run_roots", column("run_id"), column("root_id"), schema=schema)
+            roots = select(table(
+                "run_roots", column("run_id"), column("root_id"), schema=schema,
+            )).cte("history_roots").prefix_with("MATERIALIZED", dialect="postgresql")
             users = table("users", column("id"), column("kind"), column("linked_user_id"), schema=schema)
             original = ProductContinuation.source_session_id
             old_pin = select(pins.c.run_id).where(
@@ -222,6 +231,7 @@ class ProductReadService:
         scope: NavigationScope = "all",
     ) -> dict[str, Any]:
         async with self.runtime.database.sessions() as db:
+            await prepare_history_query(db)
             query = self.native_query(reader).where(self.visible(reader, deleted=deleted))
             if not deleted:
                 query = query.where(
@@ -248,6 +258,7 @@ class ProductReadService:
         matches: dict[str, dict[str, Any]] = {}
         scanned, consumed, limited = 0, 0, False
         async with self.runtime.database.sessions() as db:
+            await prepare_history_query(db)
             title_rows = (await db.execute(self.native_query(reader).where(
                 self.visible(reader), func.lower(Session.title).contains(query.lower(), autoescape=True),
             ).order_by(Session.updated_at.desc(), Session.id.desc()).limit(offset + limit + 1))).mappings()
@@ -290,6 +301,7 @@ class ProductReadService:
             earlier = await self.history.search(reader.principal, query, limit=MAX_PAGE, continued_only=True)
             historical_limited = earlier["has_more"]
             async with self.runtime.database.sessions() as db:
+                await prepare_history_query(db)
                 mapping = dict((await db.execute(select(
                     ProductContinuation.native_session_id, ProductContinuation.source_session_id,
                 ).where(
@@ -450,6 +462,7 @@ class ProductReadService:
                 result["continuation_supported"] = True
         else:
             async with self.runtime.database.sessions() as db:
+                await prepare_history_query(db)
                 row = (await db.execute(self.native_query(reader).where(
                     self.visible(reader), Session.id == run_id,
                 ))).mappings().first()
