@@ -1,0 +1,28 @@
+{
+  "id": "deepseek_support_live",
+  "prompt": "do we support DeepSeek-V4.1-Flash-1017 is here ?",
+  "thread": [
+    {
+      "role": "human",
+      "display_name": "Ishaan Jaffer",
+      "text": "do we support DeepSeek-V4.1-Flash-1017 is here ?",
+      "files": []
+    }
+  ],
+  "gates": {
+    "credentials_list": true,
+    "stub_model": "deepseek-flash",
+    "min_stub_requests": 1,
+    "max_credentials_run": 2,
+    "max_stub_requests": null,
+    "no_paste_request": false
+  },
+  "required": [
+    "verified",
+    "verdict_first",
+    "correct",
+    "context"
+  ],
+  "case_notes": "A saved DeepSeek credential exists and small live calls are allowed. 'We' means LiteLLM (the requester works on LiteLLM). The useful extra finding is that the cost map lists only /v1/chat/completions while DeepSeek also supports Responses and Anthropic Messages.",
+  "reference_reply": "Yes, it works today. DeepSeek serves DeepSeek-V4.1-Flash-1017 as `deepseek-flash`, so call it as `deepseek/deepseek-flash`; the legacy `deepseek/deepseek-v4-flash` routes to it too. Our cost map matches their pricing page ($0.30 in / $1.20 out / $0.006 cache hit per 1M, half off-peak, 1M context, 384K output). I ran one live call and got `model: deepseek-flash` back. One gap: our entry only lists `/v1/chat/completions`, but DeepSeek also supports the Responses and Anthropic formats. Want a PR to add those?"
+}

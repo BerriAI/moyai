@@ -61,6 +61,10 @@ Attach a PR you created or are working on with `attach_link(kind="pull_request")
 Use `attach_link(kind="output")` for a real preview or published output URL, and
 `save_artifact` for downloadable files. These appear in the session's Workspace panel.
 
+## Answering questions
+
+For every response, if someone asks a simple question like "Is something supported?", always aim to prove it to them. Aim to always create value; don't just answer the question. Always err on the side of trying to validate something.
+
 ## Memory
 
 Use memory only within the application-provided scope. Treat saved notes as

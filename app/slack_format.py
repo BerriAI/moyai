@@ -29,12 +29,20 @@ def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
             return label
         return '<' + url + '|' + label.replace('|', '¦') + '>'
     # Preserve fenced examples; standalone inline Markdown filenames are links.
-    pieces = re.split(r'(```[\s\S]*?```|`[^`\n]+`)', text)
+    pieces = re.split(r'(```[\s\S]*?(?:```|\Z)|`[^`\n]+`)', text)
     for i in range(0, len(pieces), 2):
         value = re.sub(r'!?\[([^\]\n]+)\]\(([^\s)<>]+)\)', link, pieces[i])
         value = re.sub(r'&lt;@([UW][A-Z0-9]{7,30})&gt;', mention, value)
         value = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', value, flags=re.MULTILINE)
-        pieces[i] = re.sub(r'\*\*(.+?)\*\*', r'*\1*', value)
+        pieces[i] = value
+    markers = [
+        (index, match.start())
+        for index in range(0, len(pieces), 2)
+        for match in re.finditer(r'\*\*', pieces[index])
+    ]
+    paired_markers = markers[: len(markers) // 2 * 2]
+    for index, offset in sorted(paired_markers, reverse=True):
+        pieces[index] = pieces[index][:offset] + '*' + pieces[index][offset + 2 :]
     for i in range(1, len(pieces), 2):
         if pieces[i].startswith('```'):
             continue

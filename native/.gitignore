@@ -10,4 +10,4 @@ __pycache__/
 .pytest_cache/
 *.pyc
 test-results/
-
+jobs/

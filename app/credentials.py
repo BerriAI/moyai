@@ -148,7 +148,14 @@ class ResolveExternal(Arguments):
 
 
 class Materialize(Arguments):
-    request_ids: list[str] = Field(min_length=1, max_length=8)
+    request_ids: list[str] = Field(
+        min_length=1,
+        max_length=8,
+        description=(
+            "IDs returned by credentials_request. To use saved access, first call credentials_request with "
+            "secret_id set to the credential id from credentials_list; credential ids are not request IDs."
+        ),
+    )
 
     @model_validator(mode='after')
     def handles(self):

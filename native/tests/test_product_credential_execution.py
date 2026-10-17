@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 import test_product_authority as authority
-from app.credentials import CredentialRequest, ListCredentials, Resolve
+from app.credentials import CredentialRequest, ListCredentials, Materialize, Resolve
 from fastapi import HTTPException
 from pydantic import SecretStr
 from pydantic_ai import Agent, Conversation, ConversationTypeAdapter, DeferredToolRequests
@@ -64,6 +64,13 @@ def request_body(**overrides):
         provider="generic", name="webhook-signing-secret", reason="Configure the authorized webhook receiver.",
         request_key="webhook-access", input_fields=[{"name": "WEBHOOK_SECRET", "label": "Signing secret"}],
         **overrides,
+    )
+
+
+def test_materialize_request_ids_explain_saved_credential_handle_flow():
+    assert Materialize.model_fields["request_ids"].description == (
+        "IDs returned by credentials_request. To use saved access, first call credentials_request with "
+        "secret_id set to the credential id from credentials_list; credential ids are not request IDs."
     )
 
 
