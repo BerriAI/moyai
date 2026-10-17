@@ -39,10 +39,20 @@ other independently admitted sessions keep their own controls.
 Delegation remains bounded to the root, children and grandchildren. Swarm mode
 still uses its fixed roster. Each child uses ordinary turn admission, accounting,
 usage controls, connected-account authorization and durable Temporal execution.
-The child's generated assignment inherits the parent's admitted account policies
-and cannot grant human authority, expand skill selections, mutate personal memory
-or manage skills/automations as a direct human request. Subsequent authenticated
-human messages use normal session admission.
+The child's private/web presentation is separate from its execution authority.
+A sealed snapshot retains the originating visibility, surface and account grants.
+Generated work cannot grant human authority, load personal skills or memory
+unavailable to its parent, or manage skills/automations as a direct human request.
+Human follow-ups use normal admission within that same originating policy context;
+they can steer the child and reuse its computer without silently expanding access.
+Use a new ordinary conversation for a different account or skill context.
+Grandchildren and deferred-answer continuations preserve the same boundary.
+
+Admission, preparation, live authorization, connector credentials, inference,
+workspace restoration, computer access and account/skill pickers use that persisted
+context. Presentation and transcript ACL checks still use the private child session.
+Earlier link records containing only grants recover their context from the
+original parent preparation, never its current session settings.
 
 Old SDK-run delegates remain inspectable in their original panels. They are not
 silently converted into new conversations, and in-flight recorded workflows keep
@@ -55,9 +65,12 @@ policy. New ordinary root/child chats can delegate; swarm members and chats at t
 depth limit cannot. Even a stale or directly invoked delegate call is refused
 before child admission or computer setup. The workflow version is execution state,
 not a change to admitted connection permissions or the connector schema cache.
-Child admission also applies the normal steering fence: accepted newer guidance
-prevents an obsolete delegate call from starting work. Reporting already-admitted
-children remains independent of that fence.
+Child admission rechecks guidance inside the transaction holding the parent
+session fence. Submission, **Send now**, signal/receipt transitions, Stop and
+settlement serialize on that same row. Admitted guidance has a durable ordering
+receipt, so promoting an older queued message supersedes newer typed input;
+retrying an older delivery receipt cannot reorder guidance. Reporting
+already-admitted children remains independent of that fence.
 The input identity travels as an explicit durable-operation argument and is
 validated by admission itself, including direct calls and retries. Older pending
 activities recover it from the SDK-injected run context; if neither carries an
@@ -68,3 +81,17 @@ Existing-product deployments require the additive
 `2026-10-16-interactive-delegation-v18` migration and native protocol revision 5
 through the coordinated maintenance release. Earlier schema receipts are preserved.
 Standalone local databases add the new link table at startup.
+
+## Regression coverage
+
+`test_delegation_authority.py` covers shared web, Slack and private parents;
+personal skills, memory namespaces, legacy snapshots, grandchildren, direct
+follow-ups, computer reuse, account pickers and promoted-message ordering.
+`test_delegation_postgres.py` tests real PostgreSQL contention in both directions,
+as well as canonical connector selection, continuations and revocation.
+The credential suite checks that private child presentation does not expose
+personal vault entries unavailable to its parent. Temporal tests exercise
+ordinary delegation and steering through the pinned SDK and replay their histories.
+Browser tests exercise nested navigation, both entrypoints to side chat, draft
+isolation, access loss and responsive layouts. These tests supplement the required
+baseline/final real-application recording; they do not replace it.

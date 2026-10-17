@@ -528,12 +528,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       else { setPanelLoading(false); setPanelError(String(reason)) }
     })
   }, [id, auxiliaryPanel, Boolean(view)])
-  const productAccounts = me.product_mode === "existing"
   const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
-  const effectiveConnections = productAccounts ? accountCatalog.scope === accountScope ? accountCatalog.rows : [] : connections
-  const accountBlocked = productAccounts && (Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error)))
+  const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows : []
+  const accountBlocked = Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error))
   useEffect(() => {
-    if (!productAccounts || !view || !visible) return
+    if (!view || !visible) return
     const controller = new AbortController(), scope = accountScope
     setAccountCatalog({ scope, rows: [], loading: true, error: "" })
     const query = new URLSearchParams({ session_id: id })
@@ -541,16 +540,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       if (!controller.signal.aborted) setAccountCatalog({ scope, rows, loading: false, error: "" })
     }, reason => { if (!controller.signal.aborted) setAccountCatalog({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
-  }, [productAccounts, accountScope, visible])
+  }, [accountScope, visible])
   useEffect(() => {
-    if (!productAccounts || accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
+    if (accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
     const available = new Set(accountCatalog.rows.filter(row => row.enabled).map(row => row.id))
     const retained = selectedAccounts.filter(account => available.has(account))
     if (retained.length !== selectedAccounts.length) {
       setSelectedAccounts(retained)
       setAccountNotice("Account access changed. Review Context & connections before sending your next message.")
     }
-  }, [productAccounts, accountScope, accountCatalog, selectedAccounts])
+  }, [accountScope, accountCatalog, selectedAccounts])
   useEffect(() => {
     if (!workspaceRequest || sideMode) return
     setWorkspaceOpen(false)
@@ -736,11 +735,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             </div>
           </div>
           {accountNotice && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Dismiss</Button></p>}
-          {session.surface !== "slack" && (productAccounts || effectiveConnections.some(item => item.enabled)) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
-            {productAccounts && (accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
-            {productAccounts && accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
+          {session.surface !== "slack" && (me.product_mode === "existing" || effectiveConnections.some(item => item.enabled) || selectedAccounts.length > 0 || accountCatalog.error) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
+            {(accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
+            {accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
             <div className="connection-options">{effectiveConnections.filter(item => item.enabled && (session.visibility === "private" || item.shared)).map(item => <label key={item.id}><Checkbox checked={selectedAccounts.includes(item.id)} onCheckedChange={checked => { setAccountNotice(""); setSelectedAccounts(values => checked ? [...values, item.id] : values.filter(value => value !== item.id)) }} />{item.name}<span className="muted">{item.read_only ? "Read only" : "Can make changes"}</span></label>)}</div>
-            {productAccounts && !accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this session’s visibility and surface. <a href="#settings/connections">Manage Connections</a></p>}
+            {!accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this conversation. <a href="#settings/connections">Manage Connections</a></p>}
           </details>}
           <p className="composer-hint">{pictures.uploading ? "Uploading files…" : "Drop files or paste images · Enter to send · Shift+Enter for a new line"}</p>
         </form>

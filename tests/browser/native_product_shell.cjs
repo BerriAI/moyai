@@ -29,7 +29,8 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.mode});
   if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;return json(session('c'.repeat(32)));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
-  if(url.pathname==='/api/connections'||url.pathname==='/api/session-folders')return json([]);
+  if(url.pathname==='/api/connections')return json(state.connectionsBySession?.[url.searchParams.get('session_id')]||state.connections||[]);
+  if(url.pathname==='/api/session-folders')return json([]);
   if(url.pathname==='/api/pull-requests/statuses')return json(state.prStatuses||{});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
     if(url.pathname==='/api/history/sessions'&&state.inventoryRows)return json({sessions:state.inventoryRows,ancestors:state.inventoryAncestors||[],has_more:false});
@@ -63,7 +64,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/settings/overview')return json({counts:{},capabilities:{}});
   if(url.pathname==='/api/skills') {
     if(state.skillError)return json({detail:'Temporary skill outage.'},503);
-    return json({skills:(state.skills||[]).filter(row=>url.searchParams.get('shared')!=='true'||row.scope!=='personal'),has_more:false,next_offset:null});
+    return json({skills:(state.skillsBySession?.[url.searchParams.get('session_id')]||state.skills||[]).filter(row=>url.searchParams.get('shared')!=='true'||row.scope!=='personal'),has_more:false,next_offset:null});
   }
   if(url.pathname==='/api/settings/skills')return json({skills:[],capabilities:{}});
   if(url.pathname==='/api/settings/automations')return json({automations:[],capabilities:{}});
@@ -74,7 +75,7 @@ async function handle(req,res,next) {
   }
   if(url.pathname.startsWith('/api/sessions/')) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
-    if(url.pathname.endsWith('/workspace'))return json(state.workspace||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
+    if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
     if(url.pathname.endsWith('/progress/'+turnId))return json({messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
@@ -93,7 +94,6 @@ async function handle(req,res,next) {
     }
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname.endsWith('/activity'))return json([]);
-    if(url.pathname.endsWith('/workspace'))return json(state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/read'))return json({});
     if(req.method==='PATCH') {
       if(state.holdRename)await state.holdRename;
@@ -773,4 +773,22 @@ test('workspace subagent action opens the right-panel conversation without leavi
   await panel.getByText('Saved child result.',{exact:true}).waitFor();
   assert.equal(new URL(page.url()).hash,'#'+sessionId);
   assert.equal(await panel.getByRole('textbox',{name:'Message Moyai',exact:true}).isVisible(),true);
+});
+
+test('standalone child pickers use its server-scoped catalogs instead of private presentation',async t=>{
+  const childId='d'.repeat(32);
+  reset({mode:'standalone',status:'idle',
+    sessionOverrides:{[childId]:{title:'Curie',visibility:'private',parent_session_id:sessionId}},
+    connections:[{id:'personal',name:'Personal test connector',kind:'linear',enabled:true,shared:false,read_only:true}],
+    connectionsBySession:{[childId]:[]},
+    skills:[{id:'personal',name:'personal-test',description:'Personal test skill',scope:'personal',reference:'personal:personal-test'}],
+    skillsBySession:{[childId]:[]}});
+  const page=await pageFor(t,'#'+childId);
+  await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
+  await waitFor(()=>state.requests.some(r=>r.path==='/api/connections'&&new URLSearchParams(r.query).get('session_id')===childId));
+  assert.equal(await page.getByText('Personal test connector',{exact:true}).count(),0);
+  await page.getByRole('textbox',{name:'Message Moyai',exact:true}).fill('/personal');
+  await page.getByText(/No matching skills/).waitFor();
+  assert.ok(state.requests.some(r=>r.path==='/api/skills'&&new URLSearchParams(r.query).get('session_id')===childId));
+  assert.equal(await page.getByRole('option',{name:/Personal test skill/}).count(),0);
 });
