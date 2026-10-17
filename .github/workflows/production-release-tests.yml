@@ -29,6 +29,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: astral-sh/setup-uv@v6
       - name: Install the locked workspace for native release contract checks
         run: uv sync --frozen --python 3.13

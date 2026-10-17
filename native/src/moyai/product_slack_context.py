@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from decimal import Decimal
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from app.connector_errors import ConnectorError
 from app.db import database as source_database
-from app.slack_format import ASIDE, STAMP, routing_text
+from app.slack_format import ASIDE_PREFIXES
 from fastapi import HTTPException
 from sqlalchemy import select
 
@@ -35,28 +35,33 @@ class SlackThreadContext:
 
     async def prepare(
         self, actor: User, principal: ProductPrincipal, origin: dict[str, str],
-        installed: dict, body: NewMessage,
+        installed: dict, body: NewMessage, *, source: SlackHostEvent,
     ) -> NewMessage:
-        # Shared search credentials must never hydrate earlier direct messages.
-        if origin["channel_id"].startswith("D"):
-            return body.model_copy()
         await self.slack.product.identity.require_current(principal.grant)
         cached = await self._cached_prompt(actor, origin, body)
         if cached is not None:
             return body.model_copy(update={"prompt": cached})
-        grants = await self.slack.connections.resolve_grants(
+        # Current signed evidence is safe to retain in DMs; shared search
+        # credentials must never hydrate their earlier messages.
+        direct = origin["channel_id"].startswith("D")
+        grants = [] if direct else await self.slack.connections.resolve_grants(
             actor.id, body.connections, shared_session=True, surface="slack",
         )
         grant = next((item for item in grants if item.kind == "slack"), None)
-        context: dict[str, Any] = {
-            **{key: origin[key] for key in ("team_id", "channel_id", "thread_ts", "message_ts")},
-            "status": "complete", "messages": [],
-        }
+        host = SlackHost(
+            bot_user_id=installed["user_id"], workspace_id=origin["team_id"], exclude_prefixes=ASIDE_PREFIXES,
+        )
         if grant is None:
-            context.update(status="unavailable", error="No Slack read connection is available on this surface.")
+            context = dict(await host.thread_context(source))
+            if direct and not context["messages"]:
+                return body.model_copy()
+            context["error"] = (
+                "Earlier DM messages were not read; only the current message was supplied."
+                if direct else "No Slack read connection is available on this surface."
+            )
         else:
             context = await self.slack.connections.execution.call(
-                lambda bound: self._read(bound, origin, installed["user_id"], grant, context),
+                lambda bound: self._read(bound, host, source, grant),
                 authorize=lambda: self._authorize(principal, installed, grant), recheck=True,
             )
         await self._authorize(principal, installed, grant)
@@ -91,84 +96,27 @@ class SlackThreadContext:
             )
 
     async def _read(
-        self, bound: Any, origin: dict[str, str], bot_user_id: str, grant: Grant, context: dict[str, Any],
+        self, bound: Any, host: SlackHost, source: SlackHostEvent, grant: Grant,
     ) -> dict[str, Any]:
-        arguments = {"channel": origin["channel_id"], "thread_ts": origin["thread_ts"],
-                     "page_size": 100, "as_bot": grant.policy["product"]["access"] == "bot"}
-        messages, cursors, size = {}, set(), 0
-        try:
-            # Executor cancellation drains its thread; bound the provider coroutine
-            # here, inside that thread, rather than timing out its awaiting caller.
-            async with asyncio.timeout(READ_TIMEOUT_SECONDS):
-                for _ in range(MAX_PAGES):
-                    page = await bound.call("slack_thread", arguments)
-                    if not isinstance(page.get("messages"), list):
-                        raise ConnectorError("Slack did not return thread messages.", code="invalid_response")
-                    for message in page["messages"]:
-                        projected = self._project(message, origin, bot_user_id)
-                        if projected is None or projected["ts"] in messages:
-                            continue
-                        length = len(projected["content"])
-                        if size + length > MAX_CONTEXT_CHARS:
-                            context["status"] = "partial"
-                            break
-                        messages[projected["ts"]] = projected
-                        size += length
-                        if projected["truncated"]:
-                            context["status"] = "partial"
-                    context["messages"] = [messages[key] for key in sorted(messages, key=Decimal)]
-                    following = page.get("next_arguments")
-                    if not following:
-                        if page.get("has_more"):
-                            context["status"] = "partial"
-                        break
-                    cursor = following.get("cursor")
-                    if not cursor or cursor in cursors or size >= MAX_CONTEXT_CHARS:
-                        context["status"] = "partial"
-                        break
-                    cursors.add(cursor)
-                    arguments = {**arguments, "cursor": cursor}
-                else:
-                    context["status"] = "partial"
-        except (ConnectorError, TimeoutError) as error:
-            context.update(status="unavailable", error=(
-                error.code if isinstance(error, ConnectorError) else "timeout"
-            ))
-        else:
-            if origin["thread_ts"] != origin["message_ts"] and origin["thread_ts"] not in messages:
-                context.update(status="partial", warning="The thread root was not returned.")
-        return context
+        async def request_page(params: Mapping[str, Any]) -> dict[str, Any]:
+            try:
+                # The canonical tool retains rotating credentials and per-request
+                # authority checks. AgentChat owns pagination and the time cutoff.
+                return await bound.call("slack_thread", {
+                    "channel": params["channel"], "thread_ts": params["ts"],
+                    "page_size": params["limit"], "cursor": params.get("cursor", ""),
+                    "as_bot": grant.policy["product"]["access"] == "bot",
+                })
+            except ConnectorError as error:
+                return {"ok": False, "error": error.code}
 
-    @staticmethod
-    def _project(message: Any, origin: dict[str, str], bot_user_id: str) -> dict[str, Any] | None:
-        if not isinstance(message, dict):
-            return None
-        _, authored = routing_text(str(message.get("text") or ""), f"<@{bot_user_id}>")
-        stamp = message.get("ts")
-        if ASIDE.match(authored) or not isinstance(stamp, str) or not STAMP.fullmatch(stamp):
-            return None
-        if (Decimal(stamp) > Decimal(origin["message_ts"])
-            or Decimal(stamp) < Decimal(origin["thread_ts"])
-            or (stamp != origin["thread_ts"] and message.get("thread_ts") != origin["thread_ts"])):
-            return None
-        current = stamp == origin["message_ts"]
-        fields = ("attachments", "blocks") if current else ("text", "attachments", "blocks", "files")
-        source = {key: message[key] for key in fields if message.get(key)}
-        blocks = source.get("blocks")
-        if current and isinstance(blocks, list):
-            # Composer rich_text mirrors the authored request already in body.
-            # Unfurls and other preview blocks remain available as references.
-            source["blocks"] = [block for block in blocks
-                                if isinstance(block, dict) and block.get("type") != "rich_text"]
-            if not source["blocks"]:
-                del source["blocks"]
-        if not source:
-            return None
-        content = json.dumps(source, ensure_ascii=False)
-        return {
-            "ts": stamp, "author": message.get("user") or message.get("bot_id") or "unknown",
-            "content": content[:MAX_MESSAGE_CHARS], "truncated": len(content) > MAX_MESSAGE_CHARS,
-        }
+        # Run the SDK timeout inside the executor worker: cancelling the outer
+        # caller alone would still wait for the provider operation to drain.
+        context = await host.thread_context(
+            source, request_page, max_pages=MAX_PAGES, max_chars=MAX_CONTEXT_CHARS,
+            max_message_chars=MAX_MESSAGE_CHARS, timeout=READ_TIMEOUT_SECONDS,
+        )
+        return dict(context)
 
     @staticmethod
     def _render(context: dict[str, Any]) -> str:

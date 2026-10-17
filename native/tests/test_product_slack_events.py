@@ -135,3 +135,78 @@ async def test_historical_privacy_fence_precedes_input_readers(ingress, monkeypa
     assert error.value.status_code == 403
     async with runtime.database.sessions() as db:
         assert list(await db.scalars(select(Turn))) == []
+
+
+@pytest.mark.parametrize("quote", [
+    "`<@UBOT00001>`", "```\n<@UBOT00001>\n```", "> <@UBOT00001>",
+    ">>>\n<@UBOT00001>", "`<@UBOT00001>", "```\n<@UBOT00001>",
+])
+async def test_quoted_mentions_do_not_start_a_conversation(ingress, monkeypatch, quote):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+    monkeypatch.setattr(service.context, "prepare", forbid_prepare)
+
+    await service.receive_payload(followup("A literal example:\n" + quote))
+
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+async def test_addressed_message_preserves_mentions_inside_quotes(ingress, conversation):
+    service, runtime = ingress.service, ingress.runtime
+    question = "Explain this literal example: `<@UBOT00001> status`"
+    payload = followup(question, mentioned=True)
+    del payload["event"]["files"]
+
+    await service.receive_payload(payload)
+
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+    assert len(turns) == 2
+    assert any(runtime.security.unseal(turn.prompt).decode().startswith(question) for turn in turns)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ts", "not-a-timestamp"), ("thread_ts", "1792259999.001"),
+    ("channel", "C!INVALID"), ("text", {"not": "a string"}),
+])
+async def test_malformed_message_is_rejected_before_input_readers(ingress, monkeypatch, field, value):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+    monkeypatch.setattr(service.context, "prepare", forbid_prepare)
+    payload = followup("Review this thread.", mentioned=True)
+    payload["event"][field] = value
+
+    with pytest.raises(HTTPException) as error:
+        await service.receive_payload(payload)
+    assert error.value.status_code == 400
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+@pytest.mark.parametrize("text", ["!aside Keep this out of context.", "(aside) A human discussion.", "!ASIDE Private note."])
+async def test_addressed_asides_do_not_start_a_conversation(ingress, monkeypatch, text):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+    monkeypatch.setattr(service.context, "prepare", forbid_prepare)
+
+    await service.receive_payload(followup(text, mentioned=True))
+
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+@pytest.mark.parametrize("channel_type", [None, "channel", "mpim"])
+async def test_dm_requires_explicit_direct_channel_type(ingress, monkeypatch, channel_type):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+    monkeypatch.setattr(service.context, "prepare", forbid_prepare)
+    payload = followup("Read this attachment.")
+    payload["event"]["channel"] = "DTEST0001"
+    if channel_type is not None:
+        payload["event"]["channel_type"] = channel_type
+
+    await service.receive_payload(payload)
+
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []

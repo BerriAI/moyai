@@ -39,6 +39,13 @@ test when replacing a runtime; tests for signatures or reply delivery are not a
 substitute. A deliberate behavior change must update the contract and document
 the user-visible change, rather than delete the test as legacy-only.
 
+Slack tests exercise the installed AgentChat SDK, with only provider HTTP replaced
+by test responses. AgentChat owns event normalization, bounded thread context and
+message payloads. Moyai owns current grants, session admission, the encrypted
+input snapshot and the durable outbox; preserve these boundaries when upgrading
+the SDK. Source installation requires Rust 1.88+; the Docker dependency builder
+compiles AgentChat without adding a Rust toolchain to the runtime image.
+
 Release tests exercise the real controller with simulated Render/SSH responses
 and real PostgreSQL guards. Package tests build a wheel from the source archive
 and inspect resources outside the source checkout.

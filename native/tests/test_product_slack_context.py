@@ -371,3 +371,60 @@ async def test_direct_message_does_not_read_shared_history(ingress, monkeypatch)
     turn = await runtime.database.claim_next()
     prepared = await runtime.database.prepare(turn.id)
     assert prepared.prompt == "do we support this?"
+
+
+async def test_dm_current_preview_is_retained_without_history_and_frozen_on_retry(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def forbidden_request(*args, **kwargs):
+        pytest.fail("Current DM evidence must not read shared Slack history.")
+
+    monkeypatch.setattr(service.connectors, "request", forbidden_request)
+    message = {
+        "channel": "DTEST0001", "type": "message", "channel_type": "im",
+        "user": "UTEST0001", "ts": MENTION_TS, "text": "do we support this?",
+        "attachments": root_message()["attachments"],
+    }
+    await service.receive_payload(envelope(message))
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+
+    assert DEEPSEEK_URL in prepared.prompt and "DeepSeek-V4.1-Flash-1017" in prepared.prompt
+    assert prepared.prompt.count("do we support this?") == 1
+    assert "untrusted" in prepared.prompt and "partial" in prepared.prompt
+    assert "Earlier DM messages were not read" in prepared.prompt
+
+    await service.receive_payload(envelope({**message, "attachments": [{"text": "Edited preview"}]}))
+    async with runtime.database.sessions() as db:
+        saved = await db.get(Turn, turn.id)
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 1
+    assert runtime.security.unseal(saved.prompt).decode() == prepared.prompt
+
+
+@pytest.mark.parametrize("failure", ["missing_scope", "no_connection"])
+async def test_current_preview_survives_when_history_is_unavailable(ingress, monkeypatch, failure):
+    service, runtime = ingress.service, ingress.runtime
+    calls = []
+
+    async def request(method, url, **kwargs):
+        assert failure == "missing_scope", "No grant must mean no external Slack read."
+        calls.append(url)
+        raise ConnectorError("Slack thread access is missing a required scope.", code="missing_scope")
+
+    async def no_connections(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    if failure == "no_connection":
+        monkeypatch.setattr(service.connections, "catalog", no_connections)
+    await service.receive_payload(envelope({
+        **mention_message(), "attachments": root_message()["attachments"],
+    }))
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+
+    assert DEEPSEEK_URL in prepared.prompt and "DeepSeek-V4.1-Flash-1017" in prepared.prompt
+    assert prepared.prompt.count("do we support this?") == 1
+    assert "untrusted" in prepared.prompt and "partial" in prepared.prompt
+    assert ("missing_scope" if failure == "missing_scope" else "No Slack read connection") in prepared.prompt
+    assert len(calls) == int(failure == "missing_scope")

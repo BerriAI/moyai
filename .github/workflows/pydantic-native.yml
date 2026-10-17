@@ -26,6 +26,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.13'
@@ -74,6 +75,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.13'

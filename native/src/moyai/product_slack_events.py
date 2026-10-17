@@ -6,11 +6,11 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from app.db import database as source_database
-from app.slack_format import ASIDE, ID, STAMP, routing_text
+from app.slack_format import ASIDE_PREFIXES
 from fastapi import HTTPException
 from sqlalchemy import update
 
@@ -44,6 +44,7 @@ class SlackCommand:
 @dataclass(frozen=True)
 class SlackMessage:
     event: dict[str, Any]
+    source: SlackHostEvent
     origin: dict[str, str]
     prompt: str
     mentioned: bool
@@ -53,31 +54,28 @@ class SlackMessage:
 
     @classmethod
     def parse(cls, payload: dict, event: dict, installed: dict) -> SlackMessage | None:
-        if event.get("type") not in {"app_mention", "message"} or event.get("subtype") not in {None, "file_share"}:
-            return None
-        channel, timestamp, user = event.get("channel", ""), event.get("ts", ""), event.get("user", "")
-        thread_ts, authored = event.get("thread_ts") or timestamp, event.get("text", "")
-        if not all(isinstance(value, str) for value in (channel, timestamp, thread_ts, authored)):
-            raise HTTPException(400, "Invalid Slack event fields.")
-        if (
-            not ID.fullmatch(user) or not ID.fullmatch(channel)
-            or channel[0] not in "CDG" or user[0] not in "UW"
-            or not STAMP.fullmatch(timestamp) or not STAMP.fullmatch(thread_ts)
-            or Decimal(thread_ts) > Decimal(timestamp)
-        ):
-            raise HTTPException(400, "Invalid Slack event fields.")
-        visible, prompt = routing_text(authored, f"<@{installed['user_id']}>")
-        if ASIDE.match(prompt) or (not prompt and not event.get("files")):
+        host = SlackHost(
+            bot_user_id=installed["user_id"], workspace_id=installed["team_id"],
+            exclude_prefixes=ASIDE_PREFIXES,
+        )
+        try:
+            normalized = host.normalize_event(payload)
+        except ValueError:
+            raise HTTPException(400, "Invalid Slack event fields.") from None
+        if normalized is None:
             return None
         origin = {
-            "team_id": installed["team_id"], "channel_id": channel, "thread_ts": thread_ts,
-            "user_id": user, "event_id": payload["event_id"], "message_ts": timestamp,
+            "team_id": normalized["team_id"], "channel_id": normalized["channel_id"],
+            "thread_ts": normalized["thread_ts"], "user_id": normalized["user_id"],
+            "message_ts": normalized["message_ts"], "event_id": payload["event_id"],
         }
-        key = hashlib.sha256(json.dumps([installed["team_id"], channel, timestamp]).encode()).hexdigest()
+        # Keep existing admission identities stable across the SDK migration.
+        key = hashlib.sha256(json.dumps([
+            origin["team_id"], origin["channel_id"], origin["message_ts"],
+        ]).encode()).hexdigest()
+        prompt = normalized["text"]
         return cls(
-            event, origin, prompt,
-            mentioned=event["type"] == "app_mention" or f"<@{installed['user_id']}>" in visible,
-            direct=channel.startswith("D") and event.get("channel_type") == "im",
+            event, normalized, origin, prompt, mentioned=normalized["mentioned"], direct=normalized["direct"],
             key=key, command=SlackCommand.parse(prompt),
         )
 
@@ -108,8 +106,8 @@ class SlackEvents:
         event = self._eligible_event(payload, installed)
         if event is None:
             return {"ok": True}
-        await self._automation(payload, event, installed)
         message = SlackMessage.parse(payload, event, installed)
+        await self._automation(payload, event, installed)
         if message is None:
             return {"ok": True}
         if message.origin["channel_id"].startswith("D") and (
@@ -133,9 +131,8 @@ class SlackEvents:
         event = payload.get("event")
         if payload.get("type") != "event_callback" or not isinstance(event, dict):
             return None
-        for key in ("type", "subtype", "user", "channel", "ts", "thread_ts", "text", "channel_type"):
-            if event.get(key) is not None and not isinstance(event[key], str):
-                raise HTTPException(400, "Invalid Slack event fields.")
+        if event.get("user") is not None and not isinstance(event["user"], str):
+            raise HTTPException(400, "Invalid Slack event fields.")
         for key in ("item", "metadata"):
             if event.get(key) is not None and not isinstance(event[key], dict):
                 raise HTTPException(400, "Invalid Slack event metadata.")
@@ -174,7 +171,7 @@ class SlackEvents:
             prompt=message.prompt + attachments["context"], request_key="slack-message:" + message.key,
             mode="asap", connections=selections, attachments=attachments["images"],
         )
-        body = await self.slack.context.prepare(actor, principal, message.origin, installed, body)
+        body = await self.slack.context.prepare(actor, principal, message.origin, installed, body, source=message.source)
         return SlackSubmission(body, attachments["uploads"])
 
     async def _admit(

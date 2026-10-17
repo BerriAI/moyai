@@ -19,6 +19,8 @@ from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
+from agentchat.channels.slack.rendering import message_request
+from agentchat.models import RichReply
 from app.db import database as source_database
 from app.slack_format import ID, STAMP
 from fastapi import APIRouter, HTTPException, Request
@@ -528,6 +530,17 @@ class ProductSlack:
         ready, reply_ts = await reply_target(self.runtime, delivery, product=True)
         if not ready:
             return
+        destination = json.loads(delivery.destination)
+        content = json.loads(self.runtime.security.unseal(delivery.content))
+        request = message_request(
+            RichReply(
+                text=content["text"], blocks=tuple(content.get("blocks") or ()),
+                attachments=tuple(content.get("attachments") or ()),
+            ),
+            channel_id=destination["channel"], thread_ts=destination["thread_ts"], message_ts=reply_ts,
+            metadata={"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
+            fallback_blocks=False,
+        )
         # Refresh only the installation bot. Never use personal/shared user OAuth.
         token = await self.connectors.slack_bot_token()
         if not await self.delivery_allowed(delivery):
@@ -544,17 +557,12 @@ class ProductSlack:
         if not still_allowed:
             await self._settle(delivery.id, "suppressed")
             return
-        destination = json.loads(delivery.destination)
-        content = json.loads(self.runtime.security.unseal(delivery.content))
         try:
-            response = await client.post("chat.update" if reply_ts else "chat.postMessage", headers={"Authorization": "Bearer " + token}, json={
-                "channel": destination["channel"], **content,
-                **({"ts": reply_ts, "blocks": content.get("blocks", []),
-                    "attachments": content.get("attachments", [])} if reply_ts else {
-                    "thread_ts": destination["thread_ts"], "unfurl_links": False, "unfurl_media": False,
-                }),
-                "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": delivery.id}},
-            })
+            # AgentChat owns provider rendering/routing; this durable host owns
+            # the one-attempt effect and reconciliation after an uncertain send.
+            response = await client.post(
+                request["method"], headers={"Authorization": "Bearer " + token}, json=request["payload"],
+            )
             response.raise_for_status()
             result = response.json()
             if not isinstance(result, dict):
@@ -662,6 +670,11 @@ class ProductSlack:
                 await source_database(self.store.execute,
                                       "UPDATE slack_outbox SET status='skipped' WHERE id=? AND status='pending'", (row["id"],))
                 continue
+            request = message_request(
+                RichReply(row["text"]), channel_id=row["channel"], thread_ts=row["thread_ts"],
+                metadata={"event_type": "moyai_delivery", "event_payload": {"id": "source:" + str(row["id"])}},
+                fallback_blocks=False,
+            )
             token = await self.connectors.slack_bot_token()
             claim = {"owned": False}
 
@@ -691,11 +704,9 @@ class ProductSlack:
                                       "UPDATE slack_outbox SET status='pending' WHERE id=? AND status='sending'", (row["id"],))
                 raise
             try:
-                response = await client.post("chat.postMessage", headers={"Authorization": "Bearer " + token}, json={
-                    "channel": row["channel"], "thread_ts": row["thread_ts"], "text": row["text"],
-                    "unfurl_links": False, "unfurl_media": False,
-                    "metadata": {"event_type": "moyai_delivery", "event_payload": {"id": "source:" + str(row["id"])}},
-                })
+                response = await client.post(
+                    request["method"], headers={"Authorization": "Bearer " + token}, json=request["payload"],
+                )
                 response.raise_for_status()
                 result = response.json()
                 if not isinstance(result, dict) or not result.get("ok") or not result.get("ts"):
