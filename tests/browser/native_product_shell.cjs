@@ -350,7 +350,7 @@ for(const width of [1440,768,320])test(`space home respects reduced motion and k
   assert.equal(await page.getByRole('button',{name:'Swarm',exact:true}).isVisible(),true);
 });
 
-test('reference meteor shaders render front, side and back and restore Home after remount',async t=>{
+test('textured Moyai renders front, side and back and restores Home after remount',async t=>{
   reset({status:'idle'});
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
   t.after(()=>page.close());
@@ -373,7 +373,7 @@ test('reference meteor shaders render front, side and back and restore Home afte
   await painted();const back=await canvas.screenshot();
   assert.equal(front.equals(side),false);assert.equal(side.equals(back),false);
   await canvas.press('Home');await painted();
-  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the reference view.');
+  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the initial view.');
   await page.getByRole('link',{name:'idle Current native work',exact:true}).click();
   await canvas.waitFor({state:'detached'});
   await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).click();

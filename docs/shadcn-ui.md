@@ -22,26 +22,21 @@ belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
-The meteor is a closed, reference-textured mesh, generated offline with
-`uv run --script scripts/assets/generate_moyai_meteor.py`; generation is not a
-runtime or normal build step. The portable input is
-`scripts/assets/moyai-meteor-reference.webp`, derived from the supplied photograph.
-Its outline and photographed colors are preserved in the initial view; face/crater
-depth and the unseen back are authored estimates, not a recovered 3D scan.
-The base texture uses unlit shading to retain the photo's light and shadow. Small
-mineral facets and a faint physical reflection layer respond to rotation. Avoid
-a CSS halo or recoloring the supplied stone. Keep the generator's perspective
-projection and the viewer's initial camera aligned.
-Steep sides and the unseen back use a seamless stone texture sampled from three
-object-space directions. Blend with the reference by the surface normal, using
-one shared material across the front/back boundary; a hard material split or a
-single front projection recreates the stretched stripes visible in profile.
+The home sculpture uses the supplied Meshy **Silent Stone Orbit** model, converted
+offline from FBX into `native/web/public/moyai.glb`. Its base color, normal and
+packed metallic/roughness textures use the model's UVs and standard PBR material.
+The optimized asset has 50,150 triangles and 1024px embedded textures; importing
+it is not a runtime or normal build step. See
+[the asset provenance](../scripts/assets/moyai-model.md) for conversion details.
+Keep the model centered and normalized to a 3.5-unit longest side for the viewer's
+camera. Avoid photo-projection shaders or a separate sheen mesh: the supplied
+material already provides the stone's surface detail and lighting response.
 
 The Three.js viewer remains lazy and supports drag and keyboard rotation.
 It disposes shared geometry, materials, textures, the reflection target and shadow
 maps once on unmount. Embedded images use TextureLoader so the existing content
-security policy can load them through `img-src`. The supplied reference image is
-also the lightweight loading/WebGL fallback.
+security policy can load them through `img-src`. The lightweight loading/WebGL
+fallback is a transparent render of this same model at its initial camera angle.
 
 ```sh
 npm ci
