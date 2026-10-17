@@ -420,8 +420,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
-  const [model, setModel] = useState(initial?.session.model ?? me.default_model)
-  const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
+  const [model, setModel] = useState(view?.session.model ?? me.default_model)
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>(() => {
+    const latest = view?.turns[0]
+    return latest?.actor_id === me.user.id ? latest.connections ?? [] : []
+  })
   const [accountRevision, setAccountRevision] = useState(0)
   const [accountNotice, setAccountNotice] = useState("")
   const [accountCatalog, setAccountCatalog] = useState<{ scope: string; rows: Connection[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
@@ -454,7 +457,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [])
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
-  const loaded = useRef(false)
+  const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
   const visibleNow = useRef(visible)
@@ -463,9 +466,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     ++loadVersion.current
     ++sensitiveVersion.current
     resolvedOnce.current = undefined
+    composerInitialized.current = false
+    readThrough.current = null
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
-    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
@@ -482,8 +487,17 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       // Older servers can omit the transcript during a rolling deployment.
       const history = next.messages ?? await api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal)
       if (signal?.aborted || version !== loadVersion.current) return
+      // Publish a complete composer with the transcript, before read bookkeeping.
+      // Seed only once so polling and late receipts cannot overwrite user edits.
+      if (!composerInitialized.current) {
+        setModel(next.session.model)
+        const latest = next.turns[0]
+        setSelectedAccounts(latest?.actor_id === me.user.id ? latest.connections ?? [] : [])
+        composerInitialized.current = true
+      }
       viewNow.current = next
       setView(next); setMessages(history)
+      if (next.activity) setActivity(next.activity)
       setSendingNow(previous => {
         const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
         return pending.length === previous.size ? previous : new Set(pending)
@@ -494,13 +508,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         await api(`/sessions/${id}/read`, "POST", { message_id: latestMessage }, signal)
         if (signal?.aborted || version !== loadVersion.current) return
         readThrough.current = latestMessage
-      }
-      if (next.activity) setActivity(next.activity)
-      if (!loaded.current) {
-        setModel(next.session.model)
-        const latest = next.turns[0]
-        if (latest?.actor_id === me.user.id) setSelectedAccounts(latest.connections ?? [])
-        loaded.current = true
       }
     } catch (reason) {
       if (signal?.aborted || version !== loadVersion.current) return
