@@ -109,9 +109,11 @@ class Runtime:
                 self.database.product_drain = self.product_drain
         self.client: Client | None = None
         from .skill_invocations import SkillInvocations
+        from .slack_activity import SlackActivityService
         from .work_progress import WorkProgress
         self.skill_invocations = SkillInvocations(self)
         self.work_progress = WorkProgress(self)
+        self.slack_activity = SlackActivityService(self)
         self.agent: Agent[RunScope, str | DeferredToolRequests]
         self.durability: TemporalDurability[RunScope]
         self.models: dict[str, Model] = {}

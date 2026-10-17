@@ -134,6 +134,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         ] if run_dispatcher else []
         if run_dispatcher and runtime.product is None and runtime.settings.slack_bot_token.get_secret_value():
             tasks.append(asyncio.create_task(slack_dispatcher(runtime)))
+            tasks.append(asyncio.create_task(runtime.slack_activity.watch()))
         try:
             yield
         finally:

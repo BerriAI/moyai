@@ -25,6 +25,29 @@ input, and routes the final answer into that latest slot—even after accepted
 guidance becomes included in answer settlement. Older queued inputs promoted
 with **Send now** use admission order.
 
+Slack's native **“Moyai is working…”** indicator runs alongside those editable
+replies. It reflects queued, starting, running and saving work, refreshes every
+minute, and is reasserted after attempted or confirmed bot replies. Steering
+keeps the execution's indicator active while preserving the previous reply
+slot. Completion, failure, Stop, pause, deletion and requests for user input
+clear the working indicator even when no final text answer is produced.
+
+The coordinator owns a separate bounded status loop, so a Slack status outage
+does not block answer delivery. Its per-thread attempts and short claims are
+durable: restart reconciles the current state, and ambiguous status calls may
+retry without replaying chat messages. Destination and authorization are checked
+again after refreshing the bot token. A removed or replaced bot connection
+cannot send a cleanup request; Slack's two-minute expiration removes its status.
+Unreachable destinations retire their saved status and retry metadata, so idle
+threads leave the polling queue. Active work remains eligible when its connection
+returns. Transient provider or database failures retain the saved retry state.
+Only generic lifecycle text is sent, never private task focus or tool content.
+
+Existing-product deployments require the additive
+`2026-10-17-slack-activity-v19` application migration through the normal explicit
+release workflow. It adds only the native status table and preserves every
+earlier migration receipt. It does not change Temporal workflow commands.
+
 Long Slack answers use multiple sections in the same message. Text beyond
 32,000 characters links to the full saved answer in Moyai. Existing PR cards and
 approval controls remain attached. Already queued overflow deliveries from an
