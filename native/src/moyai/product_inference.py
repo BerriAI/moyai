@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from .product_memory_review import ProductMemoryReviewService
 
 log = logging.getLogger(__name__)
+UNSENT_CLEANUP_TIMEOUT_SECONDS = 10.0
 
 
 class InferenceAdmissionError(RuntimeError):
@@ -309,7 +310,9 @@ class ProductInferenceService:
 
     async def not_dispatched(self, request_id: str) -> None:
         try:
-            async with asyncio.timeout(1):
+            # This clears a known-unsent replay barrier, not optional analytics.
+            # Allow transient pool/row contention while keeping shutdown bounded.
+            async with asyncio.timeout(UNSENT_CLEANUP_TIMEOUT_SECONDS):
                 async with self.database.sessions.begin() as db:
                     row = await db.get(ProductInferenceRequest, request_id, with_for_update=True)
                     if row is None or row.status != "dispatching" or row.cost_usd is not None:
