@@ -117,5 +117,6 @@ def saved_commentary(messages: list[ModelMessage], run_id: str) -> list[dict[str
                 result.append({
                     "id": f"{run_id}:{message.provider_response_id or index}:{part_index}",
                     "text": part.content, "phase": "commentary",
+                    "created_at": message.timestamp.isoformat(),
                 })
     return result

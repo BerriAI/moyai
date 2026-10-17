@@ -35,7 +35,7 @@ const isAccessError = (error: unknown) => error instanceof ApiError && [401, 403
 const message = (error: unknown) => error instanceof Error ? error.message : "The request could not be completed."
 const avatarIndex = (value: number) => Number.isFinite(value) ? Math.abs(Math.trunc(value)) % 4 : 0
 
-function AgentAvatar({ avatar }: { avatar: number }) {
+export function AgentAvatar({ avatar }: { avatar: number }) {
   const index = avatarIndex(avatar), Icon = [Sparkles, Flower2, Orbit, Shapes][index]
   return <span className={`workspace-agent-avatar avatar-${index}`}><Icon size={18} aria-hidden="true" /></span>
 }

@@ -260,7 +260,7 @@ async def test_long_answers_and_artifacts_are_staged_atomically_without_broadcas
     async with slack.runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Delivery).order_by(Delivery.identity)))
     values = [json.loads(slack.runtime.security.unseal(row.content))["text"] for row in rows]
-    assert len(rows) >= 3
+    assert len(rows) == 2  # One reserved acknowledgement and one final revision of that slot.
     assert all("<!channel>" not in value for value in values)
     assert any("/api/files/" in value and "report.txt" in value for value in values)
     assert len({row.identity for row in rows}) == len(rows)

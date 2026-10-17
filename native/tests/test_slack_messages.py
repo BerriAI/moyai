@@ -156,9 +156,9 @@ async def test_progress_keeps_session_button_and_final_clears_old_attachments(ru
             (await db.get(ProductSlackBinding, active[0].id)).source_run_id = "a" * 32
 
     async def progress(*_):
-        return [{"id": "progress-one", "text": "Reading the changes."}]
+        return {"messages": [{"id": "progress-one", "text": "Reading the changes."}], "subagents": []}
 
-    monkeypatch.setattr("moyai.slack_progress.turn_progress", progress)
+    monkeypatch.setattr(runtime.work_progress, "read", progress)
     await stage_progress(runtime, product=product)
     async with runtime.database.sessions() as db:
         row = await db.scalar(select(Delivery).where(Delivery.destination.contains('"progress": true')))
@@ -199,9 +199,9 @@ async def test_product_long_answer_has_one_card_and_preserves_approval_controls(
             Delivery.identity.startswith(f"product-slack:{turn.id}:completed:"),
         ).order_by(Delivery.identity)))
     contents = [json.loads(runtime.security.unseal(row.content)) for row in rows]
-    assert len(contents) > 1
+    assert len(contents) == 1
     assert sum(len(item.get("attachments", [])) for item in contents) == 1
-    assert contents[0]["attachments"] and "Changes" not in contents[-1]["text"]
+    assert contents[0]["attachments"]
     assert PR.casefold() in contents[0]["text"].casefold()  # Accessible fallback still has the destination.
     control = {"type": "button", "action_id": "moyai_native_approve", "value": "turn", "style": "primary",
                "text": {"type": "plain_text", "text": "Approve"}}

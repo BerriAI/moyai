@@ -109,7 +109,9 @@ class Runtime:
                 self.database.product_drain = self.product_drain
         self.client: Client | None = None
         from .skill_invocations import SkillInvocations
+        from .work_progress import WorkProgress
         self.skill_invocations = SkillInvocations(self)
+        self.work_progress = WorkProgress(self)
         self.agent: Agent[RunScope, str | DeferredToolRequests]
         self.durability: TemporalDurability[RunScope]
         self.models: dict[str, Model] = {}
@@ -203,6 +205,7 @@ class Runtime:
         return self.client
 
     async def close(self) -> None:
+        self.work_progress.clear()
         try:
             if self.product_inference is not None:
                 await self.product_inference.close()

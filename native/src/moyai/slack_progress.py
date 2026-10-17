@@ -1,4 +1,4 @@
-"""One Slack reply per turn, edited through the existing durable delivery lane."""
+"""One Slack reply per steering segment, using the durable delivery lane."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .models import Delivery, SlackThread, Turn, new_id, now
-from .progress import turn_progress
 from .slack_messages import session_url, thread_message
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from .runtime import Runtime
 
 TERMINAL = {"completed", "failed", "stopped", "waiting"}
@@ -22,6 +23,47 @@ TERMINAL = {"completed", "failed", "stopped", "waiting"}
 
 def anchor_identity(turn_id: str, product: bool) -> str:
     return f"product-slack:{turn_id}:accepted" if product else f"slack-progress:{turn_id}"
+
+
+async def latest_segment(db: AsyncSession, root: Turn) -> Turn:
+    """Admission freezes the preceding slot, before native steering is acknowledged."""
+    return await db.scalar(select(Turn).where(
+        Turn.parent_turn == root.id, Turn.actor_id == root.actor_id,
+        Turn.session_id == root.session_id,
+        Turn.status.in_(["steering", "signal_sent", "accepted", "unconfirmed"]),
+    ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1)) or root
+
+
+async def execution_turn(db: AsyncSession, delivery: Delivery) -> Turn | None:
+    turn = await db.get(Turn, delivery.turn_id)
+    if turn and turn.parent_turn:
+        parent = await db.get(Turn, turn.parent_turn)
+        if parent and parent.session_id == turn.session_id and parent.actor_id == turn.actor_id:
+            return parent
+    return turn
+
+
+def segment_id(delivery: Delivery) -> str:
+    return json.loads(delivery.destination).get("segment_id", delivery.turn_id)
+
+
+def final_notice(delivery: Delivery, product: bool) -> bool:
+    if not product:
+        return delivery.identity == f"slack-answer:{delivery.turn_id}"
+    suffix = delivery.identity.removeprefix(f"product-slack:{delivery.turn_id}:")
+    return suffix.split(":")[0] in {"completed", "failed", "stopped", "waiting"}
+
+
+async def obsolete_segment(db: AsyncSession, delivery: Delivery, root: Turn, *, product: bool) -> bool:
+    destination = json.loads(delivery.destination)
+    if destination.get("control"):
+        return False
+    current = await latest_segment(db, root)
+    # Older queued final deliveries predate segment metadata. Resolve those to
+    # the current slot without replaying or discarding an answer during upgrade.
+    if "segment_id" not in destination and final_notice(delivery, product):
+        return False
+    return segment_id(delivery) != current.id
 
 
 async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
@@ -44,9 +86,13 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
             if runtime.product_slack:
                 public_url = runtime.product_slack.settings.public_url
         url = session_url(public_url, turn.session_id, source_run_id)
-        primary = anchor_identity(turn.id, product)
-        prefix = f"product-slack:{turn.id}:progress:" if product else f"slack-commentary:{turn.id}:"
         async with runtime.database.sessions() as db:
+            segment = await latest_segment(db, turn)
+            primary = anchor_identity(segment.id, product)
+            prefix = (
+                f"product-slack:{turn.id}:progress:{segment.id}:"
+                if product else f"slack-commentary:{turn.id}:{segment.id}:"
+            )
             anchor = await db.scalar(select(Delivery).where(Delivery.identity == primary))
             recent = await db.scalar(select(Delivery.id).where(
                 Delivery.identity.startswith(prefix),
@@ -54,24 +100,42 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
             ).limit(1))
         if anchor is None:
             if product:
-                continue
-            try:
-                async with runtime.database.sessions.begin() as db:
-                    db.add(Delivery(
-                        id=new_id(), identity=primary, session_id=turn.session_id, turn_id=turn.id,
-                        destination=json.dumps({
-                            "channel": thread.channel_id, "thread_ts": thread.thread_ts, "rich_reply": True,
-                        }),
-                        content=runtime.security.seal(thread_message("Moyai is working.", url)),
-                    ))
-            except IntegrityError:
-                pass
+                # Admission normally reserves this slot; polling also repairs
+                # a crash between admission and acknowledgement staging.
+                await runtime.product_slack.queue(
+                    segment, thread, "accepted", {"text": "Moyai received your message."},
+                )
+            else:
+                try:
+                    async with runtime.database.sessions.begin() as db:
+                        db.add(Delivery(
+                            id=new_id(), identity=primary, session_id=turn.session_id, turn_id=segment.id,
+                            destination=json.dumps({
+                                "channel": thread.channel_id, "thread_ts": thread.thread_ts, "rich_reply": True,
+                                "segment_id": segment.id,
+                            }),
+                            content=runtime.security.seal(thread_message("Moyai is working.", url)),
+                        ))
+                except IntegrityError:
+                    pass
         if recent:
             continue
-        messages = await turn_progress(runtime, turn)
+        work = await runtime.work_progress.read(turn)
+        messages = [
+            *work["messages"],
+            *(
+                {**message, "text": f"{agent['name']}: {message['text']}"}
+                for agent in work["subagents"] for message in agent["messages"]
+            ),
+        ]
+        if segment.id != turn.id:
+            messages = [
+                message for message in messages
+                if message.get("created_at", "") >= segment.created_at
+            ]
         if not messages:
             continue
-        latest = messages[-1]
+        latest = max(enumerate(messages), key=lambda item: (item[1].get("created_at", ""), item[0]))[1]
         identity = prefix + hashlib.sha256(latest["id"].encode()).hexdigest()[:32]
         message = slack_text(latest["text"][:2400])
         try:
@@ -81,6 +145,7 @@ async def stage_progress(runtime: Runtime, *, product: bool = False) -> None:
                     destination=json.dumps({
                         "channel": thread.channel_id, "thread_ts": thread.thread_ts, "progress": True,
                         "rich_reply": True,
+                        "segment_id": segment.id,
                     }),
                     content=runtime.security.seal(thread_message(message, url)),
                 ))
@@ -93,11 +158,13 @@ async def skip_obsolete(runtime: Runtime, delivery: Delivery, *, product: bool) 
     if delivery.status != "pending":
         return False
     async with runtime.database.sessions() as db:
-        turn = await db.get(Turn, delivery.turn_id)
-    if turn is None:
-        return False
-    if not obsolete_notice(delivery, turn.status, product):
-        return False
+        turn = await execution_turn(db, delivery)
+        if turn is None:
+            return False
+        if not obsolete_notice(delivery, turn.status, product) and not await obsolete_segment(
+            db, delivery, turn, product=product,
+        ):
+            return False
     async with runtime.database.sessions.begin() as db:
         changed = await db.scalar(update(Delivery).where(
             Delivery.id == delivery.id, Delivery.status == "pending",
@@ -122,20 +189,26 @@ def obsolete_notice(delivery: Delivery, status: str, product: bool) -> bool:
 async def claim_delivery(runtime: Runtime, delivery: Delivery, *, product: bool) -> bool:
     """Serialize all revisions of one reply, including across delivery pollers."""
     async with runtime.database.sessions.begin() as db:
+        root = await execution_turn(db, delivery)
+        if root is None:
+            return False
         # Acquire the turn's write lock on both PostgreSQL and SQLite without
         # changing its status. A row lock alone is ignored by SQLite.
-        status = await db.scalar(update(Turn).where(Turn.id == delivery.turn_id).values(
+        status = await db.scalar(update(Turn).where(Turn.id == root.id).values(
             status=Turn.status,
         ).returning(Turn.status))
         if status is None:
             return False
-        if obsolete_notice(delivery, status, product):
+        if obsolete_notice(delivery, status, product) or await obsolete_segment(db, delivery, root, product=product):
             await db.execute(update(Delivery).where(
                 Delivery.id == delivery.id, Delivery.status == "pending",
             ).values(status="suppressed"))
             return False
         if await db.scalar(select(Delivery.id).where(
-            Delivery.turn_id == delivery.turn_id, Delivery.id != delivery.id, Delivery.status == "sending",
+            Delivery.turn_id.in_(select(Turn.id).where(or_(
+                Turn.id == root.id, Turn.parent_turn == root.id,
+            ))),
+            Delivery.id != delivery.id, Delivery.status == "sending",
         ).limit(1)):
             return False
         claimed = await db.scalar(update(Delivery).where(
@@ -153,8 +226,8 @@ async def reply_target(runtime: Runtime, delivery: Delivery, *, product: bool) -
     destination = json.loads(delivery.destination)
     if destination.get("control"):
         return True, None
-    primary = anchor_identity(delivery.turn_id, product)
-    if delivery.identity == primary:
+    primary = anchor_identity(segment_id(delivery), product)
+    if delivery.identity == anchor_identity(delivery.turn_id, product):
         return True, None
     if product and destination.get("progress") is not True:
         suffix = delivery.identity.removeprefix(f"product-slack:{delivery.turn_id}:")
@@ -165,8 +238,16 @@ async def reply_target(runtime: Runtime, delivery: Delivery, *, product: bool) -
     ):
         return True, None
     async with runtime.database.sessions() as db:
+        root = await execution_turn(db, delivery)
+        if root is None:
+            return False, None
+        if "segment_id" not in destination and final_notice(delivery, product):
+            primary = anchor_identity((await latest_segment(db, root)).id, product)
         unresolved = await db.scalar(select(Delivery.id).where(
-            Delivery.turn_id == delivery.turn_id, Delivery.id != delivery.id,
+            Delivery.turn_id.in_(select(Turn.id).where(or_(
+                Turn.id == root.id, Turn.parent_turn == root.id,
+            ))),
+            Delivery.id != delivery.id,
             Delivery.status == "sending",
         ).limit(1))
         if unresolved:

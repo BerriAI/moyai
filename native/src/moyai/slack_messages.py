@@ -139,6 +139,10 @@ def thread_message(
     """Keep fallback text accessible and all section text inside Slack's limit."""
     from app.slack_format import split_reply
 
+    # Keep one message even for long answers. Its blocks carry the readable
+    # text; the saved conversation remains the source for anything beyond it.
+    if len(text) > 32_000:
+        text = text[:32_000] + "\n\nOpen the Moyai session for the full answer."
     visible = without_pr_references(text, cards)
     parts = split_reply(visible, limit=2900) if visible.strip() or not cards else []
     blocks: list[dict[str, Any]] = [
@@ -155,7 +159,7 @@ def thread_message(
         if card["fallback"].rsplit(": ", 1)[-1].casefold() not in fallback.casefold():
             fallback += "\n\n" + card["fallback"]
     return {
-        "text": fallback + ("\n\nOpen session: " + url if url else ""),
+        "text": fallback[:36_000] + ("\n\nOpen session: " + url if url else ""),
         "blocks": blocks, "attachments": cards or [],
     }
 

@@ -77,7 +77,7 @@ async function handle(req,res,next) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
-    if(url.pathname.endsWith('/progress/'+turnId))return json({messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
+    if(url.pathname.endsWith('/progress/'+turnId))return json(state.workProgress||{messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
       res.write('event: connected\ndata: {}\n\n'); clients.add(res);
@@ -87,6 +87,14 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/messages')) {
       const messages=state.messagesBySession?.[url.pathname.split('/')[3]]||state.messages;
       if(req.method==='POST') {
+        if(state.steeringAt&&data.mode==='asap') {
+          const turn={id:'turn-steer',actor_id:'viewer',parent_turn:turnId,status:'accepted',mode:'asap',
+            created_at:state.steeringAt,accepted_at:state.steeringAt,connections:[],usage:{}};
+          state.turns.push(turn);
+          messages.push({id:messages.length+1,turn_id:turn.id,role:'user',author_id:'viewer',
+            content:data.prompt,created_at:state.steeringAt});
+          return json(turn);
+        }
         messages.push({id:messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
         return json({id:'turn-skill',actor_id:'viewer',status:'completed'});
       }
@@ -95,6 +103,11 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname.endsWith('/activity'))return json([]);
     if(url.pathname.endsWith('/read'))return json({});
+    if(url.pathname.endsWith('/stop')&&req.method==='POST') {
+      state.status='stopped';
+      if(state.turns)state.turns=state.turns.map(turn=>({...turn,status:'stopped'}));
+      return json({status:'stopping'});
+    }
     if(req.method==='PATCH') {
       if(state.holdRename)await state.holdRename;
       if(state.renameError)return json({detail:'Could not save the session name.'},503);
@@ -587,10 +600,10 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
   reset();const page=await pageFor(t);await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();await waitFor(()=>clients.size>0,'SSE connected');
   emit({type:'text_start',index:0,text:'Unlabelled child text'},0);
   emit({type:'response_start',run_id:turnId,step:1},1);emit({type:'text_start',index:0,text:'I will inspect.',phase:'commentary'},2);
-  await page.locator('.turn-progress-latest').getByText('I will inspect.',{exact:true}).waitFor();
+  await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).waitFor();
   const polls=state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length;
   await waitFor(()=>state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length>polls,'saved poll');
-  assert.equal(await page.locator('.turn-progress-latest').innerText(),'I will inspect.');
+  assert.equal(await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).count(),1);
   emit({type:'tool_call',id:'call1',name:'read_file',arguments:{path:'private-tool-detail'}},3);
   await page.locator('.live-action').getByText('Using read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
   for(const client of clients)client.end();await waitFor(()=>state.streams.length===2,'browser reconnect');assert.equal(state.streams[1].last,'3');
@@ -608,6 +621,73 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
   assert.equal(await page.getByText('I will inspect.',{exact:true}).count(),0);
   await page.getByRole('button',{name:'Worked',exact:true}).click();
   await page.getByText('I will inspect.',{exact:true}).waitFor();
+});
+
+for(const width of [1440,768,320])test(`live work and subagents survive steering and final collapse at ${width}px`,async t=>{
+  const start=Date.now()-60000;
+  const at=seconds=>new Date(start+seconds*1000).toISOString();
+  const update=(step,text,seconds)=>({id:`commentary:${turnId}:${step}:0`,phase:'commentary',text,created_at:at(seconds)});
+  reset({
+    steeringAt:at(30),
+    turns:[{id:turnId,actor_id:'viewer',status:'running',created_at:at(0),connections:[],usage:{}}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect the renderer.',created_at:at(0)}],
+    workProgress:{messages:[update(1,'First inspection.',5),update(2,'Checking recorded behavior.',10)],
+      tools:[{id:'read',name:'read_file',status:'completed',created_at:at(6),finished_at:at(7)}],
+      subagents:[{id:'child',parent_id:turnId,parent_name:null,name:'Kepler',avatar:0,depth:0,status:'running',
+        created_at:at(8),updated_at:at(12),messages:[{id:'child-update',phase:'commentary',text:'I found the renderer.',created_at:at(9)}],
+        tools:[{id:'inspect',name:'read_file',status:'completed',created_at:at(8),finished_at:at(9)}],
+        messages_limited:false,tools_limited:false}]},
+  });
+  const page=await pageFor(t,'#'+sessionId,width);
+  const progress=page.locator('.turn-progress');
+  await progress.getByText('First inspection.',{exact:true}).waitFor();
+  await progress.getByText('Checking recorded behavior.',{exact:true}).waitFor();
+  await progress.getByText('I found the renderer.',{exact:true}).waitFor();
+  assert.equal(await progress.locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Also check keyboard use.');
+  await page.getByRole('combobox',{name:'Delivery timing'}).click();
+  await page.getByRole('option',{name:'Send now',exact:true}).click();
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Also check keyboard use.',{exact:true}).waitFor();
+  await page.locator('.turn-progress').nth(1).waitFor();
+  assert.equal(await progress.nth(0).getByRole('button',{name:'Activity',exact:true}).getAttribute('aria-expanded'),'true');
+  await progress.nth(0).getByText('First inspection.',{exact:true}).waitFor();
+  state.workProgress.messages.push(update(3,'Keyboard behavior is verified.',35));
+  state.workProgress.subagents[0].status='completed';
+  state.workProgress.subagents[0].updated_at=at(36);
+  state.workProgress.subagents[0].messages.push({id:'child-final',phase:'final_answer',text:'Subagent checks passed.',created_at:at(36)});
+  await progress.nth(1).getByText('Keyboard behavior is verified.',{exact:true}).waitFor();
+  assert.equal(await progress.nth(1).locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true','child completion does not complete the parent');
+  state.messages.push({id:3,turn_id:turnId,role:'assistant',author_id:null,content:'Verified final answer.',created_at:at(45)});
+  state.status='completed';state.turns[0].status='completed';state.turns[0].finished_at=at(45);
+  emit({},undefined,'finished');
+  await page.getByText('Verified final answer.',{exact:true}).waitFor();
+  assert.equal(await progress.nth(0).locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/progress/'+turnId)),'final progress request');
+  await progress.nth(1).locator('.turn-progress-toggle[aria-expanded="false"]').waitFor();
+  assert.equal(await page.getByText('Verified final answer.',{exact:true}).count(),1);
+  await progress.nth(1).locator('.turn-progress-toggle').click();
+  await progress.nth(1).getByText('Keyboard behavior is verified.',{exact:true}).waitFor();
+  await page.reload();
+  await page.getByText('Verified final answer.',{exact:true}).waitFor();
+  await progress.nth(0).getByText('First inspection.',{exact:true}).waitFor();
+  assert.equal(await progress.nth(1).locator('.turn-progress-toggle').getAttribute('aria-expanded'),'false');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+
+test('stopped work without a final answer keeps its updates expanded',async t=>{
+  reset({workProgress:{messages:[{id:`commentary:${turnId}:1:0`,phase:'commentary',text:'Observed before interruption.'}]}});
+  const page=await pageFor(t);
+  await page.getByText('Observed before interruption.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Stop task',exact:true}).click();
+  const progress=page.locator('.turn-progress');
+  await progress.getByRole('button',{name:'Work stopped',exact:true}).waitFor();
+  assert.equal(await progress.locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
+  await page.getByText('Observed before interruption.',{exact:true}).waitFor();
+  await page.reload();
+  await page.getByText('Observed before interruption.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.message.assistant').count(),0);
 });
 
 test('access revocation removes transcript, draft and panel state before reauthorization',async t=>{
