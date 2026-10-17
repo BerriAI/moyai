@@ -72,7 +72,7 @@ def test_session_route_and_long_fenced_answer():
     assert all(len(block["text"]["text"]) <= 3000 for block in value["blocks"] if block["type"] == "section")
     assert buttons(value)[0]["text"]["text"] == "Open session"
     assert value["text"].endswith(URL)
-    assert value["attachments"][0]["color"] == "#5B3FD1"
+    assert value["attachments"] == []
     assert "style" not in buttons(value)[0]
 
 
@@ -166,8 +166,7 @@ async def test_progress_keeps_session_button_and_final_clears_old_attachments(ru
     payload = json.loads(runtime.security.unseal(row.content))
     expected = "#run=" + "a" * 32 if product else "#" + active[0].id
     assert buttons(payload)[0]["url"].endswith(expected)
-    assert len(payload["attachments"]) == 1
-    assert payload["attachments"][0]["color"] == "#5B3FD1"
+    assert payload["attachments"] == []
     assert all("style" not in action for action in buttons(payload))
     # A plain legacy row must clear rich content when it edits the same timestamp.
     final = await queued(runtime, active, product=product, kind="final", text="Done.")
@@ -211,8 +210,8 @@ async def test_product_long_answer_has_one_card_and_preserves_approval_controls(
     assert buttons(message) == [control, buttons(message)[1]]
     assert buttons(message)[1]["action_id"] == "moyai_open_session"
     assert "style" not in buttons(message)[1]
-    assert message["blocks"][-1]["elements"] == [control]
-    assert message["attachments"][0]["color"] == "#5B3FD1"
+    assert message["blocks"][-1]["elements"] == buttons(message)
+    assert message["attachments"] == []
 
 
 async def test_signed_navigation_ack_does_not_create_a_turn(runtime):
