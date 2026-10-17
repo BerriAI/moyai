@@ -153,7 +153,7 @@ async def admit_one(runtime: Runtime, inbox: SlackInbox) -> None:
         # app_mention and message envelopes can describe the same Slack message.
         # Channel + message timestamp identifies that message independently of event_id.
         message_key = hashlib.sha256(json.dumps([team, channel, event["ts"]]).encode()).hexdigest()
-        await runtime.database.submit(actor, thread.session_id, NewMessage(
+        turn = await runtime.database.submit(actor, thread.session_id, NewMessage(
             prompt=event["text"], request_key=f"slack-message:{message_key}", mode="asap",
         ))
     except HTTPException as error:
@@ -161,6 +161,22 @@ async def admit_one(runtime: Runtime, inbox: SlackInbox) -> None:
             raise
         await mark_inbox(runtime, inbox.id, "access_denied")
         return
+    from .slack_progress import anchor_identity
+    try:
+        async with runtime.database.sessions.begin() as db:
+            db.add(Delivery(
+                id=new_id(), identity=anchor_identity(turn.id, False),
+                session_id=thread.session_id, turn_id=turn.id,
+                destination=json.dumps({
+                    "channel": thread.channel_id, "thread_ts": thread.thread_ts,
+                    "rich_reply": True, "segment_id": turn.id,
+                }),
+                content=runtime.security.seal(thread_message(
+                    "Moyai received your message.", session_url(runtime.settings.public_url, thread.session_id),
+                )),
+            ))
+    except IntegrityError:
+        pass
     await mark_inbox(runtime, inbox.id, "accepted")
 
 
@@ -200,13 +216,16 @@ async def stage_deliveries(runtime: Runtime) -> None:
         link = session_url(runtime.settings.public_url, turn.session_id)
         # Standalone publishes the answer before its checkpoint finishes saving.
         cards = pr_cards(text, link) if turn.status in {"saving", "completed"} else []
-        content = thread_message(slack_text(text[:3500]), link, cards=cards)
+        content = thread_message(slack_text(text), link, cards=cards)
         try:
             async with runtime.database.sessions.begin() as db:
+                from .slack_progress import latest_segment
+                segment = await latest_segment(db, turn)
                 db.add(Delivery(
                     id=new_id(), identity=identity, session_id=turn.session_id, turn_id=turn.id,
                     destination=json.dumps({
                         "channel": thread.channel_id, "thread_ts": thread.thread_ts, "rich_reply": True,
+                        "segment_id": segment.id,
                     }),
                     content=runtime.security.seal(content),
                 ))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -30,6 +31,23 @@ def enabled() -> bool:
 def text_phase(details: dict[str, Any] | None) -> Phase | None:
     phase = (details or {}).get("phase")
     return phase if phase in ("commentary", "final_answer") else None
+
+
+def public_text_parts(response: ModelResponse) -> Iterator[tuple[int, str, Phase]]:
+    """One public snapshot classification for parent and delegated responses.
+
+    Explicit public phases win. Only unphased text uses tool-call inference,
+    including provider-native calls; private or unknown phases are not public.
+    Keep original part positions so persisted presentation IDs remain stable.
+    """
+    has_tools = any(isinstance(part, (ToolCallPart, NativeToolCallPart)) for part in response.parts)
+    for index, part in enumerate(response.parts):
+        if not isinstance(part, TextPart) or not part.content.strip():
+            continue
+        phase = text_phase(part.provider_details)
+        if phase is None and (part.provider_details or {}).get("phase") is not None:
+            continue
+        yield index, part.content, phase or ("commentary" if has_tools else "final_answer")
 
 
 class Commentary(AbstractCapability[RunScope]):
@@ -108,14 +126,11 @@ def saved_commentary(messages: list[ModelMessage], run_id: str) -> list[dict[str
     for index, message in enumerate(messages):
         if not isinstance(message, ModelResponse) or message.run_id != run_id:
             continue
-        has_tools = any(isinstance(part, (ToolCallPart, NativeToolCallPart)) for part in message.parts)
-        for part_index, part in enumerate(message.parts):
-            if not isinstance(part, TextPart) or not part.content.strip():
-                continue
-            phase = text_phase(part.provider_details)
-            if phase == "commentary" or (phase is None and has_tools):
+        for part_index, content, phase in public_text_parts(message):
+            if phase == "commentary":
                 result.append({
                     "id": f"{run_id}:{message.provider_response_id or index}:{part_index}",
-                    "text": part.content, "phase": "commentary",
+                    "text": content, "phase": phase,
+                    "created_at": message.timestamp.isoformat(),
                 })
     return result

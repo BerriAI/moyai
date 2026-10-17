@@ -81,25 +81,32 @@ def link_view(row: SessionLink, user: User, owner_id: str) -> dict:
     }
 
 
-async def native_subagents(runtime: Runtime, session_id: str, turns: list[Turn], user: User) -> tuple[list[dict], bool]:
+async def run_lineage(
+    runtime: Runtime, turns: list[Turn], *, limit: int = 50,
+) -> tuple[list[tuple[RunRecord, Turn, int]], bool]:
     # Always enter the native lineage through authorized product turns. Never
     # enumerate the global run store, which contains other people's contexts.
     queue = deque((turn.id, turn, 0) for turn in turns)
     seen: set[str] = set()
     found: list[tuple[RunRecord, Turn, int]] = []
-    while queue and len(found) < 50:
+    while queue and len(found) < limit:
         parent_id, turn, depth = queue.popleft()
         if parent_id in seen or depth > 12:
             continue
         seen.add(parent_id)
         children = await runtime.stores.steps.list_runs(parent_run_id=parent_id)
         for child in children:
-            if child.run_id in seen:
+            if child.run_id in seen or child.parent_run_id != parent_id:
                 continue
             found.append((child, turn, depth))
             queue.append((child.run_id, turn, depth + 1))
-            if len(found) == 50:
+            if len(found) == limit:
                 break
+    return found, bool(queue)
+
+
+async def native_subagents(runtime: Runtime, session_id: str, turns: list[Turn], user: User) -> tuple[list[dict], bool]:
+    found, limited = await run_lineage(runtime, turns)
 
     semaphore = asyncio.Semaphore(6)
     labels = await agent_labels(runtime, session_id, [record for record, _, _ in found])
@@ -122,7 +129,7 @@ async def native_subagents(runtime: Runtime, session_id: str, turns: list[Turn],
             "can_inspect": own, "depth": depth,
         }
 
-    return list(await asyncio.gather(*(summary(*item) for item in found))), bool(queue)
+    return list(await asyncio.gather(*(summary(*item) for item in found))), limited
 
 
 def routes(runtime: Runtime, actor) -> APIRouter:

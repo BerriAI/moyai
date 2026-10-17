@@ -120,6 +120,7 @@ def connection_view(connection: Connection) -> dict[str, Any]:
 def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -> FastAPI:
     owned = runtime is None
     runtime = runtime or Runtime(Settings())
+    work_progress = runtime.work_progress
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -138,6 +139,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            work_progress.clear()
             if owned:
                 await runtime.close()
 
@@ -428,8 +430,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 active_turn = await db.get(Turn, row.active_turn, options=[turn_columns])
                 if active_turn is not None:
                     turns.append(active_turn)
+            guidance = dict((await db.execute(select(Event.turn_id, Event.created_at).where(
+                Event.turn_id.in_([turn.id for turn in turns]), Event.kind == "steering_admitted",
+            ).order_by(Event.id))).all())
             result: dict[str, Any] = {
-                "session": session_view(row), "turns": [turn_view(turn) for turn in turns],
+                "session": session_view(row), "turns": [
+                    {**turn_view(turn), "guidance_at": guidance.get(turn.id)} for turn in turns
+                ],
             }
             swarm_member = await runtime.database.swarms.member(db, session_id)
             if swarm_member is not None:
@@ -489,7 +496,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return result
 
     @app.get("/api/sessions/{session_id}/progress/{turn_id}")
-    async def progress(session_id: str, turn_id: str, user: User = Depends(actor)):
+    async def progress(
+        session_id: str, turn_id: str, request: Request,
+        include_activity: bool = False, user: User = Depends(actor),
+    ):
         from .progress import turn_progress
 
         await runtime.database.session(user, session_id)
@@ -499,7 +509,17 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 raise HTTPException(404, "Turn not found.")
             if turn.actor_id != user.id:
                 raise HTTPException(403, "Working activity is visible only to its requester.")
-        return {"messages": await turn_progress(runtime, turn)}
+        result = (
+            await work_progress.read(turn) if include_activity
+            else {"messages": await turn_progress(runtime, turn)}
+        )
+        fresh = await runtime.database.user(user.id)
+        if fresh.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        if runtime.product_identity is not None:
+            await runtime.product_identity.require_request_current(request)
+        await runtime.database.session(fresh, session_id)
+        return result
 
     @app.get("/api/sessions/{session_id}/activity")
     async def session_activity(session_id: str, user: User = Depends(actor)):

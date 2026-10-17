@@ -31,6 +31,8 @@ import type { OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
 import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
 import { TurnProgress } from "./turn-progress"
+import { useWorkProgress } from "./use-work-progress"
+import { orderedWorkMessages, workSegments } from "./work-timeline"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
@@ -445,6 +447,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const composerInput = useRef<HTMLDivElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
+  const followingWork = useRef(true)
+  const followWork = useCallback(() => {
+    if (followingWork.current && transcript.current) transcript.current.scrollTop = transcript.current.scrollHeight
+  }, [])
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
   const loaded = useRef(false)
@@ -568,9 +574,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [view?.session.title, sideMode])
   useEffect(() => {
     const element = transcript.current
-    if (element) element.scrollTop = element.scrollHeight
+    if (element) { followingWork.current = true; element.scrollTop = element.scrollHeight }
   }, [messages.length, sendingNow])
   const active = view?.turns.find(turn => turn.id === view.session.active_turn)
+  const work = useWorkProgress(
+    id, `${authorityKey}:${connectionVersion}:${id}:${me.user.id}`,
+    active?.actor_id === me.user.id ? active : undefined, visible && !swarmSpace,
+    () => clearSensitiveNow.current(),
+  )
   const requestAnswered = Boolean(active && answeredRequest === active.id)
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
@@ -614,9 +625,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     return () => { closed = true; stream.close() }
   }, [activeId, id, load])
   useEffect(() => {
-    const element = transcript.current
-    if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 180) element.scrollTop = element.scrollHeight
-  }, [liveText])
+    followWork()
+  }, [liveText, followWork])
 
   async function send(promptOverride?: string) {
     const prompt = promptOverride ?? (editing ? editText : draft)
@@ -668,6 +678,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const displayedActivity = mergeActivity(activity, liveText.activity)
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
     turn.id === message.turn_id && waitsBehindActive(turn, active, sendingNow.has(turn.id))))
+  const visibleMessages = orderedWorkMessages(messages.filter(message =>
+    (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
+  const segments = workSegments(visibleMessages, view.turns)
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
@@ -694,10 +707,15 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <ProductHistoryPrefix sessionId={originalSessionId} scopeKey={`${authorityKey}:${connectionVersion}`} active={visible} onOpenSession={openSessionReference} />
         </React.Suspense>}
         <div className="transcript" ref={transcript} hidden={space}
+          onScroll={event => {
+            const element = event.currentTarget
+            followingWork.current = element.scrollHeight - element.scrollTop - element.clientHeight < 180
+          }}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
-          {messages.filter(message => (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)).map(message => {
+          {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
+            const segment = segments.get(message.id)
             return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
               <div className="message-author">{message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
@@ -708,10 +726,17 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
-            </article>{message.role === "user" && turn?.actor_id === me.user.id && <TurnProgress
-              key={`${authorityKey}:${connectionVersion}:${turn.id}`} sessionId={id} turn={turn} visible={visible}
-              live={liveText.turnId === turn.id ? liveText : undefined}
-              hasSavedAnswer={messages.some(item => item.turn_id === turn.id && item.role === "assistant")}
+            </article>{segment?.turn.actor_id === me.user.id && <TurnProgress
+              key={`${authorityKey}:${connectionVersion}:${segment.id}`} segment={segment} visible={visible && !space}
+              entry={work.entries[segment.turn.id]} request={work.load}
+              live={liveText.turnId === segment.turn.id ? liveText : undefined}
+              onContentChange={followWork}
+              onSubagent={agent => openTab(agent.session_id ? {
+                id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,
+              } : {
+                id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id,
+                name: agent.name, status: agent.status, avatar: agent.avatar,
+              })}
             />}</React.Fragment>
           })}
           {!savedAssistant && liveMessage}

@@ -44,7 +44,7 @@ from .models import (
 from .product_connections import ProductConnections
 from .product_identity import ProductGrant, ProductPrincipal
 from .product_slack_models import ProductSlackBinding
-from .slack_messages import navigation_action, pr_cards, session_url, thread_message, without_pr_references
+from .slack_messages import navigation_action, pr_cards, session_url, thread_message
 
 if TYPE_CHECKING:
     from .product_identity import ProductIdentityAdapter
@@ -578,7 +578,9 @@ class ProductSlack:
     ):
         try:
             async with self.runtime.database.sessions.begin() as db:
+                from .slack_progress import latest_segment
                 binding = await db.get(ProductSlackBinding, thread.session_id)
+                segment = await latest_segment(db, turn)
                 suppressed = bool(binding and not control and (
                     binding.paused or (turn.finished_at and turn.finished_at <= binding.delivery_after)
                 ))
@@ -593,6 +595,7 @@ class ProductSlack:
                         session_id=thread.session_id, turn_id=turn.id,
                         destination=json.dumps({
                             "channel": thread.channel_id, "thread_ts": thread.thread_ts, "control": control,
+                            "segment_id": turn.id if key == "accepted" or control else segment.id,
                         }),
                         content=self.runtime.security.seal(content),
                         status="suppressed" if suppressed else "pending",
@@ -601,7 +604,7 @@ class ProductSlack:
             pass
 
     async def stage(self):
-        from app.slack_format import slack_text, split_reply
+        from app.slack_format import slack_text
 
         async with self.runtime.database.sessions() as db:
             pairs = (await db.execute(select(Turn, SlackThread, ProductSlackBinding).join(
@@ -661,13 +664,10 @@ class ProductSlack:
                         "\n<" + self.settings.public_url.rstrip("/") + "/api/files/" + artifact.id
                         + "|" + html.escape(artifact.name, quote=False).replace("|", "¦") + ">"
                     )
-            visible = without_pr_references(content["text"], cards)
-            parts = split_reply(visible, limit=2900) if visible.strip() else [""]
-            await self.queue_batch(turn, thread, [
-                (f"{turn.status}:{index}", thread_message(part, url, cards=cards, controls=controls)
-                 if index == 0 else {"text": part})
-                for index, part in enumerate(parts)
-            ])
+            await self.queue(
+                turn, thread, f"{turn.status}:0",
+                thread_message(content["text"], url, cards=cards, controls=controls),
+            )
 
     async def interact(self, payload: dict[str, Any]):
         bot = await source_database(self.installation)

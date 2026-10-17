@@ -275,12 +275,12 @@ async def test_progress_staging_coalesces_native_updates(runtime, active, slack,
     await queued(runtime, active, product=True, kind="anchor", text="Received.")
     sequence = 0
 
-    async def read_progress(runtime, turn):
+    async def read_progress(turn):
         nonlocal sequence
         sequence += 1
-        return [{"id": str(sequence), "text": f"Update {sequence}", "phase": "commentary"}]
+        return {"messages": [{"id": str(sequence), "text": f"Update {sequence}", "phase": "commentary"}], "subagents": []}
 
-    monkeypatch.setattr("moyai.slack_progress.turn_progress", read_progress)
+    monkeypatch.setattr(runtime.work_progress, "read", read_progress)
     await stage_progress(runtime, product=True)
     await stage_progress(runtime, product=True)
     assert sequence == 1
