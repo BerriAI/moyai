@@ -15,7 +15,7 @@
 .workspace-overview.workspace-picker > section:first-of-type { border-top: 0; padding-top: 0; }
 .workspace-overview.workspace-picker > section:last-of-type { padding-bottom: 0; }
 .workspace-picker .workspace-picker-heading { display: flex; align-items: center; gap: 8px; min-height: 26px; padding-inline: 8px 2px; margin-bottom: 2px; }
-.workspace-picker .workspace-picker-heading h3 { margin: 0; flex: 1; color: var(--ui-muted); font-size: 12px; font-weight: 500; }
+.workspace-picker .workspace-picker-heading h3 { margin: 0; flex: 1; color: var(--ui-muted); font-size: 11px; font-weight: 400; letter-spacing: .16em; text-transform: uppercase; }
 .workspace-picker .workspace-picker-heading > span { color: var(--ui-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .workspace-picker .workspace-picker-heading > button { flex: none; height: 26px; width: 26px; min-height: 26px; padding: 0; }
 .workspace-picker .workspace-picker-row { display: flex; align-items: center; min-width: 0; gap: 2px; border-radius: 8px; }
@@ -44,6 +44,8 @@
 .workspace-picker .workspace-resource-action .workspace-pr-open { color: var(--ui-success); }
 .workspace-picker .workspace-resource-action .workspace-pr-merged { color: var(--ui-merged); }
 .workspace-picker .workspace-resource-action .workspace-pr-closed { color: var(--ui-danger); }
+.workspace-picker small.workspace-status-failed { color: var(--ui-danger); }
+.workspace-picker small.workspace-status-input { color: var(--ui-warning); }
 .workspace-picker .workspace-remove { flex: none; margin-inline-end: 2px; color: var(--ui-muted); }
 .workspace-picker .workspace-agent-action:disabled { opacity: 1; color: var(--ui-muted); cursor: default; }
 .workspace-picker .workspace-agent-action:disabled > svg:last-child { visibility: hidden; }

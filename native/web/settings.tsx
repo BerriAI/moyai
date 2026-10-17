@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react"
-import { Activity, ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, Sparkles, Trash2, Users, X } from "lucide-react"
+import { ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Gauge, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, Sparkles, Trash2, Users, Wallet, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -75,8 +75,8 @@ const destinations = [
   { id: "personal-slack", title: "Personal Slack", description: "Connect your own Slack account for private web sessions.", group: "Integrations", Icon: LockKeyhole, productOnly: true },
   { id: "secrets", title: "Secrets", description: "Manage personal and shared service credentials.", group: "Integrations", Icon: KeyRound },
   { id: "users", title: "Users", description: "Manage workspace members, roles, and access.", group: "Administration", Icon: Users, admin: true },
-  { id: "performance", title: "Performance", description: "Review recorded turn timings across the workspace.", group: "Administration", Icon: Activity, admin: true },
-  { id: "usage", title: "Spend & usage", description: "Review recorded model usage and cost coverage.", group: "Administration", Icon: Activity, admin: true },
+  { id: "performance", title: "Performance", description: "Review recorded turn timings across the workspace.", group: "Administration", Icon: Gauge, admin: true },
+  { id: "usage", title: "Spend & usage", description: "Review recorded model usage and cost coverage.", group: "Administration", Icon: Wallet, admin: true },
 ]
 const groups = ["Workflows", "Integrations", "Administration"]
 const scopeOptions = [{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "shared", label: "Shared" }, { value: "bundled", label: "Bundled" }]

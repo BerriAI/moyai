@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react"
+import React, { createContext, forwardRef, useCallback, useContext, useEffect, useRef, useState } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ChevronRight, File, Flower2, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Globe, Image, Orbit, PanelRightOpen, Plus, RefreshCw, Shapes, Sparkles, X } from "lucide-react"
@@ -9,6 +9,8 @@ import { api, ApiError } from "./api"
 import type { SidebarSession } from "./session-actions"
 import type { OutputResource } from "./workspace-types"
 import { previewFileLink, type OpenFile } from "./file-links"
+import { pollVisible } from "./polling"
+import { WorkspaceKey } from "./workspace-overlay"
 import "./workspace.css"
 
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
@@ -57,41 +59,84 @@ function attachmentUrl(value: string, kind: AttachmentKind) {
   return text
 }
 
-export function WorkspaceOverview(props: OverviewProps) {
-  // A session switch must never paint the previous session's resources or editor.
-  return <WorkspaceContents key={props.id} {...props} />
-}
-
-function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSubagentSideChat, onOutput, onUpdated }: OverviewProps) {
-  const [data, setData] = useState<WorkspaceData | null>(null)
-  const [error, setError] = useState("")
-  const [linkKind, setLinkKind] = useState<AttachmentKind | null>(null)
-  const [url, setUrl] = useState(""), [title, setTitle] = useState("")
-  const [formError, setFormError] = useState(""), [busy, setBusy] = useState(false)
+/** One scoped read supplies both the closed key's attention dot and the open menu. */
+function useWorkspaceResources(id: string, enabled = true, expanded = true) {
+  const [value, setValue] = useState<{ id: string; data: WorkspaceData | null; error: string }>({ id, data: null, error: "" })
   const sequence = useRef(0), mounted = useRef(false)
-  const read = useRef<AbortController | null>(null), write = useRef<AbortController | null>(null)
-  const opener = useRef<HTMLElement | null>(null), root = useRef<HTMLDivElement>(null)
+  const read = useRef<AbortController | null>(null)
   const base = `/sessions/${encodeURIComponent(id)}`
-  const refresh = useCallback(async () => {
+  const fail = useCallback((reason: unknown) => {
+    setValue(previous => ({ id, data: previous.id === id && !isAccessError(reason) ? previous.data : null, error: message(reason) }))
+  }, [id])
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++sequence.current, controller = new AbortController()
+    const abort = () => controller.abort()
+    if (signal?.aborted) return
+    signal?.addEventListener("abort", abort, { once: true })
     read.current?.abort(); read.current = controller
     try {
       const next = await api<WorkspaceData>(`${base}/workspace`, "GET", undefined, controller.signal)
-      if (mounted.current && !controller.signal.aborted && version === sequence.current) { setData(next); setError("") }
+      if (mounted.current && !controller.signal.aborted && version === sequence.current) setValue({ id, data: next, error: "" })
     } catch (error) {
-      if (mounted.current && !controller.signal.aborted && version === sequence.current) {
-        if (isAccessError(error)) { setData(null); setLinkKind(null); setUrl(""); setTitle("") }
-        setError(message(error))
-      }
-    }
-  }, [base])
+      if (mounted.current && !controller.signal.aborted && version === sequence.current) fail(error)
+    } finally { signal?.removeEventListener("abort", abort) }
+  }, [base, id, fail])
+  useEffect(() => {
+    mounted.current = enabled
+    setValue(previous => previous.id !== id || (!enabled && (previous.data || previous.error))
+      ? { id, data: null, error: "" } : previous)
+    if (!enabled) return
+    const stop = pollVisible(refresh, () => expanded ? 4000 : 15000, fail)
+    return () => { mounted.current = false; ++sequence.current; stop(); read.current?.abort() }
+  }, [id, enabled, expanded, refresh, fail])
+  return { data: enabled && value.id === id ? value.data : null,
+    error: enabled && value.id === id ? value.error : "", refresh, fail }
+}
+
+const WorkspaceResourceContext = createContext<ReturnType<typeof useWorkspaceResources> | null>(null)
+
+/** Resource refreshes update the key/menu, not the conversation or its editor. */
+export function WorkspaceResourceProvider({ id, visible, expanded, children }: {
+  id: string; visible: boolean; expanded: boolean; children: React.ReactNode
+}) {
+  const resource = useWorkspaceResources(id, visible, expanded)
+  return <WorkspaceResourceContext.Provider value={resource}>{children}</WorkspaceResourceContext.Provider>
+}
+
+export const WorkspaceMenuKey = forwardRef<HTMLButtonElement, React.ComponentProps<typeof WorkspaceKey> & { sessionFailed: boolean }>(
+  function WorkspaceMenuKey({ sessionFailed, ...props }, ref) {
+    const resource = useContext(WorkspaceResourceContext)
+    return <WorkspaceKey {...props} ref={ref} alert={sessionFailed || resource?.data?.subagents.some(agent => agent.status === "failed")} />
+  },
+)
+
+export function WorkspaceOverview(props: OverviewProps) {
+  // A session switch must never paint the previous session's resources or editor.
+  const resource = useContext(WorkspaceResourceContext)
+  return resource ? <WorkspaceContents key={props.id} {...props} resource={resource} />
+    : <WorkspaceLoader key={props.id} {...props} />
+}
+
+function WorkspaceLoader(props: OverviewProps) {
+  const resource = useWorkspaceResources(props.id)
+  return <WorkspaceContents {...props} resource={resource} />
+}
+
+function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSubagentSideChat, onOutput, onUpdated, resource }: OverviewProps & { resource: ReturnType<typeof useWorkspaceResources> }) {
+  const { data, error, refresh, fail } = resource
+  const [linkKind, setLinkKind] = useState<AttachmentKind | null>(null)
+  const [url, setUrl] = useState(""), [title, setTitle] = useState("")
+  const [formError, setFormError] = useState(""), [busy, setBusy] = useState(false)
+  const mounted = useRef(false), write = useRef<AbortController | null>(null)
+  const opener = useRef<HTMLElement | null>(null), root = useRef<HTMLDivElement>(null)
+  const base = `/sessions/${encodeURIComponent(id)}`
   useEffect(() => {
     mounted.current = true
-    let stopped = false, timer: ReturnType<typeof setTimeout>
-    const poll = async () => { await refresh(); if (!stopped) timer = setTimeout(poll, 4000) }
-    void poll()
-    return () => { stopped = true; mounted.current = false; ++sequence.current; read.current?.abort(); write.current?.abort(); clearTimeout(timer) }
-  }, [refresh])
+    return () => { mounted.current = false; write.current?.abort() }
+  }, [])
+  useEffect(() => {
+    if (error && !data) { setLinkKind(null); setUrl(""); setTitle("") }
+  }, [error, data])
   function add(kind: AttachmentKind, trigger: HTMLElement) { opener.current = trigger; setUrl(""); setTitle(""); setFormError(""); setLinkKind(kind) }
   async function mutate(path: string, method: string, body?: object) {
     if (write.current) return
@@ -107,9 +152,9 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
       }
     } catch (error) {
       if (mounted.current && !controller.signal.aborted) {
-        if (isAccessError(error)) { setData(null); setLinkKind(null); setError(message(error)) }
+        if (isAccessError(error)) { fail(error); setLinkKind(null) }
         else if (method === "POST") setFormError(message(error))
-        else setError(message(error))
+        else fail(error)
       }
     } finally { if (write.current === controller) write.current = null; if (mounted.current) setBusy(false) }
   }
@@ -145,7 +190,7 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
       </section>
       <section aria-label="Subagents">{heading("Subagents", data.subagents.length)}
         {data.subagents.map(agent => <div className="workspace-picker-row" key={agent.id}><Button type="button" className="workspace-resource-action workspace-agent-action" variant="ghost" disabled={!agent.can_inspect} title={agent.can_inspect ? agent.name : `${agent.name}: details are available only to the requester`} onClick={() => onSubagent(agent)}>
-          <AgentAvatar avatar={agent.avatar} /><span><strong>{agent.name}</strong><small>{statusText[agent.status] ?? agent.status}{agent.depth > 0 ? " · Nested subagent" : ""}{!agent.can_inspect ? " · Requester-only details" : ""}</small></span><ChevronRight size={15} aria-hidden="true" />
+          <AgentAvatar avatar={agent.avatar} /><span><strong>{agent.name}</strong><small className={agent.status === "failed" ? "workspace-status-failed" : agent.status === "waiting" ? "workspace-status-input" : undefined}>{statusText[agent.status] ?? agent.status}{agent.depth > 0 ? " · Nested subagent" : ""}{!agent.can_inspect ? " · Requester-only details" : ""}</small></span><ChevronRight size={15} aria-hidden="true" />
         </Button>{agent.can_inspect && agent.session_id && onSubagentSideChat && <Button type="button" size="icon-sm" variant="ghost" aria-label={`Open ${agent.name} in side chat`} title="Open in side chat" onClick={() => onSubagentSideChat(agent)}><PanelRightOpen size={16} /></Button>}</div>)}
         {!data.subagents.length && <p className="workspace-picker-empty">Delegated work appears here when subagents start.</p>}
         {data.subagents_limited && <p className="workspace-picker-empty">Showing recent subagent work.</p>}

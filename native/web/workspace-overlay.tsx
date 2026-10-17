@@ -1,7 +1,8 @@
-import React, { useEffect, useSyncExternalStore } from "react"
+import React, { forwardRef, useEffect, useSyncExternalStore } from "react"
 import { Dialog as DialogPrimitive } from "radix-ui"
 import { Dialog, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 import "./workspace-overlay.css"
 
 // Matches the existing workspace breakpoint: the resource panel covers chat
@@ -32,17 +33,41 @@ export function WorkspaceOverlay({
   useEffect(() => {
     if (open && covered) onOpenChange(false)
   }, [open, covered, onOpenChange])
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (covered || event.defaultPrevented || event.isComposing || event.repeat || event.altKey
+        || !(event.metaKey || event.ctrlKey) || event.key !== ".") return
+      if (document.querySelector('[data-slot="dialog-content"][data-state="open"]')) return
+      event.preventDefault()
+      onOpenChange(!open)
+    }
+    window.addEventListener("keydown", shortcut)
+    return () => window.removeEventListener("keydown", shortcut)
+  }, [open, covered, onOpenChange])
   return <Dialog modal={false} open={open && !covered} onOpenChange={onOpenChange}>{children}</Dialog>
 }
 
 export const WorkspaceOverlayTrigger = DialogTrigger
+
+/** The supplied orbit-key design, backed by the shared accessible Button. */
+export const WorkspaceKey = forwardRef<HTMLButtonElement, React.ComponentProps<typeof Button> & { open: boolean; alert?: boolean }>(
+  function WorkspaceKey({ open, alert = false, className, ...props }, ref) {
+    return <Button {...props} ref={ref} type="button" variant="ghost" size="icon-sm"
+      className={cn("workspace-toggle workspace-orbit-key", className)} data-open={open}
+      title={alert ? "Workspace · failed work · ⌘." : "Workspace · ⌘."}
+      aria-description={alert ? "Workspace contains failed work" : undefined} aria-keyshortcuts="Meta+. Control+.">
+      <span className="workspace-orbit-glyph" aria-hidden="true"><i /><i /><i /></span>
+      {alert && <span className="workspace-orbit-alert" aria-hidden="true" />}
+    </Button>
+  },
+)
 
 type ContentProps = Omit<React.ComponentProps<typeof DialogPrimitive.Content>, "asChild" | "forceMount"> & {
   label?: string
 }
 
 /**
- * Place directly inside the workspace grid, alongside chat and PanelTabs.
+ * Place in chat-layout alongside chat-content. Absolute placement never reflows chat.
  * Keep this component mounted while closed so Radix can finish its exit motion.
  *
  * The shared DialogContent adds a viewport overlay/centered portal. Using its

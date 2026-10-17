@@ -11,7 +11,7 @@
 .product-history .ph-meta > span { display: inline-flex; align-items: center; gap: 4px; }
 .product-history .ph-body { display: grid; align-content: start; gap: 20px; max-width: 880px; margin-inline: auto; padding: 20px; }
 .product-history .ph-explanation { color: var(--ui-muted); margin: 0; }
-.product-history .ph-details > a { font: 12px/1.6 "Geist Mono", monospace; }
+.product-history .ph-details > a { font: 12px/1.6 var(--ui-font); }
 .product-history .ph-section { display: grid; gap: 16px; min-width: 0; }
 .product-history .ph-continuation, .product-history .ph-continuation-form { display: grid; gap: 12px; min-width: 0; }
 .product-history .ph-continuation { padding-block: 16px; border-block: 1px solid var(--ui-border); }
@@ -48,7 +48,7 @@
 .product-history .ph-prose ul, .product-history details ul { list-style: disc; padding-inline-start: 24px; }
 .product-history .ph-prose ol { list-style: decimal; padding-inline-start: 24px; }
 .product-history .ph-prose blockquote { padding-inline-start: 12px; border-left: 2px solid var(--ui-control-border); color: var(--ui-muted); }
-.product-history .ph-prose pre, .product-history .ph-source { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; padding: 12px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); font: 12px/1.65 "Geist Mono", monospace; tab-size: 4; }
+.product-history .ph-prose pre, .product-history .ph-source { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; padding: 12px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); font: 12px/1.65 var(--ui-font); tab-size: 4; }
 .product-history .ph-source code { font: inherit; white-space: inherit; overflow-wrap: inherit; }
 .product-history .ph-table { max-width: 100%; overflow-x: auto; }
 .product-history .ph-table table { width: 100%; border-collapse: collapse; font-size: 13px; }

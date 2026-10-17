@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUp, ArrowUpRight, Code2, Search, Sparkles } from "lucide-react"
+import { ArrowUp, ArrowUpRight, Code2, Pause, Play, Search, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import "./space-field.js"
-import logo from "./assets/moyai-logo.png"
+import { DecodeHeadline } from "./decode-headline"
+import { SpaceBackdrop } from "./space-backdrop"
+import "./home.css"
+import meteorPoster from "./assets/moyai-meteor-poster.webp"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { NewConversation, Session, Turn } from "./conversation-state"
@@ -25,6 +27,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   onCreated: () => Promise<void>; onStarted: (conversation: NewConversation) => void
 }) {
   const [draft, setDraft] = useState("")
+  const [animateHeadline, setAnimateHeadline] = useState(true)
   const [swarmMode, setSwarmMode] = useState(false)
   const [swarm, setSwarm] = useState<SwarmOptions>({ workers: 20, budget_seconds: 0, worker_models: [] })
   const [model, setModel] = useState(defaultModel)
@@ -46,7 +49,6 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   const accountsReady = productMode !== "existing" || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error
     && !accountNotice && selectedAccounts.every(id => accounts.some(row => row.id === id && row.enabled && (isPrivate || row.shared))))
   const sculpture = useRef<HTMLDivElement>(null)
-  const stars = useRef<HTMLCanvasElement>(null)
   const input = useRef<HTMLDivElement>(null)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
@@ -60,8 +62,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     void import("@/moyai-sculpture").then(({ mountSculpture }) => {
       if (!disposed) cleanupSculpture = mountSculpture(sculpture.current)
     }).catch(() => {}) // The static logo remains a complete fallback.
-    const cleanupStars = stars.current ? window.MoyaiSpace?.mount(stars.current, { anchor: sculpture.current ?? undefined }) : undefined
-    return () => { disposed = true; mounted.current = false; cleanupSculpture(); cleanupStars?.() }
+    return () => { disposed = true; mounted.current = false; cleanupSculpture() }
   }, [])
   useEffect(() => {
     if (productMode !== "existing") return
@@ -112,13 +113,15 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
     {fileDrop.dragging && <FileDropOverlay />}
-    <div className="home-crumb">✧ &nbsp; NEW SESSION</div>
-    <canvas className="space-backdrop" ref={stars} />
+    <div className="home-header"><span className="home-crumb">NEW SESSION</span><div className="home-header-actions">
+      <Button type="button" variant="ghost" size="icon-sm" aria-label={animateHeadline ? "Pause headline animation" : "Resume headline animation"} aria-pressed={!animateHeadline} onClick={() => setAnimateHeadline(value => !value)}>{animateHeadline ? <Pause size={13} /> : <Play size={13} />}</Button>
+      <span className="home-visibility">{isPrivate ? "Private" : "Shared"}</span>
+    </div></div>
+    <SpaceBackdrop />
+    <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
     <div className="home-content">
       <p className="home-eyebrow">A space for your next big idea</p>
-      <h1>What are we working on?</h1>
-      <p className="home-description">From the first spark to the final commit. Make it happen with Moyai.</p>
-      <div className="home-sculpture" ref={sculpture}><img src={logo} alt="Moyai" /></div>
+      <DecodeHeadline paused={!animateHeadline || busy || Boolean(draft)} />
       <div className="home-mode-options" aria-label="Session mode">
         <Button type="button" variant={!swarmMode ? "secondary" : "ghost"} aria-pressed={!swarmMode} disabled={busy} onClick={() => setSwarmMode(false)}>Chat</Button>
         <Button type="button" variant={swarmMode ? "secondary" : "ghost"} aria-pressed={swarmMode} disabled={busy} onClick={() => setSwarmMode(true)}>Swarm</Button>

@@ -1,0 +1,4 @@
+.space-backdrop { position: absolute; inset: 0; overflow: hidden; z-index: -1; pointer-events: none; }
+.home-space { min-height: 850px; }
+.chat-space { opacity: .38; }
+.space-star { position: absolute; border-radius: 50%; background: white; }

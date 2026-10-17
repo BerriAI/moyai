@@ -31,24 +31,26 @@
 
 :root {
   color-scheme: dark;
-  --ui-canvas: #070b14;
-  --ui-background: #182131;
-  --ui-subtle: #101623;
-  --ui-foreground: #f4f7fc;
-  --ui-primary: #b8a8ff;
+  --ui-canvas: #0b0b0f;
+  --ui-background: #151519;
+  --ui-subtle: #0e0e12;
+  --ui-foreground: #e9e8ed;
+  --ui-primary: #a48cf0;
   --ui-primary-foreground: #171126;
-  --ui-secondary: #202b3d;
-  --ui-muted: #c0cadb;
-  --ui-control-border: #64748b;
-  --ui-border: #334155;
+  --ui-secondary: #232228;
+  --ui-muted: #acabb2;
+  --ui-control-border: #706c7e;
+  --ui-border: #ffffff18;
+  --ui-font: "Share Tech Mono", ui-monospace, monospace;
+  --ui-headline-accent: #c1b1ee;
   --ui-destructive: #a73b49;
-  --ui-danger: #ffadbc;
+  --ui-danger: #e0807a;
   --ui-danger-bg: #421e2b;
   --ui-danger-border: #704653;
   --ui-success: #86efac;
   --ui-success-bg: #103323;
   --ui-success-border: #35594e;
-  --ui-warning: #ffd58a;
+  --ui-warning: #e6c75e;
   --ui-warning-bg: #3b2d13;
   --ui-warning-border: #655532;
   --ui-merged: #ddc6ff;

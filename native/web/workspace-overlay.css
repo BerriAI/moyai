@@ -1,9 +1,27 @@
-/* Absolute grid placement follows column 1 even while the panel ratio changes.
-   It neither participates in track sizing nor reaches across the separator. */
+/* This menu floats inside chat without changing its geometry.
+   Only the independent Computer/PR side panel changes the outer split. */
+.chat-layout {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1;
+}
+.chat-content {
+  position: relative;
+  isolation: isolate;
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
 .workspace-overlay-host {
   position: absolute;
-  grid-column: 1 / 2;
-  grid-row: 2 / 3;
   inset: 0;
   z-index: 40;
   min-inline-size: 0;
@@ -11,6 +29,7 @@
   overflow: hidden;
   pointer-events: none;
 }
+.workspace-overlay-host:empty { display: none; }
 
 .workspace-overlay-content {
   --workspace-overlay-edge: 8px;
@@ -20,16 +39,16 @@
   inset-inline-end: var(--workspace-overlay-edge);
   box-sizing: border-box;
   inline-size: min(360px, calc(100% - 2 * var(--workspace-overlay-edge)));
-  max-block-size: min(720px, calc(100% - 2 * var(--workspace-overlay-edge)));
+  max-block-size: min(560px, calc(100% - 2 * var(--workspace-overlay-edge)));
   min-inline-size: 0;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: var(--ui-control-border) transparent;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border: 1px solid var(--ui-border);
   border-radius: 12px;
-  background: var(--ui-subtle);
+  background: var(--ui-background);
   color: var(--ui-foreground);
   box-shadow: 0 12px 36px rgb(0 0 0 / 28%);
   pointer-events: auto;
@@ -65,17 +84,42 @@
   border: 0;
 }
 
-/* One scroll owner, sized by chat rather than the old Popover viewport limit. */
+/* One scroll owner, bounded by chat rather than a viewport-wide overlay. */
 .workspace-overlay-content > .workspace-overview.workspace-picker {
   max-height: none;
   overflow: visible;
 }
 
 /* Do not paint even an exit frame over a panel that has replaced main chat. */
-.workspace.panel-expanded > .workspace-overlay-host { visibility: hidden; }
+.workspace.panel-expanded .workspace-overlay-host { visibility: hidden; }
 @media (max-width: 1000px) {
-  .workspace.with-panel > .workspace-overlay-host { visibility: hidden; }
+  .workspace.with-panel .workspace-overlay-host { visibility: hidden; }
 }
+
+.conversation .header-controls > .workspace-orbit-key {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: #ffffff0d;
+  box-shadow: inset 0 0 0 1px #ffffff14;
+  transition: background .15s, box-shadow .2s;
+}
+.conversation .header-controls > .workspace-orbit-key:hover { background: #ffffff19; box-shadow: inset 0 0 0 1px #ffffff24; }
+.conversation .header-controls > .workspace-orbit-key[data-open="true"] {
+  background: color-mix(in srgb, var(--ui-primary) 16%, var(--ui-canvas));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-primary) 60%, transparent), 0 0 16px #a48cf033;
+}
+.workspace-orbit-glyph { display: block; position: relative; width: 16px; height: 16px; border: 1.2px solid var(--ui-muted); border-radius: 50%; }
+.workspace-orbit-glyph > i { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: var(--ui-muted); }
+.workspace-orbit-glyph > i:nth-child(1) { left: -2.5px; top: 5.5px; }
+.workspace-orbit-glyph > i:nth-child(2) { right: -1px; top: 0; }
+.workspace-orbit-glyph > i:nth-child(3) { left: 6px; bottom: -2.5px; }
+[data-open="true"] > .workspace-orbit-glyph { border-color: var(--ui-headline-accent); box-shadow: 0 0 10px #a48cf080, inset 0 0 6px #a48cf055; }
+[data-open="true"] > .workspace-orbit-glyph > i { background: white; }
+.workspace-orbit-alert { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--ui-danger); box-shadow: 0 0 0 2px var(--ui-canvas); }
 
 @keyframes workspace-overlay-enter {
   from { transform: translateX(var(--workspace-overlay-offscreen)); opacity: 0; }
@@ -89,4 +133,5 @@
 
 @media (prefers-reduced-motion: reduce) {
   .workspace-overlay-content[data-state] { animation: none; }
+  .workspace-orbit-key { transition: none !important; }
 }
