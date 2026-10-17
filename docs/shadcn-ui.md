@@ -31,9 +31,12 @@ and sculpting it is not a runtime or normal build step. See
 The offline art pass widens the meteor's depth, gives its oval outline a slight
 lean, and varies ridge sizes while protecting the face. Preserve its framing
 against the viewer's camera when editing the geometry.
-`frontend/moyai-surface.ts` adds object-space grain, pitting and mineral glints
+`frontend/moyai-surface.ts` adds coarse chips plus fine object-space grain, pitting and mineral glints
 to the supplied PBR material. The baked `_MOYAI_CAVITY` attribute localizes blue
 and violet highlights to authored crater bowls, with faint concavity accents.
+Broad relief remains visible at home-screen size while fine detail fades with
+pixel footprint. Purple crater highlights and a directional rear-left blue rim
+separate the broken outline from the background without a CSS halo.
 Glints respond to rotation without a continuous animation loop. Avoid a
 photo-projection shader or a separate overlapping sheen mesh.
 

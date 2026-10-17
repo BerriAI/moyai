@@ -51,7 +51,10 @@ The `_MOYAI_CAVITY` scalar attribute combines hand-placed crater bowl volumes wi
 a weak smoothed concavity signal. Bowl axes and depth caps keep highlights off
 the surrounding boulders. The runtime material adds fine object-space grain and
 pitting, high stone roughness, restrained blue/violet interior highlights, and
-sparse reflective mineral flecks. The material has no clock or extra animation
+sparse reflective mineral flecks. A second, coarser relief scale keeps the stone
+legible at 160–220px. Stronger purple crater emission and rear-left grazing light
+follow the surface geometry; the face receives little of that rim accent.
+The material has no clock or extra animation
 loop; the same angle always renders the same detail.
 
 Reproduce using Node.js and temporary offline dependencies (not runtime packages):

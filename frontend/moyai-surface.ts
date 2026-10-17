@@ -6,7 +6,7 @@ export function finishMeteorSurface(mesh: THREE.Mesh) {
   const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
   for (const material of materials) {
     if (!(material instanceof THREE.MeshStandardMaterial)) continue
-    material.normalScale.set(1.25, 1.25)
+    material.normalScale.set(1.4, 1.4)
     material.onBeforeCompile = shader => {
       shader.vertexShader = shader.vertexShader.replace('#include <common>', `
         #include <common>
@@ -46,15 +46,20 @@ export function finishMeteorSurface(mesh: THREE.Mesh) {
       `).replace('#include <map_fragment>', `
         #include <map_fragment>
         float moyaiCavity = smoothstep(0.09, 0.68, moyaiSurfaceCavity);
+        // Broad chips survive the small home-screen projection; fine grain fades
+        // with the pixel footprint instead of turning into distant shimmer.
+        float moyaiChips = moyaiNoise(moyaiSurfacePosition * 10.0);
+        float moyaiPits = 1.0 - smoothstep(0.22, 0.40, moyaiNoise(moyaiSurfacePosition * 23.0));
         float moyaiGrain = moyaiNoise(moyaiSurfacePosition * 32.0);
         float moyaiPores = 1.0 - smoothstep(0.23, 0.39, moyaiNoise(moyaiSurfacePosition * 57.0));
         float moyaiFootprint = max(length(dFdx(moyaiSurfacePosition)), length(dFdy(moyaiSurfacePosition)));
         float moyaiFineDetail = 1.0 - smoothstep(0.025, 0.07, moyaiFootprint);
-        vec3 moyaiCell = moyaiSurfacePosition * 52.0;
+        vec3 moyaiCell = moyaiSurfacePosition * 40.0;
         float moyaiSeed = moyaiHash(floor(moyaiCell));
         float moyaiCrystal = 1.0 - smoothstep(0.10, 0.30, length(fract(moyaiCell) - 0.5));
         float moyaiGlitter = moyaiCrystal * step(0.91, moyaiSeed) * moyaiCavity;
-        diffuseColor.rgb *= 0.80 + 0.24 * moyaiGrain - 0.15 * moyaiPores * moyaiFineDetail;
+        diffuseColor.rgb *= 0.68 + 0.42 * moyaiChips - 0.20 * moyaiPits
+          + (0.08 * moyaiGrain - 0.08 * moyaiPores) * moyaiFineDetail;
       `).replace('#include <roughnessmap_fragment>', `
         #include <roughnessmap_fragment>
         roughnessFactor = mix(max(roughnessFactor, 0.84), 0.24, moyaiGlitter);
@@ -63,19 +68,28 @@ export function finishMeteorSurface(mesh: THREE.Mesh) {
         metalnessFactor = max(metalnessFactor, moyaiGlitter * 0.65);
       `).replace('#include <normal_fragment_maps>', `
         #include <normal_fragment_maps>
-        float moyaiHeight = 0.0045 * moyaiGrain - 0.0045 * moyaiPores
-          + 0.0015 * moyaiNoise(moyaiSurfacePosition * 110.0);
-        normal = moyaiBumpNormal(-vViewPosition, normal, moyaiHeight * moyaiFineDetail, faceDirection);
+        float moyaiHeight = 0.024 * moyaiChips - 0.014 * moyaiPits
+          + (0.0045 * moyaiGrain - 0.0045 * moyaiPores
+          + 0.0015 * moyaiNoise(moyaiSurfacePosition * 110.0)) * moyaiFineDetail;
+        normal = moyaiBumpNormal(-vViewPosition, normal, moyaiHeight, faceDirection);
       `).replace('#include <emissivemap_fragment>', `
         #include <emissivemap_fragment>
-        vec3 moyaiMineralColor = mix(vec3(0.012, 0.07, 0.34), vec3(0.11, 0.025, 0.34),
-          moyaiNoise(moyaiSurfacePosition * 3.0) * 0.65);
+        vec3 moyaiMineralColor = mix(vec3(0.025, 0.09, 0.42), vec3(0.22, 0.025, 0.50),
+          0.35 + moyaiNoise(moyaiSurfacePosition * 3.0) * 0.40);
         float moyaiCraterEdge = 1.0 - abs(dot(normal, normalize(vViewPosition)));
-        totalEmissiveRadiance += moyaiMineralColor * moyaiCavity * (0.028 + 0.14 * pow(moyaiCraterEdge, 2.0));
+        totalEmissiveRadiance += moyaiMineralColor * moyaiCavity * (0.09 + 0.30 * pow(moyaiCraterEdge, 2.0));
         float moyaiGlintAngle = 0.2 + 0.8 * pow(max(dot(normal, normalize(vViewPosition)), 0.0), 12.0);
         totalEmissiveRadiance += vec3(0.36, 0.57, 1.0) * moyaiGlitter * moyaiGlintAngle * 2.2;
+        // A directional grazing highlight traces the broken rear-left contour,
+        // opposite the face in a three-quarter view, without a flat CSS halo.
+        float moyaiRimFacing = smoothstep(0.05, 0.70,
+          dot(normal, normalize(vec3(-0.8, 0.25, -0.55))));
+        float moyaiRearLeft = 1.0 - smoothstep(-0.4, 1.3,
+          moyaiSurfacePosition.x + moyaiSurfacePosition.z * 0.75);
+        float moyaiRim = pow(moyaiCraterEdge, 1.85) * moyaiRimFacing * moyaiRearLeft;
+        totalEmissiveRadiance += vec3(0.025, 0.19, 0.75) * moyaiRim * 1.25;
       `)
     }
-    material.customProgramCacheKey = () => 'moyai-weathered-stone-v1'
+    material.customProgramCacheKey = () => 'moyai-weathered-stone-v2'
   }
 }

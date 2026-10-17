@@ -32,8 +32,8 @@ export function mountSculpture(host: HTMLElement | null) {
   // The model is centered and normalized offline for this home-screen framing.
   camera.position.set(0, 0, 8.6)
   camera.lookAt(0, 0, 0)
-  scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .45))
-  for (const [color, power, x, y, z] of [[0xf0f2f8, 3.8, 3, 5, 5], [0x7a9be6, 2.4, -4, 0, -2], [0x9b86d8, .95, 3, 1, -3], [0x829ee8, .9, -4, -2, 3]]) {
+  scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .32))
+  for (const [color, power, x, y, z] of [[0xf0f2f8, 4.1, 3, 5, 5], [0x658bff, 5.2, -4, 1, -2], [0x9b86d8, .95, 3, 1, -3], [0x829ee8, .60, -4, -2, 3]]) {
     const light = new THREE.DirectionalLight(color, power)
     light.position.set(x, y, z); scene.add(light)
     if (y === 5 || y === -2) {
