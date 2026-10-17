@@ -329,8 +329,14 @@ def command(body):
                 if body["command"]["action"] != "open":
                     raise ValueError("Open the shared browser first.")
                 start(deadline)
-            return browser_runtime.operate(
-                body["command"], deadline, ENV, diagnostics=bool(body.get("browser_diagnostics")),
+            driver = body.get("browser_driver", str(Path(__file__).with_name("browser_driver.py")))
+            driver_spec = importlib.util.spec_from_file_location("moyai_browser_driver", driver)
+            driver_runtime = importlib.util.module_from_spec(driver_spec)
+            sys.modules[driver_spec.name] = driver_runtime
+            driver_spec.loader.exec_module(driver_runtime)
+            return driver_runtime.call(
+                STATE, Path(helper), body["command"], deadline, ENV,
+                diagnostics=bool(body.get("browser_diagnostics")),
             )
         if not display_alive():
             return {"available": False, "width": WIDTH, "height": HEIGHT}

@@ -58,6 +58,7 @@ packages = ["src/moyai"]
 "instructions.md" = "moyai/resources/instructions.md"
 "desktop.py" = "moyai/resources/desktop.py"
 "browser_guest.py" = "moyai/resources/browser_guest.py"
+"browser_driver.py" = "moyai/resources/browser_driver.py"
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
