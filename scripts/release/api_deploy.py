@@ -53,8 +53,7 @@ def topology(service):
 
 
 class APIRelease(Release):
-    # Only this API controller and maintenance admit native services. API
-    # preflight additionally requires identical provisioned native contracts.
+    # API preflight additionally requires identical provisioned native contracts.
     native_release = True
 
     def __init__(self, *args, api_service_id, contract=candidate_contract, readiness_timeout=300,

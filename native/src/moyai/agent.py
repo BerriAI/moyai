@@ -56,6 +56,7 @@ from .effects import EffectReceipts
 from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
 from .live_events import root_event_stream
+from .request_limits import UnlimitedModelRequests
 from .settings import Settings
 from .settings_runtime import settings_capability
 from .storage import ObjectStore
@@ -298,9 +299,12 @@ def make_agent(
 ) -> tuple[Agent[RunScope, str | DeferredToolRequests], TemporalDurability[RunScope]]:
     models = models or inference_models(settings)
     if workspace is None:
-        workspace = ModalSandbox(
-            image=workspace_image(), app_name=settings.modal_app, working_dir="/workspace",
-            sandbox_timeout=settings.computer_lifetime, idle_timeout=settings.computer_idle_timeout,
+        from .lambda_workspace import WorkspaceProviders
+        workspace = WorkspaceProviders(
+            settings, ModalSandbox(
+                image=workspace_image(), app_name=settings.modal_app, working_dir="/workspace",
+                sandbox_timeout=settings.computer_lifetime, idle_timeout=settings.computer_idle_timeout,
+            ),
         )
     durability: TemporalDurability[RunScope] = OnDemandDurability(
         models=models,
@@ -328,6 +332,7 @@ def make_agent(
         retries=2,
         instructions=(PACKAGE_ROOT / "instructions.md").read_text(),
         capabilities=[
+            UnlimitedModelRequests(),
             workspace,
             authority,
             InteractiveDelegation(database),

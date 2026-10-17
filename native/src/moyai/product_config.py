@@ -159,6 +159,16 @@ class ProductConfig:
                 artifact_access_key_id=SecretStr(source.object_storage_access_key_id),
                 artifact_secret_access_key=SecretStr(source.object_storage_secret_access_key),
                 artifact_session_token=SecretStr(source.object_storage_session_token),
+                sandbox_provider=source.sandbox_provider,
+                lambda_region=source.lambda_region,
+                lambda_profile=source.lambda_profile,
+                lambda_image=source.lambda_image,
+                lambda_image_version=source.lambda_image_version,
+                lambda_checkpoint_bucket=source.lambda_checkpoint_bucket,
+                lambda_checkpoint_prefix=source.lambda_checkpoint_prefix,
+                lambda_execution_role_arn=source.lambda_execution_role_arn,
+                lambda_egress_connector=source.lambda_egress_connector,
+                lambda_checkpoint_timeout=source.snapshot_timeout_seconds,
             )
         return result
 

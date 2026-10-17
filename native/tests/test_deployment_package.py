@@ -57,6 +57,22 @@ def prepared(environment):
     return state, configuration(environment, state)
 
 
+def test_lambda_configuration_preserves_native_provider_without_modal_credentials(install_environment):
+    install_environment.pop("MODAL_TOKEN_ID")
+    install_environment.pop("MODAL_TOKEN_SECRET")
+    install_environment.update(
+        SANDBOX_PROVIDER="lambda", LAMBDA_REGION="us-east-1", LAMBDA_IMAGE="native-image",
+        LAMBDA_IMAGE_VERSION="1.0", LAMBDA_CHECKPOINT_BUCKET="private-checkpoints",
+        SNAPSHOT_TIMEOUT_SECONDS="900",
+    )
+    _, values = prepared(install_environment)
+    from moyai.deployment_checks import validate
+    configured = validate(values)
+    assert configured.sandbox_provider == "lambda"
+    assert configured.lambda_checkpoint_bucket == "private-checkpoints"
+    assert configured.lambda_checkpoint_timeout == 900
+
+
 def test_shared_configuration_uses_verified_schemas_and_persists_keys(install_environment):
     state, values = prepared(install_environment)
     write_state(install_environment, state)

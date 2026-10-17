@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
     from .images import prompt_content
     from .product_continuation_errors import public_preparation_message
     from .product_drain import DRAIN_VERSION, DrainDecision
+    from .request_limits import unlimited_model_requests
     from .runtime import current
     from .workspace_recovery import VERSION as WORKSPACE_CHECKPOINT_VERSION
 
@@ -154,7 +155,9 @@ class TurnWorkflow(PydanticAIWorkflow):
                 deps=prepared.scope,
                 deferred_tool_results=deferred_results,
                 workspace=workspace,
-                usage_limits=UsageLimits(request_limit=runtime.settings.model_request_limit),
+                usage_limits=UsageLimits(
+                    request_limit=None if unlimited_model_requests() else runtime.settings.model_request_limit,
+                ),
             ) as agent_run:
                 self.agent_run = agent_run
                 # This is the public SDK iterator, not another model/tool dispatch loop.
@@ -201,7 +204,9 @@ class TurnWorkflow(PydanticAIWorkflow):
                 try:
                     await workflow.execute_activity(
                         "moyai_save_computer_v1", args=[turn_id, reference],
-                        start_to_close_timeout=timedelta(minutes=3),
+                        start_to_close_timeout=timedelta(
+                            minutes=17 if reference and reference.get("provider") == "lambda" else 3,
+                        ),
                         retry_policy=RetryPolicy(maximum_attempts=1),
                     )
                 except ActivityError:

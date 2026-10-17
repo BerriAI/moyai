@@ -15,6 +15,7 @@ maintenance = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 LISTENER_GRACE_SECONDS = 30
 API_GRACEFUL_SHUTDOWN_SECONDS = 240
 BROKER_GRACEFUL_SHUTDOWN_SECONDS = 240
+NATIVE_WORKER_GRACEFUL_SHUTDOWN_SECONDS = 240
 
 
 class RenderOverlapServer(uvicorn.Server):
@@ -98,6 +99,12 @@ def configure_environment():
     os.environ.pop("CHECKPOINT_DIR", None)
     os.environ.pop("MODAL_VOLUME_NAME", None)
     os.environ.setdefault("DATA_DIR", "/var/data/moyai")
+    if os.environ.get("MOYAI_RUNTIME_ROLE") == "worker":
+        # WorkerPools starts all poller shutdowns within this shared window. Let
+        # in-flight model/tool activities finish before cancellation; their
+        # externally dispatched outcomes must not be replayed after replacement.
+        os.environ.setdefault("MOYAI_WORKER_SHUTDOWN_SECONDS",
+                              str(NATIVE_WORKER_GRACEFUL_SHUTDOWN_SECONDS))
 
 
 

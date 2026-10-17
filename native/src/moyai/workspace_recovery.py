@@ -210,7 +210,7 @@ async def preserve_restoration(db: AsyncSession, session_id: str, old_id: str, n
 
 async def prepare_workspace(runtime: Runtime, prepared: PreparedTurn) -> PreparedTurn:
     reference = prepared.workspace
-    if not reference or reference.get("provider") != "modal":
+    if not reference or reference.get("provider") not in {"modal", "lambda"}:
         return prepared
     async with computer_timing(runtime.database, prepared.scope, "reuse", preparation=True) as timing:
         return await _prepare_workspace(runtime, prepared, reference, timing)
@@ -227,7 +227,16 @@ async def _prepare_workspace(
             raise PermissionError("The computer changed before preparation.")
         preparation, revision = turn.preparation, session.revision
     async with asyncio.timeout(30):
-        alive = await live_sandbox(reference)
+        if reference["provider"] == "lambda":
+            from pydantic_ai.workspaces import WorkspaceUnavailableError
+
+            from .lambda_control import LambdaControl
+            try:
+                alive = await (await LambdaControl(runtime.settings).get(reference["id"])).alive()
+            except WorkspaceUnavailableError:
+                alive = False
+        else:
+            alive = await live_sandbox(reference)
     saved, expected = None, None
     if not alive:
         timing.mode = "restore"
@@ -239,11 +248,19 @@ async def _prepare_workspace(
                 raise RuntimeError("Preparation changed before restore; retry the authorized preparation.")
             saved = await validate_checkpoint(database, db, session, scope, reference)
             expected = session.snapshot
-        async with asyncio.timeout(180):
-            sandbox = await restored_sandbox(runtime, scope, saved)
-            if await sandbox.poll.aio() is not None:
-                raise preparation_blocked("workspace_checkpoint_missing")
-        replacement = {"provider": "modal", "id": sandbox.object_id}
+        if reference["provider"] == "lambda":
+            from .lambda_control import LambdaControl
+            name = "native-restore:" + hashlib.sha256(
+                f"{scope.workspace_key}:{scope.turn_id}:{saved.image_id}:{reference['id']}".encode()
+            ).hexdigest()
+            restored = await LambdaControl(runtime.settings).create(name, checkpoint=saved.image_id)
+            replacement = {"provider": "lambda", "id": restored.id}
+        else:
+            async with asyncio.timeout(180):
+                sandbox = await restored_sandbox(runtime, scope, saved)
+                if await sandbox.poll.aio() is not None:
+                    raise preparation_blocked("workspace_checkpoint_missing")
+            replacement = {"provider": "modal", "id": sandbox.object_id}
     else:
         replacement = reference
     async with database.sessions.begin() as db:

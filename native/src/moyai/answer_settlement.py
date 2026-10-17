@@ -64,17 +64,31 @@ class ModalSnapshots:
         return image.object_id
 
 
+class ProviderSnapshots:
+    def __init__(self, database: Database):
+        self.database = database
+
+    async def capture(self, reference: WorkspaceRef, *, require_live: bool) -> str:
+        if reference.provider == "lambda":
+            from .lambda_control import LambdaControl
+            vm = await LambdaControl(self.database.settings).get(reference.id)
+            await vm.running()
+            identity, _ = await vm.checkpoint()
+            return identity
+        return await ModalSnapshots().capture(reference, require_live=require_live)
+
+
 class AnswerSettlement:
     def __init__(self, database: Database, *, snapshots: SnapshotCapture | None = None):
         self.database = database
-        self.snapshots = snapshots if snapshots is not None else ModalSnapshots()
+        self.snapshots = snapshots if snapshots is not None else ProviderSnapshots(database)
 
     async def save_computer(self, turn_id: str, reference: dict | None, *, product: bool) -> None:
         if not reference:
             await self.settle(turn_id)
             return
         ref = TypeAdapter(WorkspaceRef).validate_python(reference)
-        if ref.provider != "modal":
+        if ref.provider not in {"modal", "lambda"}:
             # Local workspaces are used only by deterministic supplementary tests.
             await self.settle(turn_id)
             return
@@ -105,7 +119,7 @@ class AnswerSettlement:
         if checkpoint_workspace:
             result_identity["checkpoint_workspace"] = True
         fingerprint = hashlib.sha256(json.dumps(result_identity, sort_keys=True).encode()).hexdigest()
-        checkpointing = checkpoint_workspace and bool(workspace and workspace.get("provider") == "modal")
+        checkpointing = checkpoint_workspace and bool(workspace and workspace.get("provider") in {"modal", "lambda"})
         async with self.database.sessions.begin() as db:
             turn = await db.get(Turn, scope.turn_id)
             session = await db.get(Session, scope.session_id)
@@ -202,7 +216,10 @@ class AnswerSettlement:
                 saved = saved.model_copy(update={"product_context": context, "restoration_manifest": manifest})
                 session.snapshot = saved.model_dump_json()
             await db.execute(delete(ComputerOperation).where(ComputerOperation.session_id == session.id))
-            db.add(ComputerOperation(session_id=session.id, identity=identity, expires_at=int(time.time()) + 240))
+            lease_seconds = (
+                database.settings.lambda_checkpoint_timeout + 120 if reference["provider"] == "lambda" else 240
+            )
+            db.add(ComputerOperation(session_id=session.id, identity=identity, expires_at=int(time.time()) + lease_seconds))
             expected, revision = session.snapshot, session.revision
         try:
             image = await self.snapshots.capture(TypeAdapter(WorkspaceRef).validate_python(reference), require_live=True)
