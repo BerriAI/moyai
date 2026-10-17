@@ -18,12 +18,14 @@ from scenarios import integration_model
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from temporalio.testing import WorkflowEnvironment
+from test_delegation_temporal import dispatching
 
 from moyai.api import create_app
 from moyai.computer import DESKTOP_VERSION, lease
 from moyai.computer_stream import bind, release, validate
 from moyai.contracts import NewMessage, NewSession
-from moyai.models import Artifact, ComputerDesktop, Delivery, Session, User, new_id
+from moyai.delegation_models import DelegatedSession
+from moyai.models import Artifact, ComputerDesktop, Delivery, Session, Turn, User, new_id
 from moyai.runtime import Runtime
 from moyai.settings import Settings
 from moyai.slack import deliver_one
@@ -66,11 +68,11 @@ async def test_native_postgres_stores_in_temporal(tmp_path, monkeypatch):
         )
         async with environment:
             runtime.client = environment.client
-            async with make_worker(runtime):
-                result = await runtime.client.execute_workflow(
+            async with make_worker(runtime), dispatching(runtime):
+                result = await asyncio.wait_for(runtime.client.execute_workflow(
                     TurnWorkflow.run, turn.id, id=turn.workflow_id,
                     task_queue=runtime.settings.temporal_queue,
-                )
+                ), timeout=60)
         assert result["status"] == "completed"
         assert len(await runtime.stores.plan(session.id).get_items()) == 1
         snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id)
@@ -78,6 +80,10 @@ async def test_native_postgres_stores_in_temporal(tmp_path, monkeypatch):
         async with runtime.database.sessions() as db:
             saved = await db.scalar(select(Artifact).where(Artifact.turn_id == turn.id))
             assert saved.name == "proof.txt"
+            child = await db.scalar(select(DelegatedSession).where(DelegatedSession.parent_turn_id == turn.id))
+            assert child is not None
+            assert (await db.get(Turn, child.initial_turn_id)).status == "completed"
+        assert len(await runtime.stores.plan(child.session_id).get_items()) == 1
         await qualify_pool_wait(runtime, session.id, turn.id, monkeypatch)
         # Qualify the admission policy in PostgreSQL without making a provider
         # call: the real Modal desktop is exercised by the separate live proof.

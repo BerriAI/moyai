@@ -22,7 +22,7 @@ from pydantic_ai_harness import Coder, RepoContext
 from temporalio import workflow
 
 from .contracts import RunScope
-from .delegation import enabled as interactive_delegation
+from .delegation import delegation_mode
 from .effects import EffectReceipts
 
 STARTUP_VERSION = "moyai-on-demand-computer-v1"
@@ -130,8 +130,8 @@ class OnDemandRepository(WrapperCapability[RunScope]):
         self, ctx: RunContext[RunScope], *, call: ToolCallPart,
         tool_def: ToolDefinition, args: dict[str, Any],
     ) -> dict[str, Any]:
-        if tool_def.name == "delegate_task" and interactive_delegation(ctx.deps):
-            return args  # The child acquires its own computer when it needs one.
+        if tool_def.name == "delegate_task" and delegation_mode(ctx.deps) != "legacy":
+            return args  # Only legacy SDK delegates share the parent's computer.
         if tool_def.name not in COMPUTER_TOOLS and not re.fullmatch(r"github_[A-Za-z0-9]{8}_checkout", tool_def.name):
             return args
         async with self.lock:

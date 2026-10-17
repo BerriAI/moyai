@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fastapi import HTTPException
 from pydantic import TypeAdapter
@@ -42,6 +42,17 @@ def enabled(scope: RunScope) -> bool:
     if workflow.in_workflow():
         scope.interactive_delegation = workflow.patched(VERSION)
     return scope.interactive_delegation
+
+
+def delegation_mode(scope: RunScope) -> Literal["legacy", "interactive", "disabled"]:
+    """One policy for instructions, tool exposure, execution and computer setup."""
+    # Evaluate the version even for blocked contexts: skipping or moving its
+    # original marker sites changes replay of already-recorded workflows.
+    if not enabled(scope):
+        return "legacy"
+    if scope.swarm_id is not None or scope.delegation_depth >= MAX_DEPTH:
+        return "disabled"
+    return "interactive"
 
 
 class DelegationService:
@@ -225,7 +236,7 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
 
     def get_instructions(self):
         def instructions(ctx: RunContext[RunScope]) -> str:
-            if not enabled(ctx.deps) or ctx.deps.swarm_id:
+            if delegation_mode(ctx.deps) != "interactive":
                 return ""
             return (
                 "Delegating to self creates a persistent subagent conversation. "
@@ -241,7 +252,7 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
     async def prepare_tools(
         self, ctx: RunContext[RunScope], tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
-        if enabled(ctx.deps) and ctx.deps.delegation_depth >= MAX_DEPTH:
+        if delegation_mode(ctx.deps) == "disabled":
             return [tool for tool in tool_defs if tool.name != "delegate_task"]
         return tool_defs
 
@@ -249,13 +260,18 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
         self, ctx: RunContext[RunScope], *, call: ToolCallPart, tool_def: ToolDefinition,
         args: dict[str, Any], handler: WrapToolExecuteHandler,
     ) -> Any:
-        if call.tool_name != "delegate_task" or not enabled(ctx.deps):
+        if call.tool_name != "delegate_task":
             return await handler(args)
+        mode = delegation_mode(ctx.deps)
+        if mode == "legacy":
+            return await handler(args)
+        if mode == "disabled":
+            raise ToolFailed("Delegation is not available for swarm members or at the maximum subagent depth.")
         if (
             ctx.run_id != ctx.deps.turn_id or not call.tool_call_id
-            or args.get("agent_name") != "self" or args.get("model") or args.get("resume")
+            or args.get("agent_name") != "self" or args.get("model") or args.get("resume") or args.get("background")
         ):
-            raise ToolFailed("Choose self to create a subagent conversation with this task's model and accounts.")
+            raise ToolFailed("Choose self without model, resume or background overrides to create a subagent chat.")
         task = args.get("task")
         if not isinstance(task, str) or not task.strip() or len(task) > 499_800:
             raise ToolFailed("Provide a bounded, nonempty task for this subagent.")

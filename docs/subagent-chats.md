@@ -50,6 +50,15 @@ their original delegation path through the Temporal version marker.
 The workflow carries that decision into its activities; older activity payloads
 retain the SDK's shared parent computer setup.
 
+Instructions, available tools, execution and computer startup use one delegation
+policy. New ordinary root/child chats can delegate; swarm members and chats at the
+depth limit cannot. Even a stale or directly invoked delegate call is refused
+before child admission or computer setup. The workflow version is execution state,
+not a change to admitted connection permissions or the connector schema cache.
+Child admission also applies the normal steering fence: accepted newer guidance
+prevents an obsolete delegate call from starting work. Reporting already-admitted
+children remains independent of that fence.
+
 Existing-product deployments require the additive
 `2026-10-16-interactive-delegation-v18` migration and native protocol revision 5
 through the coordinated maintenance release. Earlier schema receipts are preserved.

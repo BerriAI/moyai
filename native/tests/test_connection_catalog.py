@@ -88,6 +88,33 @@ async def test_scope_changes_expiry_and_size_eviction_refresh_catalog(monkeypatc
     assert len(builds) == 5
 
 
+async def test_workflow_version_resolution_reuses_catalog_without_erasing_admission_boundaries():
+    catalog, builds = ConnectionCatalog(), []
+
+    def factory(name):
+        builds.append(1)
+        tools = FunctionToolset(id="live")
+        tools.add_function(lambda: "ok", name="read")
+        return tools
+
+    # SDK discovery can precede the first versioned instruction hook. Resolving
+    # execution mode must not rebuild otherwise identical connector schemas.
+    for selected in [context(), context(interactive_delegation=True)]:
+        async with CatalogToolset(catalog, selected, factory) as tools:
+            await tools.get_tools(selected)
+    assert len(builds) == 1
+    for changes in [
+        {"turn_id": "another-turn"}, {"actor_id": "another-actor"},
+        {"swarm_id": "mission"}, {"delegation_generated": True},
+        {"grants": [Grant("connection", "github", 2, "changed-token")]},
+        {"grants": [Grant("connection", "github", 1, "sealed-token", read_only=False)]},
+    ]:
+        selected = context(interactive_delegation=True, **changes)
+        async with CatalogToolset(catalog, selected, factory) as tools:
+            await tools.get_tools(selected)
+    assert len(builds) == 7
+
+
 async def test_catalog_change_fails_closed_and_invalidates_discovery():
     catalog, ctx = ConnectionCatalog(), context()
     read_only = True

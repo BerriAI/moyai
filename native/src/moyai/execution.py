@@ -43,9 +43,15 @@ class AuthorizedActivity(ActivityInboundInterceptor):
                     type="MoyaiMissingExecutionScope", non_retryable=True,
                 )
             input_id = None
-            if name.endswith("__call_tool") and input.args:
+            # Interactive delegation bypasses the SDK tool body, but admitting
+            # a child is still a tool dispatch. Fence it against newer guidance;
+            # report polling for already-admitted children must still settle.
+            if input.args and (
+                name.endswith("__call_tool")
+                or name == "agent__moyai__capability__moyai_interactive_delegation__start"
+            ):
                 context = getattr(input.args[0], "serialized_run_context", {})
-                input_id = context.get("metadata", {}).get("moyai_input_id")
+                input_id = (context.get("metadata") or {}).get("moyai_input_id")
             try:
                 await self.database.authorize_scope(scope, input_id=input_id)
             except (PermissionError, HTTPException) as error:

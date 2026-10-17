@@ -132,6 +132,23 @@ async def test_stopped_parent_cannot_create_more_children(runtime, actor, active
         await DelegationService(runtime.database).start(prepared.scope, "one", "No new work")
 
 
+async def test_admitted_swarm_members_cannot_bypass_roster_through_direct_child_admission(runtime, actor):
+    from moyai.swarm_contracts import NewSwarm
+
+    await runtime.database.swarms.start(actor, NewSwarm(
+        prompt="Use only this admitted roster.", workers=2, request_key="bounded-roster", visibility="private",
+    ))
+    turns = await runtime.database.claim_batch(10)
+    assert len(turns) == 3
+    for turn in turns:
+        prepared = await runtime.database.prepare(turn.id)
+        assert prepared.scope.swarm_id
+        with pytest.raises(PermissionError, match="another level"):
+            await DelegationService(runtime.database).start(prepared.scope, "extra-agent", "Unadmitted work")
+    async with runtime.database.sessions() as db:
+        assert not list(await db.scalars(select(DelegatedSession)))
+
+
 async def test_report_cannot_read_another_parents_child(runtime, active):
     _, _, prepared = active
     service = DelegationService(runtime.database)
