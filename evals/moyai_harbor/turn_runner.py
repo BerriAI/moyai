@@ -31,7 +31,6 @@ from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 from temporalio.testing import WorkflowEnvironment
 
 from app.credentials import SaveSecret
-from app.db import Store
 
 from .workspace import HarborWorkspace
 
@@ -155,19 +154,6 @@ async def run_moyai_turn(
         product_config = load_product_config(environment)
         if product_config is None:
             raise RuntimeError("Could not load the eval's existing-product configuration.")
-        source_settings = product_config.legacy_settings()
-        provision = Store(
-            source_settings.data_dir,
-            source_settings.agent_model,
-            database_url=source_settings.moyai_database_url,
-            database_schema=source_settings.moyai_database_schema,
-            database_initialize=True,
-            schema_mode="auto",
-            database_pool_size=source_settings.moyai_database_pool_size,
-            runtime_role=source_settings.moyai_runtime_role,
-            runtime_settings=source_settings,
-        )
-        provision.close()
         settings = Settings.model_validate(product_config.native_overrides())
         runtime = Runtime(settings, product_config=product_config)
         try:
