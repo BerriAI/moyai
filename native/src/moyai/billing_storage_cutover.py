@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -288,7 +288,10 @@ async def _view(
     await connection.execute(text(f"DROP FUNCTION {storage.function(source)}() RESTRICT"))
 
 
-async def consolidate(engine: AsyncEngine, storage: Storage) -> None:
+async def consolidate(
+    engine: AsyncEngine, storage: Storage, *,
+    before_consolidate: Callable[[AsyncConnection], Awaitable[None]] | None = None,
+) -> dict[str, dict[str, int]]:
     """Atomically replace both physical sources; only one store survives commit."""
     async with engine.begin() as connection:
         await _timeouts(connection)
@@ -302,10 +305,12 @@ async def consolidate(engine: AsyncEngine, storage: Storage) -> None:
         ))).one_or_none()
         if source_revision is None or source_revision[0] < 22 or source_revision[1]:
             raise BillingStorageError("Apply the canonical schema v22 migration before physical consolidation.")
+        if before_consolidate is not None:
+            await before_consolidate(connection)
         state = await _state(connection, storage, lock=True)
         if state["phase"] == "consolidated":
             await verify_consolidated(connection, storage, state)
-            return
+            return await _compare(connection, storage)
         if not state["legacy_done"] or not state["native_done"]:
             raise BillingStorageError("Finish both source backfills before physical consolidation.")
         for source in SOURCES:
@@ -328,3 +333,4 @@ async def consolidate(engine: AsyncEngine, storage: Storage) -> None:
             f"UPDATE {storage.state} SET phase='consolidated',view_manifest=CAST(:manifest AS jsonb) WHERE id=1"
         ), {"manifest": json.dumps(manifest)})
         await verify_consolidated(connection, storage)
+        return comparison

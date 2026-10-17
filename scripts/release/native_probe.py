@@ -75,7 +75,7 @@ def drain_counts(connection, schema=None):
     # Count unknown states conservatively. Queued native turns may survive a
     # same-core deployment, but a core switch must not strand or reinterpret them.
     inventories = (
-        ('native_runs', 'moyai_turns', 'status', ('queued', 'completed', 'failed', 'stopped', 'resumed')),
+        ('native_runs', 'moyai_turns', 'status', ('queued', 'completed', 'failed', 'stopped', 'resumed', 'included')),
         ('native_effects', 'moyai_effects', 'state', ('confirmed', 'not_dispatched')),
         ('native_requests', 'moyai_product_inference_requests', 'status',
          ('completed', 'failed', 'not_dispatched')),

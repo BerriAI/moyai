@@ -76,7 +76,7 @@ def test_transport_runs_installed_native_command_only_after_exact_source_probe(m
     monkeypatch.setattr(control.subprocess, 'run', run)
     assert control.execute({'service': service, 'command': command, 'body': body},
                            probe_fn=lambda _: state) == value
-    assert calls[0][0] == ['/app/.venv/bin/python', '-m', 'moyai.product_drain', command]
+    assert calls[0][0] == ['/app/.venv/bin/python', '-c', control.INSTALLED_CONTROL_SOURCE, command]
     assert json.loads(calls[0][1]['input']) == body
     assert calls[0][1]['capture_output'] and calls[0][1]['timeout'] == 25
     calls.clear()
@@ -123,3 +123,34 @@ def test_owner_timezone_normalization_matches_native_receipt_fingerprint(body):
     assert control.validate(receipt(normalized, 'request'), body, 'request')['generation'] == 8
     with pytest.raises(ValueError):
         control.owner('42@2026-10-15T00:00:00')
+
+
+@pytest.mark.parametrize('already_corrected', [False, True])
+def test_installed_cli_bridge_only_adds_the_known_terminal_input(monkeypatch, already_corrected):
+    from moyai import product_drain, product_drain_cli
+
+    previous = ('completed', 'failed', 'stopped', 'resumed')
+    corrected = previous + ('included',)
+    monkeypatch.setattr(product_drain, 'TERMINAL_TURNS', corrected if already_corrected else previous)
+    calls = []
+    monkeypatch.setattr(product_drain_cli, 'main', lambda: calls.append(product_drain.TERMINAL_TURNS))
+    exec(control.INSTALLED_CONTROL_SOURCE, {})
+    assert calls == [corrected]
+
+
+@pytest.mark.parametrize('fault', ['protocol', 'extra_terminal', 'missing_terminal', 'different_type'])
+def test_unknown_installed_contract_stops_before_cli_execution(monkeypatch, fault):
+    from moyai import product_drain, product_drain_cli
+
+    if fault == 'protocol':
+        monkeypatch.setattr(product_drain, 'DRAIN_VERSION', 'unqualified-v2')
+    else:
+        terms = product_drain.TERMINAL_TURNS
+        changed = terms + ('unreviewed',) if fault == 'extra_terminal' else (
+            tuple(value for value in terms if value != 'failed') if fault == 'missing_terminal' else list(terms))
+        monkeypatch.setattr(product_drain, 'TERMINAL_TURNS', changed)
+    calls = []
+    monkeypatch.setattr(product_drain_cli, 'main', lambda: calls.append(True))
+    with pytest.raises(SystemExit, match='not qualified'):
+        exec(control.INSTALLED_CONTROL_SOURCE, {})
+    assert not calls
