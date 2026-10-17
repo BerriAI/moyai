@@ -1,5 +1,4 @@
 import pytest
-
 from app.slack_format import slack_text
 
 
@@ -9,6 +8,13 @@ from app.slack_format import slack_text
         ("**bold**", "*bold*"),
         ("**`x`**", "*`x`*"),
         ("**see `x` now**", "*see `x` now*"),
+        ("**a** x **b** y **c**", "*a* x *b* y *c*"),
+        (
+            "- **Model mapping:** x\n- **HTTP 200** model\n**Pricing caveat:** the",
+            "- *Model mapping:* x\n- *HTTP 200* model\n*Pricing caveat:* the",
+        ),
+        ("**a** **", "*a* **"),
+        ("**a** `**code**` **b**", "*a* `**code**` *b*"),
         ("`**x**`", "`**x**`"),
         ("```python\n**x**\n```", "```python\n**x**\n```"),
         ("```python\n**x**", "```python\n**x**"),

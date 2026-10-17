@@ -55,9 +55,9 @@ def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
         for index in range(0, len(pieces), 2)
         for match in re.finditer(r'\*\*', pieces[index])
     ]
-    for pair in range(0, len(markers) - 1, 2):
-        for index, offset in reversed(markers[pair : pair + 2]):
-            pieces[index] = pieces[index][:offset] + '*' + pieces[index][offset + 2 :]
+    paired_markers = markers[: len(markers) // 2 * 2]
+    for index, offset in sorted(paired_markers, reverse=True):
+        pieces[index] = pieces[index][:offset] + '*' + pieces[index][offset + 2 :]
     for i in range(1, len(pieces), 2):
         if pieces[i].startswith('```'):
             continue
