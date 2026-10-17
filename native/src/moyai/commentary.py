@@ -68,7 +68,7 @@ class Commentary(AbstractCapability[RunScope]):
     ) -> ModelResponse:
         if not enabled():
             return response
-        if self.database is not None and ctx.run_id == ctx.deps.turn_id:
+        if self.database is not None and ctx.run_id == ctx.deps.root_run_id:
             progress = saved_commentary([replace(response, run_id=ctx.deps.turn_id)], ctx.deps.turn_id)
             if progress:
                 await self.save(ctx.deps, ctx.run_step, progress)
@@ -104,9 +104,11 @@ class Commentary(AbstractCapability[RunScope]):
 
 def saved_commentary(messages: list[ModelMessage], run_id: str) -> list[dict[str, str]]:
     """Read public progress from native snapshots, including unphased providers."""
+    from .history_handoff import is_turn_run
+
     result: list[dict[str, str]] = []
     for index, message in enumerate(messages):
-        if not isinstance(message, ModelResponse) or message.run_id != run_id:
+        if not isinstance(message, ModelResponse) or not is_turn_run(message.run_id, run_id):
             continue
         has_tools = any(isinstance(part, (ToolCallPart, NativeToolCallPart)) for part in message.parts)
         for part_index, part in enumerate(message.parts):

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from .commentary import saved_commentary
+from .history_handoff import latest_turn_snapshot
 from .models import Event, Turn
 from .presentation import redact
 
@@ -25,7 +26,7 @@ async def turn_progress(runtime: Runtime, turn: Turn) -> list[dict[str, str]]:
     else:
         # Older turns predate the projection. Their native snapshot still offers
         # whatever public commentary remains in that saved conversation.
-        snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id)
+        snapshot = await latest_turn_snapshot(runtime, turn.id)
         messages = saved_commentary(snapshot.messages, turn.id) if snapshot else []
     secrets = [runtime.settings.gateway_key.get_secret_value()]
     if turn.preparation:

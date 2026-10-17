@@ -32,7 +32,7 @@ async def root_events(
     """Child events stay with the child; response indices are scoped by step."""
     started = False
     async for event in stream:
-        if ctx.run_id != ctx.deps.turn_id:
+        if ctx.run_id != ctx.deps.root_run_id:
             continue
         if not started and isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent, FinalResultEvent)):
             started = True

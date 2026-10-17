@@ -324,7 +324,7 @@ class InteractiveDelegation(AbstractCapability[RunScope]):
         if mode == "disabled":
             raise ToolFailed("Delegation is not available for swarm members or at the maximum subagent depth.")
         if (
-            ctx.run_id != ctx.deps.turn_id or not call.tool_call_id
+            ctx.run_id != ctx.deps.root_run_id or not call.tool_call_id
             or args.get("agent_name") != "self" or args.get("model") or args.get("resume") or args.get("background")
         ):
             raise ToolFailed("Choose self without model, resume or background overrides to create a subagent chat.")

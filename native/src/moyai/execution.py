@@ -67,8 +67,8 @@ class AuthorizedActivity(ActivityInboundInterceptor):
                 f"{info.workflow_namespace}/{info.workflow_id}/{info.workflow_run_id}/{info.activity_id}/{info.attempt}",
                 # A workflow retry/reset changes run_id, but does not authorize
                 # paying again for this activity of the same admitted turn.
-                logical_identity=f"{info.workflow_namespace}/{info.workflow_id}/{scope.turn_id}/{info.activity_id}",
-                foreground=isinstance(serialized, dict) and serialized.get("run_id") == scope.turn_id,
+                logical_identity=f"{info.workflow_namespace}/{info.workflow_id}/{scope.root_run_id}/{info.activity_id}",
+                foreground=isinstance(serialized, dict) and serialized.get("run_id") == scope.root_run_id,
             )
             token = INFERENCE_ACTIVITY.set(usage)
             try:
@@ -89,7 +89,7 @@ class AuthorizedActivity(ActivityInboundInterceptor):
             serialized = getattr(wire, "serialized_run_context", {})
             if (
                 getattr(getattr(wire, "call", None), "method", None) == "ensure"
-                and isinstance(serialized, dict) and serialized.get("run_id") == scope.turn_id
+                and isinstance(serialized, dict) and serialized.get("run_id") == scope.root_run_id
             ):
                 async with computer_timing(
                     self.database, scope, "reuse" if getattr(wire, "ref", None) else "cold", ensure=True,

@@ -276,8 +276,12 @@ async def test_computer_first_attempt_success_failure_and_retry_coverage(runtime
     assert metrics([view])["computer"]["failed"] == 1
 
 
-async def test_activity_binds_root_model_and_measures_real_workspace_ensure_contract(runtime, active, monkeypatch):
+@pytest.mark.parametrize("segment", [0, 1])
+async def test_activity_binds_root_model_and_measures_real_workspace_ensure_contract(
+    runtime, active, monkeypatch, segment,
+):
     _, turn, prepared = active
+    prepared.scope.history_segment = segment
     info = SimpleNamespace(
         activity_type="agent__moyai__model_request_stream", workflow_namespace="default",
         workflow_id="workflow", workflow_run_id="run", activity_id="activity", attempt=1,
@@ -291,14 +295,16 @@ async def test_activity_binds_root_model_and_measures_real_workspace_ensure_cont
             return SimpleNamespace(error=None)
 
     interceptor = AuthorizedActivity(Next(), runtime.database)
-    wire = SimpleNamespace(serialized_run_context={"run_id": turn.id}, call=SimpleNamespace(method="ensure"), ref=None)
+    wire = SimpleNamespace(
+        serialized_run_context={"run_id": prepared.scope.root_run_id}, call=SimpleNamespace(method="ensure"), ref=None,
+    )
     request = ExecuteActivityInput(fn=lambda: None, args=[wire, prepared.scope], executor=None, headers={})
     await interceptor.execute_activity(request)
     assert seen[-1].foreground is True and INFERENCE_ACTIVITY.get() is None
     wire.serialized_run_context["run_id"] = "delegate"
     await interceptor.execute_activity(request)
     assert seen[-1].foreground is False
-    wire.serialized_run_context["run_id"] = turn.id
+    wire.serialized_run_context["run_id"] = prepared.scope.root_run_id
     info.activity_type = "agent__moyai__workspace__call"
     await interceptor.execute_activity(request)
     row = await saved(runtime, turn.id, "computer")

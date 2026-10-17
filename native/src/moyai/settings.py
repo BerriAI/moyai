@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     temporal_queue: str = Field(default="moyai-pydantic-v1", validation_alias="TEMPORAL_TASK_QUEUE")
     temporal_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="TEMPORAL_API_KEY")
     temporal_tls: bool = Field(default=False, validation_alias="TEMPORAL_TLS")
+    history_continue_bytes: int = Field(
+        default=8 * 1024 * 1024, ge=16384, le=20 * 1024 * 1024,
+        validation_alias="MOYAI_HISTORY_CONTINUE_BYTES",
+    )
+    history_continue_events: int = Field(
+        default=8000, ge=100, le=10000, validation_alias="MOYAI_HISTORY_CONTINUE_EVENTS",
+    )
     worker_shutdown_seconds: int = Field(
         default=0, ge=0, le=240, validation_alias="MOYAI_WORKER_SHUTDOWN_SECONDS",
     )

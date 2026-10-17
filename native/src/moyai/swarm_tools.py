@@ -109,7 +109,7 @@ async def operate(
     service: SwarmService, scope: RunScope, run_id: str | None, call_id: str | None,
     action: str, arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    if not scope.swarm_id or run_id != scope.turn_id or not call_id:
+    if not scope.swarm_id or run_id != scope.root_run_id or not call_id:
         raise ToolFailed("Only the current admitted swarm member can use these tools.")
     try:
         await service.database.authorize_scope(scope)
@@ -292,7 +292,7 @@ class SwarmCapability(AbstractCapability[RunScope]):
         self.tools = tools
 
     async def for_run(self, ctx: RunContext[RunScope]) -> AbstractCapability[RunScope]:
-        if ctx.deps.swarm_id is None or ctx.run_id != ctx.deps.turn_id:
+        if ctx.deps.swarm_id is None or ctx.run_id != ctx.deps.root_run_id:
             return InactiveSwarm()
         return self
 
