@@ -158,17 +158,36 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                                 issued = tool_steps.get(call_id) if call_id else None
                                 if issued is None:
                                     if isinstance(part, RetryPromptPart):
-                                        add_system(str(part.content), message.timestamp, {"kind": "retry"})
+                                        if private_tool(part.tool_name):
+                                            add_system(
+                                                f"[redacted: result of private tool {part.tool_name} "
+                                                "is hidden in debug traces]",
+                                                message.timestamp,
+                                                {"kind": "retry", "redacted": True},
+                                            )
+                                        else:
+                                            add_system(
+                                                str(part.content), message.timestamp, {"kind": "retry"}
+                                            )
                                     continue
                                 agent_step, private = issued
-                                result_content = None if private or private_tool(part.tool_name) else str(part.content)[:30_000]
+                                private_result = private or private_tool(part.tool_name)
+                                result_content = (
+                                    f"[redacted: result of private tool {part.tool_name} "
+                                    "is hidden in debug traces]"
+                                    if private_result
+                                    else str(part.content)[:30_000]
+                                )
                                 failed = part.part_kind == "retry-prompt" or getattr(part, "outcome", None) == "failed"
                                 observation = agent_step.setdefault("observation", {"results": []})
-                                observation["results"].append({
+                                result: dict[str, Any] = {
                                     "source_call_id": call_id,
                                     "content": result_content,
                                     "extra": {"failed": failed},
-                                })
+                                }
+                                if private_result:
+                                    result["extra"]["redacted"] = True
+                                observation["results"].append(result)
                         if first_request:
                             if user_step is not None and user_parts:
                                 user_step["extra"]["prompt_received"] = "\n".join(user_parts)
@@ -178,13 +197,33 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                         for part in message.parts:
                             if isinstance(part, ToolCallPart):
                                 private = private_tool(part.tool_name)
+                                invalid_arguments = False
+                                if private:
+                                    arguments: dict[str, Any] = {
+                                        "redacted": (
+                                            f"Arguments of private tool {part.tool_name} "
+                                            "are hidden in debug traces."
+                                        )
+                                    }
+                                else:
+                                    try:
+                                        arguments = part.args_as_dict(raise_if_invalid=True)
+                                    except ValueError:
+                                        arguments = {
+                                            "raw_arguments": (
+                                                part.args if isinstance(part.args, str) else str(part.args)
+                                            )
+                                        }
+                                        invalid_arguments = True
                                 call: dict[str, Any] = {
                                     "tool_call_id": part.tool_call_id,
                                     "function_name": part.tool_name,
-                                    "arguments": {} if private else part.args_as_dict(),
+                                    "arguments": arguments,
                                 }
                                 if private:
                                     call["extra"] = {"redacted": True}
+                                elif invalid_arguments:
+                                    call["extra"] = {"invalid_arguments": True}
                                 tool_calls.append(call)
 
                         usage = message.usage
@@ -279,7 +318,7 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
         "notes": (
             f"Moyai debug trace for session {session.title}: user messages, the agent's reasoning, "
             "tool calls and tool results in order. Hand it to Moyai with what you expected to debug "
-            "where it went wrong."
+            "where it went wrong. Arguments and results marked redacted were hidden for privacy, not empty."
         ),
         "final_metrics": final_metrics,
         "extra": {

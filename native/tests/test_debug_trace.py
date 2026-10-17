@@ -63,6 +63,10 @@ def _messages(turn_id: str) -> list[ModelRequest | ModelResponse]:
                 RetryPromptPart(
                     "Provider request failed.", tool_name="missing", tool_call_id="missing-call",
                 ),
+                RetryPromptPart(
+                    "Unmatched private tool result.", tool_name="credentials_run",
+                    tool_call_id="unmatched-private-call",
+                ),
             ],
             timestamp=timestamp,
             run_id=turn_id,
@@ -130,21 +134,32 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
     assert agent["metrics"] == {"prompt_tokens": 120, "completion_tokens": 30, "cached_tokens": 10}
     assert next(step for step in steps if step.get("extra") == {"kind": "steering"})["message"] == "Check the working directory."
     calls = {call["tool_call_id"]: call for call in agent["tool_calls"]}
-    assert calls["private-call"]["arguments"] == {}
+    assert calls["private-call"]["arguments"] == {
+        "redacted": "Arguments of private tool credentials_run are hidden in debug traces."
+    }
     assert calls["private-call"]["extra"] == {"redacted": True}
     assert calls["shell-call"]["arguments"] == {"command": "pwd"}
     observations = {item["source_call_id"]: item for item in agent["observation"]["results"]}
-    assert observations["private-call"]["content"] is None
-    assert observations["private-call"]["extra"] == {"failed": False}
+    private_result = "[redacted: result of private tool credentials_run is hidden in debug traces]"
+    assert observations["private-call"]["content"] == private_result
+    assert observations["private-call"]["extra"] == {"failed": False, "redacted": True}
     assert observations["shell-call"]["content"] == "The command needs correction."
     assert observations["shell-call"]["extra"] == {"failed": True}
     assert any(step["source"] == "system" and step.get("extra") == {"kind": "retry"} for step in steps)
     assert any(
+        step["source"] == "system"
+        and step["message"] == private_result
+        and step.get("extra") == {"kind": "retry", "redacted": True}
+        for step in steps
+    )
+    assert any(
         step["source"] == "system" and step.get("extra") == {"kind": "error", "turn_id": turn.id}
         for step in steps
     )
+    assert "Arguments and results marked redacted were hidden for privacy, not empty." in trace["notes"]
     assert "sensitive command" not in json.dumps(trace)
     assert "private command output" not in json.dumps(trace)
+    assert "Unmatched private tool result." not in json.dumps(trace)
     assert "another run" not in json.dumps(trace)
     assert trace["final_metrics"] == {
         "total_prompt_tokens": 120,
@@ -153,6 +168,33 @@ async def test_debug_trace_exports_atif_with_requester_activity_and_redaction(ru
         "total_steps": len(steps),
         "total_cost_usd": 0.25,
     }
+
+
+async def test_debug_trace_preserves_malformed_tool_arguments(runtime, actor, monkeypatch):
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    turn = await runtime.database.submit(
+        actor, session.id, NewMessage(prompt="Inspect malformed tool arguments.", request_key="malformed-tool-args"),
+    )
+    timestamp = datetime(2026, 6, 20, tzinfo=UTC)
+
+    async def snapshot(runtime: Runtime, turn_id: str):
+        assert turn_id == turn.id
+        return SimpleNamespace(messages=[
+            ModelResponse(
+                parts=[ToolCallPart("shell", '{"path": ', tool_call_id="malformed-call")],
+                model_name="test-model",
+                timestamp=timestamp,
+                usage=RequestUsage(),
+                run_id=turn.id,
+            )
+        ])
+
+    monkeypatch.setattr("moyai.debug_trace.latest_turn_snapshot", snapshot)
+    trace = await debug_trace(runtime, actor, session.id)
+    agent = next(step for step in trace["steps"] if step["source"] == "agent")
+    call = agent["tool_calls"][0]
+    assert call["arguments"] == {"raw_arguments": '{"path": '}
+    assert call["extra"] == {"invalid_arguments": True}
 
 
 async def test_debug_trace_hides_teammate_work_and_denies_nonmembers(runtime, actor, monkeypatch):

@@ -10,8 +10,10 @@ download is available from the session actions menu for native sessions.
 Requester-owned turns include their recorded execution details. Turns started
 by teammates show the saved assistant response without their private reasoning
 or tool activity. Private memory, capability and credential tool arguments and
-results are redacted. Treat the file as sensitive because it can include prompts,
-reasoning, and non-private tool inputs and outputs.
+results are labeled in place with explanatory redaction text and redacted
+metadata, rather than appearing as empty data. Treat the file as sensitive
+because it can include prompts, reasoning, and non-private tool inputs and
+outputs.
 
 To report a problem, attach the JSON file to Moyai and describe what you expected
 instead. Point to the relevant step when possible so the trace can be used to
