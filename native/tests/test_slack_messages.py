@@ -166,6 +166,63 @@ async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, s
 
 
 @pytest.mark.parametrize("product", [False, True])
+async def test_final_markdown_formats_inline_code_and_fences_in_delivered_reply(runtime, active, slack, product):
+    thread = await bind(slack, active)
+    runtime.settings.public_url = slack.service.settings.public_url = "https://moyai.example"
+    code = (
+        "from litellm import completion\n\n"
+        "response = completion(\n"
+        '    model="deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017",\n'
+        '    messages=[{"role": "user", "content": "Keep **literal** markdown."}],\n'
+        ")"
+    )
+    answer = (
+        "**Yes—LiteLLM’s current `main` supports `DeepSeek-V4.1-Flash-1017` via DeepInfra.**\n\n"
+        "Use this model string with `DEEPINFRA_API_KEY` set:\n\n"
+        f"```python\n{code}\n```\n\n"
+        "The [LiteLLM model registry](https://example.com/models) includes **vision and reasoning**.\n"
+        "Literal mentions: <@UTEST0001> <!channel>."
+    )
+    expected = (
+        "*Yes—LiteLLM’s current `main` supports `DeepSeek-V4.1-Flash-1017` via DeepInfra.*\n\n"
+        "Use this model string with `DEEPINFRA_API_KEY` set:\n\n"
+        f"```\n{code}\n```\n\n"
+        "The <https://example.com/models|LiteLLM model registry> includes *vision and reasoning*.\n"
+        "Literal mentions: &lt;@UTEST0001&gt; &lt;!channel&gt;."
+    )
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Working.")
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    requests, messages, handler = transport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
+        await deliver(client, initial)
+        async with runtime.database.sessions.begin() as db:
+            turn = await db.get(Turn, active[1].id)
+            turn.status = "completed"
+            turn.result = runtime.security.seal(answer)
+        await (slack.service.stage() if product else stage_deliveries(runtime))
+        identity = f"product-slack:{turn.id}:completed:0" if product else f"slack-answer:{turn.id}"
+        async with runtime.database.sessions() as db:
+            final = await db.scalar(select(Delivery).where(Delivery.identity == identity))
+        await deliver(client, final)
+
+    assert [path for path, _ in requests] == ["/chat.postMessage", "/chat.update"]
+    assert len(messages) == 1 and requests[-1][1]["ts"] == next(iter(messages))
+    message = requests[-1][1]
+    section = message["blocks"][0]
+    link = f"<https://moyai.example/#{thread.session_id}|[↗︎]>"
+    assert section["text"] == {"type": "mrkdwn", "text": expected + " " + link, "verbatim": True}
+    assert message["text"] == expected + f"\n\nOpen session: https://moyai.example/#{thread.session_id}"
+    assert message["attachments"] == []
+    assert buttons(message) == []
+    assert requests[0][1]["unfurl_links"] is False and requests[0][1]["unfurl_media"] is False
+    if product:
+        assert section["expand"] is True
+        for _path, payload in requests:
+            assert payload["parse"] == "none" and payload["link_names"] is False
+            assert payload["unfurl_links"] is False and payload["unfurl_media"] is False
+
+
+@pytest.mark.parametrize("product", [False, True])
 async def test_progress_uses_ambient_session_link_and_final_clears_old_attachments(
     runtime, active, slack, monkeypatch, product,
 ):
