@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.run import AgentRunResultEvent
 
 from .commentary import text_phase
-from .live_events import ResponseStart
+from .live_events import PUBLIC_UPDATE_PREFIXES, ResponseStart
 
 PRIVATE_TOOLS = {"read_memory", "search_memory", "write_memory", "delete_memory", "load_capability"}
 
@@ -72,7 +72,7 @@ def public_event(event: Any) -> dict[str, Any] | None:
         return {"type": "agent_finished", "run_id": event.result.run_id}
     name = type(event).__name__
     if (
-        name.startswith(("Plan", "Delegation", "AskUser", "EnqueuedMessages"))
+        name.startswith(PUBLIC_UPDATE_PREFIXES)
         and is_dataclass(event) and not isinstance(event, type)
     ):
         value = asdict(event)

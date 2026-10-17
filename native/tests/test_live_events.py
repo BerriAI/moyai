@@ -16,9 +16,10 @@ from moyai.workflow import TurnWorkflow
 
 
 @pytest.mark.parametrize("runtime", ["stream"], indirect=True)
-async def test_native_workflow_stream_scopes_root_text_and_model_rounds(runtime, active):
+@pytest.mark.parametrize("compress", [False, True])
+async def test_native_workflow_stream_scopes_root_text_and_model_rounds(runtime, active, compress):
     _session, turn, _prepared = active
-    converter = DataConverter(payload_codec=EncryptedPayloadCodec(runtime.security, runtime.objects))
+    converter = DataConverter(payload_codec=EncryptedPayloadCodec(runtime.security, runtime.objects, compress=compress))
     environment = await WorkflowEnvironment.start_local(
         plugins=[PydanticAIPlugin()], data_converter=converter,
     )

@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     temporal_queue: str = Field(default="moyai-pydantic-v1", validation_alias="TEMPORAL_TASK_QUEUE")
     temporal_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="TEMPORAL_API_KEY")
     temporal_tls: bool = Field(default=False, validation_alias="TEMPORAL_TLS")
+    compress_temporal_payloads: bool = Field(
+        default=False, validation_alias="MOYAI_COMPRESS_TEMPORAL_PAYLOADS",
+    )
     history_continue_bytes: int = Field(
         default=8 * 1024 * 1024, ge=16384, le=20 * 1024 * 1024,
         validation_alias="MOYAI_HISTORY_CONTINUE_BYTES",

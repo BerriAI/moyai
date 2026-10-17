@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
     from .history_handoff import VERSION as HISTORY_VERSION
     from .history_handoff import AgentCheckpoint, CheckpointSave, HistoryHandoff, HistoryLimits
     from .images import prompt_content
+    from .live_events import public_event_sink
     from .product_continuation_errors import public_preparation_message
     from .product_drain import DRAIN_VERSION, DrainDecision
     from .request_limits import unlimited_model_requests
@@ -183,7 +184,7 @@ class TurnWorkflow(PydanticAIWorkflow):
             )
             initial_requests = conversation.usage.requests
             checkpoint_ref: str | None = None
-            async with self.events, runtime.agent.iter(
+            async with self.events, public_event_sink(self.events.stream), runtime.agent.iter(
                 None if resumed else prompt_content(prepared.prompt, prepared.images),
                 conversation=conversation,
                 run_id=prepared.scope.root_run_id,
