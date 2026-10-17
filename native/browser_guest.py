@@ -5,7 +5,6 @@ CDP methods, debugger URLs, shell fragments, or filesystem paths.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 import time
@@ -73,6 +72,8 @@ async def tabs(pages, trace=None):
 
 async def move_cursor(page, x, y, env, deadline):
     """Move the real X pointer to the actual action, including browser chrome."""
+    import asyncio
+
     geometry = await page.evaluate("""() => ({
         x: screenX + Math.max(0, (outerWidth - innerWidth) / 2),
         y: screenY + Math.max(0, outerHeight - innerHeight)
@@ -86,6 +87,8 @@ async def move_cursor(page, x, y, env, deadline):
 
 def operate(body, deadline, env, *, diagnostics=False):
     """One-shot compatibility entrypoint; the production worker reuses its attachment."""
+    import asyncio
+
     return asyncio.run(operate_async(body, deadline, env, diagnostics=diagnostics))
 
 
@@ -239,6 +242,7 @@ async def perform(browser, body, deadline, env, trace):
 
 async def worker() -> None:
     """Keep the attachment warm; the separate supervisor owns all teardown."""
+    import asyncio
     import os
     import sys
 
@@ -273,6 +277,7 @@ async def worker() -> None:
 
 
 if __name__ == "__main__":
+    import asyncio
     import os
     import sys
 

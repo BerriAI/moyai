@@ -101,8 +101,18 @@ def test_deadline_kills_worker_descendants_and_next_service_recovers(service):
     outside = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"], start_new_session=True)
     try:
         began = time.monotonic()
-        with pytest.raises((ConnectionError, TimeoutError, OSError)):
-            request(state, "hang", seconds=.3)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(state / driver.SOCKET_NAME))
+            client.sendall(json.dumps({
+                "command": {"action": "hang"}, "deadline": time.time()+.3,
+            }).encode()+b"\n")
+            # The caller deliberately waits beyond the deadline. Only the
+            # supervisor can stop this worker; caller timeout/EOF cannot mask it.
+            client.settimeout(2)
+            try:
+                assert client.recv(100) == b""
+            except ConnectionResetError:
+                pass
         process.wait(timeout=2)
         assert time.monotonic() - began < 2
         assert outside.poll() is None
