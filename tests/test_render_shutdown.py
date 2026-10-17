@@ -214,6 +214,9 @@ def test_tcp_listener_stays_closed_until_application_startup_completes(tmp_path)
         port = reservation.getsockname()[1]
     gate = tmp_path / 'admit'
     events = tmp_path / 'startup.jsonl'
+    # An append writer creates the file before publishing its first event.
+    # Exercise that window on every run instead of depending on scheduling.
+    events.touch()
     probe = PROBE.replace(
         "record('owner_acquired')",
         "record('startup_waiting')\n"
@@ -227,7 +230,7 @@ def test_tcp_listener_stays_closed_until_application_startup_completes(tmp_path)
     )
     try:
         deadline = time.monotonic() + 5
-        while not events.exists() and time.monotonic() < deadline:
+        while 'startup_waiting' not in events.read_text() and time.monotonic() < deadline:
             assert process.poll() is None
             time.sleep(.01)
         assert 'startup_waiting' in events.read_text()
@@ -236,6 +239,7 @@ def test_tcp_listener_stays_closed_until_application_startup_completes(tmp_path)
                 socket.create_connection(('127.0.0.1', port), timeout=.1)
             time.sleep(.02)
         gate.touch()
+        deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if '"event": "ready"' in events.read_text():
                 break
