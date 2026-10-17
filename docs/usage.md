@@ -2,6 +2,15 @@
 
 [Install Moyai](../README.md#run-locally) · [Documentation](README.md)
 
+## Answering questions
+
+Question cards show numbered options in a vertical list. Choose an option or
+write your own response, then select **Send**. Multiple-choice questions that
+allow several answers use checkboxes. While an option has focus, number keys
+select an option; arrow keys also navigate single-choice questions. Digits typed
+in the response field remain text. Command/Ctrl+Enter submits a written response.
+Any accompanying action approval still requires an explicit Allow or Decline.
+
 ## Attachments and the computer
 
 The native interface reuses Moyai's navigation style, home constellation and

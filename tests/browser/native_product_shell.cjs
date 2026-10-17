@@ -70,6 +70,12 @@ async function handle(req,res,next) {
   }
   if(url.pathname.startsWith('/api/sessions/')) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
+    if(url.pathname.endsWith('/answers')&&req.method==='POST') {
+      if(state.answerHold)await state.answerHold;
+      if(state.answerError)return json({detail:'The answer could not be saved. Try again.'},503);
+      state.status='idle';state.pending=undefined;
+      return json({id:'resumed-turn',status:'queued'},202);
+    }
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
     if(url.pathname.endsWith('/progress/'+turnId))return json({messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
@@ -276,7 +282,7 @@ for(const attention of ['question','effect'])test(`swarm reveals a pending ${att
     state.status='idle';
     state.effects=[{id:'effect-one',turn_id:turnId,tool_name:'shell',arguments:{command:'example requiring review'}}];
   }
-  await page.getByRole('heading',{name:attention==='question'?'Your input is needed':'An action needs review',exact:true}).waitFor();
+  await page.getByRole('heading',{name:attention==='question'?'Question':'An action needs review',exact:true}).waitFor();
   assert.equal(await page.locator('.transcript').isVisible(),true);
   await page.getByRole('button',{name:'Space',exact:true}).click();
   assert.equal(await page.locator('.transcript').isVisible(),true);
@@ -682,4 +688,104 @@ test('source collisions and identically named legacy folders survive paged inven
   await page.getByRole('button',{name:'Show archived conversations',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/history/sessions'&&req.query.includes('archived=true')&&!req.query.includes('cursor=')));
   assert.equal(await native.count(),0,'changing list scope resets loaded pages');
+});
+
+function colorQuestion({multi=false,approvals=[]}={}) {
+  return {calls:[{tool_call_id:'color-call',tool_name:'ask_user_question',args:{questions:[{
+    header:'Color',question:'Which color should I use?',multi_select:multi,
+    options:[
+      {label:'Blue',description:'A calm blue accent for the workspace.'},
+      {label:'Green',description:'A clear green accent with good contrast.'},
+      {label:'Purple',description:'A muted purple accent that matches the existing theme.'},
+    ],
+  }]}}],approvals};
+}
+const answerRequests=()=>state.requests.filter(row=>row.path.endsWith('/answers')&&row.method==='POST');
+
+for(const width of [1440,768,320])test(`numbered question options stay vertical and keyboard selectable at ${width}px`,async t=>{
+  reset({status:'waiting',pending:colorQuestion()});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('heading',{name:'Question',exact:true}).waitFor();
+  const send=page.getByRole('button',{name:'Send',exact:true});
+  assert.equal(await send.isEnabled(),false);
+  const choices=page.getByRole('radio');
+  assert.equal(await choices.count(),3);
+  const boxes=await Promise.all([0,1,2].map(index=>choices.nth(index).boundingBox()));
+  assert.ok(boxes[0].y+boxes[0].height<=boxes[1].y&&boxes[1].y+boxes[1].height<=boxes[2].y);
+  assert.ok(boxes.every(box=>Math.abs(box.x-boxes[0].x)<1));
+  for(const number of ['1','2','3'])assert.equal(await page.getByRole('radiogroup').getByText(number,{exact:true}).count(),1);
+  await choices.nth(0).focus();await choices.nth(0).press('2');
+  await page.getByRole('radio',{name:'Green',exact:true,checked:true}).waitFor();
+  // Radix schedules roving focus after keydown. Keep the key down until that
+  // focus/selection settles, rather than racing an instantaneous synthetic keyup.
+  await page.keyboard.down('ArrowDown');
+  try {await page.getByRole('radio',{name:'Purple',exact:true,checked:true}).waitFor();}
+  finally {await page.keyboard.up('ArrowDown');}
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await send.click();await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers,[{header:'Color',selected:['Purple'],custom_answer:null}]);
+});
+
+test('free text replaces a selection and typing digits never triggers choice shortcuts',async t=>{
+  reset({status:'waiting',pending:colorQuestion()});
+  const page=await pageFor(t);
+  await page.getByRole('radio',{name:'Blue',exact:true}).click();
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('2 shades of orange');await custom.press('3');
+  assert.equal(await custom.inputValue(),'2 shades of orange3');
+  for(const radio of await page.getByRole('radio').all())assert.equal(await radio.isChecked(),false);
+  await custom.press('Control+Enter');await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers,[{header:'Color',selected:[],custom_answer:'2 shades of orange3'}]);
+});
+
+test('multi-select choices remain checkboxes and returning to choices clears custom text',async t=>{
+  reset({status:'waiting',pending:colorQuestion({multi:true})});
+  const page=await pageFor(t);
+  await page.getByRole('checkbox',{name:'Blue',exact:true}).click();
+  await page.getByRole('checkbox',{name:'Green',exact:true}).click();
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('Amber');
+  assert.equal(await page.getByRole('checkbox',{name:'Blue',exact:true}).isChecked(),false);
+  await page.getByRole('checkbox',{name:'Purple',exact:true}).click();
+  assert.equal(await custom.inputValue(),'');
+  await page.getByRole('checkbox',{name:'Blue',exact:true}).click();
+  await page.getByRole('button',{name:'Send',exact:true}).click();await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers[0].selected,['Purple','Blue']);
+});
+
+test('choosing an answer never implicitly resolves a pending approval',async t=>{
+  reset({status:'waiting',pending:colorQuestion({approvals:[{tool_call_id:'publish',tool_name:'publish_document',args:{title:'Test document'}}]})});
+  const page=await pageFor(t);
+  await page.getByRole('radio',{name:'Blue',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Send',exact:true}).isEnabled(),false);
+  await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).press('Control+Enter');
+  assert.equal(answerRequests().length,0);
+  await page.getByRole('button',{name:'Decline',exact:true}).click();
+  await page.getByRole('button',{name:'Send',exact:true}).click();await waitFor(()=>answerRequests().length===1);
+  assert.deepEqual(answerRequests()[0].body.approvals,{publish:false});
+});
+
+test('failed answer submission preserves text and retries the same request identity',async t=>{
+  reset({status:'waiting',pending:colorQuestion(),answerError:true});
+  const page=await pageFor(t);
+  const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
+  await custom.fill('Soft orange');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'The answer could not be saved.'}).waitFor();
+  assert.equal(await custom.inputValue(),'Soft orange');
+  state.answerError=false;
+  await page.getByRole('button',{name:'Send',exact:true}).click();await waitFor(()=>answerRequests().length===2);
+  assert.deepEqual(answerRequests()[0].body,answerRequests()[1].body);
+});
+
+test('answer controls are disabled while submission is in progress',async t=>{
+  let release;reset({status:'waiting',pending:colorQuestion(),answerHold:new Promise(resolve=>{release=resolve})});
+  t.after(()=>release());
+  const page=await pageFor(t);
+  await page.getByRole('radio',{name:'Blue',exact:true}).click();
+  await page.getByRole('button',{name:'Send',exact:true}).click();await waitFor(()=>answerRequests().length===1);
+  assert.equal(await page.getByRole('button',{name:'Sending…',exact:true}).isEnabled(),false);
+  assert.equal(await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).isEnabled(),false);
+  for(const radio of await page.getByRole('radio').all())assert.equal(await radio.isEnabled(),false);
+  release();
 });

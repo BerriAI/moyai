@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useReducer, useRef, useState } fr
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -36,6 +36,7 @@ import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } fr
 import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
+import { QuestionChoices, type Question } from "./question-choices"
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
@@ -54,7 +55,6 @@ type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { r
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
 type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
-type Question = { header: string; question: string; multi_select?: boolean; options: { label: string; description?: string }[] }
 const settingsDestinations = [
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
   { page: "connections", label: "Connections" }, { page: "secrets", label: "Secrets" },
@@ -863,14 +863,20 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
   const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
   const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
+  const complete = questions.every(({ call, questions }) => questions.every(question => {
+    const key = `${call.tool_call_id}:${question.header}`
+    return Boolean(custom[key]?.trim() || values[key]?.length)
+  })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
   return <>
     {credentials.map(call => {
       const requestId = pending.metadata?.[call.tool_call_id]?.request_id
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
-    {(questions.length > 0 || pending.approvals.length > 0) && <form className="pending" onSubmit={async e => {
-    e.preventDefault(); setBusy(true); setError("")
+    {(questions.length > 0 || pending.approvals.length > 0) && <form className={questions.length ? "question-form" : "pending"} onSubmit={async e => {
+    e.preventDefault()
+    if (busy || unknown || !complete) return
+    setBusy(true); setError("")
     const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
       return { header: question.header, selected: custom[key]?.trim() ? [] : values[key] ?? [], custom_answer: custom[key]?.trim() || null }
@@ -878,14 +884,19 @@ function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pend
     try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }); await onDone() }
     catch (e) { setError(String(e)) } finally { setBusy(false) }
   }}>
-    <h3>Your input is needed</h3>
+    {questions.length
+      ? <div className="question-form-header"><MessageCircleQuestion size={18} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3></div>
+      : <h3>Your input is needed</h3>}
     {questions.map(({ call, questions }) => questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
-      return <fieldset key={key}><legend>{question.question}</legend><div className="question-options">{question.options.map(option => <Button type="button" key={option.label} variant={(values[key] ?? []).includes(option.label) && !custom[key] ? "secondary" : "outline"} aria-pressed={(values[key] ?? []).includes(option.label) && !custom[key]} onClick={() => { setCustom(previous => ({ ...previous, [key]: "" })); setValues(previous => ({ ...previous, [key]: question.multi_select ? (previous[key] ?? []).includes(option.label) ? previous[key].filter(item => item !== option.label) : [...previous[key] ?? [], option.label] : [option.label] })) }} title={option.description}>{option.label}</Button>)}</div><Input aria-label={`Custom answer for ${question.header}`} placeholder="Or write your own answer…" value={custom[key] ?? ""} onChange={e => setCustom(previous => ({ ...previous, [key]: e.target.value }))} /></fieldset>
+      return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={busy}
+        onSelect={selected => setValues(previous => ({ ...previous, [key]: selected }))}
+        onCustomAnswer={value => setCustom(previous => ({ ...previous, [key]: value }))} />
     }))}
-    {pending.approvals.map(call => <fieldset key={call.tool_call_id}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
+    {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={busy} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
     {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
-    {error && <p className="error" role="alert">{error}</p>}<Button type="submit" disabled={busy || unknown}>{busy ? "Submitting…" : "Continue"}</Button>
+    {error && <p className="error" role="alert">{error}</p>}
+    <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={busy || unknown || !complete}>{busy ? "Sending…" : questions.length ? "Send" : "Continue"}</Button></div>
   </form>}
   </>
 }
