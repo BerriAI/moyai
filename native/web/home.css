@@ -3,13 +3,10 @@
 .home-crumb, .home-visibility { color: var(--ui-muted); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; }
 .home-header-actions { display: flex; align-items: center; gap: 16px; }
 .home-header-actions > button { color: var(--ui-muted); }
-.home-space { position: absolute; inset: 0; min-height: 850px; overflow: hidden; z-index: -1; pointer-events: none; }
-.home-star { position: absolute; border-radius: 50%; background: white; }
 .home-orbit { position: absolute; width: 330px; height: 330px; right: 30px; top: 80px; border: 1px solid #ffffff14; border-radius: 50%; }
 .home-orbit-outer { width: 760px; height: 760px; right: -200px; top: -135px; border-color: #ffffff0d; }
-.home-sculpture { position: absolute; width: 190px; height: 190px; right: 100px; top: 150px; }
-.home-sculpture::before { content: ""; position: absolute; inset: -35px; border-radius: 50%; background: radial-gradient(circle, #8d64c522, transparent 68%); pointer-events: none; z-index: -1; }
-.home-sculpture > img { position: absolute; width: 90px; height: 90px; top: 50px; left: 50px; object-fit: contain; }
+.home-sculpture { position: absolute; width: 220px; height: 220px; right: 85px; top: 135px; }
+.home-sculpture > img { position: absolute; width: 100%; height: 100%; inset: 0; object-fit: contain; }
 .home-sculpture.sculpture-ready > img { visibility: hidden; }
 .home-sculpture canvas { width: 100%; height: 100%; cursor: grab; touch-action: none; outline-offset: 3px; }
 .home-sculpture canvas.dragging { cursor: grabbing; }
@@ -44,9 +41,12 @@
 .home .suggestions small { display: none; }
 @media (max-width: 1250px) {
   .home { padding-inline: 28px; }
-  .home-sculpture { right: 65px; }
+  .home-sculpture { right: 50px; }
   .home-orbit { right: -5px; }
   .home-orbit-outer { right: -240px; }
+}
+@media (min-width: 601px) and (max-width: 1000px) {
+  .home-content { margin-top: 315px; }
 }
 @media (max-width: 600px) {
   .home { padding: 20px 16px 28px; }
@@ -54,8 +54,6 @@
   .home-header-actions { gap: 6px; }
   .home-crumb, .home-visibility { font-size: 10px; letter-spacing: .12em; }
   .home-sculpture { height: 160px; width: 160px; top: 80px; right: 25px; }
-  .home-sculpture::before { inset: -20px; }
-  .home-sculpture > img { width: 80px; height: 80px; left: 40px; top: 40px; }
   .home-orbit { width: 260px; height: 260px; right: -25px; top: 30px; }
   .home-orbit-outer { width: 620px; height: 620px; right: -205px; top: -150px; }
   .home-content { margin-top: 240px; }

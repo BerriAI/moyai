@@ -1,7 +1,7 @@
-/* Reserve a separate resource track. Chat and its composer never sit behind it.
-   The outer Computer/PR panel keeps its existing resizable 65:35 split. */
-.chat:has(> .chat-layout) { container-type: inline-size; }
+/* This menu floats inside chat without changing its geometry.
+   Only the independent Computer/PR side panel changes the outer split. */
 .chat-layout {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -10,8 +10,9 @@
   height: 100%;
   flex: 1;
 }
-.chat-layout:has(.workspace-overlay-content) { grid-template-columns: minmax(0, 1fr) 360px; }
 .chat-content {
+  position: relative;
+  isolation: isolate;
   grid-column: 1;
   grid-row: 1;
   display: flex;
@@ -20,23 +21,25 @@
   min-height: 0;
 }
 .workspace-overlay-host {
-  grid-column: 2;
-  grid-row: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 40;
   min-inline-size: 0;
   min-block-size: 0;
-  padding: 8px;
   overflow: hidden;
+  pointer-events: none;
 }
 .workspace-overlay-host:empty { display: none; }
 
 .workspace-overlay-content {
   --workspace-overlay-edge: 8px;
   --workspace-overlay-offscreen: calc(100% + var(--workspace-overlay-edge));
-  position: relative;
+  position: absolute;
+  inset-block-start: var(--workspace-overlay-edge);
+  inset-inline-end: var(--workspace-overlay-edge);
   box-sizing: border-box;
-  inline-size: min(100%, 360px);
-  margin-inline-start: auto;
-  max-block-size: 100%;
+  inline-size: min(360px, calc(100% - 2 * var(--workspace-overlay-edge)));
+  max-block-size: min(560px, calc(100% - 2 * var(--workspace-overlay-edge)));
   min-inline-size: 0;
   overflow: auto;
   overscroll-behavior: contain;
@@ -81,7 +84,7 @@
   border: 0;
 }
 
-/* One scroll owner, bounded by the reserved track. */
+/* One scroll owner, bounded by chat rather than a viewport-wide overlay. */
 .workspace-overlay-content > .workspace-overview.workspace-picker {
   max-height: none;
   overflow: visible;
@@ -91,15 +94,6 @@
 .workspace.panel-expanded .workspace-overlay-host { visibility: hidden; }
 @media (max-width: 1000px) {
   .workspace.with-panel .workspace-overlay-host { visibility: hidden; }
-}
-
-@container (max-width: 740px) {
-  .chat-layout:has(.workspace-overlay-content) {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) min(40%, 280px);
-  }
-  .workspace-overlay-host { grid-column: 1; grid-row: 2; }
-  .chat-layout:has(.workspace-overlay-content) .chat-content { --chat-gutter: 16px; }
 }
 
 .conversation .header-controls > .workspace-orbit-key {

@@ -67,7 +67,7 @@ type ContentProps = Omit<React.ComponentProps<typeof DialogPrimitive.Content>, "
 }
 
 /**
- * Place in chat-layout alongside chat-content. Its grid track reserves space.
+ * Place in chat-layout alongside chat-content. Absolute placement never reflows chat.
  * Keep this component mounted while closed so Radix can finish its exit motion.
  *
  * The shared DialogContent adds a viewport overlay/centered portal. Using its

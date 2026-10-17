@@ -215,22 +215,26 @@ test('sidebar PR icons retain multi-PR selection without numeric badges',async t
   await page.getByRole('button',{name:'Review change 13 example/project#13',exact:true}).waitFor();
 });
 
-test('orbit key shows failed subagent attention while closed and reserves chat space when opened',async t=>{
+test('workspace overlay preserves chat geometry while the side panel resizes it',async t=>{
   reset({status:'completed',workspaceData:{links:[],files:[],sources:[],subagents_limited:false,
     subagents:[{id:'agent-one',parent_id:'',name:'Newton',avatar:0,status:'failed',can_inspect:true,started_at:'',depth:0}]}});
   const page=await pageFor(t);
   const key=page.getByRole('button',{name:'Open workspace',exact:true});
   await key.locator('.workspace-orbit-alert').waitFor();
   assert.equal(await key.getAttribute('aria-expanded'),'false');
+  const before = await Promise.all([page.locator('.chat-content').boundingBox(),page.locator('.composer-wrap').boundingBox()]);
   await key.click();
   const dialog=page.getByRole('dialog',{name:'Workspace resources',exact:true});
   await dialog.waitFor();
-  const [chat,resources]=await Promise.all([page.locator('.chat-content').boundingBox(),dialog.boundingBox()]);
-  assert.ok(resources.x>=chat.x+chat.width||resources.y>=chat.y+chat.height);
+  assert.deepEqual(await Promise.all([page.locator('.chat-content').boundingBox(),page.locator('.composer-wrap').boundingBox()]),before);
   assert.equal(await dialog.getByText('Failed',{exact:true}).count(),1);
   await page.keyboard.press('Escape');
   await dialog.waitFor({state:'detached'});
   assert.equal(await page.getByRole('button',{name:'Open workspace',exact:true}).locator('.workspace-orbit-alert').count(),1);
+  assert.deepEqual(await page.locator('.chat-content').boundingBox(),before[0]);
+  await page.getByRole('button',{name:'Open side panel',exact:true}).click();
+  await page.getByRole('separator',{name:'Resize chat and side panel',exact:true}).waitFor();
+  assert.ok((await page.locator('.chat-content').boundingBox()).width < before[0].width);
 });
 
 test('workspace attention refresh preserves the active skill picker and draft',async t=>{

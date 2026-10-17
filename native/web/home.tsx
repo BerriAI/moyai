@@ -5,9 +5,9 @@ import { SkillComposer } from "./skill-composer"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { DecodeHeadline } from "./decode-headline"
-import { HomeSpace } from "./home-space"
+import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
-import logo from "./assets/moyai-logo.png"
+import meteorPoster from "./assets/moyai-meteor-poster.webp"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { NewConversation, Session, Turn } from "./conversation-state"
@@ -117,8 +117,8 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
       <Button type="button" variant="ghost" size="icon-sm" aria-label={animateHeadline ? "Pause headline animation" : "Resume headline animation"} aria-pressed={!animateHeadline} onClick={() => setAnimateHeadline(value => !value)}>{animateHeadline ? <Pause size={13} /> : <Play size={13} />}</Button>
       <span className="home-visibility">{isPrivate ? "Private" : "Shared"}</span>
     </div></div>
-    <HomeSpace />
-    <div className="home-sculpture" ref={sculpture}><img src={logo} alt="Moyai" /></div>
+    <SpaceBackdrop />
+    <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
     <div className="home-content">
       <p className="home-eyebrow">A space for your next big idea</p>
       <DecodeHeadline paused={!animateHeadline || busy || Boolean(draft)} />

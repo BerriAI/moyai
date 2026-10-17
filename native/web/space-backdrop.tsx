@@ -1,4 +1,5 @@
 import React, { memo } from "react"
+import "./space-backdrop.css"
 
 // Stable positions across renders, with no canvas render loop or random layout.
 const stars = Array.from({ length: 140 }, (_, index) => {
@@ -10,9 +11,9 @@ const stars = Array.from({ length: 140 }, (_, index) => {
     opacity: .15 + sample(41.421) * .45, width: index % 7 === 0 ? 2 : 1, height: index % 7 === 0 ? 2 : 1 }
 })
 
-export const HomeSpace = memo(function HomeSpace() {
-  return <div className="home-space" aria-hidden="true">
-    {stars.map((style, index) => <span key={index} className="home-star" style={style} />)}
-    <div className="home-orbit home-orbit-outer" /><div className="home-orbit" />
+export const SpaceBackdrop = memo(function SpaceBackdrop({ variant = "home" }: { variant?: "home" | "chat" }) {
+  return <div className={`space-backdrop ${variant}-space`} aria-hidden="true">
+    {stars.map((style, index) => <span key={index} className="space-star" style={style} />)}
+    {variant === "home" && <><div className="home-orbit home-orbit-outer" /><div className="home-orbit" /></>}
   </div>
 })

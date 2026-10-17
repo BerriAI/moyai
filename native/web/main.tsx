@@ -17,6 +17,7 @@ import logo from "./assets/moyai-logo.png"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { Home } from "./home"
+import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
@@ -660,6 +661,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
   const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
       <div className="chat-layout"><div className="chat-content">
+        {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
         {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
           space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}

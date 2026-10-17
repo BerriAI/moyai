@@ -7,8 +7,10 @@ description: Build or refine Moyai's native React frontend using its established
 
 Preserve the space workspace: near-black neutral surfaces, lavender actions,
 near-white text, local Share Tech Mono typography and opaque composer panels. The home screen
-uses deterministic stars, the decode headline and interactive Moyai sculpture; chat and Settings stay
-quiet for sustained work. Inspect the current screens before changing them.
+uses deterministic stars, the decode headline and interactive Moyai meteor.
+Chats reuse the static stars at lower brightness; Settings stay quiet for sustained
+work. The workspace menu floats without reflowing chat; only the independent side
+panel changes chat proportions. Inspect current screens before changing them.
 
 ## Sources and controls
 

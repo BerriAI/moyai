@@ -167,7 +167,7 @@ async function geometry(page) {
   });
 }
 
-test('workspace resources reserve space without overlapping chat across live ratio changes', async t => {
+test('workspace floats within chat across live ratio changes without resizing it', async t => {
   const page = await pageFor(t);
   const content = await opened(page);
   for (const size of ['65%', '380px', '820px']) {
@@ -180,7 +180,7 @@ test('workspace resources reserve space without overlapping chat across live rat
     assert(box.content.bottom <= box.chat.bottom);
     assert(box.content.right < box.panel.left);
     assert(box.content.right < box.workspace.right - 100, 'Not anchored to workspace/viewport far right');
-    assert(box.content.left >= box.body.right || box.content.top >= box.body.bottom, 'Resources must not overlap chat');
+    assert.deepEqual(box.body, box.chat, 'The floating menu must not reserve chat space');
   }
   assert.deepEqual(await content.locator('section').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))),
     ['Pull requests', 'Subagents', 'Outputs']);
@@ -239,11 +239,12 @@ test('existing attach-link dialog consumes Escape before the workspace overlay',
 for (const width of [768, 320]) {
   test(`closed resource panel leaves overlay inside the ${width}px main chat`, async t => {
     const page = await pageFor(t, { viewport: { width, height: 800 } }, '?panel=closed');
+    const before = await page.locator('.chat-content').boundingBox();
     await opened(page);
     const box = await geometry(page);
     assert(box.content.left >= box.chat.left && box.content.right <= box.chat.right);
     assert(box.content.bottom <= box.chat.bottom && box.content.width <= 360.1);
-    assert(box.content.top >= box.body.bottom, 'Compact resources reserve a row below chat');
+    assert.deepEqual(await page.locator('.chat-content').boundingBox(), before, 'Compact menu must not resize chat');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   });
 }

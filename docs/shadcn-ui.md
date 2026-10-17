@@ -13,14 +13,25 @@ sidebar and workspace styles own application layout.
 
 The orbit workspace key uses the shared Button and Radix Dialog behavior, including
 Escape, outside dismissal and the Command/Control-period shortcut. Its resource
-menu reserves a column beside chat, or a bounded row below it on compact layouts;
-it must not cover the transcript or composer. The Computer/resource panel retains
-its independent resizable split.
+menu floats within the chat area and must not resize the transcript, move the
+composer or change their scroll positions. The independent Computer/resource
+side panel still resizes the chat through its existing split.
 
 Images/fonts belong to `native/web/assets`; public files and the sculpture model
 belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
+
+The meteor is an actual cratered mesh, generated offline with
+`uv run --script scripts/assets/generate_moyai_meteor.py`; generation is not a
+runtime or normal build step. Its pinned script dependencies produce the bundled
+GLB with matte material, baked vertex shading and embedded mineral surface maps.
+Use cool gray lighting and a restrained rim light; avoid a CSS glow around the silhouette.
+The Three.js viewer remains lazy,
+supports drag and keyboard rotation, and disposes its geometry, materials and
+textures/shadow maps on unmount. Embedded images use TextureLoader so the existing
+content security policy can load them through `img-src`. The supplied reference
+image is the lightweight fallback.
 
 ```sh
 npm ci
