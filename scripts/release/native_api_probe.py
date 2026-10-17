@@ -42,11 +42,15 @@ def health_identity(response, options, state):
             'api_owner': health['identity'] if options['role'] == 'api' else None}
 
 
-def probe(options):
+def require_configuration():
     require(os.environ.get('MOYAI_CORE') == 'pydantic'
             and os.environ.get('MOYAI_PRODUCT_MODE') == 'existing'
             and os.environ.get('MOYAI_NATIVE_SCHEMA_MODE', 'verify') == 'verify'
             and os.environ.get('MOYAI_PRODUCT_LOCAL_REHEARSAL', 'false') == 'false')
+
+
+def probe(options):
+    require_configuration()
     return _rolling_probe.probe(options, snapshot_fn=snapshot, health_fn=health_identity)
 
 

@@ -345,7 +345,7 @@ class Release:
         env = self.environment(service_id)
         if (env.get('MOYAI_CORE', 'legacy') not in {'legacy', 'pydantic'}
                 or (env.get('MOYAI_CORE') == 'pydantic' and not getattr(self, 'native_release', False))):
-            raise ReleaseError('Native services require maintenance or a compatible API release with native receipt checks.')
+            raise ReleaseError('Native services require maintenance or a compatible native release with receipt checks.')
         sha = live[0]['commit']['id']
         if (not re.fullmatch('[0-9a-f]{40}', sha) or env.get('MOYAI_BUILD_SHA') != sha
                 or env.get('MOYAI_RUNTIME_ROLE') != role or env.get('MAINTENANCE_DRAIN') != 'false'
@@ -567,12 +567,12 @@ def main():
                                          automation_probe=SSHAutomationProbe(key_path, connections=connections),
                                          preflight_only=args.preflight)
         elif args.release_type == 'rolling':
-            from scripts.release.rolling_deploy import RollingRelease
-            from scripts.release.online_migration import SSHMigration
-            release = RollingRelease(render, github, SSHProbe(key_path, source=ROOT / 'rolling_probe.py', connections=connections),
-                                     args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
-                                     migrate=SSHMigration(key_path),
-                                     preflight_only=args.preflight)
+            from scripts.release.native_rolling_deploy import NativeRollingRelease
+            from scripts.release.native_rolling_probe import SSHNativeRollingProbe
+            release = NativeRollingRelease(
+                render, github, SSHNativeRollingProbe(key_path, connections=connections),
+                args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
+                preflight_only=args.preflight)
         elif args.release_type == 'api':
             from scripts.release.api_deploy import APIRelease
             from scripts.release.native_api_probe import SSHAPIProbe

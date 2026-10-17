@@ -5,12 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: API replaces only a compatible API/UI; maintenance pauses all four roles for runtime or schema upgrades
+        description: API replaces a compatible API/UI; rolling replaces compatible native roles; maintenance handles schema or protocol upgrades
         type: choice
         options: [rolling, api, coordinated, maintenance]
         default: maintenance
       execution_core:
-        description: Use preserve for API releases; pydantic selects the maintenance upgrade
+        description: Use preserve for API or rolling releases; pydantic selects the maintenance upgrade
         type: choice
         options: [pydantic, preserve]
         default: pydantic

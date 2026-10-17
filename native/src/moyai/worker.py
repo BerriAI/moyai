@@ -62,9 +62,9 @@ def make_worker(runtime: Runtime) -> WorkerPools:
     drain = getattr(runtime, "product_drain", None)
     activities = [*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities, *SWARM_ACTIVITIES]
     activity_pools = ("control", "model", "tools")
-    # WorkerPools retires pollers sequentially. Share the process's grace budget
-    # so adding activity pools cannot exceed the HTTP/container shutdown limits.
-    shutdown_timeout = timedelta(seconds=runtime.settings.worker_shutdown_seconds / (1 + len(activity_pools)))
+    # WorkerPools starts all poller shutdowns concurrently, so each active
+    # operation gets the shared process budget without multiplying that budget.
+    shutdown_timeout = timedelta(seconds=runtime.settings.worker_shutdown_seconds)
     legacy = Worker(
         runtime.client,
         identity=identity,

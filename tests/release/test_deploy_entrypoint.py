@@ -84,3 +84,34 @@ def test_maintenance_entrypoint_selects_packaged_probe_and_single_shot_migrator(
         for signum, handler in handlers.items():
             deploy.signal.signal(signum, handler)
     assert calls == ['maintenance']
+
+
+def test_rolling_entrypoint_selects_native_receipt_and_membership_checks(tmp_path, monkeypatch):
+    from scripts.release import deploy, native_rolling_deploy
+    from scripts.release.native_rolling_probe import SSHNativeRollingProbe
+    calls = []
+    class Controller:
+        def __init__(self, render, github, probe, receipt, **kwargs):
+            assert isinstance(probe, SSHNativeRollingProbe)
+            assert kwargs['preflight_only'] is True and kwargs['api_service_id'] == 'srv-syntheticapi'
+            assert 'migrate' not in kwargs and 'native_control' not in kwargs
+            self.record = {'status': 'preflight_passed', 'phase': 'native rolling preflight'}
+        def run(self):
+            calls.append('rolling')
+    monkeypatch.setattr(native_rolling_deploy, 'NativeRollingRelease', Controller)
+    for key, value in {'GITHUB_REPOSITORY': 'BerriAI/moyai', 'GITHUB_REF': 'refs/heads/main',
+        'GITHUB_SHA': 'a' * 40, 'GITHUB_RUN_ID': '1', 'RENDER_DEPLOY_SSH_KEY': 'synthetic-key',
+        'RENDER_DEPLOY_API_KEY': 'synthetic-render-token', 'GH_TOKEN': 'synthetic-gh-token',
+        'MOYAI_API_SERVICE_ID': 'srv-syntheticapi'}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('GITHUB_STEP_SUMMARY', raising=False)
+    monkeypatch.setattr(sys, 'argv', ['deploy', '--release-type', 'rolling', '--core', 'preserve',
+                                    '--preflight', '--receipt', str(tmp_path / 'receipt.json')])
+    handlers = {signum: deploy.signal.getsignal(signum)
+                for signum in (deploy.signal.SIGINT, deploy.signal.SIGTERM)}
+    try:
+        deploy.main()
+    finally:
+        for signum, handler in handlers.items():
+            deploy.signal.signal(signum, handler)
+    assert calls == ['rolling']
