@@ -66,22 +66,33 @@ class ProductSlackFiles:
                 return old
         return row
 
-    async def prepare(self, actor, principal, event: dict, provenance: dict) -> dict[str, Any]:
+    async def prepare(self, actor, principal, event: dict | list[dict], provenance: dict) -> dict[str, Any]:
         # Native ingress already retains the signed Slack event. Only its file
         # identifiers cross into the canonical downloader, which validates each.
-        files = event.get("files")
-        identities = list(dict.fromkeys(
-            item["id"] for item in files
-            if isinstance(item, dict) and isinstance(item.get("id"), str)
-        )) if isinstance(files, list) else []
+        messages = event if isinstance(event, list) else [event]
+        identities = []
+        seen = set()
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            files = message.get("files")
+            if not isinstance(files, list):
+                continue
+            message_ts = message.get("ts")
+            message_ts = message_ts if isinstance(message_ts, str) else provenance["message_ts"]
+            for item in files:
+                file_id = item.get("id") if isinstance(item, dict) else None
+                if isinstance(file_id, str) and file_id not in seen:
+                    seen.add(file_id)
+                    identities.append((file_id, message_ts))
         uploads, images, context = [], [], []
         total = 0
-        for file_id in identities:
+        for file_id, message_ts in identities:
             # Private drafts are tied to the authenticated sender and exact
             # transport message. No source run/message rows are fabricated.
             identity = str(uuid5(NAMESPACE_URL, json.dumps([
                 "moyai-slack-input-v1", actor.id, provenance["team_id"], provenance["channel_id"],
-                provenance["message_ts"], file_id,
+                message_ts, file_id,
             ])))
             inspection_id = str(uuid5(NAMESPACE_URL, identity + "/inspection-v1"))
             async with self.runtime.database.sessions() as db:
