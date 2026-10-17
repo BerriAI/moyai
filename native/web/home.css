@@ -1,16 +1,13 @@
 .home { height: 100%; overflow: auto; position: relative; isolation: isolate; padding: 24px 56px 36px; }
-.home::after { content: ""; position: absolute; inset: 0; min-height: 850px; z-index: 1; pointer-events: none; background: radial-gradient(ellipse 540px 370px at calc(100% - 195px) 250px, rgb(111 114 159 / 30%), rgb(52 55 86 / 16%) 48%, transparent 78%), linear-gradient(170deg, transparent 8%, rgb(10 10 18 / 12%) 35%, transparent 70%); }
 .home-orbit { position: absolute; width: 330px; height: 330px; right: 30px; top: 80px; border: 1px solid #ffffff14; border-radius: 50%; }
 .home-orbit-outer { width: 760px; height: 760px; right: -200px; top: -135px; border-color: #ffffff0d; }
-.home-sculpture { position: absolute; width: 220px; height: 220px; right: 85px; top: 135px; filter: saturate(.65) contrast(.78) brightness(.82); animation: sculpture-float 12s ease-in-out infinite; animation-play-state: paused; }
-.home-sculpture.sculpture-floating { animation-play-state: running; }
-@keyframes sculpture-float { 0%, 100% { translate: 0 -5px; } 50% { translate: 0 5px; } }
+.home-sculpture { position: absolute; width: 220px; height: 220px; right: 85px; top: 135px; }
 .home-sculpture > img { position: absolute; width: 100%; height: 100%; inset: 0; object-fit: contain; }
 .home-sculpture.sculpture-ready > img { visibility: hidden; }
 .home-sculpture canvas { width: 100%; height: 100%; cursor: grab; touch-action: none; outline-offset: 3px; }
 .home-sculpture canvas.dragging { cursor: grabbing; }
 .home-sculpture canvas:focus-visible { outline: 2px solid var(--ui-primary); border-radius: 12px; }
-.home-content { position: relative; z-index: 2; max-width: 820px; margin: clamp(235px, 29vh, 330px) 0 0; text-align: left; }
+.home-content { position: relative; max-width: 820px; margin: calc(clamp(235px, 29vh, 330px) + 32px) 0 0; text-align: left; }
 .home-eyebrow { font-size: 12px; letter-spacing: .28em; color: var(--ui-muted); text-transform: uppercase; margin-bottom: 20px; }
 .home .decode-headline { display: flex; flex-direction: column; gap: 4px; font: 400 clamp(32px, 5.3vw, 76px)/1.02 var(--ui-font-mono); letter-spacing: -.04em; margin: 0 0 44px; }
 .decode-line { position: relative; display: block; width: max-content; max-width: 100%; white-space: pre; }
@@ -38,19 +35,18 @@
   .home-orbit-outer { right: -240px; }
 }
 @media (min-width: 601px) and (max-width: 1000px) {
-  .home-content { margin-top: 315px; }
+  .home-content { margin-top: 347px; }
 }
 @media (max-width: 600px) {
   .home { padding: 20px 16px 28px; }
   .home-sculpture { height: 160px; width: 160px; top: 80px; right: 25px; }
-  .home::after { background: radial-gradient(ellipse 320px 280px at calc(100% - 105px) 160px, rgb(111 114 159 / 30%), rgb(52 55 86 / 16%) 48%, transparent 78%); }
   .home-orbit { width: 260px; height: 260px; right: -25px; top: 30px; }
   .home-orbit-outer { width: 620px; height: 620px; right: -205px; top: -150px; }
-  .home-content { margin-top: 240px; }
+  .home-content { margin-top: 272px; }
   .home-eyebrow { font-size: 11px; letter-spacing: .15em; }
   .home .decode-headline { font-size: clamp(30px, 8vw, 44px); margin-bottom: 36px; }
   .home-composer .send-actions { width: auto; max-width: 100%; }
   .home-composer .send-actions [data-slot="select-trigger"] { max-width: 175px; font-size: 12px !important; }
   .home-composer-hint { flex-wrap: wrap; }
 }
-@media (prefers-reduced-motion: reduce) { .home-sculpture, .decoded .decode-caret { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .decoded .decode-caret { animation: none; } }

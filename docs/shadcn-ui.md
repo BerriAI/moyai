@@ -26,20 +26,17 @@ belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
-The home screen uses the supplied Silent Stone Orbit mesh and its PBR texture
-maps from every viewing angle. The Three.js viewer loads lazily and supports
-drag and keyboard rotation; Home resets the view. A matching rendered image is
-the loading and WebGL fallback. See the
-[asset conversion notes](../scripts/assets/meshy-rock.md).
-A faint atmospheric layer sits over the rock and stars, beneath the sharp text
-and composer, to give the scene depth without blocking rotation controls.
+The home screen keeps the original meteor's frontal photograph and irregular oval
+outline, with the supplied Meshy geometry for the sides and back.
+`frontend/moyai-original-surface.ts` fades the reference image into the textured
+stone as the rock turns. The Three.js viewer loads lazily and supports drag and
+keyboard rotation; Home resets the view. The original image remains the loading
+and WebGL fallback. See the [original-profile asset notes](../scripts/assets/original-profile.md).
 
 The headline decodes once per home-screen visit; its cursor blinks five times,
-then disappears. The rock
-floats vertically by five pixels in each direction over a twelve-second cycle, using CSS so idle
-WebGL scenes do not continuously render. Motion stops offscreen, in background
-tabs, and when reduced motion is enabled. Geometry, materials, textures,
-reflection targets and shadow maps are disposed on unmount.
+then disappears. The rock stays still until rotated. Rendering stops offscreen
+and in background tabs; reduced motion disables rotation inertia. Geometry,
+materials, textures, reflection targets and shadow maps are disposed on unmount.
 
 ```sh
 npm ci
