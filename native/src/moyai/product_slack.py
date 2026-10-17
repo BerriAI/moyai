@@ -145,6 +145,7 @@ class ProductSlack:
         self.events = SlackEvents(self)
         self.inbox = HookInbox(self.store, self, list)
         self.delivery_task: asyncio.Task[None] | None = None
+        self.activity_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""
@@ -152,10 +153,15 @@ class ProductSlack:
             raise RuntimeError("Product Slack background lifecycle already started.")
         self.inbox.start()
         self.delivery_task = asyncio.create_task(self.watch(), name="product-slack-delivery")
+        self.activity_task = asyncio.create_task(self.runtime.slack_activity.watch(), name="product-slack-activity")
 
     async def close(self) -> None:
         """Parent retains its coordinator lock until this drain returns."""
         await self.inbox.close()
+        if self.activity_task is not None:
+            self.activity_task.cancel()
+            await asyncio.gather(self.activity_task, return_exceptions=True)
+            self.activity_task = None
         if self.delivery_task is not None:
             self.delivery_task.cancel()
             await asyncio.gather(self.delivery_task, return_exceptions=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, Double, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -265,6 +265,20 @@ class SlackInbox(Base):
     payload: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class SlackActivity(Base):
+    """Retryable native status, independent of non-replayable message deliveries."""
+
+    __tablename__ = "moyai_slack_activity"
+    thread_id: Mapped[str] = mapped_column(ForeignKey("moyai_slack_threads.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(200), default="")
+    delivery_version: Mapped[str] = mapped_column(String(64), default="")
+    refreshed_at: Mapped[float] = mapped_column(Double, default=0)
+    retry_at: Mapped[float] = mapped_column(Double, default=0)
+    checked_at: Mapped[float] = mapped_column(Double, default=0)
+    claim_id: Mapped[str] = mapped_column(String(36), default="")
+    claim_until: Mapped[float] = mapped_column(Double, default=0)
 
 
 class Delivery(Base):
