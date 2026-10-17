@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useRef, useState } from "react"
-import { Archive, Check, ChevronRight, Copy, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
+import { Archive, Check, ChevronRight, Copy, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -10,6 +10,7 @@ export type SidebarSession = {
   id: string; title: string; owner_id: string; status: string; archived: boolean; deleted?: boolean
   pinned?: boolean; folder?: string; participated?: boolean; created_by_me?: boolean; unread?: boolean; updated_at?: string
   surface?: string
+  parent_session_id?: string | null
   source?: "native" | "legacy"; key?: string; url?: string; read_only?: boolean; deleting?: boolean; folder_id?: string | null
   pull_requests?: { url: string; title: string; repository: string; number: number; state: "open" | "closed" | "merged" | "unknown"; draft: boolean; accessible: boolean; error?: string }[]
 }
@@ -53,7 +54,9 @@ export function ActionItem({ children, onClick, disabled }: { children: React.Re
   return <Button type="button" role="menuitem" variant="ghost" disabled={disabled} onClick={onClick}>{children}</Button>
 }
 
-export function SessionMenu({ session: row, header = false }: { session: SidebarSession; header?: boolean }) {
+export function SessionMenu({ session: row, header = false, onOpenSideChat }: {
+  session: SidebarSession; header?: boolean; onOpenSideChat?: () => void
+}) {
   const actions = useSessionActions()
   const owner = row.owner_id === actions.userId
   return <ActionMenu header={header} label={header ? "Session actions" : `Session actions for ${row.title}`}>{close => {
@@ -64,6 +67,7 @@ export function SessionMenu({ session: row, header = false }: { session: Sidebar
     const editor = (action: Action) => { close(); actions.openEditor({ action, session: row }) }
     return <>
       {row.deleted ? <ActionItem disabled={!owner || actions.busy} onClick={() => editor("restore")}><RotateCcw />Restore session</ActionItem> : <>
+        {onOpenSideChat && <ActionItem onClick={() => { close(); onOpenSideChat() }}><PanelRightOpen />Open in side chat</ActionItem>}
         <ActionItem disabled={actions.busy} onClick={() => editor("move")}><Folder />Folder<ChevronRight className="trailing" /></ActionItem>
         <ActionItem disabled={!owner || actions.busy} onClick={() => editor("rename")}><Pencil />Rename</ActionItem>
         <ActionItem onClick={() => { close(); actions.copy(row) }}><Copy />Copy session link</ActionItem>

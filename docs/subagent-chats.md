@@ -4,8 +4,20 @@ Ask a normal chat to delegate three self-contained tasks. New `delegate_task`
 calls create three persistent native sessions. Open **Workspace → Subagents**
 and select a child to use the same transcript, composer, queued input,
 **Send now**, questions, files, activity and Stop controls as any other session.
-**Parent chat** returns to its direct parent. The session list and search also
-keep the child's conversation reachable after the parent finishes.
+**Parent chat** returns to its direct parent.
+
+The left sidebar nests subagents under their parent, with an expandable group.
+Selecting a name opens the full conversation. **Open in side chat**, available
+beside the child and in its menu or Workspace row, opens that same session in
+the right panel while preserving the main conversation and its draft. The
+side chat has its own composer, queue, **Send now** and Stop controls.
+Reopening the same child selects its existing tab and retains the side-chat draft.
+
+An authorized parent outside the current history page is included as sidebar
+context without consuming pagination slots. Missing or unavailable parents do
+not hide accessible children. Explicit child pins and folder placements retain
+their own location; otherwise children follow their parent's sidebar group.
+Search continues to return matching conversations independently.
 
 Children begin with the delegated task and copies of input attachment references,
 not the parent's private conversation history. Each has its own computer and

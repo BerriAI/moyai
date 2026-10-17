@@ -100,7 +100,10 @@ New ordinary subagents open as full private conversations: select one under
 **Workspace → Subagents**, then message, queue a follow-up, use **Send now**,
 answer questions, or stop it with the normal session controls. **Parent chat**
 returns to the conversation that delegated the work. Each child retains its
-history and has its own computer. They also appear in the requester's session list.
+history and has its own computer. In the left sidebar, children nest beneath their
+parent in a collapsible group. Select a child to open its full conversation, or
+choose **Open in side chat** from its row, menu, or Workspace entry to chat with
+the same child in the right panel. The parent stays open and keeps its draft.
 Older SDK subagents retain their requester-only answer and recorded-steps panels.
 See [Subagent chats](subagent-chats.md) for lifecycle and migration details. Saving a
 file with `save_artifact` adds an output, and `attach_link` adds a PR, external

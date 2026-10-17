@@ -32,6 +32,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/connections'||url.pathname==='/api/session-folders')return json([]);
   if(url.pathname==='/api/pull-requests/statuses')return json({});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
+    if(url.pathname==='/api/history/sessions'&&state.inventoryRows)return json({sessions:state.inventoryRows,ancestors:state.inventoryAncestors||[],has_more:false});
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
       {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId,title:'Current native work'}];
     if(state.createdSession)rows.push({...session('c'.repeat(32)),key:'native:'+'c'.repeat(32),source:'native',url:'/#'+'c'.repeat(32)});
@@ -456,7 +457,7 @@ for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and 
   const page=await pageFor(t,'#'+sessionId);
   await page.setViewportSize({width,height:900});
   await page.getByRole('button',{name:'Open workspace',exact:true}).click();
-  await page.getByRole('button',{name:/Curie/}).click();
+  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Curie idle',exact:true}).click();
   await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
   assert.equal(new URL(page.url()).hash,'#'+childId);
   await page.getByText('Parent agent',{exact:true}).waitFor();
@@ -469,4 +470,65 @@ for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and 
   await page.getByRole('link',{name:'Parent chat',exact:true}).click();
   await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+for(const width of [1440,768,320])test(`sidebar nests three subagents and opens an independent side chat at ${width}px`,async t=>{
+  const childIds=['d','e','f'].map(c=>c.repeat(32)),names=['Curie','Kepler','Newton'];
+  reset({status:'idle',sessionOverrides:Object.fromEntries(childIds.map((id,i)=>[id,{title:names[i],parent_session_id:sessionId}])),
+    messagesBySession:Object.fromEntries(childIds.map(id=>[id,[{id:1,turn_id:'child-turn',role:'system',source:'delegation',author_id:null,content:'Independent child assignment.'}]]))});
+  state.inventoryRows=childIds.map(id=>({...session(id),source:'native',key:'native:'+id}));
+  // The older parent is authorized context, outside the primary page.
+  state.inventoryAncestors=[{...session(),source:'native',key:'native:'+sessionId}];
+  const page=await pageFor(t,'#'+sessionId,width);
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  const group=page.getByRole('group',{name:'Subagents of Current native work',exact:true});
+  await group.waitFor();assert.equal(await group.locator('[data-session-key]').count(),3);
+  const parent=page.locator(`[data-session-key="native:${sessionId}"]`);
+  const child=group.locator(`[data-session-key="native:${childIds[0]}"]`);
+  assert.ok((await child.boundingBox()).x>(await parent.boundingBox()).x+12);
+  for(const id of childIds)assert.equal(await page.locator(`[data-session-key="native:${id}"]`).count(),1);
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).click();
+  assert.equal(await group.isVisible(),false);
+  await page.reload();
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
+  const parentComposer=page.locator('.workspace > .chat [role="textbox"][aria-label="Message Moyai"]');
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await parentComposer.fill('Keep the parent draft.');
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await child.hover();await child.getByRole('link').press('Tab');
+  await child.getByRole('button',{name:'Open Curie in side chat',exact:true}).click();
+  const panel=page.getByRole('complementary',{name:'Session panel',exact:true});
+  await panel.getByRole('heading',{name:'Curie',exact:true}).waitFor();
+  assert.equal(new URL(page.url()).hash,'#'+sessionId);
+  assert.equal(await parentComposer.textContent(),'Keep the parent draft.');
+  const sideComposer=panel.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await sideComposer.fill('Message only the selected child.');await sideComposer.press('Enter');
+  await waitFor(()=>state.requests.some(r=>r.path===`/api/sessions/${childIds[0]}/messages`&&r.method==='POST'));
+  assert.equal(state.requests.some(r=>r.path===`/api/sessions/${sessionId}/messages`&&r.method==='POST'),false);
+  await sideComposer.fill('Retain the side-chat draft.');
+  await panel.getByRole('button',{name:'Hide side panel',exact:true}).click();
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await child.hover();await child.getByRole('link').press('Tab');await child.getByRole('button',{name:'Open Curie in side chat',exact:true}).click();
+  await panel.getByRole('tab',{name:'Curie',exact:true}).waitFor();
+  assert.equal(await panel.getByRole('tab',{name:'Curie',exact:true}).count(),1);
+  assert.equal(await sideComposer.innerText(),'Retain the side-chat draft.');
+  assert.equal(await parentComposer.textContent(),'Keep the parent draft.');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('workspace subagent action opens the right-panel conversation without leaving the parent',async t=>{
+  const childId='d'.repeat(32);
+  reset({status:'idle',sessionOverrides:{[childId]:{title:'Curie',parent_session_id:sessionId}},
+    messagesBySession:{[childId]:[{id:1,turn_id:'child-turn',role:'assistant',author_id:null,content:'Saved child result.'}]},
+    workspace:{links:[],files:[],sources:[],subagents:[{id:'child-turn',session_id:childId,parent_id:turnId,
+      name:'Curie',avatar:1,status:'idle',can_inspect:true,depth:0,started_at:''}],subagents_limited:false}});
+  const page=await pageFor(t,'#'+sessionId);
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Open Curie in side chat',exact:true}).click();
+  const panel=page.getByRole('complementary',{name:'Session panel',exact:true});
+  await panel.getByRole('heading',{name:'Curie',exact:true}).waitFor();
+  await panel.getByText('Saved child result.',{exact:true}).waitFor();
+  assert.equal(new URL(page.url()).hash,'#'+sessionId);
+  assert.equal(await panel.getByRole('textbox',{name:'Message Moyai',exact:true}).isVisible(),true);
 });

@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from "react"
-import { Archive, ArchiveRestore, ChevronDown, Clock3, Folder, FolderPlus, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Pencil, Pin, PinOff, Trash2, Users } from "lucide-react"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Archive, ArchiveRestore, ChevronDown, Clock3, Folder, FolderPlus, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, PanelRightOpen, Pencil, Pin, PinOff, Trash2, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ActionItem, ActionMenu, SessionMenu, sessionHash, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import type { SessionFolder, SidebarSession } from "./session-actions"
 import { currentDragSession, movableSession, SESSION_DRAG_TYPE, sessionCreatedByMe, sessionDrop, sessionPlacement } from "./sidebar-drag"
 import type { SessionDrag, SessionDropTarget, SidebarDragContext } from "./sidebar-drag"
+import { sessionTree } from "./session-tree"
 import slackLogo from "./assets/slack-logo.svg"
 import "./sidebar-layout.css"
 export type { SessionFolder, SidebarSession } from "./session-actions"
@@ -66,10 +67,11 @@ function age(value?: string) {
   return minutes < 1 ? "Just now" : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.floor(minutes / 60)} hr ago` : `${days} ${days === 1 ? "day" : "days"} ago`
 }
 
-export function SessionSidebar({ sessions, folders, selected, userId, view, onViewChange, onOpenPullRequest, hasMore, loading, notice, onLoadMore }: {
+export function SessionSidebar({ sessions, folders, selected, userId, view, onViewChange, onOpenPullRequest, onOpenSideChat, hasMore, loading, notice, onLoadMore }: {
   sessions: SidebarSession[]; folders: SessionFolder[]; selected: string; userId: string
   view: SessionListView; onViewChange: (view: SessionListView) => void
   onOpenPullRequest?: OpenPullRequest
+  onOpenSideChat?: (session: SidebarSession) => void
   hasMore?: boolean; loading?: boolean; notice?: string; onLoadMore?: () => void
 }) {
   const { openEditor, edit, busy, userId: actionsUserId } = useSessionActions()
@@ -128,12 +130,35 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
     try { localStorage.setItem(`moyai-native-folders:${userId}`, JSON.stringify({ version: 2, closed: next })) } catch {}
     return next
   })
-  const nativeRows = sessions.filter(row => !sessionIsReadOnly(row))
+  const tree = useMemo(() => sessionTree(sessions), [sessions])
+  const [collapsedAgents, setCollapsedAgents] = useState<string[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(`moyai-subagents:${userId}`) ?? "[]")
+      if (Array.isArray(saved)) return saved.filter(value => typeof value === "string")
+    } catch {}
+    return []
+  })
+  const saveCollapsedAgents = (next: string[]) => {
+    try { localStorage.setItem(`moyai-subagents:${userId}`, JSON.stringify(next)) } catch {}
+    return next
+  }
+  const ancestry: string[] = []
+  let selectedParent = tree.parents.get(`native:${selected}`)
+  while (selectedParent) {
+    ancestry.push(sessionKey(selectedParent)); selectedParent = tree.parents.get(sessionKey(selectedParent))
+  }
+  const ancestryKey = JSON.stringify(ancestry)
+  useEffect(() => {
+    const keys = JSON.parse(ancestryKey) as string[]
+    if (keys.length) setCollapsedAgents(previous => saveCollapsedAgents(previous.filter(key => !keys.includes(key))))
+  }, [selected, ancestryKey])
+  const roots = view === "deleted" ? sessions : tree.roots
+  const nativeRows = roots.filter(row => !sessionIsReadOnly(row))
   const placements = new Map(nativeRows.map(row => [row, sessionPlacement(row, folders, userId)]))
-  const unfiled = sessions.filter(row => sessionIsReadOnly(row)
+  const unfiled = roots.filter(row => sessionIsReadOnly(row)
     ? !row.pinned && !row.folder : ["recent", "participated"].includes(placements.get(row)!.kind))
-  const pinned = sessions.filter(row => sessionIsReadOnly(row) ? row.pinned : placements.get(row)!.kind === "pinned")
-  const legacyFolders = [...new Map(sessions.filter(row => sessionIsReadOnly(row) && row.folder).map(row =>
+  const pinned = roots.filter(row => sessionIsReadOnly(row) ? row.pinned : placements.get(row)!.kind === "pinned")
+  const legacyFolders = [...new Map(roots.filter(row => sessionIsReadOnly(row) && row.folder).map(row =>
     [`${row.source ?? "native"}:${row.folder_id ?? row.folder}`, { key: `${row.source ?? "native"}:${row.folder_id ?? row.folder}`, name: row.folder! }],
   )).values()]
   function startDrag(event: React.DragEvent<HTMLDivElement>, row: SidebarSession) {
@@ -185,25 +210,37 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
   function onListBackground(event: React.DragEvent<HTMLElement>): boolean {
     return !(event.target instanceof Element && event.target.closest(".session-group, button"))
   }
-  function rows(items: SidebarSession[]) {
+  function rows(items: SidebarSession[], depth = 0): React.ReactNode {
     return items.map(row => {
       const readOnly = sessionIsReadOnly(row)
       const active = row.source === "legacy" ? selected === `run=${row.id}` || selected === sessionHash(row) : selected === row.id
-      return <div key={sessionKey(row)} data-session-key={sessionKey(row)} draggable={!busy && view !== "deleted" && userId === actionsUserId && movableSession(row)}
+      const key = sessionKey(row), descendants = view === "deleted" ? [] : tree.children.get(key) ?? []
+      const expanded = !collapsedAgents.includes(key)
+      const openAside = !readOnly && !row.deleted && row.parent_session_id && onOpenSideChat
+        ? () => onOpenSideChat(row) : undefined
+      return <div key={key} className="session-branch">
+      <div data-session-key={key} draggable={!busy && view !== "deleted" && userId === actionsUserId && movableSession(row)}
         onDragStart={event => startDrag(event, row)} onDragEnd={clearDrag}
-        className={`session-row ${active ? "selected" : ""} ${row.unread ? "unread" : ""} ${dragging === row.id ? "session-dragging" : ""}`}>
+        className={`session-row ${depth ? "session-child" : ""} ${descendants.length ? "session-parent" : ""} ${active ? "selected" : ""} ${row.unread ? "unread" : ""} ${dragging === row.id ? "session-dragging" : ""}`}>
+      {descendants.length > 0 && <Button type="button" variant="ghost" size="icon-sm" className="session-children-toggle"
+        aria-label={`${expanded ? "Collapse" : "Expand"} subagents for ${row.title}`} aria-expanded={expanded}
+        aria-controls={`subagents-${encodeURIComponent(key)}`}
+        onClick={() => setCollapsedAgents(previous => saveCollapsedAgents(expanded ? [...previous, key] : previous.filter(value => value !== key)))}>
+        <ChevronDown className={expanded ? "" : "closed"} size={12} />
+      </Button>}
       <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
         <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : ""}`} aria-label={readOnly ? "Read-only history" : row.unread ? "Unread" : row.status} />
         <span className="session-title">{row.title}</span>
       </a>
       <div className="session-row-actions">
-        {!readOnly && !row.deleted && <>
+        {openAside && <Button type="button" variant="ghost" size="icon-sm" aria-label={`Open ${row.title} in side chat`} title="Open in side chat" onClick={openAside}><PanelRightOpen /></Button>}
+        {!readOnly && !row.deleted && depth === 0 && <>
           <Button type="button" variant="ghost" size="icon-sm" disabled={busy} aria-label={`${row.pinned ? "Unpin" : "Pin"} ${row.title}`} aria-pressed={Boolean(row.pinned)} title={row.pinned ? "Unpin session" : "Pin session"}
             onClick={() => void edit(row, { pinned: !row.pinned }, row.pinned ? "Session unpinned." : "Session pinned.")}>{row.pinned ? <PinOff /> : <Pin />}</Button>
           <Button type="button" variant="ghost" size="icon-sm" disabled={busy || row.owner_id !== userId} aria-label={`${row.archived ? "Restore from archive" : "Archive"} ${row.title}`}
             title={row.owner_id !== userId ? "Only the session owner can change its archive status" : row.archived ? "Restore from archive" : "Archive session"} onClick={() => openEditor({ action: "archive", session: row })}>{row.archived ? <ArchiveRestore /> : <Archive />}</Button>
         </>}
-        <SessionMenu session={row} />
+        <SessionMenu session={row} onOpenSideChat={openAside} />
       </div>
       <div className="session-row-meta">
         {!readOnly && row.pinned && placements.get(row)?.kind === "folder" && <Pin size={12} aria-label="Pinned session" />}
@@ -211,6 +248,8 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         {!readOnly && <PullRequestIndicators session={row} onOpen={row.deleted ? undefined : onOpenPullRequest} />}
         {row.surface === "slack" && <img className="session-slack-logo" src={slackLogo} width={14} height={14} alt="Slack conversation" title="Slack conversation" />}
       </div>
+    </div>
+    {descendants.length > 0 && <div id={`subagents-${encodeURIComponent(key)}`} className="session-children" role="group" aria-label={`Subagents of ${row.title}`} hidden={!expanded}>{rows(descendants, depth + 1)}</div>}
     </div>})
   }
   function section(key: string, label: string, icon: React.ReactNode, items: SidebarSession[], folder?: SessionFolder) {

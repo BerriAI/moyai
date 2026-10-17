@@ -216,7 +216,11 @@ async def test_revoked_turn_cannot_allocate_its_first_computer(runtime, active, 
         assert not list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
 
 
-async def test_first_delegation_shares_the_single_computer_with_its_parent(runtime, active, actor):
+async def test_first_delegation_acquires_only_the_child_computer(runtime, active, actor):
+    from test_delegation_temporal import dispatching
+
+    from moyai.delegation_models import DelegatedSession
+
     session, turn, _ = active
     directory = runtime.settings.data_dir.parent / "computer"
     allocations = []
@@ -229,19 +233,20 @@ async def test_first_delegation_shares_the_single_computer_with_its_parent(runti
             part.tool_name for message in messages for part in message.parts if isinstance(part, ToolReturnPart)
         }
         if "CHILD_FIRST_COMPUTER" in prompts:
-            assert allocations == [str(directory)]
             if "shell" not in returned:
+                assert not allocations
                 return ModelResponse(parts=[ToolCallPart(
-                    "shell", {"command": "printf child > shared.txt"}, tool_call_id="child-shell",
+                    "shell", {"command": "printf child > child.txt"}, tool_call_id="child-shell",
                 )])
-            return ModelResponse(parts=[TextPart("Child wrote the shared file.")])
+            assert allocations == [str(directory)]
+            return ModelResponse(parts=[TextPart("Child wrote its file.")])
         if "delegate_task" not in returned:
             assert not allocations
             return ModelResponse(parts=[ToolCallPart(
                 "delegate_task", {"agent_name": "self", "task": "CHILD_FIRST_COMPUTER"},
                 tool_call_id="first-delegation",
             )])
-        return ModelResponse(parts=[TextPart("Shared computer work completed.")])
+        return ModelResponse(parts=[TextPart("Child computer work completed.")])
 
     runtime.models = {"test": scripted_model(respond)}
     runtime.agent, runtime.durability = make_agent(
@@ -253,7 +258,7 @@ async def test_first_delegation_shares_the_single_computer_with_its_parent(runti
         plugins=[PydanticAIPlugin()], data_converter=converter,
     ) as environment:
         runtime.client = environment.client
-        async with make_worker(runtime):
+        async with make_worker(runtime), dispatching(runtime):
             handle = await runtime.client.start_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
             )
@@ -264,6 +269,10 @@ async def test_first_delegation_shares_the_single_computer_with_its_parent(runti
             interceptors=[ActivityCapacity()],
         ).replay_workflow(history)
     assert allocations == [str(directory)]
-    assert (directory / "shared.txt").read_text() == "child"
+    assert (directory / "child.txt").read_text() == "child"
     saved = await runtime.database.session(actor, session.id)
-    assert json.loads(saved.workspace) == {"provider": "local", "id": str(directory)}
+    assert saved.workspace is None
+    async with runtime.database.sessions() as db:
+        child = await db.scalar(select(DelegatedSession).where(DelegatedSession.parent_turn_id == turn.id))
+    saved_child = await runtime.database.session(actor, child.session_id)
+    assert json.loads(saved_child.workspace) == {"provider": "local", "id": str(directory)}

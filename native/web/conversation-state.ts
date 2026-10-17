@@ -6,7 +6,6 @@ export type Session = SidebarSession & {
   read_marker_key?: string; completion_marker?: string; save_warning?: string
   workspace?: { id: string; provider: string }
   swarm_id?: string
-  parent_session_id?: string
 }
 export type Turn = {
   id: string; actor_id: string; status: string; mode?: string; connections: string[]; error?: string

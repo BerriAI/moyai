@@ -41,10 +41,10 @@ const ProductHistory = React.lazy(() => import("./product-history").then(module 
 const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
 
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
-type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request"; url?: string }
+type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
 type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing" }
-type SessionInventory = { sessions: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
+type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
@@ -184,6 +184,9 @@ function App() {
           }
           rows.set(sessionKey(row), { ...row, unread })
         }
+        for (const row of next.ancestors ?? []) {
+          if (!rows.has(sessionKey(row))) rows.set(sessionKey(row), row)
+        }
         if (next.notice) notices.add(next.notice)
         hasMore = Boolean(next.has_more && next.next_cursor)
         if (!hasMore || next.next_cursor === cursor) break
@@ -298,6 +301,13 @@ function App() {
       <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
         hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
         onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
+        onOpenSideChat={row => {
+          const host = nativeSelected && nativeSelected !== row.id ? nativeSelected : row.parent_session_id
+          if (!host) return
+          setWorkspaceRequest(previous => ({ sessionId: host, tab: "side-chat", child: { id: row.id, title: row.title }, sequence: (previous?.sequence ?? 0) + 1 }))
+          if (nativeSelected !== host) location.hash = host
+          setMobileNav(false)
+        }}
         onOpenPullRequest={(sessionId, url) => { setWorkspaceRequest(previous => ({ sessionId, url, tab: "pull-request", sequence: (previous?.sequence ?? 0) + 1 })); location.hash = sessionId; setMobileNav(false) }} />
       <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Settings" onClick={() => navigateSettings("overview")}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => {
         try { const result = await api<{ logout_url?: string }>("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")); if (result.logout_url) navigateAuth(result.logout_url, true) }
@@ -542,6 +552,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (!workspaceRequest || sideMode) return
     setWorkspaceOpen(false)
     if (workspaceRequest.tab === "computer") dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+    else if (workspaceRequest.tab === "side-chat" && workspaceRequest.child) dispatchPanel({ type: "open", tab: {
+      id: `side-chat:${workspaceRequest.child.id}`, kind: "side-chat",
+      sessionId: workspaceRequest.child.id, title: workspaceRequest.child.title,
+    } })
     else if (workspaceRequest.url) dispatchPanel({ type: "open", tab: { id: `pr:${workspaceRequest.url.toLowerCase()}`, kind: "pull-request", title: "Pull request", url: workspaceRequest.url } })
   }, [workspaceRequest, sideMode])
   useEffect(() => { if (visible) heading.current?.focus() }, [Boolean(view), visible])
@@ -753,6 +767,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           onSubagent={agent => {
             if (agent.session_id) { window.location.hash = agent.session_id; return }
             openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })
+          }}
+          onSubagentSideChat={agent => {
+            if (agent.session_id) openTab({ id: `side-chat:${agent.session_id}`, kind: "side-chat", sessionId: agent.session_id, title: agent.name })
           }}
           onOutput={openOutput} />
       </WorkspaceOverlayContent>
