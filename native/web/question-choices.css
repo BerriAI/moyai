@@ -10,6 +10,7 @@
 .question-form-header { display: flex; align-items: center; gap: 6px; color: var(--ui-muted); }
 .question-form-header h3 { color: inherit; font-size: 12px; font-weight: 400; }
 .question-send-status { margin-left: auto; font-size: 12px; }
+.question-reply-hint { margin: 0 12px 8px; color: var(--ui-muted); }
 .question-choice-field { margin: 8px 0 0; }
 .question-choice-field + .question-choice-field { padding-top: 12px; border-top: 1px solid var(--ui-border); }
 .question-choice-field legend { width: 100%; margin-bottom: 6px; font-size: inherit; font-weight: 400; line-height: 1.75; overflow-wrap: anywhere; }

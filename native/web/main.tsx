@@ -725,7 +725,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
-          {answeringQuestion && <p className="notice">Your reply will answer the pending question.</p>}
+          {answeringQuestion && <p className="question-reply-hint">Your reply will answer the pending question.</p>}
           {session.status === "waiting" && view.can_answer && !answeringQuestion && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
             <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
