@@ -52,13 +52,15 @@ async def test_swarm_schema_preserves_prior_receipts_and_requires_explicit_provi
         for name in SWARM_TABLES:
             assert await db.scalar(text("SELECT to_regclass(:name)"), {"name": f"{product.schema}.{name}"}) is None
     assert await migrate_product_schema(
-        product.source, schema=product.schema, source_schema="moyai",
+        product.source, schema=product.schema, source_schema="moyai", version=SWARM_SCHEMA_VERSION,
     ) == SWARM_SCHEMA_VERSION
     after = await receipt_rows(product)
     assert set(after) == before.keys() | added_versions
     assert all(after[key] == value for key, value in before.items())
-    await verify_product_schema(product.source, schema=product.schema)
-    await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai")
+    await verify_product_schema(product.source, schema=product.schema, version=SWARM_SCHEMA_VERSION)
+    await migrate_product_schema(
+        product.source, schema=product.schema, source_schema="moyai", version=SWARM_SCHEMA_VERSION,
+    )
     assert await receipt_rows(product) == after
 
 

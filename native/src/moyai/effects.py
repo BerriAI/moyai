@@ -238,7 +238,9 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 raise ToolFailed("The browser result has no confirmed outcome. Inspect and reconcile the pending action.")
         if requires_receipt(tool_def):
             await self.confirm(effect_id(ctx, call))
-            is_creation = call.tool_name.startswith("github_") and call.tool_name.endswith("_create_pull_request")
+            is_creation = call.tool_name.startswith("github_") and call.tool_name.endswith(
+                ("_create_pull_request", "_open_pull_request")
+            )
             if is_creation and (not workflow.in_workflow() or workflow.patched("moyai-pr-publications-v1")):
                 try:
                     receipt = creation_receipt(

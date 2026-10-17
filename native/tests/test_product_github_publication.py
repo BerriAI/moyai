@@ -35,7 +35,16 @@ admitted_product = authority.admitted_product
 class Provider:
     def __init__(self):
         self.calls, self.refs, self.pulls = [], {}, []
+        self.sources = {"main": "a" * 40, "release": "a" * 40}
+        self.default_branch = "main"
+        self.protected = set()
+        self.reviews = {}
+        self.stacks = {}
+        self.compare_status = "ahead"
+        self.patch_head = None
+        self.race_before_ref_update = False
         self.lost_create = False
+        self.fail_before_pr = False
         self.visible = True
         self.symlink = False
         self.commits = 0
@@ -44,9 +53,43 @@ class Provider:
         self.calls.append((method, path, copy.deepcopy(kwargs)))
         prefix = "/repositories/123"
         if method == "GET" and path == prefix:
-            return {"id": 123, "full_name": "owner/repo", "default_branch": "main"}
-        if method == "GET" and path == prefix + "/commits/main":
-            return {"sha": "a" * 40}
+            return {"id": 123, "node_id": "R_123", "full_name": "owner/repo", "default_branch": self.default_branch}
+        if method == "GET" and path.startswith(prefix + "/commits/"):
+            from urllib.parse import unquote
+            ref = unquote(path.removeprefix(prefix + "/commits/"))
+            return {"sha": self.sources.get(ref, self.refs.get(ref, ref))}
+        if method == "GET" and "/compare/" in path:
+            return {"status": self.compare_status}
+        if method == "GET" and "/rules/branches/" in path:
+            return []
+        if method == "GET" and path.startswith(prefix + "/branches/"):
+            from urllib.parse import unquote
+            branch = unquote(path.removeprefix(prefix + "/branches/"))
+            return {"name": branch, "protected": branch in self.protected} if branch in self.refs else None
+        if method == "POST" and path == "/graphql":
+            from moyai.github_request_policy import ADVANCE, DRAFT, PROTECTION, REBASE
+            query, variables = kwargs["json"]["query"], kwargs["json"]["variables"]
+            if query == PROTECTION:
+                return {"data": {"repository": {"databaseId": 123, "branchProtectionRules": {
+                    "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }}}}
+            if query in {REBASE, ADVANCE}:
+                branch = variables["name"].removeprefix("refs/heads/")
+                if self.race_before_ref_update:
+                    self.refs[branch] = "9" * 40
+                if self.refs[branch] != variables["beforeOid"]:
+                    return {"errors": [{"message": "stale head"}]}
+                self.refs[branch] = variables["afterOid"]
+                for pr in self.pulls:
+                    if pr["head"]["ref"] == branch:
+                        pr["head"]["sha"] = variables["afterOid"]
+                return {"data": {"updateRefs": {"clientMutationId": None}}}
+            if query == DRAFT:
+                pr = next(pr for pr in self.pulls if pr["node_id"] == variables["id"])
+                pr["draft"] = True
+                return {"data": {"convertPullRequestToDraft": {
+                    "pullRequest": {"number": pr["number"], "isDraft": True, "url": pr["html_url"]},
+                }}}
         if method == "GET" and "/git/commits/" in path:
             return {"tree": {"sha": "b" * 40}}
         if method == "GET" and "/git/trees/" in path:
@@ -57,34 +100,95 @@ class Provider:
             return {"sha": "d" * 40}
         if method == "POST" and path.endswith("/git/commits"):
             self.commits += 1
-            return {"sha": ("e" if self.commits == 1 else "f") * 40}
+            return {"sha": "ef123456789abcd"[(self.commits - 1) % 15] * 40}
         if method == "GET" and "/git/ref/heads/" in path:
-            sha = self.refs.get(path.split("/git/ref/heads/", 1)[1])
-            return {"object": {"sha": sha}} if sha else None
+            from urllib.parse import unquote
+            branch = unquote(path.split("/git/ref/heads/", 1)[1])
+            sha = self.refs.get(branch)
+            return {"ref": "refs/heads/" + branch, "object": {"type": "commit", "sha": sha}} if sha else None
         if method == "POST" and path.endswith("/git/refs"):
             body = kwargs["json"]
             self.refs[body["ref"].removeprefix("refs/heads/")] = body["sha"]
-            return {"object": {"sha": body["sha"]}}
+            return {"ref": body["ref"], "object": {"type": "commit", "sha": body["sha"]}}
         if method == "PATCH" and "/git/refs/heads/" in path:
-            branch, body = path.split("/git/refs/heads/", 1)[1], kwargs["json"]
+            from urllib.parse import unquote
+            branch, body = unquote(path.split("/git/refs/heads/", 1)[1]), kwargs["json"]
             assert body["force"] is False
             self.refs[branch] = body["sha"]
             for pr in self.pulls:
                 if pr["head"]["ref"] == branch:
                     pr["head"]["sha"] = body["sha"]
-            return {"object": {"sha": body["sha"]}}
+            return {"ref": "refs/heads/" + branch, "object": {"type": "commit", "sha": body["sha"]}}
         if method == "GET" and path == prefix + "/pulls":
-            return copy.deepcopy(self.pulls) if self.visible else []
-        if method == "GET" and path.startswith(prefix + "/pulls/"):
+            if self.fail_before_pr:
+                raise ConnectorError("Interrupted before PR creation.")
+            params = kwargs.get("params", {})
+            return copy.deepcopy([pr for pr in self.pulls if (
+                ("head" not in params or params["head"] == "owner:" + pr["head"]["ref"])
+                and ("base" not in params or params["base"] == pr["base"]["ref"])
+            )]) if self.visible else []
+        if path.startswith("/repos/owner/repo/stacks"):
+            stack_prefix = "/repos/owner/repo/stacks"
+            if method == "GET":
+                if path != stack_prefix:
+                    return copy.deepcopy(self.stacks[int(path.rsplit("/", 1)[1])])
+                selected = kwargs.get("params", {}).get("pull_request")
+                return copy.deepcopy([stack for stack in self.stacks.values() if (
+                    selected is None or selected in {pr["number"] for pr in stack["pull_requests"]}
+                )])
+            additions = [copy.deepcopy(next(pr for pr in self.pulls if pr["number"] == number))
+                         for number in kwargs["json"]["pull_requests"]]
+            if path == stack_prefix:
+                number = len(self.stacks) + 1
+                stack = {"id": 500 + number, "number": number, "node_id": f"ST_{number}", "open": True,
+                         "base": {"ref": additions[0]["base"]["ref"]}, "pull_requests": additions}
+                self.stacks[number] = stack
+                return {"status_code": 201, "data": copy.deepcopy(stack)}
+            stack = self.stacks[int(path.split("/stacks/")[1].split("/")[0])]
+            stack["pull_requests"].extend(additions)
+            return {"status_code": 200, "data": copy.deepcopy(stack)}
+        if "/reviews" in path:
+            number = int(path.split("/pulls/")[1].split("/")[0])
+            if method == "POST" and path.endswith("/reviews"):
+                body = kwargs["json"]
+                review = {"id": len(self.reviews) + 1, "commit_id": body["commit_id"], "body": body["body"],
+                          "state": {"COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}.get(
+                              body.get("event"), "PENDING")}
+                self.reviews[review["id"]] = review
+                return copy.deepcopy(review)
+            identity = int(path.split("/reviews/")[1].split("/")[0])
+            review = self.reviews[identity]
+            if method in {"POST", "PUT"}:
+                review["body"] = kwargs["json"]["body"]
+                if method == "POST":
+                    review["state"] = {"COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}[
+                        kwargs["json"]["event"]]
+            if method == "DELETE":
+                del self.reviews[identity]
+            return copy.deepcopy(review)
+        if method in {"GET", "PATCH"} and path.startswith(prefix + "/pulls/"):
+            if method == "PATCH":
+                pr = next(pr for pr in self.pulls if pr["number"] == int(path.rsplit("/", 1)[1]))
+                body = kwargs["json"]
+                if "state" in body:
+                    pr["state"] = body["state"]
+                if "base" in body:
+                    pr["base"]["ref"] = body["base"]
+                if self.patch_head is not None:
+                    pr["head"]["sha"] = self.patch_head
             return copy.deepcopy(next(pr for pr in self.pulls if pr["number"] == int(path.rsplit("/", 1)[1])))
         if method == "POST" and path == prefix + "/pulls":
             body = kwargs["json"]
             assert body["draft"] is False
+            number = len(self.pulls) + 7
             pr = {
-                "id": 1007, "number": 7, "html_url": "https://github.com/owner/repo/pull/7",
+                "id": 1000 + number, "number": number, "node_id": f"PR_{number}",
+                "html_url": f"https://github.com/owner/repo/pull/{number}",
                 "created_at": "2026-10-15T12:00:00Z", "state": "open", "draft": False, "merged": False,
+                "merged_at": None,
                 "head": {"ref": body["head"], "sha": self.refs[body["head"]], "repo": {"id": 123}},
-                "base": {"ref": body["base"], "repo": {"id": 123, "full_name": "owner/repo"}},
+                "base": {"ref": body["base"], "sha": self.sources.get(body["base"], self.refs.get(body["base"])),
+                         "repo": {"id": 123, "full_name": "owner/repo"}},
             }
             self.pulls.append(pr)
             if self.lost_create:
@@ -112,19 +216,25 @@ async def publication(admitted_product):
     async def check(scope, selected):
         assert selected == grant
         await product.database.authorize_scope(scope)
+    async def credentials(scope, selected):
+        await check(scope, selected)
+        return {"access_token": "synthetic-token"}
     class SourceGit:
         validate_tree_paths = GitHub.validate_tree_paths
         def target(self, value): return 123 if value in {123, "owner/repo"} else 999
         def connection_version(self): return "current-canonical-version"
         async def request(self, *args, **kwargs): return await provider.request(*args, **kwargs)
-        async def installation_token(self, **kwargs): return "synthetic-token"
+        async def installation_token(self, **kwargs):
+            if current.get("token_unavailable"):
+                raise ConnectorError("The provider token is currently unavailable.")
+            return "synthetic-token"
         def saved_credentials(self): return {}
     service = SimpleNamespace(
         database=product.database, product=SimpleNamespace(identity=product.adapter),
         connectors=SimpleNamespace(
             github=SourceGit(), personal_slack=SimpleNamespace(),
             locks={"github": asyncio.Lock()}, request=provider.request,
-        ), check=check,
+        ), check=check, credentials=credentials,
         store=SimpleNamespace(rows=lambda *_args: []),
     )
     service.execution = CanonicalConnectorExecution(service)
@@ -168,15 +278,15 @@ async def test_regular_publication_and_update_use_receipts_and_never_force(publi
     assert patches == [{"sha": "f" * 40, "force": False}]
 
 
-async def test_uncertain_creation_uses_readback_and_never_reposts(publication):
+async def test_uncertain_creation_does_not_invent_authorship_from_readback(publication):
     f = publication
     f.provider.lost_create = True
     request = create_request()
     await reserve(f, "create_pull_request", request)
     with pytest.raises(ConnectorError):
         await f.publisher.create(f.ctx, request)
-    result = await f.publisher.create(f.ctx, request)
-    assert result["number"] == 7
+    with pytest.raises(ToolFailed, match="acknowledgment"):
+        await f.publisher.create(f.ctx, request)
     assert len([item for item in f.provider.calls if item[0] == "POST" and item[1].endswith("/pulls")]) == 1
 
 
@@ -202,7 +312,9 @@ async def test_symlink_and_protected_paths_refuse_publication(publication):
     await reserve(f, "create_pull_request", request)
     with pytest.raises(ConnectorError, match="regular files"):
         await f.publisher.create(f.ctx, request)
-    assert not [item for item in f.provider.calls if item[0] != "GET"]
+    from moyai.github_request_policy import PROTECTION
+    assert not [item for item in f.provider.calls if item[0] != "GET"
+                and item[2].get("json", {}).get("query") != PROTECTION]
     with pytest.raises(ValidationError):
         Publish.model_validate({**request.model_dump(), "files": [{"path": ".env", "content": "No export"}]})
 
