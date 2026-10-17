@@ -134,7 +134,10 @@ async def run_command(
         await claim_command(service, ctx.deps, identity, bindings)
     except (HTTPException, PermissionError, ToolFailed):
         await refuse_command(service, ctx.deps, identity)
-        raise ToolFailed("Credential execution was refused before dispatch. Review the current handles, scope, and workspace.") from None
+        raise ToolFailed(
+            "Credential execution was refused before dispatch. request_ids must be IDs returned by "
+            "credentials_request (pass a saved credential's id as secret_id there first); also check scope and workspace."
+        ) from None
     try:
         result = await ctx.workspace.run(
             ["python3", "-I", "-c", COMMAND_GUEST],
@@ -188,7 +191,10 @@ class CredentialTools(Toolset[RunScope]):
         @tools.tool(metadata=WRITE, sequential=True, description=(
             "Run one foreground command with approved generic credential handles. Values enter only that process; "
             "files use anonymous descriptors. Never print or copy credentials into ordinary files. "
-            "Output is bounded/redacted; uncertain actions are not replayed. " + ONEPASSWORD_GUIDANCE
+            "Output is bounded/redacted; uncertain actions are not replayed. "
+            "For saved access, first call credentials_request with secret_id set to the credential id from "
+            "credentials_list; credentials_run.request_ids must use the IDs returned by credentials_request. "
+            + ONEPASSWORD_GUIDANCE
         ))
         async def credentials_run(ctx: RunContext[RunScope], request: RunCredential) -> dict:
             """Run one foreground command with authorized generic credential handles.
@@ -196,6 +202,8 @@ class CredentialTools(Toolset[RunScope]):
             Values are injected into this process only; file credentials use anonymous descriptors.
             Never print credentials, write them to ordinary files, or detach a background process.
             Output is bounded/redacted. An uncertain command is never automatically replayed.
+            For saved access, first call credentials_request with secret_id set to the credential id from
+            credentials_list; credentials_run.request_ids must use the IDs returned by credentials_request.
             """
             return await run_command(service, ctx, request)
 
