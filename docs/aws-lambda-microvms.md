@@ -69,6 +69,10 @@ identity and private transport state are excluded. Processes are quiesced while
 packing; restoration imports files into a fresh VM without replaying commands or
 starting saved processes.
 
+Restoration applies the exact archived xattr set after ownership and mode changes,
+including Linux ACLs and file capabilities. Attributes removed during the session
+are removed on restore as well.
+
 Content hashes can be reused only when device/inode, nanosecond ctime/mtime, size,
 mode, ownership and link count still match. Recent timestamps and backwards clock
 steps invalidate cache hints. Missing, malformed or mismatched image seeds fall

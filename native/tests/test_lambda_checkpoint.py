@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import shutil
+import struct
 import sys
 import tarfile
 import time
@@ -165,3 +166,37 @@ def test_independent_archives_round_trip_metadata_deletions_and_restored_cache(i
         assert ("user.removed" in os.listxattr(fresh / "workspace")) == (index == 1)
         _, _, names = pack(tmp_path, fresh, baseline, checkpoint.ContentCache(), f"restored{index}")
         assert "root/lib/edit" in names and "root/workspace/target" in names
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="Linux file capabilities require the root ARM64 guest",
+)
+def test_linux_security_capability_and_posix_acl_round_trip(image, tmp_path):
+    root, baseline = image
+    pristine = tmp_path / "pristine"
+    shutil.copytree(root, pristine)
+    target = root / "lib/edit"
+    # Linux vfs_cap_data revision 2, effective CAP_NET_BIND_SERVICE. This only
+    # changes an inert fixture's metadata; the file is never executed.
+    capability = struct.pack("<IIIII", 0x02000001, 1 << 10, 0, 0, 0)
+    acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in (
+        (1, 6, 0xffffffff), (2, 4, 1234), (4, 4, 0xffffffff),
+        (16, 4, 0xffffffff), (32, 0, 0xffffffff),
+    ))
+    os.setxattr(target, "system.posix_acl_access", acl)
+    os.setxattr(target, "security.capability", capability)
+    expected = checkpoint.attributes(target)
+    cache = checkpoint.ContentCache()
+    for index in (1, 2):
+        archive, meta, _ = pack(tmp_path, root, baseline, cache, f"security-{index}")
+        fresh = tmp_path / f"security-restore-{index}"
+        shutil.copytree(pristine, fresh)
+        checkpoint.restore(archive, root=fresh, expected_sha256=meta["sha256"])
+        assert checkpoint.attributes(fresh / "lib/edit") == expected
+        assert (fresh / "lib/edit").stat().st_mode == target.stat().st_mode
+        again, saved, _ = pack(tmp_path, fresh, baseline, checkpoint.ContentCache(), f"security-again-{index}")
+        another = tmp_path / f"security-again-restore-{index}"
+        shutil.copytree(pristine, another)
+        checkpoint.restore(again, root=another, expected_sha256=saved["sha256"])
+        assert checkpoint.attributes(another / "lib/edit") == expected

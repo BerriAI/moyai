@@ -373,8 +373,30 @@ def restore(archive, *, root=Path('/'), expected_sha256):
             for name in os.listxattr(target, follow_symlinks=False):
                 os.removexattr(target, name, follow_symlinks=False)
     result = subprocess.run(['tar', '--extract', '--gzip', '--file', str(archive), '--directory', str(root),
-        '--xattrs', '--acls', '--numeric-owner', '--exclude=manifest.json', '--strip-components=1'], capture_output=True)
+        '--xattrs', '--xattrs-include=*', '--acls', '--numeric-owner',
+        '--exclude=manifest.json', '--strip-components=1'], capture_output=True)
     if result.returncode:
         raise RuntimeError('Filesystem restoration failed')
+    # GNU tar's ACL handling uses its own text headers and can discard a raw
+    # system.posix_acl_access xattr even with --xattrs-include. Apply the exact
+    # archived set after tar has finished chown/chmod; those operations can also
+    # clear file capabilities. The target uses the same pinned Linux image.
+    for member in members:
+        if not member.name.startswith('root/'):
+            continue
+        target = root / member.name[5:]
+        parent = target.parent.resolve()
+        if (not parent.is_relative_to(root.resolve())
+                or excluded(parent.relative_to(root.resolve()).as_posix())):
+            raise ValueError('Attribute target escapes the checkpoint filesystem')
+        expected = {
+            key.removeprefix('SCHILY.xattr.'): value.encode('utf-8', 'surrogateescape')
+            for key, value in member.pax_headers.items() if key.startswith('SCHILY.xattr.')
+        }
+        for key in os.listxattr(target, follow_symlinks=False):
+            if key not in expected:
+                os.removexattr(target, key, follow_symlinks=False)
+        for key in sorted(expected, key=lambda name: (name.startswith('security.'), name)):
+            os.setxattr(target, key, expected[key], follow_symlinks=False)
     # No execution specs or credentials are imported and no saved process is
     # started. Durable harness journals retain their uncertain markers.
