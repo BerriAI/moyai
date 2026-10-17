@@ -35,6 +35,10 @@ needing a human answer, stopped by the user, failed, or deleted produces that
 status rather than a successful result. A later child answer/follow-up does not
 automatically restart a completed parent. Stop affects the selected conversation;
 other independently admitted sessions keep their own controls.
+Optional clarification preferences keep the parent waiting for the child's
+answer or automatic fallback; they do not freeze a human-input handoff. Typed
+answers and timeout continuations retain generated provenance and are reserved
+ahead of older queued follow-ups.
 
 Delegation remains bounded to the root, children and grandchildren. Swarm mode
 still uses its fixed roster. Each child uses ordinary turn admission, accounting,

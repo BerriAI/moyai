@@ -80,6 +80,18 @@ class DelegationService:
         # content or permission to run/read it after Stop or authority changes.
         return {"session_id": previous.session_id, "name": previous.name}
 
+    def awaiting_result(self, turn: Turn | None) -> bool:
+        if turn is None:
+            return False
+        if turn.status in BUSY:
+            return True
+        if turn.status == "waiting":
+            from .questions import optional_questions, pending_questions
+            # An optional preference can finish through its durable timeout.
+            # Do not freeze a "needs human input" report before that continuation.
+            return optional_questions(pending_questions(self.database, turn))
+        return False
+
     async def shared_artifact(
         self, db: AsyncSession, actor: User, destination: str, source: str | None,
     ) -> bool:
@@ -214,7 +226,7 @@ class DelegationService:
         async with database.sessions.begin() as db:
             # Serialize one immutable handoff. Only the original delegated turn
             # (including accepted steering) can report back to the parent.
-            # Later private human turns may select broader account permissions.
+            # Later human turns can carry unrelated private instructions/accounts.
             link = await db.get(DelegatedSession, session_id)
             if link is None or link.parent_turn_id != scope.turn_id or link.actor_id != scope.actor_id:
                 raise PermissionError("This delegation does not belong to the current task.")
@@ -224,7 +236,7 @@ class DelegationService:
                 DelegatedTurn.session_id == session_id,
             ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1)
             initial = await db.scalar(generated)
-            if initial is not None and initial.status in BUSY:
+            if self.awaiting_result(initial):
                 return None  # Polling active children performs no writes or row locks.
             await db.execute(update(Session).where(Session.id == session_id).values(revision=Session.revision))
             await db.refresh(link)
@@ -233,7 +245,7 @@ class DelegationService:
             # An answer can have resumed the original assignment before we
             # acquired its session fence. It remains part of the delegated work.
             initial = await db.scalar(generated.execution_options(populate_existing=True))
-            if initial is not None and initial.status in BUSY:
+            if self.awaiting_result(initial):
                 return None
             child = await db.get(Session, session_id)
             if child is None or child.deleted:

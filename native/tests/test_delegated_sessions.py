@@ -226,3 +226,59 @@ async def test_question_continuations_keep_their_original_input_provenance(runti
     human_context = await runtime.database.prepare(answered.id)
     assert not human_context.scope.delegation_generated
     assert await service.report(prepared.scope, child["session_id"]) == report
+
+
+@pytest.mark.parametrize("answer", ["typed", "timeout"])
+async def test_child_question_replies_preserve_authority_and_precede_queued_followups(runtime, actor, answer):
+    from pydantic_ai import DeferredToolRequests
+    from pydantic_ai.messages import ToolCallPart
+    from test_delegation_authority import parent_context
+    from test_questions import expire_deadline
+
+    from moyai.questions import expire_optional_questions
+
+    database = runtime.database
+    _, _, parent = await parent_context(runtime, actor)
+    service = DelegationService(database)
+    child = await service.start(parent.scope, "question", "Ask which color to use.")
+    initial = await database.claim_next()
+    prepared = await database.prepare(initial.id)
+    call = ToolCallPart("ask_user_question", {"questions": [{
+        "header": "Color", "question": "Blue or green?",
+        "options": [{"label": "Blue"}, {"label": "Green"}],
+    }]}, tool_call_id="color")
+    pending = DeferredToolRequests(
+        calls=[call], metadata={"color": {"moyai_question_required": False}} if answer == "timeout" else {},
+    )
+    assert await database.save_result(
+        prepared.scope, conversation=ConversationTypeAdapter.dump_json(Conversation(
+            conversation_id=prepared.scope.conversation_id, deferred_tool_requests=pending,
+        )).decode(), output="", workspace=None, usage={}, deferred=True,
+    )
+    follow = await database.submit(actor, child["session_id"], NewMessage(
+        prompt="Private follow-up after the assignment.", request_key="queued-followup",
+    ))
+    if answer == "timeout":
+        # Optional preferences do not require a parent handoff: the child can
+        # continue with its fallback after the persisted deadline.
+        assert await service.report(parent.scope, child["session_id"]) is None
+        await expire_deadline(runtime, initial)
+        await expire_optional_questions(database)
+    else:
+        await database.submit(actor, child["session_id"], NewMessage(
+            prompt="Blue, please.", request_key="typed-answer", reply_to=initial.id,
+        ))
+    [resumed] = await database.claim_batch(10)
+    assert resumed.id != follow.id
+    continuation = await database.prepare(resumed.id)
+    assert continuation.scope.delegation_generated
+    assert continuation.scope.authority == parent.scope.authority
+    assert continuation.deferred_results is not None
+    await finish(runtime, continuation, "Assignment completed.")
+    report = await service.report(parent.scope, child["session_id"])
+    assert report["status"] == "completed" and report["output"] == "Assignment completed."
+    assert (await database.claim_next()).id == follow.id
+    human = await database.prepare(follow.id)
+    assert not human.scope.delegation_generated
+    await finish(runtime, human, "Private follow-up result.")
+    assert await service.report(parent.scope, child["session_id"]) == report
