@@ -75,6 +75,7 @@ def test_session_route_and_long_fenced_answer():
 
 @pytest.mark.parametrize("reference", [
     "Reference PR (not created or reviewed here): [{title}]({url}).",
+    "Reference PR—not created or reviewed: [{title}]({url}).",
     "Reference PR: [{title}]({url})",
     "Reference: [{title}]({url})",
     "**PR:** [{title}]({url})",

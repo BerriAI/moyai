@@ -15,7 +15,7 @@ VIOLET = "#5B3FD1"
 NAVIGATION_ACTIONS = {"moyai_open_session", "moyai_view_pr", "moyai_review_pr"}
 PR_REFERENCE_LABEL = re.compile(
     r"(?:reference(?:\s+(?:PR|pull request))?|PR|pull request)"
-    r"(?:\s*\(not created or reviewed(?: here)?\))?\s*:",
+    r"(?:\s*(?:\(not created or reviewed(?: here)?\)|[—–-]\s*not created or reviewed(?: here)?))?\s*:",
     re.IGNORECASE,
 )
 PR_TEXT_LINK = re.compile(r"<(https://github\.com/[^\s<>|]+)(?:\|[^>\n]*)?>|(https://github\.com/[^\s<>]+)")
