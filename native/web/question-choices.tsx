@@ -69,6 +69,7 @@ export function QuestionChoices({ question, selected, customAnswer, disabled, on
       type="button" variant="ghost" className="question-choice-row"
       ref={element => { buttons.current[index] = element }}
       aria-label={option.label} aria-describedby={description} aria-keyshortcuts={String(index + 1)}
+      aria-pressed={question.multi_select ? undefined : active.includes(option.label)}
       disabled={disabled}
       data-state={active.includes(option.label) ? "checked" : "unchecked"}
       onClick={question.multi_select ? undefined : () => choose(option.label)}

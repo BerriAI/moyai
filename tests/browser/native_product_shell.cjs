@@ -776,6 +776,7 @@ test('multi-select choices remain checkboxes and returning to choices clears cus
   const page=await pageFor(t);
   await page.getByRole('checkbox',{name:'Blue',exact:true}).click();
   await page.getByRole('checkbox',{name:'Green',exact:true}).click();
+  for(const checkbox of await page.getByRole('checkbox').all())assert.equal(await checkbox.getAttribute('aria-pressed'),null);
   const custom=page.getByRole('textbox',{name:'Custom answer for Color',exact:true});
   await custom.fill('Amber');
   assert.equal(await page.getByRole('checkbox',{name:'Blue',exact:true}).isChecked(),false);
@@ -791,6 +792,7 @@ test('choosing an answer never implicitly resolves a pending approval',async t=>
   reset({status:'waiting',pending:colorQuestion({approvals:[{tool_call_id:'publish',tool_name:'publish_document',args:{title:'Test document'}}]})});
   const page=await pageFor(t);
   await page.getByRole('button',{name:'Blue',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:true}).count(),1);
   assert.equal(await page.getByRole('button',{name:'Continue',exact:true}).isEnabled(),false);
   await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).press('Enter');
   assert.equal(answerRequests().length,0);
@@ -830,8 +832,13 @@ test('the last answer submits a complete multi-question snapshot',async t=>{
   pending.calls[0].args.questions.push({header:'Format',question:'Which format?',options:[{label:'Text'},{label:'JSON'}]});
   reset({status:'waiting',pending});const page=await pageFor(t);
   await page.getByRole('button',{name:'Blue',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:true}).count(),1);
+  await page.getByRole('button',{name:'Green',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Blue',exact:true,pressed:false}).count(),1);
+  assert.equal(await page.getByRole('button',{name:'Green',exact:true,pressed:true}).count(),1);
   assert.equal(answerRequests().length,0);
   await page.getByRole('textbox',{name:'Custom answer for Color',exact:true}).fill('Orange');
+  assert.equal(await page.locator('.question-choice-list').getByRole('button',{pressed:false}).count(),5);
   await page.getByRole('button',{name:'JSON',exact:true}).click();await waitFor(()=>answerRequests().length===1);
   assert.deepEqual(answerRequests()[0].body.answers['color-call'].answers,[
     {header:'Color',selected:[],custom_answer:'Orange'},
