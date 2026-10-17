@@ -1,11 +1,12 @@
 /** Presentation of the SDK's root-only stream. Saved messages remain authoritative. */
 export type LiveEvent = {
   type: string; run_id?: string; step?: number; index?: number; text?: string
+  phase?: "commentary" | "final_answer" | null
   id?: string; name?: string; content?: string; arguments?: unknown; data?: unknown; failed?: boolean
 }
 export type LiveTranscript = {
   turnId: string; offset: number; step: number | null
-  rounds: { step: number; parts: Record<number, string> }[]
+  rounds: { step: number; parts: Record<number, string>; phases?: Record<number, LiveEvent["phase"]> }[]
   activity: LiveEvent[]; action: string; finished: boolean
 }
 export const emptyLiveTranscript = (turnId = ""): LiveTranscript => ({
@@ -21,10 +22,12 @@ export function applyLiveEvent(state: LiveTranscript, event: LiveEvent, offset: 
     return { ...next, step: event.step!, action: "Writing a response…",
       rounds: [...state.rounds.filter(round => round.step < event.step!), { step: event.step!, parts: {} }] }
   }
-  if (event.type === "text_start" || event.type === "text_delta") {
+  if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
     if (state.step === null || !Number.isSafeInteger(event.index) || event.index! < 0 || typeof event.text !== "string") return next
     return { ...next, action: "Writing a response…", rounds: state.rounds.map(round => round.step !== state.step ? round : {
-      ...round, parts: { ...round.parts, [event.index!]: event.type === "text_start" ? event.text! : (round.parts[event.index!] ?? "") + event.text! },
+      ...round,
+      phases: { ...round.phases, [event.index!]: event.phase ?? round.phases?.[event.index!] },
+      parts: { ...round.parts, [event.index!]: event.type === "text_delta" ? (round.parts[event.index!] ?? "") + event.text! : event.text! },
     }) }
   }
   if (event.type === "tool_call" || event.type === "tool_result" || event.type === "capability") {
@@ -37,8 +40,22 @@ export function applyLiveEvent(state: LiveTranscript, event: LiveEvent, offset: 
   return next
 }
 export function liveCommentary(state: LiveTranscript, hasSavedAssistant: boolean): string {
-  const rounds = hasSavedAssistant ? state.rounds.slice(0, -1) : state.rounds
-  return rounds.map(round => Object.entries(round.parts).sort(([a], [b]) => Number(a) - Number(b)).map(([, text]) => text).join("")).filter(Boolean).join("\n\n")
+  return progressMessages(state, hasSavedAssistant).map(message => message.text).join("\n\n")
+}
+export type ProgressMessage = { id: string; text: string; phase: "commentary" }
+export function progressMessages(state: LiveTranscript, hasSavedAssistant: boolean): ProgressMessage[] {
+  return state.rounds.flatMap((round, roundIndex) => Object.entries(round.parts)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .filter(([index, text]) => {
+      const phase = round.phases?.[Number(index)]
+      return text.trim() && phase !== "final_answer"
+        && !(hasSavedAssistant && !phase && roundIndex === state.rounds.length - 1)
+    })
+    .map(([index, text]) => ({ id: `${state.turnId}:${round.step}:${index}`, text, phase: "commentary" })))
+}
+export function liveFinalAnswer(state: LiveTranscript): string {
+  return state.rounds.flatMap(round => Object.entries(round.parts).sort(([a], [b]) => Number(a) - Number(b))
+    .filter(([index]) => round.phases?.[Number(index)] === "final_answer").map(([, text]) => text)).join("\n\n")
 }
 export function mergeActivity(saved: LiveEvent[], live: LiveEvent[]): LiveEvent[] {
   const seen = new Set<string>()

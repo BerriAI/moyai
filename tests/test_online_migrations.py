@@ -105,9 +105,12 @@ def test_candidate_plans_require_contiguous_reviewed_source_digests(monkeypatch)
         online.plan(BASE)
 
 
-def test_performance_expansion_preserves_old_writer_and_matches_initializer(database, tmp_path):
+def test_performance_expansion_preserves_old_writer_and_matches_initializer(database, tmp_path, monkeypatch):
     """Exercise the real 20 -> 21 declaration, not only a synthetic future plan."""
     from app import performance
+    # Later releases may require maintenance. Keep this historical reader/writer
+    # compatibility proof scoped to the reviewed performance-only expansion.
+    monkeypatch.setattr(schema_migrations, 'SCHEMA_REVISION', 21)
     url, schema = database
     columns = {'message_id': 'BIGINT PRIMARY KEY', 'run_id': 'TEXT NOT NULL',
                'kind': 'TEXT NOT NULL', 'received_at': 'TEXT', 'persisted_at': 'TEXT NOT NULL',

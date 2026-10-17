@@ -298,7 +298,9 @@ async def test_approval_actions_are_scoped_to_original_requester_and_native_pend
     with pytest.raises(HTTPException):
         await slack.service.interact(payload)
     async with slack.runtime.database.sessions.begin() as db:
-        delivery = await db.scalar(select(Delivery))
+        delivery = await db.scalar(select(Delivery).where(
+            Delivery.identity == f"product-slack:{active[1].id}:waiting:0",
+        ))
         content = json.loads(slack.runtime.security.unseal(delivery.content))
         assert content["blocks"] and "linear_123_create_issue" in content["text"]
         delivery.status = "sent"

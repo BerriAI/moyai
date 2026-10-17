@@ -12,12 +12,14 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     PartDeltaEvent,
+    PartEndEvent,
     PartStartEvent,
     ToolCallPart,
     ToolReturnPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
 
+from .commentary import text_phase
 from .live_events import ResponseStart
 
 PRIVATE_TOOLS = {"read_memory", "search_memory", "write_memory", "delete_memory", "load_capability"}
@@ -32,11 +34,24 @@ def public_event(event: Any) -> dict[str, Any] | None:
         return {"type": "response_start", "run_id": event.run_id, "step": event.step}
     if isinstance(event, PartStartEvent):
         if event.part.part_kind == "text":
-            return {"type": "text_start", "index": event.index, "text": event.part.content}
+            return {
+                "type": "text_start", "index": event.index, "text": event.part.content,
+                "phase": text_phase(event.part.provider_details),
+            }
         return None
     if isinstance(event, PartDeltaEvent):
         if event.delta.part_delta_kind == "text":
-            return {"type": "text_delta", "index": event.index, "text": event.delta.content_delta}
+            return {
+                "type": "text_delta", "index": event.index, "text": event.delta.content_delta,
+                "phase": text_phase(event.delta.provider_details),
+            }
+        return None
+    if isinstance(event, PartEndEvent):
+        if event.part.part_kind == "text":
+            return {
+                "type": "text_end", "index": event.index, "text": event.part.content,
+                "phase": text_phase(event.part.provider_details),
+            }
         return None
     if isinstance(event, FunctionToolCallEvent):
         part = event.part

@@ -27,7 +27,8 @@ import { FilesPanel, OutputPanel } from "./output"
 import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
 import type { OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
-import { applyLiveEvent, emptyLiveTranscript, liveCommentary, mergeActivity, type LiveEvent } from "./live-transcript"
+import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
+import { TurnProgress } from "./turn-progress"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
 import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } from "./workspace-overlay"
 import { previewFileLink, type OpenFile } from "./file-links"
@@ -633,9 +634,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   if (!view) return <div className="center" role="status">{error || "Opening conversation…"}</div>
   const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
   const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
-  const commentary = liveCommentary(liveText, savedAssistant)
-  const liveMessage = commentary ? <article className="message assistant live-message" data-turn-id={liveText.turnId}>
-    <div className="message-author">Moyai</div><div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{commentary}</Markdown></div>
+  const finalText = liveFinalAnswer(liveText)
+  const liveMessage = !savedAssistant && finalText ? <article className="message assistant live-message" data-turn-id={liveText.turnId}>
+    <div className="message-author">Moyai</div><div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{finalText}</Markdown></div>
   </article> : null
   const displayedActivity = mergeActivity(activity, liveText.activity)
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
@@ -668,7 +669,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
           {messages.filter(message => message.role !== "system" && !queued.some(item => item.id === message.id)).map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
-            return <React.Fragment key={message.id}>{message.role === "assistant" && message.turn_id === liveText.turnId && liveMessage}<article className={`message ${message.role}`}>
+            return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
               <div className="message-author">{message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
@@ -678,7 +679,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
-            </article></React.Fragment>
+            </article>{message.role === "user" && turn?.actor_id === me.user.id && <TurnProgress
+              key={`${authorityKey}:${connectionVersion}:${turn.id}`} sessionId={id} turn={turn} visible={visible}
+              live={liveText.turnId === turn.id ? liveText : undefined}
+              hasSavedAnswer={messages.some(item => item.turn_id === turn.id && item.role === "assistant")}
+            />}</React.Fragment>
           })}
           {!savedAssistant && liveMessage}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
