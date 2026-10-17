@@ -86,12 +86,13 @@ def integration_model(scenario: str, *, gates: tuple[asyncio.Event, asyncio.Even
                 ]
             else:
                 calls = []
-        elif scenario == "question":
+        elif scenario in {"question", "optional_question"}:
             calls = [("ask_user_question", {
                 "questions": [{
                     "header": "Choice", "question": "Which output should I create?",
                     "options": [{"label": "Text"}, {"label": "JSON"}],
-                }]
+                }],
+                **({"required": False} if scenario == "optional_question" else {}),
             })]
         elif scenario == "stream":
             calls = [("delegate_task", {"agent_name": "self", "task": "Return the phrase native-child-result."})]

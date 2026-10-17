@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     # Replay-only: new turns and delegates have no model-request-count cap.
     model_request_limit: int = Field(default=100, ge=1, le=1000, validation_alias="MOYAI_MODEL_CALL_LIMIT")
     model_timeout_seconds: int = Field(default=300, ge=10, le=900, validation_alias="MOYAI_MODEL_TIMEOUT")
+    optional_question_timeout_seconds: int = Field(
+        default=90, ge=5, le=900, validation_alias="MOYAI_OPTIONAL_QUESTION_TIMEOUT",
+    )
     secure_cookies: bool = Field(default=False, validation_alias="MOYAI_SECURE_COOKIES")
     public_url: str = Field(default="", validation_alias=AliasChoices("MOYAI_PUBLIC_URL", "PUBLIC_URL"))
     slack_signing_secret: SecretStr = Field(default=SecretStr(""), validation_alias="SLACK_SIGNING_SECRET")

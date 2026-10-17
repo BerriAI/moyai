@@ -103,7 +103,7 @@ async function handle(req,res,next) {
       return json({updated:true});
     }
     const row=session(url.pathname.split('/')[3]);
-    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
   }
@@ -116,6 +116,34 @@ async function pageFor(t,route='#'+sessionId,width=1440) {
   const errors=[];page.on('pageerror',error=>errors.push(error.message));t.after(()=>assert.deepEqual(errors,[]));
   await page.goto(base+'/'+route);return page;
 }
+for(const width of [1440,768,320])test(`ordinary question accepts a composer answer at ${width}px`,async t=>{
+  reset({status:'waiting',canAnswer:true,canReply:true,questionDeadline:'2099-01-01T12:00:00Z',
+    pending:{calls:[{tool_call_id:'color',tool_name:'ask_user_question',args:{questions:[{
+      header:'Color',question:'Blue or green?',options:[{label:'Blue'},{label:'Green'}],
+    }]}}],approvals:[]}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByText('Your reply will answer the pending question.',{exact:true}).waitFor();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Blue, please.');
+  const button=page.getByRole('button',{name:'Answer question',exact:true});
+  assert.equal(await button.isEnabled(),true);
+  await button.click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/messages')&&row.method==='POST'));
+  const sent=state.requests.find(row=>row.path.endsWith('/messages')&&row.method==='POST');
+  assert.equal(sent.body.reply_to,turnId);
+  assert.equal(sent.body.prompt,'Blue, please.');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+test('another participant can queue a message without answering the requester question',async t=>{
+  reset({status:'waiting',canAnswer:false,canReply:false});
+  const page=await pageFor(t);
+  await page.getByText('Waiting for the original requester’s response. New messages will be queued.',{exact:true}).waitFor();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Additional context for later.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/messages')&&row.method==='POST'));
+  const sent=state.requests.find(row=>row.path.endsWith('/messages')&&row.method==='POST');
+  assert.equal(sent.body.reply_to,undefined);
+  assert.equal(state.requests.some(row=>row.path.endsWith('/answers')),false);
+});
 async function palette(page) {await page.keyboard.press('Control+k');const dialog=page.getByRole('dialog',{name:'Commands and session search'});await dialog.waitFor();return dialog;}
 before(async()=>{
   reset();const {createServer}=await import('vite');

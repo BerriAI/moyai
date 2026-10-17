@@ -148,6 +148,7 @@ class NewMessage(BaseModel):
     mode: Literal["asap", "when_idle"] = "when_idle"
     connections: list[str] = Field(default_factory=list, max_length=30)
     attachments: list[str] = Field(default_factory=list, max_length=8)
+    reply_to: str | None = Field(default=None, min_length=1, max_length=36)
 
     @model_validator(mode="after")
     def nonblank_prompt(self) -> NewMessage:

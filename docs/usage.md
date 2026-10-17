@@ -342,6 +342,19 @@ not implemented by this adapter.
 - **Send now** uses the native pending-message mechanism. A changed requester,
   model or connection set becomes a follow-up rather than inheriting an active
   run's authority.
+- When Moyai asks one ordinary clarification question, its requester can type
+  an answer in the main composer or use the question form. Multiple questions,
+  approvals and credential requests retain their dedicated forms. Other
+  participants can queue context but cannot answer for the requester.
+- Required questions wait for an explicit answer. The agent can mark a
+  preference question optional; its persisted deadline defaults to 90 seconds
+  (`MOYAI_OPTIONAL_QUESTION_TIMEOUT`, 5–900 seconds). An unanswered optional
+  question returns “no answer received” to the agent, which must state its
+  assumption. No option is selected and no permission is granted by timeout.
+- Applying a question answer reserves the resumed turn ahead of queued
+  follow-ups. Those messages remain saved until the deferred tool result has
+  been processed. Deploy the API and coordinator changes together; older
+  coordinators do not dispatch a reserved queued resume turn.
 - **Stop** revokes unstarted work before requesting Temporal cancellation.
   Failed cancellation RPCs are reconciled. Native foreground-command cancellation
   is exercised by the tests. Already returned background process handles and

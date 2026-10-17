@@ -7,18 +7,18 @@ from dataclasses import replace
 from datetime import timedelta
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 import modal
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from opentelemetry.trace import get_tracer
-from pydantic import TypeAdapter
+from pydantic import Field, TypeAdapter
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
 from pydantic_ai.capabilities import AbstractCapability, SetToolMetadata, durable_operation
 from pydantic_ai.capabilities.abstract import WrapToolExecuteHandler
 from pydantic_ai.durable_exec.temporal import TemporalDurability, TemporalRunContext
-from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.exceptions import CallDeferred, ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
@@ -36,6 +36,7 @@ from pydantic_ai_harness import (
     StepPersistence,
     SummarizingCompaction,
 )
+from pydantic_ai_harness.ask_user import AskUserRequest, Question
 from pydantic_ai_harness.conversation_search import SnapshotHistorySource
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -104,9 +105,45 @@ class DurableQuestions(AskUser[RunScope]):
         native = super().get_toolset()
         if not isinstance(native, FunctionToolset):
             raise TypeError("The native question capability changed its toolset contract.")
-        # Keep the SDK's tool, validator, events and deferral implementation unchanged.
+        original = native.tools["ask_user_question"].function
+
+        async def ask_user_question(
+            ctx: RunContext[RunScope],
+            questions: Annotated[list[Question], Field(min_length=1, max_length=10)],
+            required: bool = True,
+        ) -> dict[str, list[str]] | str:
+            """Ask a clarification with options; the user can also type their answer.
+
+            Ask only when the answer cannot be found in the conversation or workspace.
+            Use required=False for optional preferences with a reasonable fallback.
+            Optional questions may time out with no answer; state your assumption then.
+            Use required=True when missing information prevents correct work.
+            Never use this tool for permission, credentials, or approval of an action.
+
+            Args:
+                questions: One to ten questions with unique headers and concrete options.
+                required: Whether an explicit answer is necessary to continue.
+            """
+            try:
+                request = AskUserRequest.from_tool_call(ToolCallPart(
+                    "ask_user_question", {"questions": [question.model_dump() for question in questions]},
+                    tool_call_id=ctx.tool_call_id or "",
+                ))
+            except ValueError as error:
+                raise ModelRetry("Use valid questions with unique headers and distinct option labels.") from error
+            try:
+                return await original(ctx, list(request.questions))
+            except CallDeferred as error:
+                if required:
+                    raise
+                raise CallDeferred(metadata={
+                    **(error.metadata or {}), "moyai_question_required": False,
+                }) from None
+
+        # Retain the SDK's validation, events and result shape. Optional intent
+        # belongs to the persisted deferred call, never a browser-only timer.
         return FunctionToolset(
-            tools=list(native.tools.values()), id="moyai_questions"
+            tools=[ask_user_question], id="moyai_questions"
         ).with_metadata(temporal=False)
 
     def get_toolset(self) -> AbstractToolset[RunScope]:

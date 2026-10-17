@@ -52,7 +52,7 @@ type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 type Question = { header: string; question: string; multi_select?: boolean; options: { label: string; description?: string }[] }
 const settingsDestinations = [
@@ -570,6 +570,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (element) element.scrollTop = element.scrollHeight
   }, [messages.length, sendingNow])
   const active = view?.turns.find(turn => turn.id === view.session.active_turn)
+  const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
   useEffect(() => {
     if (!activeId || endedStreams.current.has(activeId)) return
@@ -626,7 +627,12 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     }
     if ((!prompt.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
     setBusy(true); setError("")
-    const body = { prompt, model, mode, connections: selectedAccounts, attachments: pictures.readyFiles.map(file => file.id) }
+    const body = {
+      prompt, model: answeringQuestion ? active?.model ?? model : model, mode,
+      connections: answeringQuestion ? active?.connections ?? selectedAccounts : selectedAccounts,
+      attachments: pictures.readyFiles.map(file => file.id),
+      ...(answeringQuestion ? { reply_to: active?.id } : {}),
+    }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
     try {
@@ -706,7 +712,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {!savedAssistant && liveMessage}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
-          {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} onDone={load} />}
+          {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
+            {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
+            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} onDone={load} />
+          </>}
+          {session.status === "waiting" && !view.can_answer && !view.pending && <p className="notice">Waiting for the original requester’s response. New messages will be queued.</p>}
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
           {view.turns[0]?.error && <p className="error" role="alert">{view.turns[0].error}</p>}
           {!session.active_turn && view.effects?.map(effect => <EffectReview key={effect.id} effect={effect} onDone={load} />)}
@@ -715,6 +725,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
+          {answeringQuestion && <p className="notice">Your reply will answer the pending question.</p>}
+          {session.status === "waiting" && view.can_answer && !answeringQuestion && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
             <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
@@ -724,13 +736,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
             <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
-            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} sessionId={id} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={editing ? undefined : pictures.paste} />
+            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} sessionId={id} disabled={busy} placeholder={answeringQuestion ? "Type your answer to the pending question…" : "Describe the work, or type / for skills…"} onPaste={editing ? undefined : pictures.paste} />
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
                 {session.active_turn && <><Choice value={mode} onChange={setMode} label="Delivery timing" options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /><Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button></>}
-                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || session.status === "waiting" || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
+                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
               </div>
             </div>
           </div>
