@@ -109,7 +109,8 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .message-content p { margin-bottom: 12px; }
 .message-content a { color: var(--ui-primary); text-decoration: underline; text-underline-offset: 3px; }
 .message-content pre { background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 8px; padding: 16px; }
-.message-content :not(pre) > code { color: var(--ui-primary); }
+.message-content :not(pre) > code { color: var(--ui-foreground); }
+.message-content a code { color: inherit; }
 .message-content table { border-collapse: collapse; display: block; overflow-x: auto; }
 .message-content td, .message-content th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--ui-border); }
 .message.user { display: flex; flex-direction: column; align-items: flex-end; }
@@ -129,10 +130,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; max-width: 100%; }
 .send-actions [data-slot="select-trigger"] { font-size: 12px; width: 112px; }
 .composer-hint { text-align: center; color: var(--ui-muted); font-size: 11px; margin-top: 8px; }
-.account-selection { margin-top: 12px; font-size: 12px; color: var(--ui-muted); }
-.account-selection summary { cursor: pointer; }
-.connection-options { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 0; }
-.connection-options label { display: flex; gap: 8px; align-items: center; }
 .working { display: flex; gap: 10px; align-items: center; color: var(--ui-muted); margin: 24px auto; font-size: 13px; max-width: var(--chat-width); }
 .running-dot { width: 6px; height: 6px; background: var(--ui-success); border-radius: 50%; flex: none; }
 .details-panel { border-left: 1px solid var(--ui-border); background: var(--ui-subtle); display: flex; flex-direction: column; min-height: 0; }

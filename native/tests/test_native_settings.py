@@ -679,3 +679,37 @@ async def test_saved_skill_runs_through_integrated_native_temporal_agent_and_rep
         recorded = await db.get(Turn, turn.id)
         assert runtime.security.unseal(recorded.result).decode() == "Stored skill loaded in native Temporal execution."
     assert len(await runtime.stores.steps.list_runs(conversation_id=prepared.scope.conversation_id)) == 1
+
+
+async def test_general_preferences_persist_partially_and_are_user_scoped(runtime, actor):
+    other = await member(runtime)
+    async with runtime.database.sessions.begin() as db:
+        row = await db.get(User, actor.id)
+        row.preferences = json.dumps({"unrelated": {"keep": True}, "general": {"future": "preserve"}})
+    async with client_for(runtime, actor) as client:
+        defaults = {"delivery_mode": "when_idle", "connection_ids": None}
+        assert (await client.get("/api/settings/general")).json() == defaults
+        # Concurrent partial changes must merge under the user-row lock.
+        responses = await asyncio.gather(
+            client.patch("/api/settings/general", json={"delivery_mode": "asap"}),
+            client.patch("/api/settings/general", json={"connection_ids": ["selected"]}),
+        )
+        assert all(response.status_code == 200 for response in responses)
+        saved = {"delivery_mode": "asap", "connection_ids": ["selected"]}
+        assert (await client.get("/api/settings/general")).json() == saved
+        assert (await client.get("/api/me")).json()["preferences"] == saved
+        async with runtime.database.sessions() as db:
+            document = json.loads((await db.get(User, actor.id)).preferences)
+            assert document["unrelated"] == {"keep": True}
+            assert document["general"]["future"] == "preserve"
+        async with client_for(runtime, other) as other_client:
+            assert (await other_client.get("/api/settings/general")).json() == defaults
+        assert (await client.patch("/api/settings/general", json={"connection_ids": []})).json()["connection_ids"] == []
+        assert (await client.patch("/api/settings/general", json={"connection_ids": None})).json()["connection_ids"] is None
+        for invalid in ({"delivery_mode": None}, {"delivery_mode": "invalid"}, {"unknown": True},
+                        {"connection_ids": [""]}, {"connection_ids": ["x"] * 31}):
+            assert (await client.patch("/api/settings/general", json=invalid)).status_code == 422
+        client.headers.pop("X-Moyai-CSRF")
+        assert (await client.patch("/api/settings/general", json={"delivery_mode": "when_idle"})).status_code == 403
+        client.cookies.clear()
+        assert (await client.get("/api/settings/general")).status_code == 401

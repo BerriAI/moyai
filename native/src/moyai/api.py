@@ -26,6 +26,7 @@ from temporalio.service import RPCError
 
 from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
+from .general_preferences import general_preferences
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .file_preview import routes as file_preview_routes
 from .history_handoff import is_turn_run, latest_turn_snapshot
@@ -369,6 +370,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             },
             "csrf": csrf, "models": runtime.settings.models,
             "default_model": runtime.settings.default_model,
+            "preferences": general_preferences(user.preferences),
             "product_mode": "existing" if runtime.product_identity is not None else "standalone",
         }
 
