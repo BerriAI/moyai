@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from "react"
+import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -38,6 +38,7 @@ import { WorkspaceOverlay, WorkspaceOverlayContent, WorkspaceOverlayTrigger } fr
 import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
+import { QuestionChoices, type Question } from "./question-choices"
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
@@ -56,7 +57,6 @@ type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { r
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
 type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
-type Question = { header: string; question: string; multi_select?: boolean; options: { label: string; description?: string }[] }
 const settingsDestinations = [
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
   { page: "connections", label: "Connections" }, { page: "secrets", label: "Secrets" },
@@ -417,6 +417,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   viewNow.current = view
   const sensitiveVersion = useRef(0)
   const [draft, setDraft] = useState("")
+  const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
   const [model, setModel] = useState(initial?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
@@ -463,7 +464,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     resolvedOnce.current = undefined
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
-    setDraft(""); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
@@ -581,7 +582,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     active?.actor_id === me.user.id ? active : undefined, visible && !swarmSpace,
     () => clearSensitiveNow.current(),
   )
-  const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && pictures.files.length === 0)
+  const requestAnswered = Boolean(active && answeredRequest === active.id)
+  const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
   useEffect(() => {
     if (!activeId || endedStreams.current.has(activeId)) return
@@ -645,10 +647,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
+    let accepted = false
     try {
       await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: lastRequest.current.key })
+      accepted = true
+      if (body.reply_to) setAnsweredRequest(body.reply_to)
       setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
-    } catch (e) { setError(String(e)) } finally { setBusy(false) }
+    } catch (e) { setError(accepted && body.reply_to ? "Your response was sent, but the conversation could not be refreshed." : String(e)) } finally { setBusy(false) }
   }
   async function sendNow(turnId: string) {
     if (busy) return
@@ -739,7 +744,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
             {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
-            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} onDone={load} />
+            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} />
           </>}
           {session.status === "waiting" && !view.can_answer && !view.pending && <p className="notice">Waiting for the original requester’s response. New messages will be queued.</p>}
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
@@ -750,8 +755,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
-          {answeringQuestion && <p className="notice">Your reply will answer the pending question.</p>}
-          {session.status === "waiting" && view.can_answer && !answeringQuestion && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
+          {answeringQuestion && <p className="question-reply-hint">Your reply will answer the pending question.</p>}
+          {requestAnswered && <p className="question-reply-hint">Your answer was sent. You can send a follow-up.</p>}
+          {session.status === "waiting" && view.can_answer && !answeringQuestion && !requestAnswered && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
             <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
@@ -911,39 +917,92 @@ function EffectReview({ effect, onDone }: { effect: Effect; onDone: () => Promis
   </form>
 }
 
-function PendingRequests({ pending, turnId, sessionId, onDone }: { pending: Pending; turnId: string; sessionId: string; onDone: () => Promise<void> }) {
+function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void> }) {
   const [values, setValues] = useState<Record<string, string[]>>({})
   const [custom, setCustom] = useState<Record<string, string>>({})
   const [approvals, setApprovals] = useState<Record<string, boolean>>({})
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const form = useRef<HTMLFormElement>(null)
+  const restoreFocus = useRef<HTMLElement | null>(null)
   const requestKey = useRef(crypto.randomUUID())
+  const submitting = useRef(false)
+  const disabled = busy || submitted
+  useLayoutEffect(() => {
+    if (busy || submitted || !restoreFocus.current) return
+    const target = restoreFocus.current
+    restoreFocus.current = null
+    if (target.isConnected && document.activeElement === document.body) target.focus()
+  }, [busy, submitted])
   const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
   const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
+  const isComplete = (nextValues: typeof values, nextCustom: typeof custom) => questions.every(({ call, questions }) => questions.every(question => {
+    const key = `${call.tool_call_id}:${question.header}`
+    return Boolean(nextCustom[key]?.trim() || nextValues[key]?.length)
+  })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
+  const requiresContinue = pending.approvals.length > 0 || credentials.length > 0
+  async function refreshSubmitted() {
+    setBusy(true); setError("")
+    try { await onDone() }
+    catch { setError("Your response was sent, but the conversation could not be refreshed.") }
+    finally { setBusy(false) }
+  }
+  async function submit(nextValues = values, nextCustom = custom) {
+    if (submitting.current || submitted || unknown) return
+    if (!isComplete(nextValues, nextCustom)) {
+      setError(requiresContinue ? "Complete the remaining questions and approval requests before continuing." : "Answer the remaining questions before continuing.")
+      return
+    }
+    submitting.current = true
+    restoreFocus.current = document.activeElement instanceof HTMLElement && form.current?.contains(document.activeElement)
+      ? document.activeElement : null
+    setBusy(true); setError("")
+    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
+      const key = `${call.tool_call_id}:${question.header}`
+      return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
+    }) }]))
+    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }) }
+    catch (e) {
+      submitting.current = false
+      setError(String(e)); setBusy(false)
+      return
+    }
+    // Once accepted, only refresh the conversation; never reopen this answer.
+    restoreFocus.current = null
+    onAccepted()
+    await refreshSubmitted()
+  }
   return <>
     {credentials.map(call => {
       const requestId = pending.metadata?.[call.tool_call_id]?.request_id
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
-    {(questions.length > 0 || pending.approvals.length > 0) && <form className="pending" onSubmit={async e => {
-    e.preventDefault(); setBusy(true); setError("")
-    const answers = Object.fromEntries(questions.map(({ call, questions }) => [call.tool_call_id, { answers: questions.map(question => {
-      const key = `${call.tool_call_id}:${question.header}`
-      return { header: question.header, selected: custom[key]?.trim() ? [] : values[key] ?? [], custom_answer: custom[key]?.trim() || null }
-    }) }]))
-    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }); await onDone() }
-    catch (e) { setError(String(e)) } finally { setBusy(false) }
-  }}>
-    <h3>Your input is needed</h3>
+    {(questions.length > 0 || pending.approvals.length > 0) && <form ref={form} aria-busy={busy} className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
+    {questions.length
+      ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{disabled && <span className="question-send-status" role="status">{submitted ? "Answer sent" : "Sending…"}</span>}</div>
+      : <h3>Your input is needed</h3>}
     {questions.map(({ call, questions }) => questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
-      return <fieldset key={key}><legend>{question.question}</legend><div className="question-options">{question.options.map(option => <Button type="button" key={option.label} variant={(values[key] ?? []).includes(option.label) && !custom[key] ? "secondary" : "outline"} aria-pressed={(values[key] ?? []).includes(option.label) && !custom[key]} onClick={() => { setCustom(previous => ({ ...previous, [key]: "" })); setValues(previous => ({ ...previous, [key]: question.multi_select ? (previous[key] ?? []).includes(option.label) ? previous[key].filter(item => item !== option.label) : [...previous[key] ?? [], option.label] : [option.label] })) }} title={option.description}>{option.label}</Button>)}</div><Input aria-label={`Custom answer for ${question.header}`} placeholder="Or write your own answer…" value={custom[key] ?? ""} onChange={e => setCustom(previous => ({ ...previous, [key]: e.target.value }))} /></fieldset>
+      return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={disabled}
+        onSelect={selected => {
+          if (submitting.current) return
+          const nextValues = { ...values, [key]: selected }, nextCustom = { ...custom, [key]: "" }
+          setValues(nextValues); setCustom(nextCustom)
+          if (!question.multi_select && !requiresContinue && isComplete(nextValues, nextCustom)) void submit(nextValues, nextCustom)
+        }}
+        onCustomAnswer={value => {
+          if (submitting.current) return
+          setCustom(previous => ({ ...previous, [key]: value }))
+          if (value.trim()) setValues(previous => ({ ...previous, [key]: [] }))
+        }} />
     }))}
-    {pending.approvals.map(call => <fieldset key={call.tool_call_id}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
+    {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={disabled} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
     {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
-    {error && <p className="error" role="alert">{error}</p>}<Button type="submit" disabled={busy || unknown}>{busy ? "Submitting…" : "Continue"}</Button>
+    {error && <p className="error" role="alert">{error}</p>}
+    {submitted && <div className={questions.length ? "question-form-actions" : undefined}><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refreshSubmitted()}>Refresh conversation</Button></div>}
+    {requiresContinue && <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={disabled || unknown || !isComplete(values, custom)}>{submitted ? "Submitted" : busy ? "Submitting…" : "Continue"}</Button></div>}
   </form>}
   </>
 }
