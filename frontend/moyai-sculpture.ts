@@ -29,8 +29,9 @@ export function mountSculpture(host: HTMLElement | null) {
   studio.dispose(); pmrem.dispose()
   scene.environment = environment.texture
   scene.environmentIntensity = .16
-  // The model is centered and normalized offline for this home-screen framing.
-  camera.position.set(0, 0, 8.6)
+  // The sculpted body's 2.614-unit radius needs 9.483 units at this FOV.
+  // Leave clearance for every yaw/pitch, including the lowest pointed ridge.
+  camera.position.set(0, 0, 9.8)
   camera.lookAt(0, 0, 0)
   scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .32))
   for (const [color, power, x, y, z] of [[0xf0f2f8, 4.1, 3, 5, 5], [0x658bff, 5.2, -4, 1, -2], [0x9b86d8, .95, 3, 1, -3], [0x829ee8, .60, -4, -2, 3]]) {

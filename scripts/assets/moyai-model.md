@@ -73,6 +73,10 @@ Current GLB: 5,134,880 bytes, SHA-256
 The larger textures are an intentional quality tradeoff for close inspection;
 the model remains lazy-loaded and uses no new decoder.
 
+The viewer uses a 9.8-unit camera distance. The body's maximum radius is 2.614
+units, requiring at least 9.483 units at the 32-degree field of view to stay
+inside the square canvas through rotation.
+
 Regenerate the poster from the final viewer at Home rotation with a square,
 transparent canvas. Downsample to 440×440 and encode WebP at quality 94. An offline
 capture may preserve the drawing buffer to export the image; leave that option
