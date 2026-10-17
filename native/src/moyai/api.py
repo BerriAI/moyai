@@ -598,7 +598,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         return {"status": "stopping"}
 
     @app.post("/api/sessions/{session_id}/answers", status_code=202)
-    async def answer(session_id: str, body: ApprovalReply, user: User = Depends(actor)):
+    async def answer(session_id: str, body: ApprovalReply, request: Request, user: User = Depends(actor)):
         async with runtime.database.sessions() as db:
             await runtime.database.allowed_session(db, session_id, user)
             turn = await db.get(Turn, body.turn_id)
@@ -635,6 +635,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         resumed = await runtime.database.resume(
             resumed_actor, session_id, turn.id, body.request_key,
             TypeAdapter(DeferredToolResults).dump_python(results, mode="json"),
+            received_at=request.state.moyai_received_at,
         )
         return turn_view(resumed)
 

@@ -46,7 +46,7 @@ async def test_api_receipt_belongs_to_original_admission_and_ignores_client_cloc
         assert first.status_code == 202
         receipt = await saved(runtime, first.json()["id"], "received")
         assert receipt is not None and receipt.created_at <= first.json()["created_at"]
-        assert json.loads(receipt.content) == {}
+        assert json.loads(receipt.content) == {"source": "http", "surface": "web", "coverage_version": 2}
         assert not receipt.created_at.startswith("1900")
         second = await client.post(f"/api/sessions/{session.id}/messages", json=body)
         assert second.json()["id"] == first.json()["id"]
@@ -160,7 +160,8 @@ async def test_report_is_admin_only_root_scoped_bounded_and_csv_keeps_evidence(r
     async with runtime.database.sessions() as db:
         turns = list(await db.scalars(select(Turn)))
         values = await observations(db, turns, period)
-        assert set(values) == {turn.id}
+        assert set(values) == {turn.id, "steering"}
+        assert values["steering"]["startup_timing_status"] == "steering_input"
         assert await observations(db, turns, report_range("custom", "2026-10-17", "2026-10-18")) == {}
     async with client_for(runtime, actor) as client:
         query = "?preset=custom&start=2026-10-16&end=2026-10-17"
@@ -169,6 +170,8 @@ async def test_report_is_admin_only_root_scoped_bounded_and_csv_keeps_evidence(r
         report = response.json()
         assert report["performance"]["dispatch"]["mean_ms"] == 4000
         assert report["performance"]["eligible_turns"] == 1
+        assert report["performance"]["accounted_turns"] == 2
+        assert report["performance"]["cards"]["startup"]["excluded"] == 1
         assert report["performance"]["cards"]["queue"]["mean_ms"] == 1000
         assert report["performance"]["cards"]["startup"]["max_ms"] == 4000
         assert len(report["performance"]["trend"]) == 24
@@ -335,7 +338,9 @@ def test_cards_measure_partial_stages_without_changing_the_additive_cohort():
     assert result["queue"]["mean_ms"] == 1500 and result["queue"]["max_ms"] == 2000
     assert result["startup"]["samples"] == result["broker"]["samples"] == 1
     assert result["startup"]["pending"] == result["startup"]["missing"] == 1
-    assert result["computer"]["samples"] == result["computer"]["missing"] == 0
+    assert result["computer"]["samples"] == 0
+    assert result["computer"]["missing"] == 1  # History has no instrumentation, not a known model-only turn.
+    assert result["computer"]["excluded"] == 1
     assert result["computer"]["pending"] == 1  # Historical/model-only turns are not missing computers.
     assert metrics([full, waiting, historical])["breakdown"]["samples"] == 1
 

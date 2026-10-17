@@ -5,8 +5,8 @@ import { elapsed, finiteValue, spendCount } from "./analytics-format"
 import { ReportTable } from "./analytics-shared"
 
 export const timingSeries: { key: TimingCardKey; title: string; description: string }[] = [
-  { key: "startup", title: "Startup to dispatch", description: "API receipt → first foreground LiteLLM outbound attempt" },
-  { key: "queue", title: "Queue pickup", description: "API receipt → execution worker starts preparation" },
+  { key: "startup", title: "Startup to dispatch", description: "Turn receipt → first foreground LiteLLM outbound attempt" },
+  { key: "queue", title: "Queue pickup", description: "Turn receipt → execution worker starts preparation" },
   { key: "broker", title: "Broker preparation", description: "Broker receipt → foreground outbound attempt" },
   { key: "computer", title: "Computer readiness", description: "First acquisition requested → usable workspace" },
 ]

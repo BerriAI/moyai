@@ -40,7 +40,7 @@ USAGE_COUNTERS = ("requests", "input_tokens", "output_tokens", "cache_read_token
 TURN_COLUMNS = (
     Turn.id, Turn.actor_id, Turn.session_id, Turn.model, Turn.status, Turn.usage,
     Turn.created_at, Turn.accepted_at, Turn.finished_at,
-    Turn.parent_turn, Turn.preparation.is_not(None).label("has_preparation"),
+    Turn.parent_turn, Turn.preparation.is_not(None).label("has_preparation"), Turn.workflow_id,
 )
 
 
@@ -379,7 +379,10 @@ async def report(
         steering=row.id in steering,
     ) for row in turns]
     for row in rows:
-        row.update(timing.get(row["id"], performance_report.timing_view({})))
+        row.update(timing.get(row["id"], {
+            **performance_report.timing_view({}),
+            **{f"{name}_timing_status": "outside_range" for name in performance_report.CARD_FIELDS},
+        }))
     receipt_rows = publications
     publications = [
         row for row in unique_publications(publications)
