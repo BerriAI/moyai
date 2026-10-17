@@ -32,11 +32,12 @@ async def test_combined_reference_read_uses_real_current_product_identity(runtim
         transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
         base_url="http://testserver", cookies={"workspace_session": cookie},
     ) as client:
-        path = f"/api/sessions/{session.id}?resolve=true&include_activity=false"
+        path = f"/api/sessions/{session.id}?resolve=true&include_activity=false&include_messages=true"
         response = await client.get(path)
         assert response.status_code == 200
         assert response.json()["reference"]["id"] == response.json()["session"]["id"] == session.id
         assert response.json()["reference"]["source"] == "native"
+        assert response.json()["messages"] == []
         assert response.headers["cache-control"] == "no-store"
         member_cookie, _ = identity_fixtures.google_cookie(identity, sub="member-sub", email="member@example.test")
         client.cookies.set("workspace_session", member_cookie)
@@ -45,6 +46,26 @@ async def test_combined_reference_read_uses_real_current_product_identity(runtim
         async with canonical_product.writer.begin() as db:
             await db.execute(text("DELETE FROM users WHERE id='google:admin-sub'"))
         assert (await client.get(path)).status_code == 401
+
+
+async def test_session_bootstrap_returns_the_authorized_transcript(runtime, actor):
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    await runtime.database.submit(
+        actor, session.id, NewMessage(prompt="Keep this saved message.", request_key="bootstrap"),
+    )
+    path = f"/api/sessions/{session.id}?include_activity=false"
+    async with sign_in(runtime) as client:
+        assert "messages" not in (await client.get(path)).json()
+        response = await client.get(path + "&include_messages=true")
+        assert response.status_code == 200
+        expected = (await client.get(f"/api/sessions/{session.id}/messages")).json()
+        assert response.json()["messages"] == expected
+        assert expected[0]["content"] == "Keep this saved message."
+        assert response.headers["cache-control"] == "no-store"
+    async with member_client(runtime) as (other, _):
+        denied = await other.get(path + "&include_messages=true")
+        assert denied.status_code == 404
+        assert "Keep this saved message." not in denied.text
 
 
 async def test_transcript_snapshot_skips_optional_store_and_heavy_turn_columns(runtime, actor, monkeypatch):

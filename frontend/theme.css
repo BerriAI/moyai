@@ -41,7 +41,8 @@
   --ui-muted: #acabb2;
   --ui-control-border: #706c7e;
   --ui-border: #ffffff18;
-  --ui-font: "Share Tech Mono", ui-monospace, monospace;
+  --ui-font: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --ui-font-mono: "Share Tech Mono", ui-monospace, monospace;
   --ui-headline-accent: #c1b1ee;
   --ui-destructive: #a73b49;
   --ui-danger: #e0807a;

@@ -1,3 +1,4 @@
+@font-face { font-family: "Manrope"; src: url("./assets/fonts/manrope-variable.ttf") format("truetype"); font-weight: 200 800; font-style: normal; font-display: swap; }
 @font-face { font-family: "Share Tech Mono"; src: url("./assets/fonts/share-tech-mono.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; }
 @layer base {
   *, ::before, ::after { border: 0 solid var(--ui-border); }
@@ -15,7 +16,7 @@ h2 { font-size: 22px; font-weight: 500; }
 h3 { font-size: 16px; font-weight: 550; }
 input, textarea { color: var(--ui-foreground); }
 label { display: grid; gap: 8px; }
-pre, code { font-family: var(--ui-font); font-size: 12px; }
+pre, code { font-family: var(--ui-font-mono); font-size: 12px; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; }
 small { display: block; color: var(--ui-muted); font-size: 12px; font-weight: 400; }
 fieldset { border: 0; padding: 0; margin: 20px 0; min-width: 0; }
@@ -40,7 +41,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .session-indicator.working { background: var(--ui-success); }
 .session-indicator.waiting { background: var(--ui-warning); }
 .session-row .session-menu-trigger { opacity: 0; }
-.session-row:hover .session-menu-trigger, .session-row:focus-within .session-menu-trigger, .session-row.selected .session-menu-trigger { opacity: 1; }
+.session-row:hover .session-menu-trigger, .session-row:has(:focus-visible) .session-menu-trigger { opacity: 1; }
 .session-row a:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
 .rail-caption > div, .session-group-heading { display: flex; align-items: center; min-width: 0; }
 .session-group { margin-bottom: 12px; }
@@ -100,7 +101,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .transcript { flex: 1; overflow-y: auto; scrollbar-gutter: stable; padding: 32px var(--chat-gutter); scroll-behavior: auto; }
 .transcript > *, .composer-wrap > * { max-width: var(--chat-width); margin-inline: auto; }
 .empty-chat { max-width: 680px; margin: 14vh auto 0; text-align: center; }
-.empty-chat img { width: 56px; height: 56px; object-fit: contain; opacity: .8; margin-bottom: 20px; }
 .empty-chat p { margin-top: 12px; }
 .message { max-width: var(--chat-width); margin: 0 auto 32px; }
 .message-author { display: flex; gap: 12px; align-items: center; font-weight: 550; font-size: 12px; color: var(--ui-muted); margin-bottom: 10px; }
@@ -109,7 +109,8 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .message-content p { margin-bottom: 12px; }
 .message-content a { color: var(--ui-primary); text-decoration: underline; text-underline-offset: 3px; }
 .message-content pre { background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 8px; padding: 16px; }
-.message-content :not(pre) > code { color: var(--ui-primary); }
+.message-content :not(pre) > code { color: var(--ui-foreground); }
+.message-content a code { color: inherit; }
 .message-content table { border-collapse: collapse; display: block; overflow-x: auto; }
 .message-content td, .message-content th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--ui-border); }
 .message.user { display: flex; flex-direction: column; align-items: flex-end; }
@@ -129,10 +130,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; max-width: 100%; }
 .send-actions [data-slot="select-trigger"] { font-size: 12px; width: 112px; }
 .composer-hint { text-align: center; color: var(--ui-muted); font-size: 11px; margin-top: 8px; }
-.account-selection { margin-top: 12px; font-size: 12px; color: var(--ui-muted); }
-.account-selection summary { cursor: pointer; }
-.connection-options { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 0; }
-.connection-options label { display: flex; gap: 8px; align-items: center; }
 .working { display: flex; gap: 10px; align-items: center; color: var(--ui-muted); margin: 24px auto; font-size: 13px; max-width: var(--chat-width); }
 .running-dot { width: 6px; height: 6px; background: var(--ui-success); border-radius: 50%; flex: none; }
 .details-panel { border-left: 1px solid var(--ui-border); background: var(--ui-subtle); display: flex; flex-direction: column; min-height: 0; }
@@ -160,7 +157,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .notice { color: var(--ui-warning); background: var(--ui-warning-bg); }
 .global-error { position: absolute; z-index: 20; top: 6px; left: 20px; right: 20px; display: flex; justify-content: space-between; }
 .login { width: min(360px, calc(100vw - 48px)); display: flex; flex-direction: column; gap: 20px; }
-.login img { width: 52px; height: 52px; object-fit: contain; margin-bottom: 4px; }
 .login h1 { font-size: 28px; }
 .login label { font-size: 13px; }
 .login p { margin-top: -8px; }

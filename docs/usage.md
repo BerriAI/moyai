@@ -143,20 +143,22 @@ not restarted automatically.
 
 ## Settings and administration
 
-The account's Settings button opens a dedicated rail with Overview, Skills,
+The account's Settings button opens a dedicated rail with Overview, General, Skills,
 Automations, Memory, Connections and Secrets. Administrators also see Users,
 Performance and Spend & usage. These pages use native application records,
 not the legacy application's database or APIs.
 
+- **General:** save your message-delivery and connection preferences. **Queue next**
+  waits for the current task; **Send now** delivers input as soon as the run can
+  accept it.
 - **Skills:** type `/` anywhere in the home or conversation composer, then search
   by name. Use the arrow keys and Enter/Tab, or click a result, to insert an
   inline icon-and-name token at the cursor, such as **Team** for `/team`.
-  Icons come from a set of 30 consistent outlines, matched to the skill name
-  where possible, with a stable fallback so they do not shuffle on reload.
+  Every skill uses the same document icon in the picker and saved messages.
   Keep typing before or after it; Backspace removes it, or select the token
   and press Delete. Copy/paste within
   Moyai and queued-message editing preserve the selection. Sent messages retain
-  the selected name and icon after reload, even if the skill is subsequently
+  the selected name after reload, even if the skill is subsequently
   changed or removed. Code examples and escaped references remain literal.
   A unique leading `/team` short name also works when sent directly; duplicate
   names require a scoped reference from the picker.
@@ -186,7 +188,7 @@ not the legacy application's database or APIs.
   admissions; work already admitted follows the normal Stop controls. Creation
   requires a registered Settings worker. Schedules are private and belong to
   their requester.
-- **Connections:** manage the same account records selected in the composer.
+- **Connections:** manage accounts available to your chats. Choose defaults in **General**.
 - **Secrets:** encrypted personal/shared storage with metadata-only reads and
   rotation. Values are never returned to the browser or automatically injected
   into tools or computers. Explicit scoped runtime secret grants remain future
@@ -290,9 +292,11 @@ names or pinned SDK execution behavior.
 
 ## Accounts and integrations
 
-Add accounts in **Connections**, then select them under **Context & connections**
-for a message. New conversations select no accounts; continuations restore the
-requester's previous selection for review. Read-only is the default;
+Add accounts in **Connections**, then set your preferences in **Settings → General**.
+**Use chat defaults** retains a continuation's latest selection when it belongs to
+you. New existing-product chats use available accounts; standalone chats start
+without accounts. **Choose connections** saves your own selection for future
+messages. Only accounts permitted in the chat are used. Read-only is the default;
 non-read-only tools require explicit approval by default.
 
 Personal accounts are restricted to private web conversations. Shared web

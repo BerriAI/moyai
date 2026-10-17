@@ -61,7 +61,7 @@ for (const width of [1440, 768, 320]) test(`timing reasons, partial stages and f
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(base + '/#settings/performance');
-  const startup = page.getByRole('region', {name: 'Startup to dispatch', exact: true});
+  const startup = page.getByRole('region', {name: 'Startup', exact: true});
   await startup.getByText('Timing coverage · 1 turn', {exact: true}).click();
   await startup.getByText('1 · No instrumentation record', {exact: true}).waitFor();
   const before = requests;
@@ -75,9 +75,9 @@ for (const width of [1440, 768, 320]) test(`timing reasons, partial stages and f
   await row.getByText('Receipt → worker: 25 ms', {exact: true}).waitFor();
   await row.getByText('Timing evidence', {exact: true}).click();
   await row.getByText('Start: Native admission · slack', {exact: true}).waitFor();
-  await page.getByRole('combobox', {name: 'Report status'}).click();
+  await page.getByRole('combobox', {name: 'Status'}).click();
   await page.getByRole('option', {name: 'Failed', exact: true}).click();
-  await page.getByText('No recorded turns match this range and its filters.', {exact: true}).waitFor();
+  await page.getByText('No turns match these filters.', {exact: true}).waitFor();
   await page.getByRole('button', {name: 'Clear filters', exact: true}).click();
   await row.getByText('Receipt → worker: 25 ms', {exact: true}).waitFor();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));

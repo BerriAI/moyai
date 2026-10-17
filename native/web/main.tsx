@@ -2,22 +2,21 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useR
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelLeft, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
 import { SkillMessage } from "./skill-content"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
-import logo from "./assets/moyai-logo.png"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { Home } from "./home"
-import { MoyaiBrand } from "./brand"
+import type { GeneralPreferences } from "./general-preferences"
+import { MoyaiBrand, SidebarToggle } from "./brand"
 import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
@@ -49,16 +48,17 @@ const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(m
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
-type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing" }
+type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing"; preferences?: GeneralPreferences }
 type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { session: Session; turns: Turn[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 const settingsDestinations = [
+  { page: "general", label: "General" },
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
   { page: "connections", label: "Connections" }, { page: "secrets", label: "Secrets" },
   { page: "personal-slack", label: "Personal Slack", productOnly: true },
@@ -144,7 +144,7 @@ function App() {
     const controller = new AbortController(), key = routeKey
     // A native UUID can itself be an alias. Only the authenticated read adapter
     // may supply that mapping; ordinary session reads still enforce native ACLs.
-    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false`, "GET", undefined, controller.signal).then(value => {
+    void api<View & { reference: SessionReference }>(`/sessions/${encodeURIComponent(selected)}?resolve=true&include_activity=false&include_messages=true`, "GET", undefined, controller.signal).then(value => {
       const session = value.reference
       if (controller.signal.aborted || currentRoute() !== selected) return
       if (session.id !== selected || session.source !== "native") throw new Error("The session reference changed. Reopen the conversation.")
@@ -295,12 +295,12 @@ function App() {
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
     {!settingsOpen && <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-      <MoyaiBrand />
+      <div className="sidebar-brand-row"><MoyaiBrand /><SidebarToggle collapsed={sidebarHidden} onToggle={toggleSidebar} /></div>
       <Button variant="secondary" className="new-chat" onClick={newSession}><Plus />New session<span className="key-hint">⌘⇧O</span></Button>
       <Button variant="ghost" className="rail-palette-trigger" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={16} /><span>Search sessions & commands</span><span className="key-hint">⌘K</span></Button>
       <span className="rail-section-label">Workspace</span>
       <nav className="rail-destinations" aria-label="Workspace tools">
-        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><BookOpen />Skills</Button>
+        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><FileText />Skills</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
@@ -322,10 +322,9 @@ function App() {
     </aside>}
     <main className="main">
       {!settingsOpen && <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>}
-      {!settingsOpen && sidebarHidden && <Button className="restore-sidebar" variant="outline" size="icon-sm" aria-label="Show sidebar" onClick={() => setSidebarHidden(false)}><PanelLeft size={16} /></Button>}
       {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
       {settingsOpen
-        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} /></React.Suspense>
+        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} sidebarCollapsed={sidebarHidden} onToggleSidebar={toggleSidebar} onPreferences={preferences => setMe(current => current?.user.id === me.user.id && current.csrf === me.csrf ? { ...current, preferences } : current)} /></React.Suspense>
         : historical && !nativeSelected
         ? <React.Suspense fallback={<div className="center muted">Opening saved history…</div>}><ProductHistory key={`${routeScope}:${selected}`} sessionId={originalId} scopeKey={routeScope} onOpenSession={openHistorySession} onStartNewNative={newSession} /></React.Suspense>
         : nativeSelected
@@ -336,7 +335,7 @@ function App() {
           onSession={session => { setCurrentSession(session); setInitialConversation(previous => previous?.value.session.id === (session?.id ?? nativeSelected) ? null : previous) }} />
         : selected
         ? <div className="center" role={routeError ? "alert" : "status"}>{routeError || "Opening conversation…"}{routeError && <Button variant="outline" onClick={() => setRouteRevision(value => value + 1)}>Retry</Button>}</div>
-        : <Home models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
+        : <Home preferences={me.preferences} models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
           onStarted={value => { setInitialConversation({ scope: scopeKey, value }); setSelected(value.session.id); location.hash = value.session.id }} />}
     </main>
     <AppCommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} scopeKey={`${scopeKey}:${selected}`} role={me.user.role} productMode={me.product_mode}
@@ -380,7 +379,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
     return () => controller.abort()
   }, [retry])
   return <main className="center"><section className="login" aria-labelledby="login-title">
-    <img src={logo} alt="" /><h1 id="login-title">Welcome to Moyai</h1><p className="muted">Sign in to your workspace.</p>
+    <h1 id="login-title">Welcome to Moyai</h1><p className="muted">Sign in to your workspace.</p>
     {!config && !error && <p role="status">Loading sign-in options…</p>}
     {config?.google_enabled && <Button variant="outline" disabled={busy} onClick={async () => {
       setBusy(true); setError("")
@@ -408,8 +407,8 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
 }
 
 function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
-  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : null)
-  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : [])
+  const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages !== undefined ? resolved : null)
+  const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
   const [plan, setPlan] = useState<Plan[]>([])
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState("")
@@ -420,12 +419,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
-  const [model, setModel] = useState(initial?.session.model ?? me.default_model)
-  const [selectedAccounts, setSelectedAccounts] = useState<string[]>(initial?.turn.connections ?? [])
+  const [model, setModel] = useState(view?.session.model ?? me.default_model)
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>(() => {
+    const latest = view?.turns[0]
+    return latest?.actor_id === me.user.id ? latest.connections ?? [] : []
+  })
   const [accountRevision, setAccountRevision] = useState(0)
   const [accountNotice, setAccountNotice] = useState("")
   const [accountCatalog, setAccountCatalog] = useState<{ scope: string; rows: Connection[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
-  const [mode, setMode] = useState("when_idle")
+  const mode = me.preferences?.delivery_mode ?? "when_idle"
+  const [skippedAccountScope, setSkippedAccountScope] = useState("")
   const [error, setError] = useState("")
   const pictures = useAttachments(setError)
   const [busy, setBusy] = useState(false)
@@ -454,7 +457,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [])
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
-  const loaded = useRef(false)
+  const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
   const visibleNow = useRef(visible)
@@ -463,10 +466,12 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     ++loadVersion.current
     ++sensitiveVersion.current
     resolvedOnce.current = undefined
+    composerInitialized.current = false
+    readThrough.current = null
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
-    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setSelectedAccounts([]); setWorkspaceOpen(false)
-    setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
+    setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
   }
@@ -478,13 +483,21 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     try {
       const cached = resolvedOnce.current
       resolvedOnce.current = undefined
-      const [next, history] = await Promise.all([
-        cached ? Promise.resolve(cached) : api<View>(`/sessions/${id}?include_activity=false`, "GET", undefined, signal),
-        api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal),
-      ])
+      const next = cached ?? await api<View>(`/sessions/${id}?include_activity=false&include_messages=true`, "GET", undefined, signal)
+      // Older servers can omit the transcript during a rolling deployment.
+      const history = next.messages ?? await api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal)
       if (signal?.aborted || version !== loadVersion.current) return
+      // Publish a complete composer with the transcript, before read bookkeeping.
+      // Seed only once so polling and late receipts cannot overwrite user edits.
+      if (!composerInitialized.current) {
+        setModel(next.session.model)
+        const latest = next.turns[0]
+        setSelectedAccounts(latest?.actor_id === me.user.id ? latest.connections ?? [] : [])
+        composerInitialized.current = true
+      }
       viewNow.current = next
       setView(next); setMessages(history)
+      if (next.activity) setActivity(next.activity)
       setSendingNow(previous => {
         const pending = [...previous].filter(id => next.turns.some(turn => turn.id === id && turn.status === "queued" && turn.mode !== "asap"))
         return pending.length === previous.size ? previous : new Set(pending)
@@ -495,13 +508,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         await api(`/sessions/${id}/read`, "POST", { message_id: latestMessage }, signal)
         if (signal?.aborted || version !== loadVersion.current) return
         readThrough.current = latestMessage
-      }
-      if (next.activity) setActivity(next.activity)
-      if (!loaded.current) {
-        setModel(next.session.model)
-        const latest = next.turns[0]
-        if (latest?.actor_id === me.user.id) setSelectedAccounts(latest.connections ?? [])
-        loaded.current = true
       }
     } catch (reason) {
       if (signal?.aborted || version !== loadVersion.current) return
@@ -537,8 +543,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     })
   }, [id, auxiliaryPanel, Boolean(view)])
   const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
-  const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows : []
-  const accountBlocked = Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error))
+  const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows.filter(row => row.enabled && (view?.session.visibility === "private" || row.shared)) : []
+  const preferredAccounts = me.preferences?.connection_ids ?? selectedAccounts
+  const skipAccounts = skippedAccountScope === accountScope
+  const sendAccounts = skipAccounts ? [] : preferredAccounts.filter(id => effectiveConnections.some(row => row.id === id))
+  const accountBlocked = !skipAccounts && (Boolean(accountNotice) || preferredAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error)))
   useEffect(() => {
     if (!view || !visible) return
     const controller = new AbortController(), scope = accountScope
@@ -550,14 +559,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     return () => controller.abort()
   }, [accountScope, visible])
   useEffect(() => {
-    if (accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
+    if (me.preferences?.connection_ids != null || accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
     const available = new Set(accountCatalog.rows.filter(row => row.enabled).map(row => row.id))
     const retained = selectedAccounts.filter(account => available.has(account))
     if (retained.length !== selectedAccounts.length) {
       setSelectedAccounts(retained)
-      setAccountNotice("Account access changed. Review Context & connections before sending your next message.")
+      setAccountNotice("Some connections are no longer available for this chat.")
     }
-  }, [accountScope, accountCatalog, selectedAccounts])
+  }, [accountScope, accountCatalog, selectedAccounts, me.preferences?.connection_ids])
   useEffect(() => {
     if (!workspaceRequest || sideMode) return
     setWorkspaceOpen(false)
@@ -642,7 +651,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     setBusy(true); setError("")
     const body = {
       prompt, model: answeringQuestion ? active?.model ?? model : model, mode,
-      connections: answeringQuestion ? active?.connections ?? selectedAccounts : selectedAccounts,
+      connections: answeringQuestion ? active?.connections ?? sendAccounts : sendAccounts,
       attachments: pictures.readyFiles.map(file => file.id),
       ...(answeringQuestion ? { reply_to: active?.id } : {}),
     }
@@ -713,7 +722,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             followingWork.current = element.scrollHeight - element.scrollTop - element.clientHeight < 180
           }}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
-          {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
+          {!messages.length && <div className="empty-chat"><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             const segment = segments.get(message.id)
@@ -773,19 +782,15 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
-                {session.active_turn && <><Choice value={mode} onChange={setMode} label="Delivery timing" options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /><Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button></>}
+                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button>}
                 <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
               </div>
             </div>
           </div>
-          {accountNotice && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Dismiss</Button></p>}
-          {session.surface !== "slack" && (me.product_mode === "existing" || effectiveConnections.some(item => item.enabled) || selectedAccounts.length > 0 || accountCatalog.error) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
-            {(accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
-            {accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
-            <div className="connection-options">{effectiveConnections.filter(item => item.enabled && (session.visibility === "private" || item.shared)).map(item => <label key={item.id}><Checkbox checked={selectedAccounts.includes(item.id)} onCheckedChange={checked => { setAccountNotice(""); setSelectedAccounts(values => checked ? [...values, item.id] : values.filter(value => value !== item.id)) }} />{item.name}<span className="muted">{item.read_only ? "Read only" : "Can make changes"}</span></label>)}</div>
-            {!accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this conversation. <a href="#settings/connections">Manage Connections</a></p>}
-          </details>}
-          <p className="composer-hint">{pictures.uploading ? "Uploading files…" : "Drop files or paste images · Enter to send · Shift+Enter for a new line"}</p>
+          {accountNotice && !skipAccounts && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Continue</Button><a href="#settings/general">Preferences</a></p>}
+          {accountBlocked && !accountNotice && !accountCatalog.error && <p className="composer-hint" role="status">Loading connections…</p>}
+          {accountBlocked && accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry connections</Button><Button type="button" variant="ghost" size="sm" onClick={() => { setSkippedAccountScope(accountScope); setAccountNotice("") }}>Continue without connections</Button></p>}
+          {pictures.uploading && <p className="composer-hint" role="status">Uploading files…</p>}
         </form>
       </div>
       {!sideMode && <WorkspaceOverlayContent>

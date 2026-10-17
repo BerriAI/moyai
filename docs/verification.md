@@ -13,7 +13,7 @@ npx playwright install chromium
 
 Use a disposable local UTF-8 PostgreSQL 17/18 server. The test role needs permission
 to create/drop isolated schemas and, for native qualification, databases. Export
-`MOYAI_TEST_POSTGRES_URL` for shared/release tests and `MOYAI_TEST_POSTGRES` for
+`MOYAI_TEST_POSTGRES_URL` for shared runtime tests and `MOYAI_TEST_POSTGRES` for
 native tests to that server's connection URL. Never use a production database.
 
 ```sh
@@ -46,9 +46,9 @@ input snapshot and the durable outbox; preserve these boundaries when upgrading
 the SDK. Source installation requires Rust 1.88+; the Docker dependency builder
 compiles AgentChat without adding a Rust toolchain to the runtime image.
 
-Release tests exercise the real controller with simulated Render/SSH responses
-and real PostgreSQL guards. Package tests build a wheel from the source archive
-and inspect resources outside the source checkout.
+Runtime rehearsal tests exercise startup, shutdown and real PostgreSQL migration
+guards. Deployment-controller tests live in a private repository. Package tests build
+a wheel from the source archive and inspect resources outside the source checkout.
 
 Without the test database environment, PostgreSQL cases skip. A passing local
 SQLite-only run is not full qualification. Native tests may download Temporal
@@ -75,14 +75,14 @@ mounted-directory ownership, symlink handling, staging, and invalid distributed
 configuration. It makes no model or cloud-computer requests.
 
 CI runs these checks in the UI unit, frontend, native runtime, PostgreSQL runtime/migration,
-production release rehearsal and Docker workflows. The release gate requires the
-exact selected main commit's checks, including docs-only changes.
+runtime rehearsal and Docker workflows. Managed deployment requirements are
+maintained in a private repository.
 
 ## Deployment evidence
 
 Local tests do not certify every live provider token, production identity policy,
 cloud image build or Render handoff. Before accepting a deployment, check the
-actual four roles, original-user sign-in, historical files, a real model/Modal
-task, continuation/approval recovery and the release receipt. Preserve uncertain
+application health, user sign-in, historical files, a real model/Modal
+task and continuation/approval recovery. Preserve uncertain
 external effects for explicit reconciliation. No deployment is performed by the
 consolidation test suite.

@@ -165,7 +165,7 @@
 }
 
 /* Keep the controls in the tab order; focusing one reveals its whole group. */
-.sidebar .session-row:is(:hover, :focus-within, .selected, :has([data-state="open"])) .session-row-actions {
+.sidebar .session-row:is(:hover, :has(:focus-visible), :has([data-state="open"])) .session-row-actions {
   width: auto;
   overflow: visible;
   opacity: 1;
@@ -270,10 +270,6 @@
     grid-column: 1 / -1;
     grid-row: 3;
     justify-self: end;
-    width: auto;
-    overflow: visible;
-    opacity: 1;
-    pointer-events: auto;
   }
   .sidebar .session-row-actions > button { width: 44px; height: 44px; min-height: 44px; }
   .sidebar button.session-pr-indicator { min-height: 44px; }
@@ -281,4 +277,8 @@
   .sidebar .session-group-heading > button,
   .sidebar .rail-caption button { min-height: 44px; height: 44px; }
   .native-session-menu.sidebar-pr-menu > button { min-height: 44px; }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .sidebar .session-row-actions { width: auto; overflow: visible; opacity: 1; pointer-events: auto; }
 }

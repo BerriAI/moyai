@@ -28,6 +28,7 @@ from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .file_preview import routes as file_preview_routes
+from .general_preferences import general_preferences
 from .history_handoff import is_turn_run, latest_turn_snapshot
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
@@ -133,6 +134,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         ] if run_dispatcher else []
         if run_dispatcher and runtime.product is None and runtime.settings.slack_bot_token.get_secret_value():
             tasks.append(asyncio.create_task(slack_dispatcher(runtime)))
+            tasks.append(asyncio.create_task(runtime.slack_activity.watch()))
         try:
             yield
         finally:
@@ -369,6 +371,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             },
             "csrf": csrf, "models": runtime.settings.models,
             "default_model": runtime.settings.default_model,
+            "preferences": general_preferences(user.preferences),
             "product_mode": "existing" if runtime.product_identity is not None else "standalone",
         }
 
@@ -407,6 +410,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.get("/api/sessions/{session_id}")
     async def session(
         session_id: str, request: Request, resolve: bool = False, include_activity: bool = True,
+        include_messages: bool = False,
         user: User = Depends(actor),
     ):
         reference = None
@@ -494,6 +498,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 result["credential_requests"] = [
                     {"request_id": item["request_id"]} for item in requests["requests"]
                 ]
+        if include_messages:
+            result["messages"] = await runtime.database.messages(user, session_id)
         return result
 
     @app.get("/api/sessions/{session_id}/progress/{turn_id}")

@@ -26,11 +26,11 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/auth/google/start')return json({url:'https://accounts.google.com/fixture'});
   if(url.pathname==='/api/logout'){state.signedIn=false;return json({signed_out:true});}
   if(!state.signedIn)return json({detail:'Sign in.'},401);
-  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:['test-model'],default_model:'test-model',product_mode:state.mode});
-  if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;return json(session('c'.repeat(32)));}
+  if(url.pathname==='/api/me')return json({user:{id:'viewer',name:'Test viewer',role:'admin',individual:state.individual},csrf:'fixture-csrf',models:state.models||['test-model'],default_model:'test-model',product_mode:state.mode,preferences:state.preferences||{delivery_mode:'when_idle',connection_ids:null}});
+  if(url.pathname==='/api/sessions'&&req.method==='POST'){state.createdSession=true;const id='c'.repeat(32);state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],model:data.model||'test-model'}};return json(session(id));}
   if(url.pathname==='/api/sessions')return json(state.denied?[]:[session(),...(state.createdSession?[session('c'.repeat(32))]:[])]);
   if(url.pathname==='/api/connections') {
-    if(state.connectionError && url.searchParams.has('shared'))return json({detail:'Connections temporarily unavailable.'},503);
+    if(state.connectionError && (url.searchParams.has('shared') || url.searchParams.has('session_id')))return json({detail:'Connections temporarily unavailable.'},503);
     return json(state.connectionsBySession?.[url.searchParams.get('session_id')]||state.connections||[]);
   }
   if(url.pathname==='/api/session-folders')return json([]);
@@ -64,6 +64,13 @@ async function handle(req,res,next) {
   }
   if(url.pathname==='/api/settings/users/role')return state.roleConflict ? json({detail:'This role changed since you opened it. Refresh and try again.'},409) : json(data);
   if(url.pathname==='/api/settings/users')return json({source:'product',note:'Organization sign-in manages accounts.',capabilities:{roles:true,create:false,update:false,delete:false},users:[{id:'teammate@example.test',email:'teammate@example.test',username:'teammate@example.test',display_name:'Teammate',role:'member',revision:7,enabled:true}]});
+  if(url.pathname==='/api/settings/general') {
+    if(req.method==='PATCH') {
+      if(state.preferenceError)return json({detail:'Could not save preferences. Try again.'},503);
+      state.preferences={delivery_mode:'when_idle',connection_ids:null,...state.preferences,...data};
+    }
+    return json(state.preferences||{delivery_mode:'when_idle',connection_ids:null});
+  }
   if(url.pathname==='/api/settings/overview')return json({counts:{},capabilities:{}});
   if(url.pathname==='/api/skills') {
     if(state.skillError)return json({detail:'Temporary skill outage.'},503);
@@ -106,13 +113,13 @@ async function handle(req,res,next) {
         }
         messages.push({id:messages.length+1,turn_id:'turn-skill',role:'user',author_id:'viewer',content:data.prompt});
         if(data.reply_to){state.status='idle';state.pending=undefined;state.answerAccepted=true;}
-        return json({id:'turn-skill',actor_id:'viewer',status:'completed'});
+        return json({id:'turn-skill',actor_id:'viewer',status:'completed',model:data.model,connections:data.connections||[]});
       }
       return json(messages);
     }
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname.endsWith('/activity'))return json([]);
-    if(url.pathname.endsWith('/read'))return json({});
+    if(url.pathname.endsWith('/read'))return state.readError?json({detail:'Read marker unavailable.'},503):json({});
     if(url.pathname.endsWith('/stop')&&req.method==='POST') {
       state.status='stopped';
       if(state.turns)state.turns=state.turns.map(turn=>({...turn,status:'stopped'}));
@@ -127,7 +134,9 @@ async function handle(req,res,next) {
     }
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
     const row=session(url.pathname.split('/')[3]);
-    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
+    if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
+      result.messages=state.messagesBySession?.[row.id]||state.messages;
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
   }
@@ -369,7 +378,7 @@ for(const width of [1440,768,320])test(`space home respects reduced motion and k
   assert.equal(await page.locator('.home-composer').getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
 });
 
-test('reference meteor shaders render front, side and back and restore Home after remount',async t=>{
+test('textured rock renders front, side and back and restores Home after remount',async t=>{
   reset({status:'idle'});
   const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
   t.after(()=>page.close());
@@ -392,7 +401,7 @@ test('reference meteor shaders render front, side and back and restore Home afte
   await painted();const back=await canvas.screenshot();
   assert.equal(front.equals(side),false);assert.equal(side.equals(back),false);
   await canvas.press('Home');await painted();
-  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the reference view.');
+  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the initial view.');
   await page.getByRole('link',{name:'idle Current native work',exact:true}).click();
   await canvas.waitFor({state:'detached'});
   await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).click();
@@ -401,19 +410,56 @@ test('reference meteor shaders render front, side and back and restore Home afte
   assert.deepEqual(errors,[]);
 });
 
-test('decode animation settles on input and can be paused without losing the draft',async t=>{
-  reset({status:'idle'});const page=await pageFor(t,'');
-  await page.emulateMedia({reducedMotion:'no-preference'});
-  await page.waitForFunction(()=>document.querySelector('.decode-headline')?.classList.contains('decoded'));
+test('headline plays once, cursor flashes five times, and neither restarts after editing a draft',async t=>{
+  reset({status:'idle'});
+  const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'no-preference'});
+  t.after(()=>page.close());
+  await page.goto(base+'/');
+  const caret=page.locator('.decode-caret');
+  await caret.waitFor({state:'attached'});
+  const blinking=await caret.evaluate(el=>new Promise((resolve,reject)=>{
+    let flashes=0,lit=false,frame;
+    const timeout=setTimeout(()=>{cancelAnimationFrame(frame);reject(new Error('Cursor did not stop blinking.'));},12000);
+    const sample=()=>{
+      const visible=getComputedStyle(el).opacity==='1';
+      if(visible&&!lit)flashes++;
+      lit=visible;frame=requestAnimationFrame(sample);
+    };
+    el.addEventListener('animationend',()=>{
+      clearTimeout(timeout);cancelAnimationFrame(frame);
+      resolve({flashes,opacity:getComputedStyle(el).opacity});
+    },{once:true});
+    sample();
+  }));
+  assert.deepEqual(blinking,{flashes:5,opacity:'0'});
+  const settled=['> what are we','  working on?▌'];
+  assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
+  assert.equal(await page.locator('.home-header').count(),0);
   const input=page.getByRole('textbox',{name:'Message Moyai'});
-  await input.fill('Keep this draft while the headline pauses.');
-  await page.getByRole('button',{name:'Pause headline animation',exact:true}).click();
-  await page.waitForTimeout(2700);
-  assert.equal(await input.innerText(),'Keep this draft while the headline pauses.');
-  assert.deepEqual(await page.locator('.decode-text').allTextContents(),['> what are we','  working on?▌']);
-  assert.equal(await page.locator('.decode-caret').evaluate(el=>getComputedStyle(el).animationName),'none');
-  await page.getByRole('button',{name:'Resume headline animation',exact:true}).click();
-  assert.equal(await input.innerText(),'Keep this draft while the headline pauses.');
+  await input.fill('Keep this draft.');
+  assert.equal(await input.innerText(),'Keep this draft.');
+  await input.fill('');
+  await page.waitForTimeout(400);
+  assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
+  assert.equal(await caret.evaluate(el=>getComputedStyle(el).opacity),'0');
+  assert.equal(await caret.evaluate(el=>el.getAnimations()[0]?.playState),'finished');
+});
+
+for(const width of [1440,320])test(`selected chat keeps its highlight while actions hide at ${width}px`,async t=>{
+  reset({status:'idle'});const page=await pageFor(t,'#'+sessionId,width);
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  const row=page.locator(`[data-session-key="native:${sessionId}"]`);
+  await row.getByRole('link').click();
+  if(width<760 && !(await row.isVisible()))await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.mouse.move(width-2,2);
+  assert.ok((await row.getAttribute('class')).includes('selected'));
+  assert.notEqual(await row.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)');
+  assert.equal(await row.locator('.session-row-actions').evaluate(el=>getComputedStyle(el).opacity),'0');
+  await row.hover();
+  assert.equal(await row.locator('.session-row-actions').evaluate(el=>getComputedStyle(el).opacity),'1');
+  await row.getByRole('link').press('Tab');
+  await page.mouse.move(width-2,2);
+  assert.equal(await row.locator('.session-row-actions').evaluate(el=>getComputedStyle(el).opacity),'1');
 });
 
 test('sidebar PR icons retain multi-PR selection without numeric badges',async t=>{
@@ -489,7 +535,165 @@ test('resolved conversation opens without plan/activity reads; plan loads only w
   release();await page.locator('.plan-row').filter({hasText:'Review the measurements'}).waitFor();
 });
 
-for(const width of [1440,768,320])test(`inline skills keep surrounding text, icon and scoped identity through send/reload at ${width}px`,async t=>{
+test('conversation bootstrap renders messages without a second transcript request',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holds:{[`/api/sessions/${sessionId}/messages`]:held}});
+  const page=await pageFor(t);
+  await page.getByText('Inspect this repository.',{exact:true}).waitFor({timeout:3000});
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).isVisible(),true);
+  const reads=state.requests.filter(req=>req.method==='GET'&&req.path.startsWith(`/api/sessions/${sessionId}`));
+  assert.equal(reads.filter(req=>req.path===`/api/sessions/${sessionId}`).length,1);
+  assert.ok(reads.some(req=>req.query.includes('resolve=true')&&req.query.includes('include_messages=true')));
+  assert.equal(reads.filter(req=>req.path.endsWith('/messages')).length,0);
+});
+
+test('an empty bootstrap transcript does not trigger a redundant history read',async t=>{
+  reset({status:'idle',messages:[]});
+  const page=await pageFor(t);
+  await page.getByText('Start with a task or a question.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(req=>req.method==='GET'&&req.path.endsWith('/messages')).length,0);
+});
+
+test('an older server without bootstrap messages still opens the conversation',async t=>{
+  reset({status:'idle',omitInitialMessages:true});
+  const page=await pageFor(t);
+  await page.getByText('Inspect this repository.',{exact:true}).waitFor();
+  assert.equal(state.requests.filter(req=>req.method==='GET'&&req.path.endsWith('/messages')).length,1);
+});
+
+function savedComposer(overrides={}) {
+  reset({status:'idle',models:['test-model','saved-model','edited-model'],
+    sessionOverrides:{[sessionId]:{model:'saved-model'}},
+    turns:[{id:turnId,actor_id:'viewer',status:'completed',connections:['saved'],usage:{}}],
+    connections:[{id:'saved',name:'Saved account',owner_id:'viewer',kind:'linear',enabled:true,shared:true,read_only:true}],
+    ...overrides});
+}
+
+for(const entry of ['resolved','older-server','standalone'])for(const failure of [false,true])
+test(`saved composer settings precede ${failure?'failed':'pending'} read receipt: ${entry}`,async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({mode:entry==='standalone'?'standalone':'existing',omitInitialMessages:entry==='older-server',
+    holds:failure?{}:{[`/api/sessions/${sessionId}/read`]:held},readError:failure});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  if(failure)await page.getByText(/Read marker unavailable/).waitFor();
+  assert.equal(await page.getByRole('combobox',{name:'Model',exact:true}).innerText(),'saved-model');
+  assert.equal(await page.locator('.account-selection').count(),0);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Send with the saved settings.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  const sent=state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST');
+  assert.equal(sent.body.model,'saved-model');assert.deepEqual(sent.body.connections,['saved']);
+});
+
+test('read receipt completion cannot overwrite manual composer choices',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({preferences:{delivery_mode:'when_idle',connection_ids:[]},holds:{[`/api/sessions/${sessionId}/read`]:held}});
+  const page=await pageFor(t),model=page.getByRole('combobox',{name:'Model',exact:true});
+  await model.waitFor();await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  await model.click();await page.getByRole('option',{name:'edited-model',exact:true}).click();
+  const response=page.waitForResponse(r=>r.url().endsWith('/read'));
+  release();await (await response).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await model.innerText(),'edited-model');
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Keep my preferences.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'&&req.body.prompt==='Keep my preferences.'));
+  const sent=state.requests.find(req=>req.body?.prompt==='Keep my preferences.');
+  assert.equal(sent.body.model,'edited-model');assert.deepEqual(sent.body.connections,[]);
+});
+
+test('resolved composer never inherits another author’s selected accounts',async t=>{
+  savedComposer({turns:[{id:turnId,actor_id:'teammate',status:'completed',connections:['saved'],usage:{}}]});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Use my own connections.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,[]);
+  assert.equal(await page.getByRole('combobox',{name:'Model',exact:true}).innerText(),'saved-model');
+});
+
+test('side-chat composer initializes before its read receipt completes',async t=>{
+  const childId='d'.repeat(32);
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({sessionOverrides:{[childId]:{title:'Curie',model:'saved-model',parent_session_id:sessionId}},
+    holds:{[`/api/sessions/${childId}/read`]:held},
+    workspace:{links:[],files:[],sources:[],subagents:[{id:'child-turn',session_id:childId,parent_id:turnId,
+      name:'Curie',avatar:1,status:'idle',can_inspect:true,depth:0,started_at:''}],subagents_limited:false}});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  await page.getByRole('region',{name:'Subagents',exact:true}).getByRole('button',{name:'Open Curie in side chat',exact:true}).click();
+  const panel=page.getByRole('complementary',{name:'Session panel',exact:true});
+  await panel.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await waitFor(()=>state.requests.some(req=>req.path===`/api/sessions/${childId}/read`));
+  assert.equal(await panel.getByRole('combobox',{name:'Model',exact:true}).innerText(),'saved-model');
+  await panel.getByRole('textbox',{name:'Message Moyai'}).fill('Continue the side chat.');
+  await panel.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path===`/api/sessions/${childId}/messages`&&req.method==='POST'));
+  assert.deepEqual(state.requests.find(req=>req.path===`/api/sessions/${childId}/messages`&&req.method==='POST').body.connections,['saved']);
+});
+
+test('saved composer blocks a fast send until its selected account catalog is authorized',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({holds:{'/api/connections':held,[`/api/sessions/${sessionId}/read`]:held}});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Do not drop my saved account.');
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isEnabled(),false);
+  assert.equal(state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'),false);
+  release();
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,['saved']);
+});
+
+test('newly accepted composer preserves choices across its first read receipt',async t=>{
+  const created='c'.repeat(32);
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({holds:{[`/api/sessions/${created}/read`]:held}});
+  const page=await pageFor(t,'#'),model=page.getByRole('combobox',{name:'Model',exact:true});
+  await model.click();await page.getByRole('option',{name:'saved-model',exact:true}).click();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Start with these settings.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.waitForURL(base+'/#'+created);
+  await waitFor(()=>state.requests.some(req=>req.path===`/api/sessions/${created}/read`));
+  assert.equal(await model.innerText(),'saved-model');
+  await model.click();await page.getByRole('option',{name:'edited-model',exact:true}).click();
+
+  const response=page.waitForResponse(r=>r.url().endsWith('/read'));
+  release();await (await response).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await model.innerText(),'edited-model');
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Keep the accepted connections.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.body?.prompt==='Keep the accepted connections.'));
+  assert.deepEqual(state.requests.find(req=>req.body?.prompt==='Keep the accepted connections.').body.connections,['saved']);
+});
+
+test('revoked composer clears protected state and reinitializes on an authorized retry',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  savedComposer({holds:{[`/api/sessions/${sessionId}/read`]:held}});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Private draft');
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
+  state.denied=true;release();
+  await page.getByRole('status').getByText(/Session access revoked/).waitFor();
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).count(),0);
+  assert.equal(await page.getByText('Inspect this repository.',{exact:true}).count(),0);
+  state.denied=false;state.sessionOverrides[sessionId].model='edited-model';state.turns[0].connections=[];
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  assert.equal(await page.getByRole('combobox',{name:'Model',exact:true}).innerText(),'edited-model');
+  assert.equal((await page.getByRole('textbox',{name:'Message Moyai'}).innerText()).trim(),'');
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Authorized retry.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.body?.prompt==='Authorized retry.'));
+  assert.deepEqual(state.requests.find(req=>req.body?.prompt==='Authorized retry.').body.connections,[]);
+});
+
+for(const width of [1440,768,320])test(`inline skills share one icon and keep surrounding text and scoped identity through send/reload at ${width}px`,async t=>{
   const skills=[
     {id:'personal-team',name:'team',description:'Investigate a bug with a team.',scope:'personal',reference:'personal:team',icon:'👥'},
     {id:'org-team',name:'team',description:'Organization workflow.',scope:'organization',reference:'org:team',icon:'code'},
@@ -501,10 +705,12 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   const options=page.getByRole('listbox',{name:'Skills'});
   await options.waitFor();assert.equal(await options.getByRole('option').count(),2);
   assert.match(await options.innerText(),/Personal/);assert.match(await options.innerText(),/Organization/);
+  assert.equal(await options.locator('svg[data-skill-icon="document"]').count(),2);
+  assert.deepEqual(await options.locator('svg').evaluateAll(icons=>icons.map(icon=>icon.innerHTML)),Array(2).fill(await options.locator('svg').first().innerHTML()));
   const box=await options.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=width+1);
   await input.press('Enter');
   const mention=input.getByLabel('/team skill');await mention.waitFor();
-  assert.equal(await mention.locator('svg[data-skill-icon="team"]').count(),1);
+  assert.equal(await mention.locator('svg[data-skill-icon="document"]').count(),1);
   assert.match(await input.innerText(),/^Please use Team /);
   assert.equal(state.requests.filter(r=>r.method==='POST'&&r.path.endsWith('/messages')).length,0);
   await input.pressSequentially('to inspect the issue.');
@@ -513,9 +719,9 @@ for(const width of [1440,768,320])test(`inline skills keep surrounding text, ico
   const sent=state.requests.find(r=>r.method==='POST'&&r.path.endsWith('/messages'));
   assert.equal(sent.body.prompt,'Please use [/team](moyai-skill:personal%3Ateam?icon=%F0%9F%91%A5) to inspect the issue.');
   const saved=page.locator('.transcript').getByLabel('/team skill');await saved.waitFor();
-  assert.equal(await saved.locator('svg[data-skill-icon="team"]').count(),1);
+  assert.equal(await saved.locator('svg[data-skill-icon="document"]').count(),1);
   state.skills=[];await page.reload();await saved.waitFor();
-  assert.equal(await saved.locator('svg[data-skill-icon="team"]').count(),1);
+  assert.equal(await saved.locator('svg[data-skill-icon="document"]').count(),1);
   assert.match(await saved.locator('..').innerText(),/Please use Team to inspect the issue\./);
   state.skills=skills;
   await page.goto(base+'/#'+sessionId);
@@ -619,8 +825,9 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
   emit({type:'text_start',index:0,text:'Unlabelled child text'},0);
   emit({type:'response_start',run_id:turnId,step:1},1);emit({type:'text_start',index:0,text:'I will inspect.',phase:'commentary'},2);
   await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).waitFor();
-  const polls=state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length;
-  await waitFor(()=>state.requests.filter(req=>req.path===`/api/sessions/${sessionId}/messages`).length>polls,'saved poll');
+  const savedPolls=()=>state.requests.filter(req=>req.method==='GET'&&req.path===`/api/sessions/${sessionId}`&&req.query.includes('include_messages=true')).length;
+  const polls=savedPolls();
+  await waitFor(()=>savedPolls()>polls,'saved poll');
   assert.equal(await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).count(),1);
   emit({type:'tool_call',id:'call1',name:'read_file',arguments:{path:'private-tool-detail'}},3);
   await page.locator('.live-action').getByText('Using read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
@@ -646,7 +853,7 @@ for(const width of [1440,768,320])test(`live work and subagents survive steering
   const at=seconds=>new Date(start+seconds*1000).toISOString();
   const update=(step,text,seconds)=>({id:`commentary:${turnId}:${step}:0`,phase:'commentary',text,created_at:at(seconds)});
   reset({
-    steeringAt:at(30),
+    steeringAt:at(30),preferences:{delivery_mode:'asap',connection_ids:null},
     turns:[{id:turnId,actor_id:'viewer',status:'running',created_at:at(0),connections:[],usage:{}}],
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect the renderer.',created_at:at(0)}],
     workProgress:{messages:[update(1,'First inspection.',5),update(2,'Checking recorded behavior.',10)],
@@ -664,8 +871,6 @@ for(const width of [1440,768,320])test(`live work and subagents survive steering
   assert.equal(await progress.locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
   const input=page.getByRole('textbox',{name:'Message Moyai'});
   await input.fill('Also check keyboard use.');
-  await page.getByRole('combobox',{name:'Delivery timing'}).click();
-  await page.getByRole('option',{name:'Send now',exact:true}).click();
   await page.getByRole('button',{name:'Send message',exact:true}).click();
   await page.getByText('Also check keyboard use.',{exact:true}).waitFor();
   await page.locator('.turn-progress').nth(1).waitFor();
@@ -771,12 +976,48 @@ for(const recovery of ['retry','skip'])test(`home connection failures support ${
   assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,recovery==='retry'?['organization']:[]);
 });
 
-test('home and Settings share the same wordmark position and typography',async t=>{
-  reset();const page=await pageFor(t,'');
+for(const width of [1440,768])test(`sidebar collapses to an accessible rail without losing drafts at ${width}px`,async t=>{
+  reset({status:'idle'});const page=await pageFor(t,'',width);
+  const draft=page.getByRole('textbox',{name:'Message Moyai'}), sidebar=page.locator('.app > .sidebar');
+  await draft.fill('Keep this draft while I hide the sidebar.');
+  const expanded=await sidebar.boundingBox();
+  await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+  const reopen=page.getByRole('button',{name:'Open sidebar',exact:true});
+  assert.equal((await sidebar.boundingBox()).width,52);
+  assert.equal(await reopen.getAttribute('aria-expanded'),'false');
+  assert.equal(await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).isVisible(),false);
+  assert.equal(await draft.innerText(),'Keep this draft while I hide the sidebar.');
+  assert.equal(await reopen.evaluate(el=>el===document.activeElement),true);
+  await reopen.press('Enter');
+  assert.equal((await sidebar.boundingBox()).width,expanded.width);
+  assert.equal(await draft.innerText(),'Keep this draft while I hide the sidebar.');
+  if(width>850) {
+    await page.getByRole('button',{name:'Settings',exact:true}).click();
+    await page.getByRole('heading',{name:'Settings',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+    assert.equal((await page.locator('.ns-rail').boundingBox()).width,52);
+    assert.equal(await page.getByRole('button',{name:'Back to workspace',exact:true}).isVisible(),false);
+    await page.getByRole('button',{name:'Open sidebar',exact:true}).press('Enter');
+    assert.equal((await page.locator('.ns-rail').boundingBox()).width,expanded.width);
+    await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+    await draft.waitFor();
+  }
+  await page.getByRole('button',{name:'Close sidebar',exact:true}).click();
+  await page.setViewportSize({width:320,height:1000});
+  await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).isVisible(),true);
+  assert.equal(await page.getByRole('button',{name:'Open sidebar',exact:true}).isVisible(),false);
+  await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  assert.equal(await sidebar.isVisible(),false);
+});
+
+for(const width of [1440,768,320])test(`home and Settings share the same wordmark position and typography at ${width}px`,async t=>{
+  reset();const page=await pageFor(t,'',width);
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
   const brand=page.locator('.moyai-brand');await brand.waitFor();await page.evaluate(()=>document.fonts.ready);
   const metrics=()=>brand.evaluate(el=>{
-    const bounds=el.getBoundingClientRect(), style=getComputedStyle(el), subtitle=getComputedStyle(el.querySelector('small'));
-    return {x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,font:style.font,spacing:style.letterSpacing,transform:style.textTransform,subtitle:subtitle.font};
+    const bounds=el.querySelector('span').getBoundingClientRect(), style=getComputedStyle(el), subtitle=getComputedStyle(el.querySelector('small'));
+    return {x:bounds.x,y:bounds.y,height:bounds.height,font:style.font,spacing:style.letterSpacing,transform:style.textTransform,subtitle:subtitle.font};
   });
   const home=await metrics();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
@@ -835,6 +1076,7 @@ for(const width of [1440,768,320])test(`unified sidebar routes history and limit
   await row.waitFor();assert.equal(await row.locator('a').getAttribute('href'),'#run='+legacyId);
   assert.equal(await row.locator('a').getAttribute('aria-current'),'page');
   assert.equal(await row.getByRole('button').count(),1);
+  await row.hover();
   await row.getByRole('button',{name:'Session actions for Saved earlier investigation'}).click();
   const menu=page.getByRole('menu',{name:'Session actions for Saved earlier investigation'});
   assert.deepEqual(await menu.getByRole('menuitem').allTextContents(),['Open history','Copy session link']);
@@ -970,8 +1212,11 @@ test('an accepted answer stays locked when conversation refresh fails and refres
   assert.equal(state.requests.find(row=>row.path.endsWith('/messages')&&row.method==='POST').body.reply_to,undefined);
   await page.locator('.question-form').evaluate(form=>form.requestSubmit());
   assert.equal(answerRequests().length,1);
+  // Keep background reads from removing the button before the explicit retry.
+  let release;state.holdSessionRead=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   state.answerRefreshError=false;
   await page.getByRole('button',{name:'Refresh conversation',exact:true}).click();
+  release();
   await page.locator('.question-form').waitFor({state:'hidden'});
   assert.equal(answerRequests().length,1);
 });
@@ -987,8 +1232,11 @@ test('an answer sent through the composer also locks the question card after a f
   assert.equal(await page.getByRole('button',{name:'Answer question',exact:true}).count(),0);
   await page.locator('.question-form').evaluate(form=>form.requestSubmit());
   assert.equal(answerRequests().length,0);
+  // Keep background reads from removing the button before the explicit retry.
+  let release;state.holdSessionRead=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   state.answerRefreshError=false;
   await page.getByRole('button',{name:'Refresh conversation',exact:true}).click();
+  release();
   await page.locator('.question-form').waitFor({state:'hidden'});
   assert.equal(state.requests.filter(row=>row.path.endsWith('/messages')&&row.method==='POST').length,1);
 });
@@ -1160,4 +1408,88 @@ test('standalone child pickers use its server-scoped catalogs instead of private
   await page.getByText(/No matching skills/).waitFor();
   assert.ok(state.requests.some(r=>r.path==='/api/skills'&&new URLSearchParams(r.query).get('session_id')===childId));
   assert.equal(await page.getByRole('option',{name:/Personal test skill/}).count(),0);
+});
+
+for(const width of [1440,768,320])test(`General preferences persist and simplify the session composer at ${width}px`,async t=>{
+  const shared={id:'team',name:'Team GitHub',enabled:true,shared:true,read_only:true};
+  const personal={id:'mine',name:'Personal Slack',enabled:true,shared:false,read_only:true};
+  reset({connections:[shared,personal],connectionsBySession:{[sessionId]:[shared]},sessionOverrides:{[sessionId]:{visibility:'shared'}}});
+  const page=await pageFor(t,'#settings/general',width);
+  await page.getByRole('heading',{name:'General',exact:true}).waitFor();
+  assert.equal(await page.locator('.ns-page-heading').count(),1);
+  await page.getByRole('combobox',{name:'Message delivery',exact:true}).click();
+  await page.getByRole('option',{name:'Send now',exact:true}).click();
+  await waitFor(()=>state.preferences?.delivery_mode==='asap');
+  await page.getByRole('combobox',{name:'Connection preference'}).click();
+  await page.getByRole('option',{name:'Choose connections',exact:true}).click();
+  await page.getByRole('checkbox',{name:'Team GitHub',exact:true}).click();
+  await page.locator('[role="checkbox"][aria-label="Team GitHub"][aria-checked="true"]').waitFor();
+  await waitFor(()=>state.preferences.connection_ids.includes('team'));
+  await page.getByRole('checkbox',{name:'Personal Slack',exact:true}).click();
+  await page.locator('[role="checkbox"][aria-label="Personal Slack"][aria-checked="true"]').waitFor();
+  await waitFor(()=>state.preferences.connection_ids.includes('mine'));
+  await page.reload();
+  await page.getByRole('checkbox',{name:'Personal Slack',exact:true}).waitFor();
+  assert.equal(await page.getByRole('checkbox',{name:'Team GitHub',exact:true}).isChecked(),true);
+  assert.equal(await page.getByRole('checkbox',{name:'Personal Slack',exact:true}).isChecked(),true);
+  assert.equal(await page.getByRole('combobox',{name:'Message delivery',exact:true}).innerText(),'Send now');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await page.goto(base+'/#'+sessionId);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Use my saved preferences.');
+  assert.equal(await page.locator('.account-selection').count(),0);
+  assert.equal(await page.getByRole('combobox',{name:'Delivery timing'}).count(),0);
+  assert.equal(await page.getByText(/Drop files or paste images/).count(),0);
+  await page.getByRole('button',{name:'Stop task',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.body?.prompt==='Use my saved preferences.'));
+  const sent=state.requests.find(req=>req.body?.prompt==='Use my saved preferences.');
+  assert.equal(sent.body.mode,'asap');assert.deepEqual(sent.body.connections,['team']);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+
+test('failed General preference save preserves the previous setting and can be retried',async t=>{
+  reset({preferenceError:true});const page=await pageFor(t,'#settings/general');
+  async function chooseNow(){await page.getByRole('combobox',{name:'Message delivery'}).click();await page.getByRole('option',{name:'Send now',exact:true}).click();}
+  await chooseNow();await page.getByRole('alert').filter({hasText:'Could not save preferences.'}).waitFor();
+  assert.equal(await page.getByRole('combobox',{name:'Message delivery'}).innerText(),'Queue next');
+  state.preferenceError=false;await chooseNow();
+  await waitFor(()=>state.preferences?.delivery_mode==='asap');
+  await page.reload();
+  await page.getByRole('combobox',{name:'Message delivery'}).waitFor();
+  assert.equal(await page.getByRole('combobox',{name:'Message delivery'}).innerText(),'Send now');
+});
+
+for(const isPrivate of [false,true])test(`saved connection choices respect ${isPrivate?'private':'shared'} Home scope`,async t=>{
+  reset({mode:'standalone',status:'idle',preferences:{delivery_mode:'when_idle',connection_ids:['team','mine','unavailable']},
+    connections:[{id:'team',name:'Team',enabled:true,shared:true},{id:'mine',name:'Mine',enabled:true,shared:false},{id:'disabled',name:'Disabled',enabled:false,shared:true}]});
+  const page=await pageFor(t,'#');
+  if(isPrivate)await page.getByRole('button',{name:'Private session',exact:true}).click();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Start with my connections.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path.endsWith('/messages')&&req.method==='POST'));
+  assert.deepEqual(state.requests.find(req=>req.path.endsWith('/messages')&&req.method==='POST').body.connections,isPrivate?['mine','team']:['team']);
+});
+
+for(const retry of [false,true])test(`session connection errors allow ${retry?'retry':'continuing without connections'}`,async t=>{
+  savedComposer({connectionError:true});const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Recover my draft.');
+  await page.getByRole('alert').filter({hasText:'Connections temporarily unavailable.'}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isEnabled(),false);
+  if(retry){state.connectionError=false;await page.getByRole('button',{name:'Retry connections',exact:true}).click();}
+  else await page.getByRole('button',{name:'Continue without connections',exact:true}).click();
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.body?.prompt==='Recover my draft.'));
+  assert.deepEqual(state.requests.find(req=>req.body?.prompt==='Recover my draft.').body.connections,retry?['saved']:[]);
+});
+
+test('chat links remain accented and underlined while plain inline code stays neutral',async t=>{
+  reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:'[BerriAI/moyai](https://github.com/BerriAI/moyai) contains the workspace.\n\n| Path | Description |\n| --- | --- |\n| `native/web/` | Frontend |\n\nStart with [`docs/architecture.md`](https://github.com/BerriAI/moyai/blob/main/docs/architecture.md).'}]});
+  const page=await pageFor(t);
+  const link=page.getByRole('link',{name:'BerriAI/moyai',exact:true});await link.waitFor();
+  const code=page.locator('.message-content td code');
+  const linkedCode=page.locator('.message-content a code');
+  const linkColor=await link.evaluate(el=>getComputedStyle(el).color);
+  assert.notEqual(await code.evaluate(el=>getComputedStyle(el).color),linkColor);
+  assert.equal(await linkedCode.evaluate(el=>getComputedStyle(el).color),linkColor);
+  assert.equal(await link.evaluate(el=>getComputedStyle(el).textDecorationLine),'underline');
 });

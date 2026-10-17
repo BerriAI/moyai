@@ -5,10 +5,10 @@ import { elapsed, finiteValue, spendCount } from "./analytics-format"
 import { ReportTable } from "./analytics-shared"
 
 export const timingSeries: { key: TimingCardKey; title: string; description: string }[] = [
-  { key: "startup", title: "Startup to dispatch", description: "Turn receipt → first foreground LiteLLM outbound attempt" },
-  { key: "queue", title: "Queue pickup", description: "Turn receipt → execution worker starts preparation" },
-  { key: "broker", title: "Broker preparation", description: "Broker receipt → foreground outbound attempt" },
-  { key: "computer", title: "Computer readiness", description: "First acquisition requested → usable workspace" },
+  { key: "startup", title: "Startup", description: "Time until the first model request is sent" },
+  { key: "queue", title: "Queue wait", description: "Time until work starts" },
+  { key: "broker", title: "Request setup", description: "Time spent preparing the model request" },
+  { key: "computer", title: "Computer startup", description: "Time until the computer is ready" },
 ]
 
 const intervalTime = (value: string) => new Date(value).toLocaleString(undefined, { timeZone: "UTC" })
@@ -32,7 +32,7 @@ export function PerformanceTrend({ rows }: { rows?: TimingInterval[] }) {
   const x = (index: number) => 60 + (index + 0.5) * 764 / rows.length
   const y = (value: number) => 174 - value / maximum * 156
   return <Card className="performance-trend" role="region" aria-labelledby="performance-trend-title">
-    <div className="performance-section-heading"><h2 id="performance-trend-title">Average latency over time</h2><span>{rows.length} intervals · UTC · gaps mean no samples</span></div>
+    <div className="performance-section-heading"><h2 id="performance-trend-title">Average latency over time</h2><span>UTC</span></div>
     <div className="performance-legend">{timingSeries.map(item => <span key={item.key} className={`performance-series-${item.key}`}><i aria-hidden="true" />{item.title}</span>)}</div>
     {values.length ? <div className="performance-chart-scroll" role="region" aria-label="Latency trend chart" tabIndex={0}>
       <svg viewBox="0 0 840 200" role="img" aria-label="Average startup, queue pickup, broker preparation and computer readiness. Exact values are available below.">
@@ -53,7 +53,7 @@ export function PerformanceTrend({ rows }: { rows?: TimingInterval[] }) {
           </g>
         })}
       </svg>
-    </div> : <p className="analytics-status">No recorded values for this chart. Missing observations are not plotted as zero.</p>}
+    </div> : <p className="analytics-status">No measurements in this range.</p>}
     <div className="performance-chart-range"><span>{intervalTime(rows[0].start)} UTC</span><span>{intervalTime(rows[rows.length - 1].end)} UTC</span></div>
     <details className="performance-intervals"><summary>View interval values</summary>
       <ReportTable label="Latency trend interval values" columns={["Interval start (UTC)", ...timingSeries.map(item => item.title)]}>

@@ -3,13 +3,17 @@
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
 `frontend/theme.css`: The space workspace uses near-black neutral surfaces, lavender actions,
-local Share Tech Mono typography and semantic status colors. The retired escaped-template renderer is no longer used.
+local Manrope interface typography and semantic status colors. The wordmark,
+home headline and code retain Share Tech Mono. Both fonts are served locally.
+The retired escaped-template renderer is no longer used.
 
 Use direct React components for buttons, dialogs, forms, selects and menus.
 Preserve labels, focus behavior, portal geometry and permission-driven actions.
 `native/web/settings.tsx` and `settings.css` own the Settings shell; product
 adapters supply capability-specific forms. `style.css` and the focused panel,
 sidebar and workspace styles own application layout.
+Desktop sidebars collapse to a 52px rail with an open button at the top;
+workspace and Settings share the collapsed state. Mobile navigation stays an overlay.
 
 The orbit workspace key uses the shared Button and Radix Dialog behavior, including
 Escape, outside dismissal and the Command/Control-period shortcut. Its resource
@@ -22,25 +26,17 @@ belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
-This variant keeps the original meteor's frontal photograph and irregular oval
-outline, while using the supplied full Meshy geometry for the sides and back.
-`scripts/assets/build_original_profile.mjs` fits that geometry to the reference
-outline and embeds a second UV set for the front image. Generation runs offline.
-See [the original-profile asset notes](../scripts/assets/original-profile.md).
+The home screen keeps the original meteor's frontal photograph and irregular oval
+outline, with the supplied Meshy geometry for the sides and back.
+`frontend/moyai-original-surface.ts` fades the reference image into the textured
+stone as the rock turns. The Three.js viewer loads lazily and supports drag and
+keyboard rotation; Home resets the view. The original image remains the loading
+and WebGL fallback. See the [original-profile asset notes](../scripts/assets/original-profile.md).
 
-`frontend/moyai-original-surface.ts` owns the view-dependent reference layer.
-At Home rotation it displays the original photograph; as the rock turns, that
-layer fades to the underlying textured 3D stone. By about 40 degrees, only the
-physical surface remains, avoiding stretched front-photo details in profile.
-This is an intentional hybrid presentation, not a recovered scan of the image.
-Keep the projection's 8.6-unit camera distance aligned with the viewer.
-
-The Three.js viewer remains lazy and supports drag and keyboard rotation.
-It disposes shared geometry, materials, textures (including an unmounted model's
-embedded reference image), the reflection target and shadow
-maps once on unmount. Embedded images use TextureLoader so the existing content
-security policy can load them through `img-src`. The original reference image
-remains the lightweight loading/WebGL fallback.
+The headline decodes once per home-screen visit; its cursor blinks five times,
+then disappears. The rock stays still until rotated. Rendering stops offscreen
+and in background tabs; reduced motion disables rotation inertia. Geometry,
+materials, textures, reflection targets and shadow maps are disposed on unmount.
 
 ```sh
 npm ci

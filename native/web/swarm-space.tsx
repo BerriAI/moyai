@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react"
 import { Bot, Check, Circle, Crown, OctagonAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import logo from "./assets/moyai-logo.png"
 import type { SwarmView } from "./swarm"
 import type { SpaceGraph } from "./space-field"
 import "./space-field.js"
@@ -89,7 +88,7 @@ export function SwarmSpace({ data, sessionId, visible, onConversation }: {
             <a href={`#${member.session_id}`} onClick={event => open(event, member.session_id)}
               aria-label={`${member.name} · ${label} · Open conversation`} aria-current={sessionId === member.session_id ? "page" : undefined}>
               <span className="swarm-space-mark" data-working={active} data-attention={attention}>
-                {member.coordinator ? <img src={logo} alt="" width={36} height={36} /> : <Bot className="size-7" />}
+                <Bot className="size-7" />
                 <span className="swarm-space-state" aria-hidden="true">
                   {attention ? <OctagonAlert size={12} /> : active ? <Circle size={10} /> : <Check size={12} />}
                 </span>

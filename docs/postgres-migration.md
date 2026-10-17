@@ -1,11 +1,11 @@
 # PostgreSQL migration rehearsal
 
-[Deployment](production-deploy.md) · [Architecture](architecture.md)
+[Deployment contract](pydantic-deployment.md) · [Architecture](architecture.md)
 
 This maintenance tool copies a historical canonical SQLite database into an
 isolated PostgreSQL schema. It does not change the running application, provision
 native execution storage or finish legacy workflows. Current existing-product
-startup requires the separate preparation in [production deployment](production-deploy.md).
+startup requires the separate preparation in the [deployment contract](pydantic-deployment.md).
 
 ## What the command does
 

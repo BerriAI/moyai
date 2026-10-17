@@ -80,7 +80,7 @@ async def automation_readiness(runtime: Any) -> dict[str, Any]:
                 "create": ready, "update": True, "delete": True, "run": False,
                 "runtime_available": ready, "execution_backend": "temporal",
                 "reason": (
-                    "Temporal schedules enqueue native turns; pause/delete fence future admissions."
+                    ""
                     if ready else "No active Settings worker is registered. Existing schedules can still be paused or deleted."
                 ),
             }

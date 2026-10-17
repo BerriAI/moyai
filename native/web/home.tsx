@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUp, Globe, LockKeyhole, Pause, Play } from "lucide-react"
+import { ArrowUp, Globe, LockKeyhole } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -9,6 +9,7 @@ import "./home.css"
 import meteorPoster from "./assets/moyai-meteor-poster.webp"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
+import type { GeneralPreferences } from "./general-preferences"
 import type { NewConversation, Session, Turn } from "./conversation-state"
 
 type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
@@ -20,12 +21,11 @@ export function homeSubmission(prompt: string, model: string, privateSession: bo
   return { body, visibility, signature: JSON.stringify([visibility, body]) }
 }
 
-export function Home({ models, defaultModel, individual = true, productMode = "standalone", connectionVersion = "", onCreated, onStarted }: {
-  models: string[]; defaultModel: string; individual?: boolean; productMode?: "standalone" | "existing"; connectionVersion?: string
+export function Home({ models, defaultModel, individual = true, productMode = "standalone", connectionVersion = "", preferences, onCreated, onStarted }: {
+  models: string[]; defaultModel: string; individual?: boolean; productMode?: "standalone" | "existing"; connectionVersion?: string; preferences?: GeneralPreferences
   onCreated: () => Promise<void>; onStarted: (conversation: NewConversation) => void
 }) {
   const [draft, setDraft] = useState("")
-  const [animateHeadline, setAnimateHeadline] = useState(true)
   const [model, setModel] = useState(defaultModel)
   const [privateSession, setPrivateSession] = useState(false)
   const isPrivate = individual && privateSession
@@ -39,8 +39,9 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   const accountScope = `${isPrivate ? "private" : "shared"}:${connectionVersion}:${accountsVersion}`
   const accounts = catalog.scope === accountScope ? catalog.rows : []
   const skipAccounts = skippedScope === accountScope
-  const selectedAccounts = skipAccounts ? [] : accounts.map(row => row.id)
-  const accountsReady = productMode !== "existing" || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error)
+  const needsAccounts = preferences?.connection_ids != null ? preferences.connection_ids.length > 0 : productMode === "existing"
+  const selectedAccounts = skipAccounts || !needsAccounts ? [] : accounts.filter(row => preferences?.connection_ids == null || preferences.connection_ids.includes(row.id)).map(row => row.id)
+  const accountsReady = !needsAccounts || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error)
   const sculpture = useRef<HTMLDivElement>(null)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
@@ -53,11 +54,11 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     // The composer is useful before the decorative WebGL module is downloaded.
     void import("@/moyai-sculpture").then(({ mountSculpture }) => {
       if (!disposed) cleanupSculpture = mountSculpture(sculpture.current)
-    }).catch(() => {}) // The static logo remains a complete fallback.
+    }).catch(() => {}) // The static image remains a complete fallback.
     return () => { disposed = true; mounted.current = false; cleanupSculpture() }
   }, [])
   useEffect(() => {
-    if (productMode !== "existing") return
+    if (!needsAccounts) return
     const controller = new AbortController(), scope = accountScope
     setCatalog({ scope, rows: [], loading: true, error: "" })
     void api<HomeConnection[]>(`/connections?shared=${!isPrivate}`, "GET", undefined, controller.signal).then(rows => {
@@ -66,7 +67,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
       setCatalog({ scope, rows: eligible, loading: false, error: "" })
     }, reason => { if (!controller.signal.aborted) setCatalog({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
-  }, [productMode, accountScope, isPrivate])
+  }, [needsAccounts, accountScope, isPrivate])
 
   async function send(prompt = draft) {
     if (submitting.current || pictures.uploading || pictures.hasErrors || !accountsReady || (!prompt.trim() && !pictures.files.length)) return
@@ -92,18 +93,14 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
 
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
     {fileDrop.dragging && <FileDropOverlay />}
-    <div className="home-header"><span className="home-crumb">NEW SESSION</span><div className="home-header-actions">
-      <Button type="button" variant="ghost" size="icon-sm" aria-label={animateHeadline ? "Pause headline animation" : "Resume headline animation"} aria-pressed={!animateHeadline} onClick={() => setAnimateHeadline(value => !value)}>{animateHeadline ? <Pause size={13} /> : <Play size={13} />}</Button>
-      <span className="home-visibility">{isPrivate ? "Private" : "Public"}</span>
-    </div></div>
     <SpaceBackdrop />
     <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
     <div className="home-content">
       <p className="home-eyebrow">A space for your next big idea</p>
-      <DecodeHeadline paused={!animateHeadline || busy || Boolean(draft)} />
+      <DecodeHeadline paused={busy || Boolean(draft.trim())} />
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         {error && <p className="error" role="alert">{error}</p>}
-        {productMode === "existing" && catalog.scope === accountScope && catalog.error && !skipAccounts && <div className="home-connection-error" role="alert">
+        {needsAccounts && catalog.scope === accountScope && catalog.error && !skipAccounts && <div className="home-connection-error" role="alert">
           <span className="error">{catalog.error}</span>
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setAccountsVersion(value => value + 1)}>Retry connections</Button>
           <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setSkippedScope(accountScope)}>Continue without connections</Button>
@@ -127,7 +124,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         </div>
         <div className="home-composer-hint">
           {pictures.uploading && <span role="status">Uploading files…</span>}
-          {productMode === "existing" && !accountsReady && !catalog.error && <span role="status">Loading connections…</span>}
+          {needsAccounts && !accountsReady && !catalog.error && <span role="status">Loading connections…</span>}
           <span>Drop files or paste images · Enter to send</span>
         </div>
       </form>

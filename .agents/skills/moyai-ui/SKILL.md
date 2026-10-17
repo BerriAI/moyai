@@ -6,7 +6,8 @@ description: Build or refine Moyai's native React frontend using its established
 # Moyai UI
 
 Preserve the space workspace: near-black neutral surfaces, lavender actions,
-near-white text, local Share Tech Mono typography and opaque composer panels. The home screen
+near-white text, local Manrope interface typography and opaque composer panels.
+The wordmark, home headline and code retain Share Tech Mono. The home screen
 uses deterministic stars, the decode headline and interactive Moyai meteor.
 Chats reuse the static stars at lower brightness; Settings stay quiet for sustained
 work. The workspace menu floats without reflowing chat; only the independent side
@@ -66,6 +67,8 @@ or a Next.js-specific pattern to this Vite app solely to satisfy an example.
 Run `npm run typecheck`, relevant `npm test` cases, `npm run build` and
 `npm run test:ui`. The browser fixtures serve the actual React app against synthetic
 APIs; they do not prove provider authorization or production execution.
+Finish the build before API tests that mount generated static files. Avoid source
+edits during browser suites, since hot reload can invalidate in-flight checks.
 
 Inspect affected screens at 1440px, 768px and 320px. Include the front page when
 changing shared styles. Open affected dialogs, filter a populated list, recover
