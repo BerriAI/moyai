@@ -50,7 +50,7 @@ def test_sdist_to_wheel_retains_runtime_resources_and_canonical_archive_helper(t
         names = set(package.namelist())
         required = {
             "moyai/resources/instructions.md", "moyai/resources/desktop.py",
-            "moyai/resources/browser_guest.py", "app/legacy_artifacts.py",
+            "moyai/resources/browser_guest.py", "moyai/resources/browser_driver.py", "app/legacy_artifacts.py",
             "moyai/resources/skills/coding/SKILL.md", "moyai/static/index.html",
             "moyai/static/moyai.glb", "moyai/input_attachments.py",
             "moyai/product_start.py", "moyai/product_memory_review.py",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -27,8 +28,9 @@ from .analytics import (
     usage_totals,
     utc,
 )
+from .analytics_identity import report_identities
 from .inference_usage import InferenceUsage
-from .models import Effect, Session, Turn, User
+from .models import Effect, ProductTurnAuthority, Session, Turn, User
 from .pr_publications import PRPublication, verified_status
 from .pull_requests import PullRequestService, parse_pr_url
 
@@ -40,12 +42,8 @@ USAGE_COUNTERS = ("requests", "input_tokens", "output_tokens", "cache_read_token
 TURN_COLUMNS = (
     Turn.id, Turn.actor_id, Turn.session_id, Turn.model, Turn.status, Turn.usage,
     Turn.created_at, Turn.accepted_at, Turn.finished_at,
-    Turn.parent_turn, Turn.preparation.is_not(None).label("has_preparation"),
+    Turn.parent_turn, Turn.preparation.is_not(None).label("has_preparation"), Turn.workflow_id,
 )
-
-
-def user_view(row: User) -> dict[str, Any]:
-    return {key: getattr(row, key) for key in ("id", "username", "display_name", "role", "enabled", "auth_version")}
 
 
 def usage_json(raw: str) -> dict[str, Any]:
@@ -117,6 +115,37 @@ def legacy_event(row: Any, usage: dict[str, int | None]) -> UsageEvent:
     )
 
 
+async def undispatched_failures(runtime: Any, db: Any, records: list[Any]) -> set[str]:
+    """Canonical dispatch commits an admission before any upstream request.
+
+    A terminal failure with product authority and no SDK usage is known unsent
+    only when both ledgers have no attempts or exclusively proven-not-dispatched
+    reservations. Historical/standalone unknowns and dispatched attempts retain
+    their existing missing-cost treatment.
+    """
+    if not getattr(runtime.database, "product_authority_enabled", False):
+        return set()
+    from .product_inference import ProductInferenceRequest
+
+    candidates = {
+        row.id for row in records if row.status == "failed"
+        and not usage_json(row.usage)
+    }
+    if not candidates:
+        return set()
+    return set(await db.scalars(select(ProductTurnAuthority.turn_id).where(
+        ProductTurnAuthority.turn_id.in_(candidates),
+        ~select(ProductInferenceRequest.id).where(
+            ProductInferenceRequest.turn_id == ProductTurnAuthority.turn_id,
+            or_(ProductInferenceRequest.status != "not_dispatched", ProductInferenceRequest.cost_usd.is_not(None)),
+        ).exists(),
+        ~select(InferenceUsage.id).where(
+            InferenceUsage.turn_id == ProductTurnAuthority.turn_id,
+            or_(InferenceUsage.status != "not_dispatched", InferenceUsage.cost_usd.is_not(None)),
+        ).exists(),
+    )))
+
+
 def inference_event(row: InferenceUsage) -> UsageEvent:
     return UsageEvent(
         row.id, row.turn_id, row.session_id, row.actor_id, row.model, record_time(row.created_at),
@@ -160,15 +189,16 @@ def turn_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_latency_ms": sum(durations) / len(durations) if durations else None,
         "p50_latency_ms": percentile(durations, .5), "p95_latency_ms": percentile(durations, .95),
         "priced_turns": sum(row["pricing_status"] == "priced" for row in rows if row["usage_role"] != "steering_input"),
-        "unpriced_turns": sum(row["pricing_status"] != "priced" for row in rows if row["usage_role"] != "steering_input"),
+        "unpriced_turns": sum(row["pricing_status"] in {"partial", "unpriced"} for row in rows
+                             if row["usage_role"] != "steering_input"),
     }
 
 
-def filtered(query: Any, model: str | None, status: str | None, user_id: str | None, *, table: Any = Turn):
+def filtered(query: Any, model: str | None, status: str | None, actor_ids: set[str] | None, *, table: Any = Turn):
     if model:
         query = query.where(table.model == model)
-    if user_id:
-        query = query.where(table.actor_id == user_id)
+    if actor_ids is not None:
+        query = query.where(table.actor_id.in_(actor_ids))
     if status:
         query = query.where(Turn.status == status)
     return query
@@ -289,17 +319,21 @@ async def report(
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
     lower, upper = period.start.isoformat(), period.end.isoformat()
+    identities = await report_identities(runtime)
+    actor_ids = identities.actors(user_id)
+    person = identities.canonical
+    users = identities.users
     async with runtime.database.sessions() as db:
         turns = list((await db.execute(filtered(select(*TURN_COLUMNS).where(
             Turn.created_at >= lower, Turn.created_at < upper,
-        ), model, status, user_id).limit(MAX_TURNS + 1))).all())
+        ), model, status, actor_ids).limit(MAX_TURNS + 1))).all())
         ledger_query = select(InferenceUsage).join(
             Turn, Turn.id == InferenceUsage.turn_id, isouter=True,
         ).where(InferenceUsage.created_at >= lower, InferenceUsage.created_at < upper)
         if model:
             ledger_query = ledger_query.where(Turn.model == model)
         ledger = list(await db.scalars(filtered(
-            ledger_query, None, status, user_id, table=InferenceUsage,
+            ledger_query, None, status, actor_ids, table=InferenceUsage,
         ).limit(MAX_INFERENCES + 1)))
         if len(turns) > MAX_TURNS or len(ledger) > MAX_INFERENCES:
             raise HTTPException(422, "Too many matching records. Narrow the date range or filters.")
@@ -316,7 +350,8 @@ async def report(
             InferenceUsage.turn_id.in_([row.id for row in turns]),
         ).group_by(InferenceUsage.turn_id))).all())
         steering = {row.id for row in turns if row.parent_turn and not row.has_preparation and row.id not in ledger_counts}
-        inference_turns = [row for row in turns if row.id not in steering]
+        undispatched = await undispatched_failures(runtime, db, turns)
+        inference_turns = [row for row in turns if row.id not in steering | undispatched]
         deltas = await usage_deltas(runtime, db, inference_turns)
         unknown = {row.id for row in inference_turns if deltas[row.id]["requests"] is None}
         gaps = {
@@ -324,12 +359,11 @@ async def report(
             and deltas[row.id]["requests"] is not None
             and deltas[row.id]["requests"] > ledger_counts[row.id]
         }
-        users = [user_view(row) for row in await db.scalars(select(User).order_by(User.username))]
         session_query = select(Session.id, Session.owner_id, Session.created_at).where(
             Session.created_at >= lower, Session.created_at < upper,
         )
-        if user_id:
-            session_query = session_query.where(Session.owner_id == user_id)
+        if actor_ids is not None:
+            session_query = session_query.where(Session.owner_id.in_(actor_ids))
         if model:
             session_query = session_query.where(Session.model == model)
         if status:
@@ -339,7 +373,7 @@ async def report(
         created_sessions = list((await db.execute(session_query.limit(MAX_TURNS + 1))).all())
         publications = list(await db.scalars(filtered(select(PRPublication).join(
             Turn, Turn.id == PRPublication.turn_id, isouter=True,
-        ).where(PRPublication.created_at < upper), model, status, user_id, table=PRPublication).limit(MAX_TURNS + 1)))
+        ).where(PRPublication.created_at < upper), model, status, actor_ids, table=PRPublication).limit(MAX_TURNS + 1)))
         if len(publications) > MAX_TURNS or len(created_sessions) > MAX_TURNS:
             raise HTTPException(422, "Too many sessions or publication receipts match. Narrow the filters.")
         if publications and (user_id or model or status):
@@ -366,10 +400,13 @@ async def report(
             Effect.created_at < upper,
             ~select(PRPublication.id).where(PRPublication.id == Effect.id).exists(),
         ).group_by(Effect.actor_id)
-        untracked_by_user = dict((await db.execute(filtered(candidate_effects, model, status, user_id))).all())
+        untracked_by_user: dict[str, int] = defaultdict(int)
+        for actor_id, count in (await db.execute(filtered(candidate_effects, model, status, actor_ids))).all():
+            untracked_by_user[person(actor_id)] += count
         untracked = sum(untracked_by_user.values())
     events = [inference_event(row) for row in ledger]
     events.extend(legacy_event(row, deltas[row.id]) for row in inference_turns if row.id not in ledger_counts)
+    events = [replace(event, user_id=person(event.user_id)) for event in events]
     per_turn: dict[str, list[UsageEvent]] = defaultdict(list)
     for event in events:
         per_turn[event.turn_id].append(event)
@@ -379,11 +416,16 @@ async def report(
         steering=row.id in steering,
     ) for row in turns]
     for row in rows:
-        row.update(timing.get(row["id"], performance_report.timing_view({})))
+        if person(row["user_id"]) != row["user_id"]:
+            row["actor_id"], row["user_id"] = row["user_id"], person(row["user_id"])
+        row.update(timing.get(row["id"], {
+            **performance_report.timing_view({}),
+            **{f"{name}_timing_status": "outside_range" for name in performance_report.CARD_FIELDS},
+        }))
     receipt_rows = publications
     publications = [
         row for row in unique_publications(publications)
-        if (not user_id or row.actor_id == user_id) and (not model or row.model == model)
+        if (actor_ids is None or row.actor_id in actor_ids) and (not model or row.model == model)
         and (not status or publication_turn_status.get(row.turn_id) == status)
     ]
     service = service or PullRequestService(runtime)
@@ -395,7 +437,7 @@ async def report(
     merged = [row for row in publications if statuses.get(row.id, {}).get("merged_at")
               and period.contains(statuses[row.id]["merged_at"])]
     linked_pairs = {
-        (row.actor_id, receipt.session_id)
+        (person(row.actor_id), receipt.session_id)
         for row in merged for receipt in receipt_rows
         if (
             row.github_id and row.github_id == receipt.github_id
@@ -428,26 +470,29 @@ async def report(
             linked_counts = dict((await db.execute(select(InferenceUsage.turn_id, func.count()).where(
                 InferenceUsage.turn_id.in_([row.id for row in linked_turns]),
             ).group_by(InferenceUsage.turn_id))).all())
+            linked_undispatched = await undispatched_failures(runtime, db, linked_turns)
             linked_turns = [
-                row for row in linked_turns if not row.parent_turn or row.has_preparation or row.id in linked_counts
+                row for row in linked_turns if row.id not in linked_undispatched
+                and (not row.parent_turn or row.has_preparation or row.id in linked_counts)
             ]
         if not linked_limited:
-            linked_actors = {row.id: row.actor_id for row in linked_turns}
+            linked_actors = {row.id: person(row.actor_id) for row in linked_turns}
             linked_unknown = {
-                row.id for row in linked_turns if (row.actor_id, row.session_id) in linked_pairs
+                row.id for row in linked_turns if (person(row.actor_id), row.session_id) in linked_pairs
                 and linked_deltas[row.id]["requests"] is None
             }
             linked_gaps = {
-                row.id for row in linked_turns if (row.actor_id, row.session_id) in linked_pairs
+                row.id for row in linked_turns if (person(row.actor_id), row.session_id) in linked_pairs
                 and linked_counts.get(row.id, 0) and linked_deltas[row.id]["requests"] is not None
                 and linked_deltas[row.id]["requests"] > linked_counts[row.id]
             }
             linked_events = [
-                inference_event(row) for row in linked_ledger if (row.actor_id, row.session_id) in linked_pairs
+                inference_event(row) for row in linked_ledger if (person(row.actor_id), row.session_id) in linked_pairs
             ] + [
                 legacy_event(row, linked_deltas[row.id]) for row in linked_turns
-                if row.id not in linked_counts and (row.actor_id, row.session_id) in linked_pairs
+                if row.id not in linked_counts and (person(row.actor_id), row.session_id) in linked_pairs
             ]
+            linked_events = [replace(event, user_id=person(event.user_id)) for event in linked_events]
     def complete_status(values: list[PRPublication]) -> bool:
         return all(row.id in statuses and not (
             statuses[row.id]["state"] == "merged" and statuses[row.id]["merged_at"] is None
@@ -466,16 +511,16 @@ async def report(
     }
     by_user = []
     contributors = (
-        {row.actor_id for row in turns} | {item.user_id for item in events}
-        | {row.owner_id for row in created_sessions}
-        | {row.actor_id for row in publications if period.contains(utc(row.created_at))}
-        | {row.actor_id for row in merged}
+        {person(row.actor_id) for row in turns} | {item.user_id for item in events}
+        | {person(row.owner_id) for row in created_sessions}
+        | {person(row.actor_id) for row in publications if period.contains(utc(row.created_at))}
+        | {person(row.actor_id) for row in merged}
     )
     for identity in sorted(contributors):
         user_events = [item for item in events if item.user_id == identity]
-        user_turns = [row for row in turns if row.actor_id == identity]
-        user_prs = [row for row in publications if row.actor_id == identity]
-        user_merged = [row for row in merged if row.actor_id == identity]
+        user_turns = [row for row in turns if person(row.actor_id) == identity]
+        user_prs = [row for row in publications if person(row.actor_id) == identity]
+        user_merged = [row for row in merged if person(row.actor_id) == identity]
         user_ids = {row.id for row in user_turns}
         linked_user_ids = {key for key, actor_id in linked_actors.items() if actor_id == identity}
         active = {row.session_id for row in user_turns} | {item.session_id for item in user_events}
@@ -483,7 +528,7 @@ async def report(
             "user_id": identity, **turn_metrics([row for row in rows if row["user_id"] == identity]),
             **usage_totals(user_events, unknown_turns=unknown & user_ids, capture_gaps=gaps & user_ids).view(),
             "sessions": len(active), "sessions_active": len(active),
-            "sessions_created": sum(row.owner_id == identity for row in created_sessions),
+            "sessions_created": sum(person(row.owner_id) == identity for row in created_sessions),
             **pr_metrics(user_prs, statuses, period),
             "cost_per_merged_pr_usd": cost_per_merge(
                 usage_totals(
@@ -539,10 +584,10 @@ async def report(
     if format == "csv":
         exported = rows if export == "turns" else by_user if export == "users" else series if export == "daily" else by_model
         if export == "users":
-            identities = {row["id"]: row for row in users}
+            user_labels = {row["id"]: row for row in users}
             exported = [{
-                **row, "display_name": identities.get(row["user_id"], {}).get("display_name"),
-                "username": identities.get(row["user_id"], {}).get("username"),
+                **row, "display_name": user_labels.get(row["user_id"], {}).get("display_name"),
+                "username": user_labels.get(row["user_id"], {}).get("username"),
             } for row in exported]
         flattened = [{
             **row, **({"cost_models": json.dumps(row["cost_models"])} if "cost_models" in row else {}),
@@ -567,6 +612,7 @@ async def report(
                 "legacy_turns": len(totals.legacy_turns), "ledger_requests": len(ledger),
                 "unknown_request_turns": len(totals.unknown_request_turns),
                 "capture_gap_turns": len(gaps),
+                "undispatched_failed_turns": len(undispatched),
                 "linked_cost_limited": linked_limited,
                 "priced_requests": totals.priced_requests, "unpriced_requests": totals.unpriced_requests,
                 "pr_receipts": len(publications), "pr_status_checked": checked,
@@ -580,12 +626,13 @@ async def report(
             },
             "methodology": {
                 **performance_report.METHODOLOGY,
+                "users": "User totals and filters combine saved Slack accounting links with their Google or SSO account. Names and emails alone never merge users; recorded actor IDs are preserved.",
                 "sessions": "Created uses Session.created_at; active is distinct sessions with a newly admitted turn or recorded inference in range. Daily active counts are distinct per UTC date.",
                 "prs_created": "Confirmed native GitHub create_pull_request receipts, dated by confirmation. Attachments, mentions, shell/CLI creations and old engine history are not counted.",
                 "prs_merged": "Verified GitHub merge events in range, including older creations. Status counts describe the creation cohort's current verified state; unavailable reads remain unknown.",
                 "cost": "Actual reported USD subtotal only; partial coverage excludes missing amounts, never estimates them. Inference attempts use their recorded timestamp. Historical usage subtracts the exact admitted conversation's cumulative seed and stays unknown if that seed is unavailable. Only turns with no attempt ledger use this unpriced fallback.",
                 "requests": "New ledger requests count observed HTTP attempts, including retries. Historical fallback uses the admitted-seed usage delta. Attached steering inputs remain in input/turn counts but their inference belongs to the parent turn; they do not add missing-cost records.",
-                "coverage": "Coverage concerns observed records. A verified SDK request delta above ALL attempt rows demonstrates a capture gap; retries can mask gaps, so absence of that signal is not proof of complete billing. Baseline reads are bounded and missing baselines remain unknown.",
+                "coverage": "Coverage concerns observed records. Failed product turns with no SDK usage and no dispatched request in either durable ledger do not add missing costs. A verified SDK request delta above ALL attempt rows demonstrates a capture gap; retries can mask gaps, so absence of that signal is not proof of complete billing. Baseline reads are bounded and missing baselines remain unknown.",
                 "model": "The model filter selects root turns and their PR/session cohort, including child-model attempts. Ledger breakdowns use the actual requested alias. Historical fallback is attributed only to its recorded root model and marked legacy; historical per-request aliases are unavailable.",
                 "cost_per_merged_pr": "Actor inference spend through end across distinct sessions linked to that actor's merged PRs, matching the selected root-turn model filter, divided by verified merge events. Null when linked cost or PR status coverage is incomplete; this is session correlation, not exact per-PR billing.",
             },

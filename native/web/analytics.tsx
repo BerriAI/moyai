@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { api, ApiError } from "./api"
 import { AnalyticsChart, AnalyticsDatePicker, AnalyticsLegend, AnalyticsMetrics, ReportTable } from "./analytics-shared"
 import { StartupPerformance } from "./performance"
+import { timingReason, timingSource } from "./performance-labels"
 import { presetAnalyticsRange } from "./analytics-dates"
 import type { AnalyticsRange } from "./analytics-dates"
 import { dollars, elapsed, finiteValue, spendCount } from "./analytics-format"
@@ -203,14 +204,14 @@ function UsageHistory({ data, exportUrl }: { data: AnalyticsReport; exportUrl: (
 
 function TurnTable({ data, performance, offset, onOffset, loading }: { data: AnalyticsReport; performance: boolean; offset: number; onOffset: (offset: number) => void; loading: boolean }) {
   return <>
-    <ReportTable label={performance ? "Recorded turn performance" : "Recorded turn usage"} columns={["Turn / created", "User", "Root turn model / status", ...(performance ? ["API → dispatch", "Startup breakdown", "Computer ready", "Full turn duration"] : ["Requests", "Tokens", "Reported cost"])]}>
+    <ReportTable label={performance ? "Recorded turn performance" : "Recorded turn usage"} columns={["Turn / created", "User", "Root turn model / status", ...(performance ? ["Receipt → dispatch", "Startup breakdown", "Computer ready", "Full turn duration"] : ["Requests", "Tokens", "Reported cost"])]}>
       {data.rows.map(row => <TableRow key={row.id}>
         <TableCell><details><summary>{row.id.slice(0, 8)}</summary><code>{row.id}</code><small>Tool calls: {spendCount(row.tool_calls)}</small><small>Cache read: {spendCount(row.cache_read_tokens)} · write: {spendCount(row.cache_write_tokens)}</small>{row.usage_role === "steering_input" && <small>Steering input; inference cost belongs to its parent turn.</small>}{Boolean(row.cost_models?.length) && <small>Inference models: {row.cost_models!.join(", ")}</small>}</details><small>{localDate(row.created_at)}</small></TableCell>
         <TableCell>{data.users.find(user => user.id === row.user_id)?.display_name || data.users.find(user => user.id === row.user_id)?.username || row.user_id}</TableCell><TableCell>{row.model}<small>{row.status}</small></TableCell>
         {performance ? <>
-          <TableCell>{elapsed(row.api_to_dispatch_ms)}{row.first_dispatch_at && <details><summary>Timing evidence</summary><small>API: {row.api_received_at || "Unavailable"}</small><small>Worker: {row.worker_picked_up_at || "Unavailable"}</small><small>Broker: {row.broker_received_at || "Unavailable"}</small><small>Dispatch: {row.first_dispatch_at}</small><small>Route: {row.dispatch_route}</small><code>{row.dispatch_attempt_id}</code></details>}</TableCell>
-          <TableCell><small>API → worker: {elapsed(row.api_to_worker_ms)}</small><small>Worker → broker: {elapsed(row.worker_to_broker_ms)}</small><small>Broker → dispatch: {elapsed(row.broker_to_dispatch_ms)}</small></TableCell>
-          <TableCell>{elapsed(row.computer_ready_ms)}<small>{row.computer_mode || "No acquisition evidence"}{row.computer_status ? ` · ${row.computer_status}` : ""}</small></TableCell>
+          <TableCell>{elapsed(row.api_to_dispatch_ms)}<small>{timingReason(row.startup_timing_status)}</small>{(row.api_received_at || row.first_dispatch_at) && <details><summary>Timing evidence</summary><small>Start: {timingSource(row.timing_start_source)}{row.timing_surface ? ` · ${row.timing_surface}` : ""}</small><small>Receipt: {row.api_received_at || "Unavailable"}</small><small>Worker: {row.worker_picked_up_at || "Unavailable"}</small><small>Broker: {row.broker_received_at || "Unavailable"}</small><small>Dispatch: {row.first_dispatch_at || "Unavailable"}</small><small>Route: {row.dispatch_route || "Unavailable"}</small><code>{row.dispatch_attempt_id}</code></details>}</TableCell>
+          <TableCell><small>Receipt → worker: {elapsed(row.queue_pickup_ms ?? row.api_to_worker_ms)}</small>{row.queue_timing_status !== "measured" && <small>{timingReason(row.queue_timing_status)}</small>}<small>Worker → broker: {elapsed(row.worker_to_broker_ms)}</small><small>Broker → dispatch: {elapsed(row.broker_preparation_ms ?? row.broker_to_dispatch_ms)}</small>{row.broker_timing_status !== "measured" && <small>{timingReason(row.broker_timing_status)}</small>}</TableCell>
+          <TableCell>{elapsed(row.computer_ready_ms)}<small>{row.computer_mode}{row.computer_status ? ` · ${row.computer_status}` : ""}</small><small>{timingReason(row.computer_timing_status)}</small></TableCell>
           <TableCell>{elapsed(row.total_ms)}<small>Accepted → finished: {elapsed(row.latency_ms)}</small></TableCell>
         </> : <><TableCell>{spendCount(row.requests)}</TableCell><TableCell>{spendCount(row.total_tokens)}</TableCell><TableCell>{dollars(row.cost_usd)}<small>{row.pricing_status}</small></TableCell></>}
       </TableRow>)}

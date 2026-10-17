@@ -196,6 +196,18 @@ async def ledger(runtime, actor, session, turn, *, timestamp=START, cost="0.1", 
     return row
 
 
+async def test_standalone_failed_turn_without_canonical_admission_remains_unknown(runtime, actor):
+    session = await runtime.database.create_session(actor, NewSession())
+    turn = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Unverified old turn", request_key="unknown-failure",
+    ))
+    await runtime.database.fail(turn.id, "No durable product admission evidence.")
+    value = await report(runtime, actor, None, None, None, None, None, 100, 0, "json")
+    assert value["summary"]["pricing_status"] == "unpriced"
+    assert value["coverage"]["undispatched_failed_turns"] == 0
+    assert value["coverage"]["unknown_request_turns"] == 1
+
+
 async def test_native_confirmed_creation_is_idempotent_and_analytics_failure_does_not_fail_write(runtime, actor, monkeypatch):
     publication, _, _, _, ctx, call, tool, args, result = await native_publication(runtime, actor)
     capability = EffectReceipts(runtime.database)

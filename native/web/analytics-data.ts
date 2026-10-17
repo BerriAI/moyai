@@ -33,18 +33,22 @@ export type TurnUsage = {
   queue_ms: number | null; latency_ms: number | null; total_ms: number | null
   cost_usd: number | null; pricing_status: string
   api_to_dispatch_ms?: number | null; api_to_worker_ms?: number | null
+  queue_pickup_ms?: number | null; broker_preparation_ms?: number | null
   worker_to_broker_ms?: number | null; broker_to_dispatch_ms?: number | null
   computer_ready_ms?: number | null; computer_mode?: string | null; computer_status?: string | null
   api_received_at?: string | null; worker_picked_up_at?: string | null
   broker_received_at?: string | null; first_dispatch_at?: string | null
   dispatch_attempt_id?: string | null; dispatch_route?: string | null
+  timing_start_source?: string | null; timing_surface?: string | null
+  startup_timing_status?: string; queue_timing_status?: string; broker_timing_status?: string; computer_timing_status?: string
 }
 export type TimingDistribution = { samples: number; mean_ms: number | null; p50_ms: number | null; p95_ms: number | null; max_ms?: number | null }
-export type TimingCard = TimingDistribution & { pending: number; missing: number }
+export type TimingCard = TimingDistribution & { pending: number; missing: number; total?: number; excluded?: number; reasons?: Record<string, number> }
 export type TimingCardKey = "startup" | "queue" | "broker" | "computer"
 export type TimingCards = Record<TimingCardKey, TimingCard>
 export type TimingInterval = TimingCards & { start: string; end: string }
 export type NativePerformance = {
+  accounted_turns?: number
   eligible_turns: number; api_received_samples: number; missing_dispatch_samples: number
   dispatch: TimingDistribution
   breakdown: {

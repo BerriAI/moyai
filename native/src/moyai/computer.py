@@ -29,9 +29,11 @@ if not GUEST.is_file():
 GUEST_CONTENT = GUEST.read_bytes()
 BROWSER_GUEST = GUEST.with_name("browser_guest.py")
 BROWSER_CONTENT = BROWSER_GUEST.read_bytes()
-DESKTOP_VERSION = hashlib.sha256(GUEST_CONTENT + BROWSER_CONTENT).hexdigest()
+DRIVER_CONTENT = GUEST.with_name("browser_driver.py").read_bytes()
+DESKTOP_VERSION = hashlib.sha256(GUEST_CONTENT + BROWSER_CONTENT + DRIVER_CONTENT).hexdigest()
 REMOTE_GUEST = f"/opt/moyai/desktop-{DESKTOP_VERSION}.py"
 REMOTE_BROWSER = f"/opt/moyai/browser-{DESKTOP_VERSION}.py"
+REMOTE_DRIVER = f"/opt/moyai/browser-driver-{DESKTOP_VERSION}.py"
 LEASE_SECONDS = 180
 logger = logging.getLogger(__name__)
 
@@ -181,12 +183,13 @@ async def guest_request(workspace: Workspace, body: dict) -> dict:
     if body["action"] == "start":
         await workspace.write_bytes(REMOTE_GUEST, GUEST_CONTENT)
         await workspace.write_bytes(REMOTE_BROWSER, BROWSER_CONTENT)
+        await workspace.write_bytes(REMOTE_DRIVER, DRIVER_CONTENT)
     elif not await workspace.exists(REMOTE_GUEST):
         if body["action"] == "frame":
             return {"available": False, "width": 1280, "height": 800}
         raise HTTPException(409, "Open the computer before sending desktop input.")
     body = {
-        **body, "browser_helper": REMOTE_BROWSER,
+        **body, "browser_helper": REMOTE_BROWSER, "browser_driver": REMOTE_DRIVER,
         "browser_diagnostics": logger.isEnabledFor(logging.DEBUG),
     }
     result = await workspace.run(
