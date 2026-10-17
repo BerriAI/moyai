@@ -11,6 +11,7 @@ from test_product_authority import demote
 
 from moyai.models import ProductTurnAuthority, Session, Turn
 from moyai.product_schema import (
+    BILLING_STORAGE_SCHEMA_VERSION,
     EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
     SWARM_SCHEMA_VERSION,
     SWARM_TABLES,
@@ -33,14 +34,20 @@ async def receipt_rows(product):
         ))).all())
 
 
-async def test_swarm_schema_preserves_prior_receipts_and_requires_explicit_provisioning(product_database):
+@pytest.mark.parametrize(("prior_version", "prior_count", "added_versions"), [
+    (EXECUTION_COMPATIBILITY_SCHEMA_VERSION, 14, {BILLING_STORAGE_SCHEMA_VERSION, SWARM_SCHEMA_VERSION}),
+    (BILLING_STORAGE_SCHEMA_VERSION, 15, {SWARM_SCHEMA_VERSION}),
+])
+async def test_swarm_schema_preserves_prior_receipts_and_requires_explicit_provisioning(
+    product_database, prior_version, prior_count, added_versions,
+):
     product = product_database
     await migrate_product_schema(
         product.source, schema=product.schema, source_schema="moyai",
-        version=EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
+        version=prior_version,
     )
     before = await receipt_rows(product)
-    assert len(before) == 14
+    assert len(before) == prior_count
     async with product.source.connect() as db:
         for name in SWARM_TABLES:
             assert await db.scalar(text("SELECT to_regclass(:name)"), {"name": f"{product.schema}.{name}"}) is None
@@ -48,7 +55,7 @@ async def test_swarm_schema_preserves_prior_receipts_and_requires_explicit_provi
         product.source, schema=product.schema, source_schema="moyai",
     ) == SWARM_SCHEMA_VERSION
     after = await receipt_rows(product)
-    assert set(after) == {*before, SWARM_SCHEMA_VERSION}
+    assert set(after) == before.keys() | added_versions
     assert all(after[key] == value for key, value in before.items())
     await verify_product_schema(product.source, schema=product.schema)
     await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai")
