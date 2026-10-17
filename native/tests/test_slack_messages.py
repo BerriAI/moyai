@@ -43,7 +43,8 @@ def test_pr_cards_use_answer_labels_without_claiming_publication():
     }
     actions = buttons({"attachments": cards})
     assert [item["text"]["text"] for item in actions] == ["View PR", "Review changes", "Open session"]
-    assert actions[0]["style"] == "primary" and actions[0]["url"] == PR.lower()
+    assert all("style" not in action for action in actions)
+    assert actions[0]["url"] == PR.lower()
     assert "style" not in actions[2] and actions[2]["url"] == URL
 
 
@@ -70,7 +71,9 @@ def test_session_route_and_long_fenced_answer():
     value = thread_message("```python\n" + "x" * 3400 + "\n```", URL)
     assert all(len(block["text"]["text"]) <= 3000 for block in value["blocks"] if block["type"] == "section")
     assert buttons(value)[0]["text"]["text"] == "Open session"
-    assert value["text"].endswith(URL) and value["attachments"] == []
+    assert value["text"].endswith(URL)
+    assert value["attachments"][0]["color"] == "#5B3FD1"
+    assert "style" not in buttons(value)[0]
 
 
 @pytest.mark.parametrize("reference", [
@@ -163,7 +166,9 @@ async def test_progress_keeps_session_button_and_final_clears_old_attachments(ru
     payload = json.loads(runtime.security.unseal(row.content))
     expected = "#run=" + "a" * 32 if product else "#" + active[0].id
     assert buttons(payload)[0]["url"].endswith(expected)
-    assert payload["attachments"] == []
+    assert len(payload["attachments"]) == 1
+    assert payload["attachments"][0]["color"] == "#5B3FD1"
+    assert all("style" not in action for action in buttons(payload))
     # A plain legacy row must clear rich content when it edits the same timestamp.
     final = await queued(runtime, active, product=product, kind="final", text="Done.")
     assert "rich_reply" not in json.loads(final.destination)
@@ -200,11 +205,14 @@ async def test_product_long_answer_has_one_card_and_preserves_approval_controls(
     assert sum(len(item.get("attachments", [])) for item in contents) == 1
     assert contents[0]["attachments"] and "Changes" not in contents[-1]["text"]
     assert PR.casefold() in contents[0]["text"].casefold()  # Accessible fallback still has the destination.
-    control = {"type": "button", "action_id": "moyai_native_approve", "value": "turn",
+    control = {"type": "button", "action_id": "moyai_native_approve", "value": "turn", "style": "primary",
                "text": {"type": "plain_text", "text": "Approve"}}
     message = thread_message("Approval required.", URL, controls=[control])
     assert buttons(message) == [control, buttons(message)[1]]
     assert buttons(message)[1]["action_id"] == "moyai_open_session"
+    assert "style" not in buttons(message)[1]
+    assert message["blocks"][-1]["elements"] == [control]
+    assert message["attachments"][0]["color"] == "#5B3FD1"
 
 
 async def test_signed_navigation_ack_does_not_create_a_turn(runtime):

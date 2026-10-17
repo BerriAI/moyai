@@ -28,10 +28,12 @@ def session_url(public_url: str, session_id: str, source_run_id: str = "") -> st
     return public_url.rstrip("/") + "/#" + route
 
 
-def button(label: str, url: str, action: str, *, primary: bool = False) -> dict[str, Any]:
+def button(label: str, url: str, action: str) -> dict[str, Any]:
+    # Slack only supports green/red button styles, not custom brand colors.
+    # Navigation stays neutral; the surrounding attachment carries our violet.
     return {
         "type": "button", "action_id": action, "text": {"type": "plain_text", "text": label},
-        "url": url, **({"style": "primary"} if primary else {}),
+        "url": url,
     }
 
 
@@ -77,7 +79,7 @@ def pr_cards(answer: str, url: str) -> list[dict[str, Any]]:
             title = ""
         heading = f"PR #{pr.number}" + (" · " + title if title else "")
         actions = [
-            button("View PR", pr.url, "moyai_view_pr", primary=True),
+            button("View PR", pr.url, "moyai_view_pr"),
             button("Review changes", pr.url + "/files", "moyai_review_pr"),
         ]
         if url:
@@ -147,17 +149,23 @@ def thread_message(
         for part in parts
     ]
     actions = list(controls or [])
-    if url and not cards:
-        actions.append(button("Open session", url, "moyai_open_session", primary=not controls))
     if actions:
         blocks.append({"type": "actions", "elements": actions})
+    attachments = list(cards or [])
+    if url and not cards:
+        attachments.append({
+            "color": VIOLET, "fallback": "Open session: " + url,
+            "blocks": [{"type": "actions", "elements": [
+                button("Open session", url, "moyai_open_session"),
+            ]}],
+        })
     fallback = text
     for card in cards or []:
         if card["fallback"].rsplit(": ", 1)[-1].casefold() not in fallback.casefold():
             fallback += "\n\n" + card["fallback"]
     return {
         "text": fallback + ("\n\nOpen session: " + url if url else ""),
-        "blocks": blocks, "attachments": cards or [],
+        "blocks": blocks, "attachments": attachments,
     }
 
 
