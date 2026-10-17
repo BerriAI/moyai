@@ -224,8 +224,15 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.get("/api/skills")
     async def invocable_skills(
         shared: bool = False, offset: int = Query(0, ge=0, le=10000),
-        limit: int = Query(100, ge=1, le=100), user: User = Depends(actor),
+        limit: int = Query(100, ge=1, le=100), user: User = Depends(actor), session_id: str | None = None,
     ):
+        if session_id is not None:
+            async with runtime.database.sessions() as db:
+                session = await runtime.database.allowed_session(db, session_id, user)
+                context = await runtime.database.execution_context(db, session)
+                if context.surface != "web":
+                    return {"skills": [], "has_more": False, "next_offset": None}
+                shared = context.visibility != "private"
         return await runtime.skill_invocations.listing(user, shared=shared, offset=offset, limit=limit)
 
     @app.middleware("http")
@@ -427,6 +434,16 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             swarm_member = await runtime.database.swarms.member(db, session_id)
             if swarm_member is not None:
                 result["session"]["swarm_id"] = swarm_member.mission_id
+            from .delegation_models import DelegatedSession
+            delegation = await db.get(DelegatedSession, session_id)
+            if delegation is not None:
+                try:
+                    await runtime.database.allowed_session(db, delegation.parent_session_id, user)
+                except HTTPException as error:
+                    if error.status_code != 404:
+                        raise
+                else:
+                    result["session"]["parent_session_id"] = delegation.parent_session_id
             if reference is not None:
                 result["reference"] = reference
             preference = await db.get(SessionPreference, (user.id, session_id))
@@ -726,11 +743,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def connections(
         user: User = Depends(actor), session_id: str | None = None, shared: bool = False,
     ):
+        surface = "web"
+        if session_id is not None:
+            async with runtime.database.sessions() as db:
+                session = await runtime.database.allowed_session(db, session_id, user)
+                context = await runtime.database.execution_context(db, session)
+                shared, surface = context.visibility == "shared", context.surface
         if runtime.product_connections is not None:
-            surface = "web"
-            if session_id is not None:
-                session = await runtime.database.session(user, session_id)
-                shared, surface = session.visibility == "shared", session.surface
             return await runtime.product_connections.catalog(
                 user.id, shared_session=shared, surface=surface,
             )
@@ -738,7 +757,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             rows = await db.scalars(select(Connection).where(
                 (Connection.owner_id == user.id) | Connection.shared.is_(True)
             ))
-            return [connection_view(row) for row in rows]
+            return [connection_view(row) for row in rows if not shared or row.shared]
 
     @app.post("/api/connections")
     async def create_connection(body: ConnectionInput, user: User = Depends(actor)):

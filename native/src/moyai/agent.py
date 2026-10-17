@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from contextvars import ContextVar
 from dataclasses import replace
 from datetime import timedelta
 from functools import cached_property
@@ -20,7 +19,7 @@ from pydantic_ai.capabilities import AbstractCapability, SetToolMetadata, durabl
 from pydantic_ai.capabilities.abstract import WrapToolExecuteHandler
 from pydantic_ai.durable_exec.temporal import TemporalDurability, TemporalRunContext
 from pydantic_ai.exceptions import CallDeferred, ModelRetry, ToolFailed
-from pydantic_ai.messages import ModelRequest, ToolCallPart
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.providers.litellm import LiteLLMProvider
@@ -52,9 +51,11 @@ from .connection_catalog import ConnectionToolSearch
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
+from .delegation import InteractiveDelegation
 from .effects import EffectReceipts
 from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
+from .input_identity import DELEGATED_INPUT, input_identity
 from .live_events import root_event_stream
 from .request_limits import UnlimitedModelRequests
 from .settings import Settings
@@ -72,18 +73,6 @@ PLAN_TOOLS = {
     "write_plan", "read_plan", "add_task", "update_task_status", "update_task_statuses",
     "remove_task", "add_subtask", "set_dependency", "get_available_tasks",
 }
-DELEGATED_INPUT: ContextVar[str | None] = ContextVar("moyai_delegated_input", default=None)
-
-
-def input_identity(ctx: RunContext[RunScope]) -> str:
-    identity = DELEGATED_INPUT.get() or ctx.deps.turn_id
-    for message in ctx.messages:
-        if (
-            isinstance(message, ModelRequest) and message.metadata
-            and message.metadata.get("moyai_parent_turn_id") == ctx.deps.turn_id
-        ):
-            identity = message.metadata.get("moyai_input_id", identity)
-    return identity
 
 
 class HarnessActivityContext(TemporalRunContext[RunScope]):
@@ -371,6 +360,7 @@ def make_agent(
             UnlimitedModelRequests(),
             workspace,
             authority,
+            InteractiveDelegation(database),
             SwarmCapability(database.swarms),
             Commentary(database),
             EffectReceipts(database),

@@ -1,7 +1,7 @@
 import React, { createContext, forwardRef, useCallback, useContext, useEffect, useRef, useState } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ChevronRight, File, Flower2, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Globe, Image, Orbit, Plus, RefreshCw, Shapes, Sparkles, X } from "lucide-react"
+import { ChevronRight, File, Flower2, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Globe, Image, Orbit, PanelRightOpen, Plus, RefreshCw, Shapes, Sparkles, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -16,7 +16,7 @@ import "./workspace.css"
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type AttachmentKind = "pull_request" | "output"
 type Link = { id?: string; kind: AttachmentKind | "source"; url: string; title: string; origin: "attached" | "mentioned"; can_remove: boolean }
-export type Subagent = { id: string; parent_id: string; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number }
+export type Subagent = { id: string; parent_id: string; session_id?: string | null; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number }
 type PanelAgent = Pick<Subagent, "id" | "name" | "status" | "avatar"> & Partial<Pick<Subagent, "can_inspect">>
 type WorkspaceData = {
   links: Link[]; files: { id: string; name: string; url: string; size: number; media_type?: string }[]
@@ -28,6 +28,7 @@ type OverviewProps = {
   id: string; pullRequests: PRSummary[]; onUpdated: () => void
   onPullRequest: (url: string, title: string) => void
   onSubagent: (agent: Subagent) => void; onOutput: (output: OutputResource) => void
+  onSubagentSideChat?: (agent: Subagent) => void
 }
 const statusText: Record<string, string> = { completed: "Ready", running: "Working", failed: "Failed", waiting: "Needs input", interrupted: "Interrupted", stopped: "Stopped", starting: "Starting", queued: "Queued" }
 const isAccessError = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status)
@@ -121,7 +122,7 @@ function WorkspaceLoader(props: OverviewProps) {
   return <WorkspaceContents {...props} resource={resource} />
 }
 
-function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onOutput, onUpdated, resource }: OverviewProps & { resource: ReturnType<typeof useWorkspaceResources> }) {
+function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSubagentSideChat, onOutput, onUpdated, resource }: OverviewProps & { resource: ReturnType<typeof useWorkspaceResources> }) {
   const { data, error, refresh, fail } = resource
   const [linkKind, setLinkKind] = useState<AttachmentKind | null>(null)
   const [url, setUrl] = useState(""), [title, setTitle] = useState("")
@@ -188,9 +189,9 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onOutp
         {!prs.length && <p className="workspace-picker-empty">Attach a PR or mention its GitHub URL in chat.</p>}
       </section>
       <section aria-label="Subagents">{heading("Subagents", data.subagents.length)}
-        {data.subagents.map(agent => <Button type="button" key={agent.id} className="workspace-resource-action workspace-agent-action" variant="ghost" disabled={!agent.can_inspect} title={agent.can_inspect ? agent.name : `${agent.name}: details are available only to the requester`} onClick={() => onSubagent(agent)}>
+        {data.subagents.map(agent => <div className="workspace-picker-row" key={agent.id}><Button type="button" className="workspace-resource-action workspace-agent-action" variant="ghost" disabled={!agent.can_inspect} title={agent.can_inspect ? agent.name : `${agent.name}: details are available only to the requester`} onClick={() => onSubagent(agent)}>
           <AgentAvatar avatar={agent.avatar} /><span><strong>{agent.name}</strong><small className={agent.status === "failed" ? "workspace-status-failed" : agent.status === "waiting" ? "workspace-status-input" : undefined}>{statusText[agent.status] ?? agent.status}{agent.depth > 0 ? " · Nested subagent" : ""}{!agent.can_inspect ? " · Requester-only details" : ""}</small></span><ChevronRight size={15} aria-hidden="true" />
-        </Button>)}
+        </Button>{agent.can_inspect && agent.session_id && onSubagentSideChat && <Button type="button" size="icon-sm" variant="ghost" aria-label={`Open ${agent.name} in side chat`} title="Open in side chat" onClick={() => onSubagentSideChat(agent)}><PanelRightOpen size={16} /></Button>}</div>)}
         {!data.subagents.length && <p className="workspace-picker-empty">Delegated work appears here when subagents start.</p>}
         {data.subagents_limited && <p className="workspace-picker-empty">Showing recent subagent work.</p>}
       </section>

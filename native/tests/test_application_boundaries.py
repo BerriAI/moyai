@@ -323,6 +323,7 @@ async def test_stop_cancels_native_command_and_preserves_uncertainty(runtime, ac
 async def test_native_steering_fences_old_action_and_authorizes_new_delegate(
     runtime, actor, active, model_gates
 ):
+    from test_delegation_temporal import dispatching
     session, turn, _prepared = active
     computer = runtime.settings.data_dir.parent / "computer"
     environment = await WorkflowEnvironment.start_local(
@@ -330,7 +331,7 @@ async def test_native_steering_fences_old_action_and_authorizes_new_delegate(
     )
     async with environment:
         runtime.client = environment.client
-        async with make_worker(runtime):
+        async with make_worker(runtime), dispatching(runtime):
             handle = await runtime.client.start_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id,
                 task_queue=runtime.settings.temporal_queue,

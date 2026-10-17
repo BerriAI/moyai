@@ -568,7 +568,10 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             session = await runtime.database.allowed_session(db, body.session_id, user)
             if session.owner_id != user.id or session.visibility != "private" or session.surface != "web":
                 raise HTTPException(403, "Choose your own private web conversation for an automation.")
-            await runtime.database.resolve_grants(db, user.id, body.connections, shared_session=False)
+            context = await runtime.database.execution_context(db, session)
+            await runtime.database.resolve_grants(
+                db, user.id, body.connections, shared_session=context.visibility == "shared", surface=context.surface,
+            )
             model = body.model or session.model
             if model not in runtime.settings.models:
                 raise HTTPException(422, "Choose an enabled model.")

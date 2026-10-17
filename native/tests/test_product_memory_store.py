@@ -8,11 +8,12 @@ from dataclasses import replace
 import pytest
 import test_product_memory as memory_fixtures
 from fastapi import HTTPException
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext, RunUsage
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurability
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness import StepPersistence
 from pydantic_ai_harness.memory import InMemoryStore, MemoryOperation, MemoryOperationConflictError
 from sqlalchemy import select, text, update
@@ -124,6 +125,35 @@ async def test_native_operation_replay_and_changed_arguments_do_not_duplicate_no
         assert await db.scalar(text("SELECT count(*) FROM moyai.memory_operations")) == 1
 
 
+async def test_memory_mutations_follow_promoted_guidance_not_message_creation_time(memory_product):
+    product = memory_product
+    session, turn, scope, _ = await memory_execution(product)
+    older = await product.database.submit(product.actor, session.id, NewMessage(
+        prompt="Please remember: Prefer pytest for focused backend tests.", request_key="older",
+    ))
+    newer = await product.database.submit(product.actor, session.id, NewMessage(
+        prompt="Do not save that preference yet.", request_key="newer", mode="asap",
+    ))
+    await product.database.steering_receipt(newer.id, "newer")
+    await product.database.steer_queued(product.actor, older.id)
+    await product.database.steering_receipt(older.id, "promoted")
+    async with product.database.sessions() as db:
+        message = await db.scalar(select(Message.id).where(Message.turn_id == older.id))
+    context = RunContext(
+        deps=scope, model=TestModel(), usage=RunUsage(), run_id=turn.id, metadata={"moyai_input_id": newer.id},
+    )
+    store = ProductMemoryStore(product.memory, scope, turn.id, context=context)
+    path = store.prefix + "personal-backend-testing.md"
+    with pytest.raises(ToolFailed, match="guidance"):
+        await store.write(path, captured_note(message), expected_version=None,
+                          operation=MemoryOperation("stale", "a" * 64))
+    context.metadata = {"moyai_input_id": older.id}
+    assert not (await store.write(path, captured_note(message), expected_version=None,
+                                 operation=MemoryOperation("current", "b" * 64))).replayed
+    async with product.source.connect() as db:
+        assert await db.scalar(text("SELECT count(*) FROM moyai.personal_memories")) == 1
+
+
 async def test_native_manual_mode_failure_is_not_presented_as_success(memory_product):
     product = memory_product
     await product.memory.preferences(product.principal.grant, Preferences(enabled=True, auto_save=False, revision=0))
@@ -148,12 +178,16 @@ async def test_native_manual_mode_failure_is_not_presented_as_success(memory_pro
         assert await db.scalar(text("SELECT count(*) FROM moyai.personal_memories")) == 0
 
 
-@pytest.mark.parametrize("forbidden", ["foreign_message", "missing_quote", "root_file", "other_namespace", "child", "automation"])
+@pytest.mark.parametrize("forbidden", [
+    "foreign_message", "missing_quote", "root_file", "other_namespace", "child", "delegated_session", "automation",
+])
 async def test_untrusted_evidence_paths_and_nonhuman_mutations_fail_closed(memory_product, forbidden):
     product = memory_product
     _, turn, scope, message_id = await memory_execution(
         product, surface="automation" if forbidden == "automation" else "web",
     )
+    if forbidden == "delegated_session":
+        scope = replace(scope, delegation_generated=True)
     store = ProductMemoryStore(product.memory, scope, "temporal:child" if forbidden == "child" else turn.id)
     path = store.prefix + "personal-backend-testing.md"
     changes = {}

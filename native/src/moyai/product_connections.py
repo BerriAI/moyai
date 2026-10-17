@@ -206,7 +206,7 @@ class ProductConnections:
     async def require_scope(self, scope: RunScope) -> None:
         current = await self.resolve_grants(
             scope.actor_id, [g.id for g in scope.grants],
-            shared_session=scope.visibility == "shared", surface=scope.surface,
+            shared_session=scope.authority.visibility == "shared", surface=scope.authority.surface,
         )
         if [(g.id, g.policy) for g in current] != [
             (g.id, g.policy) for g in sorted(scope.grants, key=lambda item: item.id)

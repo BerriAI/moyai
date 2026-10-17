@@ -89,10 +89,7 @@ class ProductCredentialExecution:
             or (direct and (run_id != turn.id or turn.parent_turn is not None))
         ):
             raise HTTPException(403, "The original requester no longer owns this execution.")
-        grants = await self.database.resolve_grants(
-            db, actor.id, [grant.id for grant in scope.grants],
-            shared_session=session.visibility == "shared", surface=session.surface,
-        )
+        grants = await self.database.scope_grants(db, scope, session)
         if [(grant.id, grant.revision) for grant in grants] != [(grant.id, grant.revision) for grant in scope.grants]:
             raise HTTPException(403, "Connected account authority changed.")
         return principal
@@ -120,7 +117,8 @@ class ProductCredentialExecution:
         if secret["scope"] == "organization":
             return True
         session = await db.get(Session, session_id)
-        return bool(session and session.visibility == "private" and session.surface == "web") and await self.equivalent(
+        context = await self.database.execution_context(db, session) if session else None
+        return bool(context and context.visibility == "private" and context.surface == "web") and await self.equivalent(
             db, secret["owner_id"], actor_id,
         )
 
@@ -343,7 +341,8 @@ class ProductCredentialExecution:
                     db, dict(secret), principal.id, row.session_id,
                 ):
                     choices.append(self.vault.credentials.metadata(secret, principal.id, principal.role == "admin"))
-            private = session.visibility == "private" and session.surface == "web"
+            context = await self.database.execution_context(db, session)
+            private = context.visibility == "private" and context.surface == "web"
             scopes = (["personal"] if private and own and (principal.individual or self.vault.security.local_preview()) else [])
             if principal.role == "admin":
                 scopes.append("organization")
@@ -396,7 +395,8 @@ class ProductCredentialExecution:
                             raise HTTPException(403, "Only the requester may supply personal credentials.")
                         if body.scope is None:
                             raise HTTPException(422, "Choose credential sharing before saving.")
-                        if body.scope != "organization" and (session.visibility != "private" or session.surface != "web"):
+                        context = await self.database.execution_context(db, session)
+                        if body.scope != "organization" and (context.visibility != "private" or context.surface != "web"):
                             raise HTTPException(403, "Personal credentials are restricted to private web sessions.")
                         from .product_secrets import ProductSaveSecret
 

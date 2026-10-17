@@ -43,10 +43,10 @@ const ProductHistory = React.lazy(() => import("./product-history").then(module 
 const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
 
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
-type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request"; url?: string }
+type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
 type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing" }
-type SessionInventory = { sessions: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
+type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
@@ -186,6 +186,9 @@ function App() {
           }
           rows.set(sessionKey(row), { ...row, unread })
         }
+        for (const row of next.ancestors ?? []) {
+          if (!rows.has(sessionKey(row))) rows.set(sessionKey(row), row)
+        }
         if (next.notice) notices.add(next.notice)
         hasMore = Boolean(next.has_more && next.next_cursor)
         if (!hasMore || next.next_cursor === cursor) break
@@ -301,6 +304,13 @@ function App() {
       <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
         hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
         onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
+        onOpenSideChat={row => {
+          const host = nativeSelected && nativeSelected !== row.id ? nativeSelected : row.parent_session_id
+          if (!host) return
+          setWorkspaceRequest(previous => ({ sessionId: host, tab: "side-chat", child: { id: row.id, title: row.title }, sequence: (previous?.sequence ?? 0) + 1 }))
+          if (nativeSelected !== host) location.hash = host
+          setMobileNav(false)
+        }}
         onOpenPullRequest={(sessionId, url) => { setWorkspaceRequest(previous => ({ sessionId, url, tab: "pull-request", sequence: (previous?.sequence ?? 0) + 1 })); location.hash = sessionId; setMobileNav(false) }} />
       <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Settings" onClick={() => navigateSettings("overview")}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => {
         try { const result = await api<{ logout_url?: string }>("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")); if (result.logout_url) navigateAuth(result.logout_url, true) }
@@ -518,12 +528,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       else { setPanelLoading(false); setPanelError(String(reason)) }
     })
   }, [id, auxiliaryPanel, Boolean(view)])
-  const productAccounts = me.product_mode === "existing"
   const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
-  const effectiveConnections = productAccounts ? accountCatalog.scope === accountScope ? accountCatalog.rows : [] : connections
-  const accountBlocked = productAccounts && (Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error)))
+  const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows : []
+  const accountBlocked = Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error))
   useEffect(() => {
-    if (!productAccounts || !view || !visible) return
+    if (!view || !visible) return
     const controller = new AbortController(), scope = accountScope
     setAccountCatalog({ scope, rows: [], loading: true, error: "" })
     const query = new URLSearchParams({ session_id: id })
@@ -531,20 +540,24 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       if (!controller.signal.aborted) setAccountCatalog({ scope, rows, loading: false, error: "" })
     }, reason => { if (!controller.signal.aborted) setAccountCatalog({ scope, rows: [], loading: false, error: String(reason) }) })
     return () => controller.abort()
-  }, [productAccounts, accountScope, visible])
+  }, [accountScope, visible])
   useEffect(() => {
-    if (!productAccounts || accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
+    if (accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
     const available = new Set(accountCatalog.rows.filter(row => row.enabled).map(row => row.id))
     const retained = selectedAccounts.filter(account => available.has(account))
     if (retained.length !== selectedAccounts.length) {
       setSelectedAccounts(retained)
       setAccountNotice("Account access changed. Review Context & connections before sending your next message.")
     }
-  }, [productAccounts, accountScope, accountCatalog, selectedAccounts])
+  }, [accountScope, accountCatalog, selectedAccounts])
   useEffect(() => {
     if (!workspaceRequest || sideMode) return
     setWorkspaceOpen(false)
     if (workspaceRequest.tab === "computer") dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+    else if (workspaceRequest.tab === "side-chat" && workspaceRequest.child) dispatchPanel({ type: "open", tab: {
+      id: `side-chat:${workspaceRequest.child.id}`, kind: "side-chat",
+      sessionId: workspaceRequest.child.id, title: workspaceRequest.child.title,
+    } })
     else if (workspaceRequest.url) dispatchPanel({ type: "open", tab: { id: `pr:${workspaceRequest.url.toLowerCase()}`, kind: "pull-request", title: "Pull request", url: workspaceRequest.url } })
   }, [workspaceRequest, sideMode])
   useEffect(() => { if (visible) heading.current?.focus() }, [Boolean(view), visible])
@@ -678,10 +691,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         <div className="transcript" ref={transcript} hidden={space}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
           {!messages.length && <div className="empty-chat"><img src={logo} alt="" /><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
-          {messages.filter(message => message.role !== "system" && !queued.some(item => item.id === message.id)).map(message => {
+          {messages.filter(message => (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)).map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
-              <div className="message-author">{message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
+              <div className="message-author">{message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
@@ -723,7 +736,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
             <AttachmentPreviews files={editing ? editing.attachments ?? [] : pictures.files} remove={editing || busy ? undefined : pictures.remove} retry={editing || busy ? undefined : pictures.retry} draft />
-            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} disabled={busy} placeholder={answeringQuestion ? "Type your answer to the pending question…" : "Describe the work, or type / for skills…"} onPaste={editing ? undefined : pictures.paste} />
+            <SkillComposer ref={composerInput} value={editing ? editText : draft} onChange={editing ? setEditText : setDraft} onSend={prompt => void send(prompt)} shared={session.visibility !== "private"} sessionId={id} disabled={busy} placeholder={answeringQuestion ? "Type your answer to the pending question…" : "Describe the work, or type / for skills…"} onPaste={editing ? undefined : pictures.paste} />
             <div className="composer-actions">
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
@@ -734,11 +747,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             </div>
           </div>
           {accountNotice && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Dismiss</Button></p>}
-          {session.surface !== "slack" && (productAccounts || effectiveConnections.some(item => item.enabled)) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
-            {productAccounts && (accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
-            {productAccounts && accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
+          {session.surface !== "slack" && (me.product_mode === "existing" || effectiveConnections.some(item => item.enabled) || selectedAccounts.length > 0 || accountCatalog.error) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
+            {(accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
+            {accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
             <div className="connection-options">{effectiveConnections.filter(item => item.enabled && (session.visibility === "private" || item.shared)).map(item => <label key={item.id}><Checkbox checked={selectedAccounts.includes(item.id)} onCheckedChange={checked => { setAccountNotice(""); setSelectedAccounts(values => checked ? [...values, item.id] : values.filter(value => value !== item.id)) }} />{item.name}<span className="muted">{item.read_only ? "Read only" : "Can make changes"}</span></label>)}</div>
-            {productAccounts && !accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this session’s visibility and surface. <a href="#settings/connections">Manage Connections</a></p>}
+            {!accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this conversation. <a href="#settings/connections">Manage Connections</a></p>}
           </details>}
           <p className="composer-hint">{pictures.uploading ? "Uploading files…" : "Drop files or paste images · Enter to send · Shift+Enter for a new line"}</p>
         </form>
@@ -746,7 +759,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       {!sideMode && <WorkspaceOverlayContent>
         <WorkspaceOverview id={id} pullRequests={pullRequests} onUpdated={onPRUpdated}
           onPullRequest={(url, title) => openTab({ id: `pr:${url.toLowerCase()}`, kind: "pull-request", url, title })}
-          onSubagent={agent => openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })}
+          onSubagent={agent => {
+            if (agent.session_id) { window.location.hash = agent.session_id; return }
+            openTab({ id: `subagent:${agent.id}`, kind: "subagent", title: agent.name, runId: agent.id, name: agent.name, status: agent.status, avatar: agent.avatar })
+          }}
+          onSubagentSideChat={agent => {
+            if (agent.session_id) openTab({ id: `side-chat:${agent.session_id}`, kind: "side-chat", sessionId: agent.session_id, title: agent.name })
+          }}
           onOutput={openOutput} />
       </WorkspaceOverlayContent>}
       </div>
@@ -774,6 +793,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
         </div>
         <div className="header-controls">
+          {session.parent_session_id && <Button asChild variant="ghost" size="sm"><a href={`#${session.parent_session_id}`}>Parent chat</a></Button>}
           <Button variant={panelState.visible ? "secondary" : "ghost"} size="icon-sm" aria-label={panelState.visible ? "Hide side panel" : "Open side panel"} title={panelState.visible ? "Hide panel" : "Open panel"} onClick={() => dispatchPanel({ type: panelState.visible ? "hide" : "show" })}><PanelRight size={16} /></Button>
           <WorkspaceOverlayTrigger asChild><WorkspaceMenuKey open={workspaceOpen} sessionFailed={session.status === "failed"}
             aria-label={workspaceOpen ? "Close workspace" : "Open workspace"} /></WorkspaceOverlayTrigger>
@@ -782,6 +802,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         </div>
       </header>
       {chat}
+
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
       <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
         if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); setWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />

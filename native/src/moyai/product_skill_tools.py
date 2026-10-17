@@ -82,7 +82,7 @@ class ProductSkillTools:
     async def caller(self, db: AsyncSession, scope: RunScope, run_id: str | None) -> ProductPrincipal:
         # Reuse the product's existing persisted human-origin and execution fences.
         # Scope, owner and role are server-authored; none is a model-selected identity.
-        if run_id != scope.turn_id or scope.surface != "web" or scope.product_grant is None:
+        if run_id != scope.turn_id or scope.delegation_generated or scope.surface != "web" or scope.product_grant is None:
             raise HTTPException(403, "Manage skills from an authenticated direct web conversation.")
         # Keep canonical/native lock ordering identical for reads and mutations.
         await self.authority._writer(db)
@@ -92,6 +92,7 @@ class ProductSkillTools:
         if (
             session is None or session.deleted or session.surface != "web"
             or session.visibility != scope.visibility
+            or scope.authority.visibility != session.visibility or scope.authority.surface != session.surface
             or await self.authority.automated_session(db, session.id)
             or await self.authority.human_origin(db, scope) is None
         ):

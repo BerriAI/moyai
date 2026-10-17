@@ -41,10 +41,12 @@ The latest Docker installer remains included in both sides of the comparison.
 
 ## Deliberately retained limits
 
-Interactive SDK-delegate chats, legacy swarm checkpoint conversion and mixed CLI
-harnesses, canonical skill import conversion, skill learning and desktop
+Legacy swarm checkpoint conversion and mixed CLI harnesses,
+canonical skill import conversion, skill learning and desktop
 recording remain deferred. [Native swarms](native-swarms.md) now provide new
 persistent teams and member chats on Pydantic AI; they do not resume legacy swarms.
+New ordinary delegates also have [independent interactive sessions](subagent-chats.md).
+Previously recorded SDK delegates retain their read-only inspection panels.
 Standalone local accounts and existing-product identity remain separate valid
 configurations because merging them would risk replacing an existing user directory.
 
