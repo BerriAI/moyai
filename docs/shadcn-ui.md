@@ -27,9 +27,13 @@ The meteor is an actual cratered mesh, generated offline with
 runtime or normal build step. Its pinned script dependencies produce the bundled
 GLB with matte material, baked vertex shading and embedded mineral surface maps.
 Use cool gray lighting and a restrained rim light; avoid a CSS glow around the silhouette.
+The face occupies the front plane of the wider asteroid. Large craters extend
+around its flanks; cavity shading, blue-violet mineral tint, roughness/metalness
+maps and small reflective facets give the stone depth. A static studio environment
+supplies reflections that respond to rotation without an animation loop.
 The Three.js viewer remains lazy,
 supports drag and keyboard rotation, and disposes its geometry, materials and
-textures/shadow maps on unmount. Embedded images use TextureLoader so the existing
+textures, reflection target and shadow maps on unmount. Embedded images use TextureLoader so the existing
 content security policy can load them through `img-src`. The supplied reference
 image is the lightweight fallback.
 

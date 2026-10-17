@@ -1,11 +1,12 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
 /** The cratered meteor, with a bounded render lifecycle owned by the home view. */
 export function mountSculpture(host: HTMLElement | null) {
   if (!host) return () => {}
   let disposed = false, frame = 0, dragging = false, pointer = -1
-  const initialYaw = .30, initialPitch = .10
+  const initialYaw = .40, initialPitch = .10
   let lastX = 0, lastY = 0, yaw = initialYaw, pitch = initialPitch, velocity = 0
   let renderer: THREE.WebGLRenderer
   try { renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true }) }
@@ -22,13 +23,18 @@ export function mountSculpture(host: HTMLElement | null) {
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(32, 1, .1, 30)
+  const studio = new RoomEnvironment(), pmrem = new THREE.PMREMGenerator(renderer)
+  const environment = pmrem.fromScene(studio, .04)
+  studio.dispose(); pmrem.dispose()
+  scene.environment = environment.texture
+  scene.environmentIntensity = .16
   camera.position.set(0, .15, 8.6)
   camera.lookAt(0, 0, 0)
-  scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .6))
-  for (const [color, power, x, y, z] of [[0xf0f2f8, 3.1, -3, 5, 5], [0xa5b7e8, 1.7, -4, 1, -3], [0xb9ade2, .65, 3, 1, -3], [0xd7dfed, .5, 4, 0, 5]]) {
+  scene.add(new THREE.HemisphereLight(0xb2bed5, 0x161820, .45))
+  for (const [color, power, x, y, z] of [[0xf0f2f8, 3.8, 3, 5, 5], [0x7a9be6, 2.4, -4, 0, -2], [0x9b86d8, .95, 3, 1, -3], [0x829ee8, .9, -4, -2, 3]]) {
     const light = new THREE.DirectionalLight(color, power)
     light.position.set(x, y, z); scene.add(light)
-    if (y === 5) {
+    if (y === 5 || y === -2) {
       light.castShadow = true
       light.shadow.mapSize.set(1024, 1024)
       Object.assign(light.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3, near: .1, far: 20 })
@@ -77,15 +83,21 @@ export function mountSculpture(host: HTMLElement | null) {
   }
   function visibility() { velocity = 0; schedule() }
   function release(object: THREE.Object3D) {
+    const textures = new Set<THREE.Texture>()
     object.traverse(child => {
       const mesh = child as THREE.Mesh
       mesh.geometry?.dispose()
       if (mesh.material) for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-        if (material instanceof THREE.MeshStandardMaterial) { material.map?.dispose(); material.normalMap?.dispose() }
+        if (material instanceof THREE.MeshStandardMaterial) {
+          for (const texture of [material.map, material.normalMap, material.roughnessMap, material.metalnessMap]) {
+            if (texture) textures.add(texture)
+          }
+        }
         material.dispose()
       }
       if (child instanceof THREE.DirectionalLight) child.shadow.dispose()
     })
+    textures.forEach(texture => texture.dispose())
   }
   function cleanup() {
     if (disposed) return
@@ -95,7 +107,7 @@ export function mountSculpture(host: HTMLElement | null) {
     canvas.removeEventListener('pointerup', up); canvas.removeEventListener('lostpointercapture', up)
     canvas.removeEventListener('pointercancel', up); canvas.removeEventListener('keydown', key)
     canvas.removeEventListener('webglcontextlost', lost)
-    release(scene); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
+    release(scene); environment.dispose(); renderer.dispose(); canvas.remove(); host?.classList.remove('sculpture-ready')
   }
   function lost(e: Event) { e.preventDefault(); cleanup() }
   const observer = new IntersectionObserver(entries => { visible = entries[0].isIntersecting; schedule() })
