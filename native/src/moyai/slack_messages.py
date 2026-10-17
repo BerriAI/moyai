@@ -28,12 +28,12 @@ def session_url(public_url: str, session_id: str, source_run_id: str = "") -> st
     return public_url.rstrip("/") + "/#" + route
 
 
-def button(label: str, url: str, action: str) -> dict[str, Any]:
+def button(label: str, url: str, action: str, *, primary: bool = False) -> dict[str, Any]:
     # Slack only supports green/red button styles, not custom brand colors.
-    # Navigation stays neutral; PR attachments carry our violet.
+    # The primary PR action uses green; PR attachments carry our violet.
     return {
         "type": "button", "action_id": action, "text": {"type": "plain_text", "text": label},
-        "url": url,
+        "url": url, **({"style": "primary"} if primary else {}),
     }
 
 
@@ -78,12 +78,9 @@ def pr_cards(answer: str, url: str) -> list[dict[str, Any]]:
         if title.startswith(("https://", "http://")):
             title = ""
         heading = f"PR #{pr.number}" + (" · " + title if title else "")
-        actions = [
-            button("View PR", pr.url, "moyai_view_pr"),
-            button("Review changes", pr.url + "/files", "moyai_review_pr"),
-        ]
+        actions = [button("View PR", pr.url, "moyai_view_pr", primary=True)]
         if url:
-            actions.append(button("Open session", url, "moyai_open_session"))
+            actions.append(button("Open Moyai session", url, "moyai_open_session"))
         cards.append({
             "color": VIOLET, "fallback": f"{pr.repository} #{pr.number}: {pr.url}",
             "blocks": [

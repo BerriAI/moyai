@@ -42,10 +42,9 @@ def test_pr_cards_use_answer_labels_without_claiming_publication():
         "type": "plain_text", "text": "PR #495 · Keep native commentary",
     }
     actions = buttons({"attachments": cards})
-    assert [item["text"]["text"] for item in actions] == ["View PR", "Review changes", "Open session"]
-    assert all("style" not in action for action in actions)
-    assert actions[0]["url"] == PR.lower()
-    assert "style" not in actions[2] and actions[2]["url"] == URL
+    assert [item["text"]["text"] for item in actions] == ["View PR", "Open Moyai session"]
+    assert actions[0]["style"] == "primary" and actions[0]["url"] == PR.lower()
+    assert "style" not in actions[1] and actions[1]["url"] == URL
 
 
 @pytest.mark.parametrize("answer", [
@@ -61,7 +60,7 @@ def test_card_limit_and_plain_links():
     cards = pr_cards("\n".join(f"https://github.com/owner/repo/pull/{n}" for n in range(1, 9)), "")
     assert len(cards) == 5
     assert cards[0]["blocks"][1]["text"]["text"] == "PR #1"
-    assert [item["text"]["text"] for item in buttons({"attachments": cards})].count("Open session") == 0
+    assert [item["action_id"] for item in buttons({"attachments": cards})] == ["moyai_view_pr"] * 5
 
 
 def test_session_route_and_long_fenced_answer():
