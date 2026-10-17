@@ -198,7 +198,8 @@ async def stage_deliveries(runtime: Runtime) -> None:
         if not text:
             text = "This task completed without a text answer."
         link = session_url(runtime.settings.public_url, turn.session_id)
-        cards = pr_cards(text, link) if turn.status == "completed" else []
+        # Standalone publishes the answer before its checkpoint finishes saving.
+        cards = pr_cards(text, link) if turn.status in {"saving", "completed"} else []
         content = thread_message(slack_text(text[:3500]), link, cards=cards)
         try:
             async with runtime.database.sessions.begin() as db:

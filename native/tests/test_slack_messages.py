@@ -111,8 +111,8 @@ def test_reference_cleanup_preserves_explanation_code_and_unrepresented_links():
     assert message["blocks"][0]["text"]["text"] == slack_text(answer)
 
 
-@pytest.mark.parametrize("product", [False, True])
-async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, slack, product):
+@pytest.mark.parametrize("product,status", [(False, "saving"), (False, "completed"), (True, "completed")])
+async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, slack, product, status):
     thread = await bind(slack, active)
     runtime.settings.public_url = slack.service.settings.public_url = "https://moyai.example"
     initial = await queued(runtime, active, product=product, kind="anchor", text="Working.")
@@ -122,7 +122,7 @@ async def test_final_cards_replace_progress_in_the_same_reply(runtime, active, s
         await deliver(client, initial)
         async with runtime.database.sessions.begin() as db:
             turn = await db.get(Turn, active[1].id)
-            turn.status = "completed"
+            turn.status = status
             turn.result = runtime.security.seal(
                 f"Both checks passed.\n\nReference PR (not created or reviewed here): [Keep native commentary]({PR}).",
             )
