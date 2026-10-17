@@ -4,7 +4,9 @@ from copy import deepcopy
 import pytest
 
 from scripts.release.deploy import BROKER, COORDINATOR, WORKER, ReleaseError
-from scripts.release.native_rolling_deploy import NativeRollingRelease, candidate_worker_shutdown
+from scripts.release.native_rolling_deploy import (
+    NativeRollingRelease, WORKER_SHUTDOWN_CONTRACT, candidate_worker_shutdown,
+)
 from scripts.release.rehearse import Candidate, NEW, OLD
 from scripts.release.rehearse_api import API_ID
 from test_rolling_deploy import CONTRACT, RollingRender
@@ -30,12 +32,13 @@ def native_rolling(tmp_path):
             return state
         return {**state, 'core': 'pydantic-v1', 'role': service.role,
                 'native': deepcopy(NATIVE), 'native_drain': deepcopy(DRAIN),
-                'native_workers': list(render.owners[WORKER]), 'worker_shutdown_seconds': 240}
+                'native_workers': list(render.owners[WORKER]),
+                'worker_shutdown': deepcopy(WORKER_SHUTDOWN_CONTRACT)}
     release = NativeRollingRelease(
         render, github, probe, tmp_path / 'receipt.json', api_service_id=API_ID,
         contract=lambda env: deepcopy(CONTRACT),
         manifest=lambda env: {key: deepcopy(NATIVE[key]) for key in ('schema', 'app', 'harness')},
-        worker_shutdown=lambda env: 240,
+        worker_shutdown=lambda env: deepcopy(WORKER_SHUTDOWN_CONTRACT),
         wait_seconds=1, readiness_timeout=4, retirement_timeout=6, deploy_timeout=4,
         clock=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
         log=lambda *args, **kwargs: None)
@@ -189,17 +192,17 @@ def test_lost_deployment_response_is_not_retried_or_rolled_back(native_rolling):
     assert release.record['status'] == 'failed'
 
 
-@pytest.mark.parametrize('seconds', [None, 0, 60, 239, 241, True, '240'])
+@pytest.mark.parametrize('seconds', [None, 0, 60, 239, 240.0, 241, True, '240'])
 def test_unqualified_running_worker_shutdown_stops_before_mutation(native_rolling, seconds):
     release, render, _ = native_rolling
     original = release.probe
     def unqualified(service):
         state = original(service)
         if service.role == 'worker':
-            state['worker_shutdown_seconds'] = seconds
+            state['worker_shutdown']['seconds'] = seconds
         return state
     release.probe = unqualified
-    with pytest.raises(ReleaseError, match='shutdown budget'):
+    with pytest.raises(ReleaseError, match='shutdown contract'):
         release.run()
     assert not render.calls
 
@@ -207,8 +210,28 @@ def test_unqualified_running_worker_shutdown_stops_before_mutation(native_rollin
 @pytest.mark.parametrize('seconds', [0, 60, 239])
 def test_unqualified_candidate_worker_shutdown_stops_before_mutation(native_rolling, seconds):
     release, render, _ = native_rolling
-    release.worker_shutdown = lambda env: seconds
+    release.worker_shutdown = lambda env: {**WORKER_SHUTDOWN_CONTRACT, 'seconds': seconds}
     with pytest.raises(ReleaseError, match='Candidate native worker'):
+        release.run()
+    assert not render.calls
+
+
+@pytest.mark.parametrize('protocol', [None, 'sequential', 'unknown-v2'])
+@pytest.mark.parametrize('candidate', [False, True])
+def test_unqualified_worker_shutdown_protocol_stops_before_mutation(native_rolling, protocol, candidate):
+    release, render, _ = native_rolling
+    contract = {**WORKER_SHUTDOWN_CONTRACT, 'protocol': protocol}
+    if candidate:
+        release.worker_shutdown = lambda env: deepcopy(contract)
+    else:
+        original = release.probe
+        def unqualified(service):
+            state = original(service)
+            if service.role == 'worker':
+                state['worker_shutdown'] = deepcopy(contract)
+            return state
+        release.probe = unqualified
+    with pytest.raises(ReleaseError, match='shutdown contract'):
         release.run()
     assert not render.calls
 
@@ -234,5 +257,5 @@ def test_candidate_budget_uses_real_installed_settings_without_runtime_startup(c
     }
     if configured is not None:
         environment['MOYAI_WORKER_SHUTDOWN_SECONDS'] = configured
-    assert candidate_worker_shutdown(environment) == expected
+    assert candidate_worker_shutdown(environment) == {**WORKER_SHUTDOWN_CONTRACT, 'seconds': expected}
     assert not list(tmp_path.iterdir())

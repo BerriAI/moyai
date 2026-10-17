@@ -40,14 +40,18 @@ def snapshot(connection, schema):
     return state
 
 
-def worker_shutdown_seconds():
+def worker_shutdown_contract():
     """Read the installed application's effective settings without starting it."""
     from moyai.product_config import load_product_config
     from moyai.settings import Settings
+    from moyai import worker_capacity
 
     config = load_product_config()
     require(config is not None and config.role == 'worker')
-    return Settings(_env_file=None, **config.native_overrides()).worker_shutdown_seconds
+    return {
+        'seconds': Settings(_env_file=None, **config.native_overrides()).worker_shutdown_seconds,
+        'protocol': getattr(worker_capacity, 'WORKER_SHUTDOWN_VERSION', None),
+    }
 
 
 def probe(options):
@@ -57,7 +61,7 @@ def probe(options):
     if options['role'] == 'worker':
         # rolling_probe has normalized the installed Render entrypoint's
         # environment, including defaults absent from control-plane metadata.
-        state['worker_shutdown_seconds'] = worker_shutdown_seconds()
+        state['worker_shutdown'] = worker_shutdown_contract()
         if state['ready'] is True:
             require(state['identity'] in state['native_workers'])
     return state

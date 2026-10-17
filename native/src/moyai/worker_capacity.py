@@ -22,6 +22,7 @@ from temporalio.worker import (
 )
 
 ROUTING_VERSION = "moyai-activity-capacity-isolation-v1"
+WORKER_SHUTDOWN_VERSION = "moyai-worker-shared-drain-v1"
 ActivityPool = Literal["model", "tools", "control"]
 
 
@@ -121,13 +122,18 @@ class WorkerPools:
 
     async def __aenter__(self) -> Self:
         stack = AsyncExitStack()
+        entered: list[Worker] = []
         try:
             if self.register is not None:
                 await self.register()
             for worker in self.workers:
                 await stack.enter_async_context(worker)
+                entered.append(worker)
         except BaseException:
-            await finish_cleanup(stack.aclose())
+            try:
+                await finish_cleanup(self._shutdown_workers(entered))
+            finally:
+                await finish_cleanup(stack.aclose())
             raise
         self.stack = stack
         return self
@@ -137,7 +143,11 @@ class WorkerPools:
         exc: BaseException | None, traceback: TracebackType | None,
     ) -> bool | None:
         assert self.stack is not None
-        return await finish_cleanup(self.stack.__aexit__(exc_type, exc, traceback))
+        try:
+            await finish_cleanup(self._shutdown())
+        finally:
+            result = await finish_cleanup(self.stack.__aexit__(exc_type, exc, traceback))
+        return result
 
     async def run(self) -> None:
         async with self:
@@ -147,14 +157,20 @@ class WorkerPools:
         await finish_cleanup(self._shutdown())
 
     async def _shutdown(self) -> None:
-        # Keep control/workflow pollers alive while tool/model workers retire.
-        # AsyncExitStack uses the same reverse order on context exit.
-        errors: list[BaseException] = []
-        for worker in reversed(self.workers):
-            try:
-                if worker.is_running:
-                    await worker.shutdown()
-            except BaseException as error:  # noqa: BLE001 - finish every poller, then propagate failure
-                errors.append(error)
-        if errors:
-            raise errors[0]
+        workers = self.workers if self.stack is not None else tuple(
+            worker for worker in self.workers if worker.is_running
+        )
+        await self._shutdown_workers(workers)
+
+    @staticmethod
+    async def _shutdown_workers(workers: Sequence[Worker]) -> None:
+        # Every poller starts the same bounded grace window together. During
+        # rolling replacement, the ready candidate owns new workflow/control
+        # polling while these activities finish on their original worker.
+        results = await asyncio.gather(
+            *(worker.shutdown() for worker in workers),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result

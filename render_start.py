@@ -100,7 +100,7 @@ def configure_environment():
     os.environ.pop("MODAL_VOLUME_NAME", None)
     os.environ.setdefault("DATA_DIR", "/var/data/moyai")
     if os.environ.get("MOYAI_RUNTIME_ROLE") == "worker":
-        # WorkerPools shares this budget across its four poller groups. Let
+        # WorkerPools starts all poller shutdowns within this shared window. Let
         # in-flight model/tool activities finish before cancellation; their
         # externally dispatched outcomes must not be replayed after replacement.
         os.environ.setdefault("MOYAI_WORKER_SHUTDOWN_SECONDS",

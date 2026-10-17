@@ -259,7 +259,7 @@ async def test_split_workers_register_one_owner_before_polling_and_all_become_re
         runtime.client = environment.client
         pools = make_worker(runtime)
         allowances = [worker.config()["graceful_shutdown_timeout"].total_seconds() for worker in pools.workers]
-        assert sum(allowances) == shutdown_seconds
+        assert allowances == [shutdown_seconds] * len(pools.workers)
         assert all(value > 0 for value in allowances) if shutdown_seconds else not any(allowances)
 
         async def register():

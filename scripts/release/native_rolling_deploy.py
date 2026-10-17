@@ -10,7 +10,12 @@ from scripts.release.native_migration import candidate_manifest, native_python
 from scripts.release.rolling_deploy import RollingRelease, candidate_contract
 
 
-WORKER_SHUTDOWN_SECONDS = 240
+WORKER_SHUTDOWN_CONTRACT = {'seconds': 240, 'protocol': 'moyai-worker-shared-drain-v1'}
+
+
+def valid_worker_shutdown(value):
+    return (isinstance(value, dict) and type(value.get('seconds')) is int
+            and value == WORKER_SHUTDOWN_CONTRACT)
 
 
 def candidate_worker_shutdown(environment):
@@ -18,16 +23,18 @@ def candidate_worker_shutdown(environment):
     source = '''
 import json
 from render_start import configure_environment
-from scripts.release.native_rolling_probe import worker_shutdown_seconds
+from scripts.release.native_rolling_probe import worker_shutdown_contract
 configure_environment()
-print(json.dumps(worker_shutdown_seconds()))
+print(json.dumps(worker_shutdown_contract()))
 '''
     try:
         result = subprocess.run([native_python(root), '-c', source], cwd=root,
             env={**environment, 'PATH': os.defpath, 'PYTHONPATH': str(root)},
             capture_output=True, text=True, timeout=30)
         value = json.loads(result.stdout)
-        if result.returncode or type(value) is not int:
+        if (result.returncode or not isinstance(value, dict)
+                or set(value) != {'seconds', 'protocol'} or type(value['seconds']) is not int
+                or not isinstance(value['protocol'], str)):
             raise ValueError()
         return value
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -62,8 +69,8 @@ class NativeRollingRelease(RollingRelease):
         if native != expected:
             raise ReleaseError('Native application or Harness receipts differ; use a maintenance release.')
         if (environment.get('MOYAI_RUNTIME_ROLE') == 'worker'
-                and self.worker_shutdown(environment) != WORKER_SHUTDOWN_SECONDS):
-            raise ReleaseError('Candidate native worker requires the qualified 240-second shutdown budget; use maintenance.')
+                and not valid_worker_shutdown(self.worker_shutdown(environment))):
+            raise ReleaseError('Candidate native worker requires the qualified shared 240-second shutdown contract; use maintenance.')
         return candidate
 
     def plan_schema(self, states):
@@ -105,10 +112,9 @@ class NativeRollingRelease(RollingRelease):
         if state['role'] == 'worker' and state.get('ready') is True and state.get('identity') not in registered:
             raise ReleaseError('A ready native worker has not registered its exact process identity.')
         if state['role'] == 'worker':
-            if (type(state.get('worker_shutdown_seconds')) is not int
-                    or state['worker_shutdown_seconds'] != WORKER_SHUTDOWN_SECONDS):
-                raise ReleaseError('Running native workers require the qualified 240-second shutdown budget; adopt it with maintenance first.')
-            self.record.setdefault('worker_shutdown_seconds', WORKER_SHUTDOWN_SECONDS)
+            if not valid_worker_shutdown(state.get('worker_shutdown')):
+                raise ReleaseError('Running native workers require the qualified shared 240-second shutdown contract; adopt it with maintenance first.')
+            self.record.setdefault('worker_shutdown', deepcopy(WORKER_SHUTDOWN_CONTRACT))
         self.record.setdefault('core', 'pydantic-v1')
         self.record.setdefault('native', deepcopy(self.baseline['native']))
         self.record.setdefault('native_drain', deepcopy(self.baseline['native_drain']))
