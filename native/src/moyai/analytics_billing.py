@@ -25,7 +25,21 @@ def identity_map(service: ProductBillingService, identities: ReportIdentities) -
         resolved = service.mappings.resolve(source, actor=True)
         assert resolved is not None
         result[identity] = resolved.id
+    for actor, canonical in identities.canonical_ids.items():
+        if canonical in result:
+            result[actor] = result[canonical]
     return result
+
+
+def selected_user(
+    service: ProductBillingService, identities: ReportIdentities, user_id: str | None,
+) -> str | None:
+    if user_id is None:
+        return None
+    people = identity_map(service, identities)
+    if user_id in set(people.values()) | set(service.mappings.actors.values()):
+        return user_id
+    return people.get(identities.canonical(user_id), user_id)
 
 
 def chart_amount(value: str | None) -> float | None:
@@ -55,11 +69,10 @@ async def read(
     service: ProductBillingService, identities: ReportIdentities, *, viewer_id: str,
     start: str, end: str, preset: str, user_id: str | None, model: str | None, status: str | None,
 ) -> dict[str, Any]:
-    people = identity_map(service, identities)
     try:
         return await service.report(
             start=start, end=end, preset=preset,
-            user_id=people.get(identities.canonical(user_id), user_id) if user_id is not None else None,
+            user_id=selected_user(service, identities, user_id),
             root_model=model, turn_status=status, include_root_cohorts=True,
             viewer_id=viewer_id, limit=1,
         )
@@ -92,12 +105,10 @@ def apply(
             cumulative_pricing_status=financial["cumulative_pricing_status"],
         )
     empty = metrics(_totals([]))
-    activity = {
-        people.get(row["user_id"], row["user_id"]): {
-            **row, **empty, "user_id": people.get(row["user_id"], row["user_id"]),
-        }
-        for row in by_user
-    }
+    # Activity was grouped by these same canonical identities before counting
+    # sessions and PRs. Never combine completed aggregates by overwriting rows
+    # or summing distinct-session counts after the fact.
+    activity = {row["user_id"]: {**row, **empty} for row in by_user}
     labels = {
         people.get(row["id"], row["id"]): {**row, "id": people.get(row["id"], row["id"])}
         for row in users

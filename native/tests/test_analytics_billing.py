@@ -249,3 +249,32 @@ async def test_canonical_endpoint_supplies_dashboard_and_exports_from_one_read(r
     async with client_for(runtime, ordinary) as client:
         assert (await client.get("/api/settings/billing", params=params(include_activity="true"))).status_code == 403
         assert (await client.get("/api/spend", params=params(include_activity="true"))).status_code == 403
+
+
+async def test_explicit_accounting_map_groups_activity_before_distinct_counts(runtime, actor, shared):
+    other = await member(runtime)
+    async with runtime.database.sessions() as db:
+        session = await db.get(Session, shared.turn.session_id)
+    _, turn = await observation(runtime, other, session=session, known=False, model="native-root")
+    native = await ledger(runtime, other, session, turn, model="native-child", cost="0.3")
+    shared.service.mappings = IdentityMappings(
+        "fixture-combined-people", "explicit-test-mapping",
+        actors={**shared.service.mappings.actors, SourceRef("native", other.id): actor.id},
+    )
+    shared.service.native_bindings = {
+        **shared.service.native_bindings,
+        SourceRef("native", native.id): NativeBinding(
+            SCOPE, RequestIdentity("broker_request", "second-native-request"), "fixture", "1",
+        ),
+    }
+    async with client_for(runtime, actor) as client:
+        for query in ({}, {"user_id": actor.id}, {"user_id": other.id}):
+            response = await client.get("/api/settings/usage", params=params(**query))
+            assert response.status_code == 200
+            body = response.json()
+            assert len(body["by_user"]) == 1
+            person, = body["by_user"]
+            assert person["user_id"] == actor.id and person["turns"] == 2
+            assert person["sessions_active"] == 1  # Both actors used the same session.
+            assert person["requests"] == 3
+            assert person["cost_usd_exact"] == body["summary"]["cost_usd_exact"] == "0.623400000000000002"

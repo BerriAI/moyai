@@ -325,16 +325,18 @@ async def report(
         raise HTTPException(422, str(error)) from None
     lower, upper = period.start.isoformat(), period.end.isoformat()
     identities = await report_identities(runtime)
-    activity_user_id = user_id
     people: dict[str, str] = {}
+    actor_ids = identities.actors(user_id)
+    person = identities.canonical
     if billing is not None:
         people = analytics_billing.identity_map(billing, identities)
-        # New usage filters expose the same canonical accounting identities as
-        # billing. Accept existing native activity IDs as well.
-        if user_id is not None:
-            activity_user_id = {value: key for key, value in people.items()}.get(user_id, user_id)
-    actor_ids = identities.actors(activity_user_id)
-    person = identities.canonical
+        selected = analytics_billing.selected_user(billing, identities, user_id)
+        actor_ids = None if selected is None else {
+            actor for actor, canonical in people.items() if canonical == selected
+        }
+
+        def person(actor_id: str) -> str:
+            return people.get(actor_id, identities.canonical(actor_id))
     users = identities.users
     async with runtime.database.sessions() as db:
         turns = list((await db.execute(filtered(select(*TURN_COLUMNS).where(
@@ -604,8 +606,6 @@ async def report(
         by_user, by_model, users = analytics_billing.apply(
             financial, identities, billing, summary=summary, series=series, by_user=by_user, users=users,
         )
-        for row in rows:
-            row["user_id"] = people.get(row["user_id"], row["user_id"])
         # Accounting aggregates retain private usage. Adding activity to the
         # canonical billing API must not disclose another owner's turn IDs.
         async with runtime.database.sessions() as db:
