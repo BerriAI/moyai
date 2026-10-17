@@ -348,6 +348,15 @@ async def test_stream_crlf_and_multiline_data_with_byte_split_transport(runtime)
     assert row.cost_usd == "0.025" and row.coverage_error is None
 
 
+@pytest.mark.parametrize("empty_event", [b"data:\n\n", b"data: \r\n\r\n"])
+async def test_empty_stream_events_do_not_create_false_missing_coverage(runtime, empty_event):
+    body = empty_event + sse(cost="0.025")
+    response, _, _ = await request(runtime, body, headers={"content-type": "text/event-stream"}, size=1)
+    assert response.content == body
+    row, = await rows(runtime)
+    assert row.cost_usd == "0.025" and row.coverage_error is None
+
+
 async def test_large_chat_choices_are_not_mistaken_for_final_usage_only_chunk(runtime):
     body = event({"choices": [{"delta": {"content": "x" * MAX_CAPTURE_BYTES * 2}}],
                   "usage": {"cost": "999", "prompt_tokens": 999}})

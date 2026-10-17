@@ -187,6 +187,7 @@ class UsageCapture:
         self.data_line: bool | None = None
         self.data_space = False
         self.event_has_data = False
+        self.event_has_payload = False
         self.disabled = False
         self.finished = False
         self._finish_task: asyncio.Task[None] | None = None
@@ -263,7 +264,7 @@ class UsageCapture:
     def _event(self) -> None:
         if self.event.rstrip(b"\r") == b"[DONE]":
             self.terminal = True
-        elif self.event_has_data and not self.projection_failed:
+        elif self.event_has_payload and not self.projection_failed:
             try:
                 value = self.projection.finish()
                 kind = value.get("type")
@@ -282,12 +283,13 @@ class UsageCapture:
             except (ValueError, RecursionError, InvalidOperation, OverflowError) as error:
                 self._projection_error(error)
                 self.values["coverage_error"] = self._projection_reason
-        elif self.event_has_data:
+        elif self.event_has_payload:
             # [DONE] is not JSON. Only report a parse failure after its complete
             # event has been distinguished from the protocol sentinel.
             self.values["coverage_error"] = self._projection_reason
         self.event = b""
         self.event_has_data = False
+        self.event_has_payload = False
         self.projection = UsageProjection(max_bytes=MAX_CAPTURE_BYTES)
         self.projection_failed = False
 
@@ -301,6 +303,7 @@ class UsageCapture:
     def _project(self, data: bytes) -> None:
         if self.streaming:
             self.event = (self.event + data)[:16]
+            self.event_has_payload = self.event_has_payload or bool(data.strip())
         if not self.projection_failed:
             try:
                 self.projection.feed(data)
