@@ -439,7 +439,7 @@ class ProductMemoryStore:
             return MemoryMutation(receipt.version, replayed=True, existed=receipt.existed)
 
     async def _write_guard(self, db: AsyncSession, owner: str, *, saving: bool) -> list[Message]:
-        if self.run_id != self.scope.turn_id or self.scope.surface not in {"web", "slack"}:
+        if self.run_id != self.scope.turn_id or self.scope.delegation_generated or self.scope.surface not in {"web", "slack"}:
             raise ToolFailed("Automations and delegated runs may recall personal memory but cannot mutate it.")
         locked = await db.scalar(update(Session).where(
             Session.id == self.scope.session_id, Session.active_turn == self.scope.turn_id,

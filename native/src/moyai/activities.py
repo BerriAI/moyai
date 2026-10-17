@@ -50,6 +50,9 @@ async def prepare_turn(turn_id: str, recover_workspace: bool = False) -> Prepare
                     if mission is None:
                         raise PermissionError("Swarm goal is unavailable.")
                     generated_goal = runtime.security.unseal(mission.goal).decode()
+        if prepared.scope.delegation_generated:
+            # An agent-written assignment cannot select skills on the user's behalf.
+            return prepared
         if generated_goal is None:
             prepared.prompt = await runtime.skill_invocations.expand(prepared.prompt, prepared.scope)
         else:

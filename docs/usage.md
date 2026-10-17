@@ -96,8 +96,13 @@ answers and downloads and does not restart cancelled work.
 
 **Workspace** opens an overlay of pull requests, subagents and outputs. Uploaded
 sources and saved outputs are also available in the Files tab.
-Subagents come from native Harness run lineage, with persistent display names;
-only their requester can inspect their answers and recorded steps. Saving a
+New ordinary subagents open as full private conversations: select one under
+**Workspace → Subagents**, then message, queue a follow-up, use **Steer now**,
+answer questions, or stop it with the normal session controls. **Parent chat**
+returns to the conversation that delegated the work. Each child retains its
+history and has its own computer. They also appear in the requester's session list.
+Older SDK subagents retain their requester-only answer and recorded-steps panels.
+See [Subagent chats](subagent-chats.md) for lifecycle and migration details. Saving a
 file with `save_artifact` adds an output, and `attach_link` adds a PR, external
 output or source. PR links in the public transcript also appear as mentioned PRs.
 

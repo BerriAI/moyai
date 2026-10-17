@@ -8,14 +8,17 @@ import pytest
 from pydantic import TypeAdapter
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.workspaces import WorkspaceRef
+from sqlalchemy import select
 from temporalio import activity
 from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
+from test_delegation_temporal import dispatching
 
 from moyai.api import COOKIE, create_app
 from moyai.contracts import NewMessage, NewSession
+from moyai.delegation_models import DelegatedSession
 from moyai.models import Session, Turn, User, new_id
 from moyai.storage import EncryptedPayloadCodec
 from moyai.worker import make_worker
@@ -56,7 +59,7 @@ async def test_native_tools_skills_memory_delegation_and_replay(runtime, active)
     )
     async with environment:
         runtime.client = environment.client
-        async with make_worker(runtime):
+        async with make_worker(runtime), dispatching(runtime):
             handle = await runtime.client.start_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id,
                 task_queue=runtime.settings.temporal_queue,
@@ -74,8 +77,10 @@ async def test_native_tools_skills_memory_delegation_and_replay(runtime, active)
         saved = await db.get(Session, session.id)
         reference = TypeAdapter(WorkspaceRef).validate_json(saved.workspace)
     assert (Path(reference.id) / "proof.txt").read_text() == "Written by the native file capability.\n"
-    children = await runtime.stores.steps.list_runs(parent_run_id=turn.id)
+    async with runtime.database.sessions() as db:
+        children = list(await db.scalars(select(DelegatedSession).where(DelegatedSession.parent_turn_id == turn.id)))
     assert len(children) == 1
+    assert len(await runtime.stores.plan(children[0].session_id).get_items()) == 1
     memory = await runtime.stores.memory.read(
         f"{prepared.scope.memory_namespace}/main/MEMORY.md", max_chars=1000
     )

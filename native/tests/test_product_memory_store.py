@@ -148,12 +148,16 @@ async def test_native_manual_mode_failure_is_not_presented_as_success(memory_pro
         assert await db.scalar(text("SELECT count(*) FROM moyai.personal_memories")) == 0
 
 
-@pytest.mark.parametrize("forbidden", ["foreign_message", "missing_quote", "root_file", "other_namespace", "child", "automation"])
+@pytest.mark.parametrize("forbidden", [
+    "foreign_message", "missing_quote", "root_file", "other_namespace", "child", "delegated_session", "automation",
+])
 async def test_untrusted_evidence_paths_and_nonhuman_mutations_fail_closed(memory_product, forbidden):
     product = memory_product
     _, turn, scope, message_id = await memory_execution(
         product, surface="automation" if forbidden == "automation" else "web",
     )
+    if forbidden == "delegated_session":
+        scope = replace(scope, delegation_generated=True)
     store = ProductMemoryStore(product.memory, scope, "temporal:child" if forbidden == "child" else turn.id)
     path = store.prefix + "personal-backend-testing.md"
     changes = {}

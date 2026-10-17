@@ -546,7 +546,7 @@ class ProductAutomationService:
         self, scope: RunScope, run_id: str | None, *, db: AsyncSession | None = None,
     ) -> Any:
         """Preserve the original direct-chat and persisted private-sink rules."""
-        if run_id != scope.turn_id or scope.product_grant is None:
+        if run_id != scope.turn_id or scope.delegation_generated or scope.product_grant is None:
             raise HTTPException(403, "Manage automations from an authenticated direct user chat.")
         if db is None:
             async with self.database.sessions.begin() as transaction:

@@ -23,10 +23,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
+from test_delegation_temporal import dispatching
 from test_product_identity import google_cookie, request
 
 from moyai.contracts import NewMessage, NewSession, PreparedTurn
 from moyai.database import Database
+from moyai.delegation_models import DelegatedSession
 from moyai.models import Message, ProductTurnAuthority, Session, Turn, User
 from moyai.product_identity import ProductIdentityAdapter
 from moyai.product_schema import (
@@ -414,7 +416,7 @@ async def test_product_grant_and_canonical_memory_run_in_real_temporal_and_repla
         )
         async with environment:
             runtime.client = environment.client
-            async with make_worker(runtime):
+            async with make_worker(runtime), dispatching(runtime):
                 execution = await runtime.client.start_workflow(
                     TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=settings.temporal_queue,
                 )
@@ -432,9 +434,9 @@ async def test_product_grant_and_canonical_memory_run_in_real_temporal_and_repla
         assert "native capability proof succeeded" in memory.content
         assert (workspace / "proof.txt").is_file()
         assert len(await runtime.stores.plan(session.id).get_items()) == 1
-        children = await runtime.stores.steps.list_runs(parent_run_id=turn.id)
-        assert len(children) == 1 and ":" in children[0].run_id
-        assert children[0].parent_run_id == turn.id
+        async with runtime.database.sessions() as db:
+            children = list(await db.scalars(select(DelegatedSession).where(DelegatedSession.parent_turn_id == turn.id)))
+        assert len(children) == 1
         async with product.database.sessions() as db:
             saved = await db.get(Turn, turn.id)
             assert saved.result_accepted is True

@@ -51,6 +51,7 @@ from .connection_catalog import ConnectionToolSearch
 from .connections import connection_tools
 from .contracts import GuidanceChanged, RunScope
 from .database import Database
+from .delegation import InteractiveDelegation
 from .effects import EffectReceipts
 from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
@@ -329,6 +330,7 @@ def make_agent(
         capabilities=[
             workspace,
             authority,
+            InteractiveDelegation(database),
             SwarmCapability(database.swarms),
             Commentary(database),
             EffectReceipts(database),

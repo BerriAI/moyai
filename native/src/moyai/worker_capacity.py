@@ -54,6 +54,7 @@ def activity_pool(name: str, args: Sequence[object] = ()) -> ActivityPool:
             marker in name for marker in (
                 "__capability__step_persistence__", "__capability__moyai_effects__",
                 "__capability__moyai_authority__", "__capability__planning__",
+                "__capability__moyai_interactive_delegation__",
                 "__capability__memory__load_snapshot",
             )
         ):

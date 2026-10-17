@@ -39,6 +39,8 @@ class RunScope:
     product_grant: ProductGrant | None = None
     swarm_id: str | None = None
     swarm_name: str | None = None
+    delegation_depth: int = 0
+    delegation_generated: bool = False
 
     @property
     def grants_key(self) -> str:

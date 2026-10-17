@@ -426,6 +426,16 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             swarm_member = await runtime.database.swarms.member(db, session_id)
             if swarm_member is not None:
                 result["session"]["swarm_id"] = swarm_member.mission_id
+            from .delegation_models import DelegatedSession
+            delegation = await db.get(DelegatedSession, session_id)
+            if delegation is not None:
+                try:
+                    await runtime.database.allowed_session(db, delegation.parent_session_id, user)
+                except HTTPException as error:
+                    if error.status_code != 404:
+                        raise
+                else:
+                    result["session"]["parent_session_id"] = delegation.parent_session_id
             if reference is not None:
                 result["reference"] = reference
             preference = await db.get(SessionPreference, (user.id, session_id))

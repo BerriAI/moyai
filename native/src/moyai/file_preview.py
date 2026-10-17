@@ -190,14 +190,19 @@ class FilePreviewService:
                 raise HTTPException(404, "File not found in this session.")
             if row.session_id != session_id and (
                 kind != "artifact"
-                or not await self.runtime.database.swarms.shared_artifact(
-                    db, current, session_id, row.session_id,
+                or not (
+                    await self.runtime.database.swarms.shared_artifact(db, current, session_id, row.session_id)
+                    or await self.delegated_artifact(db, current, session_id, row.session_id)
                 )
             ):
                 # Ordinary allowed sessions and input uploads do not imply
                 # cross-session access. Swarms explicitly share saved outputs.
                 raise HTTPException(404, "File not found in this session.")
             return FileRecord(row.id, kind, session_id, row.name, row.media_type, row.size, row.digest)
+
+    async def delegated_artifact(self, db, user: User, session_id: str, source_id: str | None) -> bool:
+        from .delegation import DelegationService
+        return await DelegationService(self.runtime.database).shared_artifact(db, user, session_id, source_id)
 
     async def load(
         self, user: User, session_id: str, kind: ResourceKind, resource_id: str,

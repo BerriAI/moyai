@@ -9,8 +9,8 @@ import hashlib
 import re
 
 CORE_IDENTITY = "pydantic-v1"
-# Native swarm workflows/tools and their admission schema require coordinated owners.
-NATIVE_PROTOCOL_REVISION = 3
+# Interactive delegation tools and their admission schema require coordinated owners.
+NATIVE_PROTOCOL_REVISION = 4
 FRAMEWORK_VERSIONS = {
     "pydantic-ai": "2.55.0",
     "pydantic-ai-harness": "0.55.0",

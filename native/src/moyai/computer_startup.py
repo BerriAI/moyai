@@ -128,6 +128,10 @@ class OnDemandRepository(WrapperCapability[RunScope]):
         self, ctx: RunContext[RunScope], *, call: ToolCallPart,
         tool_def: ToolDefinition, args: dict[str, Any],
     ) -> dict[str, Any]:
+        if tool_def.name == "delegate_task":
+            from .delegation import enabled
+            if enabled():
+                return args  # The child acquires its own computer when it needs one.
         if tool_def.name not in COMPUTER_TOOLS:
             return args
         async with self.lock:

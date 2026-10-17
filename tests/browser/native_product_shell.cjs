@@ -12,7 +12,7 @@ function reset(overrides={}) {
   state={signedIn:true, individual:true, mode:'existing', google:true, password:true, access:false, denied:false, status:'running',
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect this repository.'}], requests:[], streams:[], ...overrides};
 }
-function session(id=sessionId) {return {id,title:'Current native work',owner_id:'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{})};}
+function session(id=sessionId) {return {id,title:'Current native work',owner_id:'viewer',visibility:'private',surface:'web',model:'test-model',status:state.status,active_turn:['running','saving','waiting'].includes(state.status)?turnId:null,archived:false,pinned:false,...(state.swarm?{swarm_id:sessionId}:{}),...(state.sessionOverrides?.[id]||{})};}
 async function handle(req,res,next) {
   const url=new URL(req.url,'http://localhost');
   if(!url.pathname.startsWith('/api/'))return next();
@@ -44,6 +44,9 @@ async function handle(req,res,next) {
   }
   if(url.pathname===`/api/history/sessions/${legacyId}`)return json({session:{...session(legacyId),source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',status:'completed',execution_engine:'legacy',read_only:true}});
   if(url.pathname===`/api/history/sessions/${sessionId}`)return json({session:{...session(),source:'native',url:'/#'+sessionId,read_only:false}});
+  if(url.pathname.startsWith('/api/history/sessions/')&&state.sessionOverrides?.[url.pathname.split('/').at(-1)]) {
+    const id=url.pathname.split('/').at(-1);return json({session:{...session(id),source:'native',url:'/#'+id,read_only:false}});
+  }
   if(state.swarm && url.pathname.startsWith('/api/history/sessions/')) {
     const id=url.pathname.split('/').at(-1);
     if(state.swarm.members.some(member=>member.session_id===id))return json({session:{...session(id),source:'native',url:'/#'+id,read_only:false}});
@@ -70,6 +73,7 @@ async function handle(req,res,next) {
   }
   if(url.pathname.startsWith('/api/sessions/')) {
     if(state.denied)return json({detail:'Session access revoked.'},403);
+    if(url.pathname.endsWith('/workspace'))return json(state.workspace||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
     if(url.pathname.endsWith('/progress/'+turnId))return json({messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
@@ -440,4 +444,25 @@ test('source collisions and identically named legacy folders survive paged inven
   await page.getByRole('button',{name:'Show archived conversations',exact:true}).click();
   await waitFor(()=>state.requests.some(req=>req.path==='/api/history/sessions'&&req.query.includes('archived=true')&&!req.query.includes('cursor=')));
   assert.equal(await native.count(),0,'changing list scope resets loaded pages');
+});
+
+for(const width of [1440,768,320])test(`ordinary subagent opens a full chat and sends to its own session at ${width}px`,async t=>{
+  const childId='d'.repeat(32);
+  reset({status:'idle',sessionOverrides:{[childId]:{title:'Curie',parent_session_id:sessionId}},
+    workspace:{links:[],files:[],sources:[],subagents:[{id:'child-turn',session_id:childId,parent_id:turnId,
+      name:'Curie',avatar:1,status:'idle',can_inspect:true,depth:0,started_at:''}],subagents_limited:false}});
+  const page=await pageFor(t,'#'+sessionId);
+  await page.setViewportSize({width,height:900});
+  await page.getByRole('button',{name:'Open workspace',exact:true}).click();
+  await page.getByRole('button',{name:/Curie/}).click();
+  await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
+  assert.equal(new URL(page.url()).hash,'#'+childId);
+  const composer=page.getByRole('textbox',{name:'Message Moyai',exact:true});
+  await composer.fill('Follow up with this subagent only.');
+  await composer.press('Enter');
+  await waitFor(()=>state.requests.some(r=>r.path===`/api/sessions/${childId}/messages`&&r.method==='POST'));
+  assert.equal(state.requests.some(r=>r.path===`/api/sessions/${sessionId}/messages`&&r.method==='POST'),false);
+  await page.getByRole('link',{name:'Parent chat',exact:true}).click();
+  await page.getByRole('heading',{name:'Current native work',exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });

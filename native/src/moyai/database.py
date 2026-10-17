@@ -34,6 +34,7 @@ from .contracts import (
     RunScope,
     SteeringInput,
 )
+from .delegation_models import DelegatedSession, DelegatedTurn
 from .dispatch_wakeups import notify_dispatch
 from .models import (
     Base,
@@ -676,6 +677,8 @@ class Database:
                     raise PermissionError("The requester changed before preparation.")
             session = await self.allowed_session(db, turn.session_id, actor)
             member = await self.swarms.authorize(db, turn)
+            delegation = await db.get(DelegatedSession, session.id)
+            generated_delegation = await db.get(DelegatedTurn, turn.id) if delegation else None
             locked = await db.scalar(update(Session).where(
                 Session.id == turn.session_id, Session.active_turn == turn.id,
                 Session.deleted.is_(False), Session.status.in_(["queued", "running"]),
@@ -695,7 +698,16 @@ class Database:
                 product_grant=product_grant,
                 swarm_id=member.mission_id if member else None,
                 swarm_name=member.name if member else None,
+                delegation_depth=delegation.depth if delegation else 0,
+                delegation_generated=generated_delegation is not None,
             )
+            if scope.delegation_generated and delegation is not None:
+                inherited = TypeAdapter(list[Grant]).validate_json(self.security.unseal(delegation.grants))
+                if [(g.id, g.revision) for g in inherited] != [(g.id, g.revision) for g in grants]:
+                    raise PermissionError("The delegated task's original account permissions changed.")
+                # Moving a shared task to a private child must not broaden its
+                # connected-account policies. Human follow-ups are admitted afresh.
+                grants = scope.grants = inherited
             if session.surface == "slack" and grants and self.product_connections is None:
                 raise PermissionError("Connected accounts are not enabled for Slack delivery.")
             if session.workspace and session.workspace_scope != scope.workspace_key:
@@ -1054,5 +1066,8 @@ class Database:
             self._bind_product_grant(db, turn, product_grant)
             if member is not None:
                 await self.swarms.bind(db, mission, turn, generated=True)
+            delegated = await db.get(DelegatedTurn, previous.id)
+            if delegated is not None:
+                db.add(DelegatedTurn(turn_id=turn.id, session_id=delegated.session_id))
             previous.status = "resumed"
             return turn
