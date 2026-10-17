@@ -24,6 +24,7 @@ from .models import Turn
 from .product_drain import ProductDrainError, drain_checkpoint
 from .runtime import Runtime, configure
 from .settings_runtime import SETTINGS_ACTIVITIES, SETTINGS_WORKFLOWS, settings_worker_identity
+from .swarm_runtime import SWARM_ACTIVITIES, SwarmWorkflow, dispatch_missions
 from .worker_capacity import ActivityCapacity, WorkerPools
 from .workflow import TurnWorkflow
 
@@ -59,7 +60,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         agent_plugins.append(AgentPlugin(review.agent))
         identity += "-memory-review-v1-"
     drain = getattr(runtime, "product_drain", None)
-    activities = [*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities]
+    activities = [*ACTIVITIES, drain_checkpoint, *SETTINGS_ACTIVITIES, *product_activities, *SWARM_ACTIVITIES]
     activity_pools = ("control", "model", "tools")
     # WorkerPools retires pollers sequentially. Share the process's grace budget
     # so adding activity pools cannot exceed the HTTP/container shutdown limits.
@@ -68,7 +69,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         runtime.client,
         identity=identity,
         task_queue=runtime.settings.temporal_queue,
-        workflows=[TurnWorkflow, *SETTINGS_WORKFLOWS, *product_workflows],
+        workflows=[TurnWorkflow, SwarmWorkflow, *SETTINGS_WORKFLOWS, *product_workflows],
         activities=activities,
         interceptors=interceptors,
         max_concurrent_activities=runtime.settings.temporal_worker_activities,
@@ -174,6 +175,13 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
             if error.status == RPCStatusCode.NOT_FOUND:
                 # A Stop admitted before workflow creation never needs to start the run.
                 await runtime.database.stopped(turn.id)
+    try:
+        async with asyncio.timeout(3):
+            await dispatch_missions(runtime)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Swarm coordination dispatch remains pending.", exc_info=True)
     if runtime.product_automations is not None:
         try:
             # Keep automation RPC outages from delaying manual input/Stop.

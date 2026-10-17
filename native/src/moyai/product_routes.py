@@ -20,11 +20,13 @@ from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import and_, case, column, false, func, or_, select, table
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import aliased
 
 from .models import Message, Session, SessionPreference, SessionRead, Turn, User
 from .product_files import routes as file_routes
 from .product_history import MAX_MESSAGE_CHARS, MAX_OFFSET, MAX_PAGE, Principal, bounded
 from .product_history import routes as legacy_routes
+from .swarm_models import SwarmMember
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -102,6 +104,16 @@ class ProductReadService:
         clauses = [Session.deleted.is_(deleted), access]
         if deleted:
             clauses.append(ownership)
+        else:
+            root = aliased(Session)
+            membership = select(SwarmMember.session_id).where(SwarmMember.session_id == Session.id)
+            parent_access = or_(
+                root.owner_id == reader.user.id if private else false(), root.visibility == "shared",
+            )
+            visible_parent = select(SwarmMember.session_id).join(
+                root, root.id == SwarmMember.mission_id,
+            ).where(SwarmMember.session_id == Session.id, root.deleted.is_(False), parent_access)
+            clauses.append(~membership.exists() | visible_parent.exists())
         return and_(*clauses)
 
     def native_query(self, reader: Reader):
@@ -212,7 +224,12 @@ class ProductReadService:
         async with self.runtime.database.sessions() as db:
             query = self.native_query(reader).where(self.visible(reader, deleted=deleted))
             if not deleted:
-                query = query.where(Session.archived.is_(archived))
+                query = query.where(
+                    Session.archived.is_(archived),
+                    ~select(SwarmMember.session_id).where(
+                        SwarmMember.session_id == Session.id, SwarmMember.position > 0,
+                    ).exists(),
+                )
                 if scope == "mine":
                     columns = query.selected_columns
                     query = query.where(or_(

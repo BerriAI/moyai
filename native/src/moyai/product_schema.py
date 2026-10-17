@@ -48,7 +48,8 @@ DRAIN_SCHEMA_VERSION = "2026-10-15-product-drain-v12"
 GIT_OPERATION_SCHEMA_VERSION = "2026-10-15-product-git-operations-v13"
 EXECUTION_COMPATIBILITY_SCHEMA_VERSION = "2026-10-16-product-execution-v14"
 BILLING_STORAGE_SCHEMA_VERSION = "2026-10-16-product-billing-storage-v15"
-PRODUCT_SCHEMA_VERSION = BILLING_STORAGE_SCHEMA_VERSION
+SWARM_SCHEMA_VERSION = "2026-10-16-native-swarms-v16"
+PRODUCT_SCHEMA_VERSION = SWARM_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -96,6 +97,10 @@ MEMORY_REVIEW_TABLES = frozenset({"moyai_product_memory_reviews"})
 DRAIN_STATE_TABLE = "moyai_product_drain_state"
 DRAIN_TABLES = frozenset({DRAIN_STATE_TABLE, "moyai_product_drain_workers", "moyai_product_drain_receipts"})
 GIT_OPERATION_TABLES = frozenset({"moyai_product_git_operations"})
+SWARM_TABLES = frozenset({
+    "moyai_swarm_missions", "moyai_swarm_members", "moyai_swarm_posts",
+    "moyai_swarm_turns", "moyai_swarm_operations",
+})
 MIGRATIONS = (
     (AUTHORITY_SCHEMA_VERSION, AUTHORITY_TABLES),
     (AUTOMATION_SCHEMA_VERSION, AUTOMATION_TABLES),
@@ -115,6 +120,7 @@ MIGRATIONS = (
     # Passive tables only. Explicit billing_storage commands install mirrors,
     # backfill records and select the read source after exact validation.
     (BILLING_STORAGE_SCHEMA_VERSION, frozenset({"moyai_billing_records", "moyai_billing_storage"})),
+    (SWARM_SCHEMA_VERSION, SWARM_TABLES),
 )
 
 
@@ -154,6 +160,7 @@ def application_metadata(schema: str, *, version: str = PRODUCT_SCHEMA_VERSION) 
         "product_drain_models",
         "product_github_models",
         "billing_storage_models",
+        "swarm_models",
     ):
         import_module(f"{__package__}.{module}")
     included = frozenset().union(*(item[1] for item in MIGRATIONS[:versions.index(version) + 1]))

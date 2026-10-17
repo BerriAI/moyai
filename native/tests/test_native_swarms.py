@@ -1,0 +1,586 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from copy import deepcopy
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+
+import httpx
+import pytest
+from fastapi import HTTPException
+from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.function import FunctionModel
+from sqlalchemy import func, select, update
+from test_file_preview import saved_file
+
+from moyai.api import COOKIE, create_app
+from moyai.contracts import NewMessage
+from moyai.file_preview import FilePreviewService
+from moyai.models import Effect, Event, Message, Session, Turn, User, new_id
+from moyai.product_routes import ProductReadService, Reader
+from moyai.swarm_contracts import MissionRun, NewSwarm, SwarmControl
+from moyai.swarm_models import SwarmMember, SwarmMission, SwarmOperation, SwarmPost, SwarmTurn
+from moyai.swarm_runtime import tick
+from moyai.swarm_tools import bounded_board, operate
+
+
+async def start(runtime, actor, *, key="one", workers=2, **kwargs):
+    return await runtime.database.swarms.start(actor, NewSwarm(
+        prompt="Investigate the test dataset and share evidence.", request_key=key, workers=workers,
+        visibility=kwargs.pop("visibility", "private"), **kwargs,
+    ))
+
+
+async def prepared_team(runtime, actor, **kwargs):
+    root, initial = await start(runtime, actor, **kwargs)
+    turns = await runtime.database.claim_batch(30)
+    prepared = {turn.session_id: (turn, await runtime.database.prepare(turn.id)) for turn in turns}
+    view = await runtime.database.swarms.view(actor, root.id)
+    workers = [member for member in view["members"] if not member["coordinator"]]
+    return root, initial, prepared, workers
+
+
+async def call(runtime, prepared, action, args, identity="call-1"):
+    scope = prepared.scope
+    return await operate(runtime.database.swarms, scope, scope.turn_id, identity, action, args)
+
+
+async def test_atomic_creation_and_retried_start_recover_same_team(runtime, actor):
+    one, two = await asyncio.gather(start(runtime, actor), start(runtime, actor))
+    assert one[0].id == two[0].id
+    async with runtime.database.sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(SwarmMission)) == 1
+        assert await db.scalar(select(func.count()).select_from(SwarmMember)) == 3
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 3
+        provenance = list(await db.scalars(select(SwarmTurn)))
+        assert sum(item.generated for item in provenance) == 2
+        human = list(await db.scalars(select(Message).where(Message.role == "user")))
+        assert len(human) == 1 and human[0].turn_id == one[1].id
+    listed = await runtime.database.list_sessions(actor)
+    assert [session.id for session in listed] == [one[0].id]
+    with pytest.raises(HTTPException, match="different swarm"):
+        await start(runtime, actor, workers=4)
+
+
+async def test_invalid_model_rolls_back_entire_creation(runtime, actor):
+    with pytest.raises(HTTPException):
+        await start(runtime, actor, worker_models=["unavailable"])
+    async with runtime.database.sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(Session)) == 0
+        assert await db.scalar(select(func.count()).select_from(SwarmMission)) == 0
+
+
+@pytest.mark.parametrize("workers", [20, 21, 37])
+async def test_requested_workers_have_distinct_persistent_sessions(runtime, actor, workers):
+    root, _ = await start(runtime, actor, workers=workers)
+    view = await runtime.database.swarms.view(actor, root.id)
+    assert len(view["members"]) == workers + 1
+    assert len({member["session_id"] for member in view["members"]}) == workers + 1
+    assert [member["name"] for member in view["members"]] == ["Coordinator", *(
+        f"Agent {index + 1}" for index in range(workers)
+    )]
+    assert all(member["model"] == "test" for member in view["members"])
+
+
+async def test_first_leader_claim_is_atomic_and_native_operations_are_idempotent(runtime, actor):
+    root, _, prepared, workers = await prepared_team(runtime, actor)
+    results = await asyncio.gather(*(
+        call(runtime, prepared[worker["session_id"]][1], "claim", {"plan": worker["name"]})
+        for worker in workers
+    ))
+    assert sum(item["claimed"] for item in results) == 1
+    leader = next(worker for worker in workers if worker["session_id"] == results[0]["leader_id"])
+    context = prepared[leader["session_id"]][1]
+    first = await call(runtime, context, "publish", {"message": "Verified finding."}, "publish-1")
+    again = await call(runtime, context, "publish", {"message": "Verified finding."}, "publish-1")
+    assert first == again
+    with pytest.raises(ToolFailed, match="different operation"):
+        await call(runtime, context, "publish", {"message": "Changed finding."}, "publish-1")
+    view = await runtime.database.swarms.view(actor, root.id)
+    assert len([post for post in view["posts"] if post["kind"] == "lead"]) == 1
+    assert len([post for post in view["posts"] if post["kind"] == "finding"]) == 1
+
+
+async def test_assignment_reuses_worker_session_and_cannot_escape_mission(runtime, actor):
+    _root, _, prepared, workers = await prepared_team(runtime, actor)
+    leader = prepared[workers[0]["session_id"]][1]
+    await call(runtime, leader, "claim", {"plan": "Divide investigation."})
+    arguments = {"member_id": workers[1]["session_id"], "task": "Check boundary conditions."}
+    first = await call(runtime, leader, "assign", arguments, "assign-1")
+    assert await call(runtime, leader, "assign", arguments, "assign-1") == first
+    with pytest.raises(ToolFailed, match="queued work"):
+        await call(runtime, leader, "assign", arguments, "assign-2")
+    other, _ = await start(runtime, actor, key="other")
+    other_view = await runtime.database.swarms.view(actor, other.id)
+    with pytest.raises(ToolFailed, match="actual roster"):
+        await call(runtime, leader, "assign", {
+            "member_id": other_view["members"][1]["session_id"], "task": "Cross-mission request.",
+        }, "assign-3")
+    async with runtime.database.sessions() as db:
+        turn = await db.get(Turn, first["turn_id"])
+        assert turn.session_id == workers[1]["session_id"]
+        binding = await db.get(SwarmTurn, turn.id)
+        message = await db.scalar(select(Message).where(Message.turn_id == turn.id))
+        assert binding.generated and message.role == "system" and message.author_id is None
+
+
+async def test_nested_delegate_cannot_impersonate_member(runtime, actor):
+    _, _, prepared, workers = await prepared_team(runtime, actor)
+    scope = prepared[workers[0]["session_id"]][1].scope
+    with pytest.raises(ToolFailed, match="current admitted"):
+        await operate(runtime.database.swarms, scope, "nested-run", "call", "claim", {"plan": "Impersonate."})
+    with pytest.raises(PermissionError):
+        await runtime.database.authorize_scope(replace(scope, swarm_id=new_id()))
+
+
+async def test_pause_fences_every_member_and_resume_preserves_roster(runtime, actor):
+    root, _, prepared, workers = await prepared_team(runtime, actor)
+    before = await runtime.database.swarms.view(actor, root.id)
+    await runtime.database.swarms.control(actor, root.id, SwarmControl(action="pause", revision=before["revision"]))
+    for _, value in prepared.values():
+        with pytest.raises(PermissionError):
+            await runtime.database.authorize_scope(value.scope)
+    assert await runtime.database.claim_batch(20) == []
+    with pytest.raises(HTTPException, match="finish stopping"):
+        await runtime.database.swarms.control(actor, root.id, SwarmControl(action="resume", revision=1))
+    for turn, _ in prepared.values():
+        await runtime.database.stopped(turn.id)
+    await runtime.database.swarms.control(actor, root.id, SwarmControl(action="resume", revision=1))
+    after = await runtime.database.swarms.view(actor, root.id)
+    assert after["generation"] == 2
+    assert [member["session_id"] for member in after["members"]] == [member["session_id"] for member in before["members"]]
+    assert len(await runtime.database.claim_batch(20)) == 3
+    old = prepared[workers[0]["session_id"]][1]
+    with pytest.raises(ToolFailed):
+        await call(runtime, old, "publish", {"message": "Late old-generation write."})
+
+
+async def test_deadline_is_checked_at_dispatch_and_activity_boundaries(runtime, actor):
+    root, _, prepared, _ = await prepared_team(runtime, actor, budget_seconds=60)
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(SwarmMission).where(SwarmMission.id == root.id).values(
+            ends_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+        ))
+    for _, value in prepared.values():
+        with pytest.raises(PermissionError, match="expired"):
+            await runtime.database.authorize_scope(value.scope)
+    state = await tick(runtime.database.swarms, MissionRun(root.id, 1))
+    assert not state.exists
+    view = await runtime.database.swarms.view(actor, root.id)
+    assert view["status"] == "paused"
+    assert await runtime.database.claim_batch(20) == []
+
+
+async def test_shared_viewer_cannot_direct_team_or_inspect_private_mission(runtime, actor):
+    root, _ = await start(runtime, actor, visibility="shared")
+    async with runtime.database.sessions.begin() as db:
+        viewer = User(id=new_id(), username="viewer", display_name="Viewer", password="", role="member")
+        db.add(viewer)
+    view = await runtime.database.swarms.view(viewer, root.id)
+    assert view is not None and not view["can_control"]
+    with pytest.raises(HTTPException, match="Only the swarm owner"):
+        await runtime.database.swarms.control(viewer, root.id, SwarmControl(action="stop", revision=0))
+    with pytest.raises(HTTPException, match="Only the swarm owner"):
+        await runtime.database.submit(viewer, root.id, NewMessage(prompt="New goal.", request_key="unauthorized"))
+    private, _ = await start(runtime, actor, key="private")
+    with pytest.raises(HTTPException):
+        await runtime.database.swarms.view(viewer, private.id)
+
+
+async def test_revoked_requester_cannot_be_refreshed_by_generated_wake(runtime, actor):
+    root, _ = await start(runtime, actor)
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(User).where(User.id == actor.id).values(auth_version=User.auth_version + 1))
+    assert not (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    fresh = await runtime.database.user(actor.id)
+    view = await runtime.database.swarms.view(fresh, root.id)
+    assert view["status"] == "attention"
+    with pytest.raises(HTTPException, match="original requester"):
+        await runtime.database.swarms.control(fresh, root.id, SwarmControl(action="resume", revision=view["revision"]))
+
+
+async def test_normal_stop_and_delete_fence_team(runtime, actor):
+    root, _ = await start(runtime, actor)
+    view = await runtime.database.swarms.view(actor, root.id)
+    await runtime.database.stop(actor, view["members"][1]["session_id"])
+    assert (await runtime.database.swarms.view(actor, root.id))["status"] == "stopped"
+    assert await runtime.database.claim_batch(20) == []
+    await runtime.database.delete_session(actor, root.id)
+    with pytest.raises(HTTPException):
+        await runtime.database.session(actor, view["members"][1]["session_id"])
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_deleted_worker_needs_restoration_before_team_can_resume(runtime, actor, paused):
+    root, _, prepared, workers = await prepared_team(runtime, actor)
+    deleted_id = workers[0]["session_id"]
+    waiting_turn, waiting = prepared[workers[1]["session_id"]]
+    await runtime.database.save_result(
+        waiting.scope, conversation='{"messages":[]}', output="", workspace=None, usage={}, deferred=True,
+    )
+    if paused:
+        await runtime.database.swarms.control(actor, root.id, SwarmControl(action="pause", revision=0))
+    await runtime.database.delete_session(actor, deleted_id)
+    view = await runtime.database.swarms.view(actor, root.id)
+    assert view["status"] == "attention" and "deleted" in view["reason"]
+    assert next(member for member in view["members"] if member["session_id"] == deleted_id)["deleted"]
+    assert await runtime.database.claim_batch(20) == []
+    for turn, value in prepared.values():
+        with pytest.raises(PermissionError):
+            await runtime.database.authorize_scope(value.scope)
+        if turn.id != waiting_turn.id:
+            await runtime.database.stopped(turn.id)
+    # A retry of Delete is idempotent, and Resume cannot start a doomed generation.
+    await runtime.database.delete_session(actor, deleted_id)
+    assert (await runtime.database.swarms.view(actor, root.id))["revision"] == view["revision"]
+    with pytest.raises(HTTPException, match="Restore the deleted team conversation") as refusal:
+        await runtime.database.swarms.control(
+            actor, root.id, SwarmControl(action="resume", revision=view["revision"]),
+        )
+    assert refusal.value.status_code == 409
+    assert not (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    unchanged = await runtime.database.swarms.view(actor, root.id)
+    assert (unchanged["generation"], unchanged["revision"]) == (view["generation"], view["revision"])
+    await runtime.database.restore_session(actor, deleted_id)
+    await runtime.database.swarms.control(
+        actor, root.id, SwarmControl(action="resume", revision=view["revision"]),
+    )
+    resumed = await runtime.database.swarms.view(actor, root.id)
+    assert resumed["status"] == "active" and resumed["generation"] == 2
+    assert [member["session_id"] for member in resumed["members"]] == [
+        member["session_id"] for member in view["members"]
+    ]
+    assert len(await runtime.database.claim_batch(20)) == 2
+    async with runtime.database.sessions() as db:
+        session = await db.get(Session, waiting_turn.session_id)
+        assert session.status == "waiting" and session.active_turn == waiting_turn.id
+
+
+async def test_nonowner_cannot_delete_worker_or_change_mission(runtime, actor):
+    root, _ = await start(runtime, actor, visibility="shared")
+    before = await runtime.database.swarms.view(actor, root.id)
+    async with runtime.database.sessions.begin() as db:
+        other = User(id=new_id(), username="other-admin", display_name="Other admin", password="", role="admin")
+        db.add(other)
+    with pytest.raises(HTTPException):
+        await runtime.database.delete_session(other, before["members"][1]["session_id"])
+    after = await runtime.database.swarms.view(actor, root.id)
+    assert (after["status"], after["revision"], after["members"]) == (
+        before["status"], before["revision"], before["members"],
+    )
+
+
+async def test_public_result_handoff_is_saved_once_and_coalesced(runtime, actor):
+    root, _, prepared, workers = await prepared_team(runtime, actor)
+    for session_id, (turn, value) in prepared.items():
+        await runtime.database.save_result(
+            value.scope, conversation='{"messages":[]}', output=f"Observed result from {session_id}",
+            workspace=None, usage={}, checkpoint_workspace=False,
+        )
+        await runtime.database.settle(turn.id)
+    await tick(runtime.database.swarms, MissionRun(root.id, 1))
+    await tick(runtime.database.swarms, MissionRun(root.id, 1))
+    async with runtime.database.sessions() as db:
+        posts = list(await db.scalars(select(SwarmPost).where(SwarmPost.kind == "result")))
+        assert len(posts) == len(workers)
+        summaries = list(await db.scalars(select(Turn).where(Turn.session_id == root.id, Turn.status == "queued")))
+        assert len(summaries) == 1
+        assert (await db.get(SwarmTurn, summaries[0].id)).generated
+        assert await db.scalar(select(func.count()).select_from(SwarmOperation)) == 0
+
+
+async def test_pause_resume_preserves_pending_question_until_owner_answers(runtime, actor):
+    root, _, prepared, workers = await prepared_team(runtime, actor)
+    waiting_turn, waiting = prepared[workers[0]["session_id"]]
+    await runtime.database.save_result(
+        waiting.scope, conversation='{"messages":[]}', output="", workspace=None, usage={}, deferred=True,
+    )
+    await runtime.database.swarms.control(actor, root.id, SwarmControl(action="pause", revision=0))
+    for turn, _ in prepared.values():
+        if turn.id != waiting_turn.id:
+            await runtime.database.stopped(turn.id)
+    with pytest.raises(HTTPException) as refusal:
+        await runtime.database.resume(actor, waiting_turn.session_id, waiting_turn.id, "answer", {})
+    assert refusal.value.status_code == 409
+    await runtime.database.swarms.control(actor, root.id, SwarmControl(action="resume", revision=1))
+    async with runtime.database.sessions() as db:
+        session = await db.get(Session, waiting_turn.session_id)
+        assert session.status == "waiting" and session.active_turn == waiting_turn.id
+        assert await db.scalar(select(func.count()).select_from(Turn).where(
+            Turn.session_id == waiting_turn.session_id,
+        )) == 1
+    answered = await runtime.database.resume(actor, waiting_turn.session_id, waiting_turn.id, "answer", {})
+    async with runtime.database.sessions() as db:
+        binding = await db.get(SwarmTurn, answered.id)
+        assert binding.generation == 2 and answered.deferred_results is not None
+
+
+@pytest.mark.parametrize("workers", [2, 21])
+async def test_authenticated_api_and_sidebar_keep_workers_inside_the_mission(runtime, actor, workers):
+    token, csrf = runtime.security.issue_session(actor.id, actor.auth_version)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
+        base_url="http://testserver",
+    ) as client:
+        client.cookies.set(COOKIE, token)
+        body = {"prompt": "Verify one shared goal.", "workers": workers, "request_key": "api-team"}
+        assert (await client.post("/api/swarms", json=body)).status_code == 403
+        client.headers["x-moyai-csrf"] = csrf
+        response = await client.post("/api/swarms", json=body)
+        assert response.status_code == 200
+        root_id = response.json()["session"]["id"]
+        assert response.json()["session"]["swarm_id"] == root_id
+        repeated = await client.post("/api/swarms", json=body)
+        assert repeated.json()["session"]["id"] == root_id
+        async with runtime.database.sessions() as db:
+            received = list(await db.scalars(select(Event).where(
+                Event.kind == "performance.v1.received", Event.session_id == root_id,
+            )))
+            assert len(received) == 1 and received[0].turn_id == response.json()["turn"]["id"]
+        listed = await client.get("/api/history/sessions?scope=mine")
+        assert [item["id"] for item in listed.json()["sessions"]] == [root_id]
+        board = (await client.get(f"/api/sessions/{root_id}/swarm")).json()
+        assert len(board["members"]) == workers + 1
+        child = board["members"][1]["session_id"]
+        detail = await client.get(f"/api/sessions/{child}")
+        assert detail.status_code == 200 and detail.json()["session"]["swarm_id"] == root_id
+
+
+async def test_queued_human_edits_and_cancellations_are_not_broadcast_before_admission(runtime, actor):
+    root, initial, prepared, _ = await prepared_team(runtime, actor)
+    queued = await runtime.database.submit(actor, root.id, NewMessage(prompt="Old direction.", request_key="edit"))
+    cancelled = await runtime.database.submit(actor, root.id, NewMessage(prompt="Never act on this.", request_key="cancel"))
+    token, csrf = runtime.security.issue_session(actor.id, actor.auth_version)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)),
+        base_url="http://testserver", headers={"x-moyai-csrf": csrf},
+    ) as client:
+        client.cookies.set(COOKIE, token)
+        assert (await client.patch(f"/api/turns/{initial.id}", json={"prompt": "Change the accepted goal."})).status_code == 409
+        assert (await client.patch(f"/api/turns/{queued.id}", json={"prompt": "Corrected direction."})).status_code == 200
+        assert (await client.delete(f"/api/turns/{cancelled.id}")).status_code == 200
+    await tick(runtime.database.swarms, MissionRun(root.id, 1))
+    before = await runtime.database.swarms.view(actor, root.id)
+    assert not any(post["kind"] == "human" for post in before["posts"])
+    for turn, value in prepared.values():
+        await runtime.database.save_result(
+            value.scope, conversation='{"messages":[]}', output="Saved initial result.", workspace=None, usage={},
+        )
+        await runtime.database.settle(turn.id)
+    claimed = await runtime.database.claim_batch(3)
+    assert [turn.id for turn in claimed] == [queued.id]
+    await runtime.database.prepare(queued.id)
+    await tick(runtime.database.swarms, MissionRun(root.id, 1))
+    after = await runtime.database.swarms.view(actor, root.id)
+    guidance = [post for post in after["posts"] if post["kind"] == "human"]
+    assert len(guidance) == 1 and guidance[0]["content"].endswith("Corrected direction.")
+    assert "Never act on this." not in str(after)
+
+
+async def test_worker_models_are_pinned_and_balanced_on_creation(runtime, actor):
+    runtime.settings.model_catalog = "test,second-enabled-model"
+    root, _ = await start(runtime, actor, workers=4, worker_models=["test", "second-enabled-model"])
+    first = await runtime.database.swarms.view(actor, root.id)
+    repeated, _ = await start(runtime, actor, workers=4, worker_models=["test", "second-enabled-model"])
+    assert repeated.id == root.id
+    assert [member["model"] for member in first["members"][1:]] == [
+        "test", "second-enabled-model", "test", "second-enabled-model",
+    ]
+
+
+async def test_ordinary_chat_retains_native_delegation_without_swarm_tools(runtime, active):
+    _, turn, prepared = active
+    offered = set()
+
+    def inspect_tools(messages, info):
+        offered.update(tool.name for tool in info.function_tools)
+        return ModelResponse(parts=[TextPart("Ordinary chat.")])
+
+    async def stream(messages, info):
+        inspect_tools(messages, info)
+        yield "Ordinary chat."
+
+    result = await runtime.agent.run(
+        "Inspect the ordinary tool catalog.", deps=prepared.scope, run_id=turn.id,
+        model=FunctionModel(inspect_tools, stream_function=stream),
+    )
+    assert result.output == "Ordinary chat."
+    assert "delegate_task" in offered
+    assert not any(name.startswith("swarm_") for name in offered)
+
+
+async def test_large_board_text_preserves_cursor_and_full_text_readback(runtime, actor):
+    _, _, prepared, workers = await prepared_team(runtime, actor)
+    context = prepared[workers[0]["session_id"]][1]
+    text = '引用"\\\n' * 3000
+    for index in range(12):
+        await call(runtime, context, "publish", {"message": text}, f"large-{index}")
+    board = await call(runtime, context, "board", {"after": 0}, "read-board")
+    assert len(json.dumps(board)) < 48_000
+    assert board["you"]["session_id"] == workers[0]["session_id"]
+    assert board["has_more"] and board["next_after"] == board["posts"][-1]["sequence"]
+    finding = next(post for post in board["posts"] if post["kind"] == "finding")
+    assert finding["truncated"]
+    pieces, offset = [], 0
+    while True:
+        page = await call(runtime, context, "read", {"sequence": finding["sequence"], "offset": offset}, "read-text")
+        assert len(json.dumps(page)) < 48_000
+        pieces.append(page["text"])
+        if not page["has_more"]:
+            break
+        offset = page["next_offset"]
+    assert "".join(pieces) == text
+    next_page = await call(runtime, context, "board", {"after": board["next_after"]}, "read-next")
+    assert next_page["posts"][0]["sequence"] > board["next_after"]
+
+
+def test_large_roster_pages_remain_bounded_and_preserve_every_member():
+    board = {
+        "goal": '引用"\\\n' * 1000, "has_more": False, "next_after": 0,
+        "members": [{
+            "session_id": f"member-{index}", "name": "名" * 100,
+            "model": "型" * 200, "assignment": '引用"\\\n' * 200,
+        } for index in range(1200)],
+        "posts": [{
+            "sequence": index + 1, "content": '引用"\\\n' * 1000,
+        } for index in range(12)],
+    }
+    seen, offset = [], 0
+    while True:
+        page = bounded_board(deepcopy(board), member_offset=offset)
+        assert len(json.dumps(page)) < 48_000
+        assert page["member_count"] == 1200
+        assert page["next_after"] > 0 and page["has_more"]
+        seen.extend(member["session_id"] for member in page["members"])
+        assert page["next_member_offset"] > offset
+        offset = page["next_member_offset"]
+        if not page["members_has_more"]:
+            break
+    assert seen == [member["session_id"] for member in board["members"]]
+    last = bounded_board(deepcopy(board), member_offset=offset)
+    assert last["members"] == [] and not last["members_has_more"]
+    assert last["next_member_offset"] == 1200
+
+
+async def test_agent_board_exposes_separate_roster_pages(runtime, actor):
+    root, _ = await start(runtime, actor, workers=61)
+    turns = await runtime.database.claim_batch(1)
+    context = await runtime.database.prepare(turns[0].id)
+    first = await call(runtime, context, "board", {"after": 0}, "roster-first")
+    second = await call(runtime, context, "board", {
+        "after": 0, "member_offset": first["next_member_offset"],
+    }, "roster-second")
+    full = await runtime.database.swarms.view(actor, root.id)
+    assert first["member_count"] == 62 and first["members_has_more"]
+    assert first["you"] == second["you"]
+    assert not second["members_has_more"]
+    assert [member["session_id"] for member in first["members"] + second["members"]] == [
+        member["session_id"] for member in full["members"]
+    ]
+    assert first["next_after"] == second["next_after"]
+
+
+async def settle_team_workers(runtime, prepared, root_id):
+    for session_id, (turn, value) in prepared.items():
+        if session_id != root_id:
+            await runtime.database.save_result(
+                value.scope, conversation='{"messages":[]}', output="Observed 5050.", workspace=None, usage={},
+            )
+            await runtime.database.settle(turn.id)
+
+
+async def test_completion_waits_for_saved_synthesis_and_followup_reuses_team(runtime, actor):
+    root, initial, prepared, workers = await prepared_team(runtime, actor)
+    coordinator = prepared[root.id][1]
+    with pytest.raises(ToolFailed, match="still need attention"):
+        await call(runtime, coordinator, "finish", {"summary": "Too soon."}, "early")
+    with pytest.raises(ToolFailed, match="Only the coordinator"):
+        await call(runtime, prepared[workers[0]["session_id"]][1], "finish", {"summary": "Worker attempt."})
+    await settle_team_workers(runtime, prepared, root.id)
+    result = await call(runtime, coordinator, "finish", {"summary": "Both checks agree."}, "finish")
+    assert result["accepted"]
+    assert await call(runtime, coordinator, "finish", {"summary": "Both checks agree."}, "finish") == result
+    assert (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    assert (await runtime.database.swarms.view(actor, root.id))["status"] == "active"
+    await runtime.database.save_result(
+        coordinator.scope, conversation='{"messages":[]}', output="Verified 5050.", workspace=None, usage={},
+    )
+    await runtime.database.settle(initial.id)
+    assert not (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    done = await runtime.database.swarms.view(actor, root.id)
+    assert done["status"] == "completed"
+    assert any(post["kind"] == "completed" for post in done["posts"])
+    followup = await runtime.database.submit(actor, root.id, NewMessage(prompt="Verify a follow-up.", request_key="followup"))
+    reopened = await runtime.database.swarms.view(actor, root.id)
+    assert reopened["status"] == "active" and reopened["generation"] == 2
+    assert [m["session_id"] for m in reopened["members"]] == [m["session_id"] for m in done["members"]]
+    assert [turn.id for turn in await runtime.database.claim_batch(30)] == [followup.id]
+
+
+async def test_human_input_wins_over_pending_completion(runtime, actor):
+    root, initial, prepared, _ = await prepared_team(runtime, actor)
+    await settle_team_workers(runtime, prepared, root.id)
+    coordinator = prepared[root.id][1]
+    await call(runtime, coordinator, "finish", {"summary": "Original work done."}, "finish")
+    followup = await runtime.database.submit(actor, root.id, NewMessage(prompt="Include this correction.", request_key="correction"))
+    await runtime.database.save_result(
+        coordinator.scope, conversation='{"messages":[]}', output="Original result.", workspace=None, usage={},
+    )
+    await runtime.database.settle(initial.id)
+    assert (await tick(runtime.database.swarms, MissionRun(root.id, 1))).exists
+    assert (await runtime.database.swarms.view(actor, root.id))["status"] == "active"
+    assert [turn.id for turn in await runtime.database.claim_batch(30)] == [followup.id]
+
+
+async def test_unknown_effect_prevents_claiming_mission_completion(runtime, actor):
+    root, initial, prepared, _ = await prepared_team(runtime, actor)
+    await settle_team_workers(runtime, prepared, root.id)
+    async with runtime.database.sessions.begin() as db:
+        db.add(Effect(
+            id="f" * 64, session_id=root.id, turn_id=initial.id, actor_id=actor.id,
+            tool_name="shell", arguments=runtime.security.seal({}), fingerprint="a" * 64,
+        ))
+    with pytest.raises(ToolFailed, match="unresolved actions"):
+        await call(runtime, prepared[root.id][1], "finish", {"summary": "Claim success."}, "finish")
+
+
+async def test_deleted_parent_hides_worker_search_and_deleted_members_remain_restorable(runtime, actor):
+    root, _ = await start(runtime, actor, visibility="shared")
+    view = await runtime.database.swarms.view(actor, root.id)
+    child_id = view["members"][1]["session_id"]
+    async with runtime.database.sessions.begin() as db:
+        viewer = User(id=new_id(), username="shared-viewer", display_name="Viewer", password="")
+        db.add(viewer)
+    reader = ProductReadService(runtime)
+    assert (await reader.native_search(Reader(viewer, None), "Investigate", limit=20, offset=0))["sessions"]
+    await runtime.database.delete_session(actor, root.id)
+    assert (await reader.native_search(Reader(viewer, None), "Investigate", limit=20, offset=0))["sessions"] == []
+    assert await reader.native_recheck(Reader(viewer, None), [child_id]) == set()
+    await runtime.database.restore_session(actor, root.id)
+    await runtime.database.delete_session(actor, child_id)
+    assert [row.id for row in await runtime.database.list_sessions(actor, deleted=True)] == [child_id]
+    deleted = await reader.native_list(Reader(actor, None), limit=20, offset=0, deleted=True)
+    assert [row["id"] for row in deleted["sessions"]] == [child_id]
+    await runtime.database.restore_session(actor, child_id)
+    assert (await runtime.database.session(actor, child_id)).id == child_id
+
+
+async def test_shared_output_links_preview_in_mission_without_leaking_other_sessions_or_uploads(runtime, actor):
+    root, _ = await start(runtime, actor)
+    view = await runtime.database.swarms.view(actor, root.id)
+    child = await runtime.database.session(actor, view["members"][1]["session_id"])
+    _, artifact, _ = await saved_file(runtime, actor, raw=b"5050\n", session=child)
+    _, upload, _ = await saved_file(runtime, actor, raw=b"Input only.", session=child, kind="upload")
+    previews = FilePreviewService(runtime)
+    _, raw, _ = await previews.load(actor, root.id, "artifact", artifact.id)
+    assert raw == b"5050\n"
+    with pytest.raises(HTTPException):
+        await previews.load(actor, root.id, "upload", upload.id)
+    other, _ = await start(runtime, actor, key="other-mission")
+    with pytest.raises(HTTPException):
+        await previews.load(actor, other.id, "artifact", artifact.id)
+    await runtime.database.delete_session(actor, child.id)
+    with pytest.raises(HTTPException):
+        await previews.load(actor, root.id, "artifact", artifact.id)

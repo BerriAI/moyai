@@ -59,6 +59,7 @@ from .settings import Settings
 from .settings_runtime import settings_capability
 from .storage import ObjectStore
 from .stores import NativeStores
+from .swarm_tools import SwarmCapability
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / "resources"
 if not PACKAGE_ROOT.is_dir():
@@ -327,6 +328,7 @@ def make_agent(
         capabilities=[
             workspace,
             authority,
+            SwarmCapability(database.swarms),
             Commentary(database),
             EffectReceipts(database),
             *product_capabilities,
