@@ -54,6 +54,8 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
+ACK_EMOJI = "eyes"
+ACK_SECONDS = 3
 
 
 class SlackInstallationUnavailable(HTTPException):
@@ -153,6 +155,22 @@ class ProductSlack:
         self.inbox = HookInbox(self.store, self, list)
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
+
+    async def acknowledge(self, origin: dict[str, str]) -> None:
+        """Best-effort :eyes: on a message Moyai will handle, like AgentChat's Slack transport ack."""
+        from app.connector_errors import ConnectorError
+
+        try:
+            async with asyncio.timeout(ACK_SECONDS):
+                token = await self.connectors.slack_bot_token()
+                await self.connectors.request(
+                    "POST", "https://slack.com/api/reactions.add",
+                    headers={"Authorization": "Bearer " + token},
+                    json={"channel": origin["channel_id"], "name": ACK_EMOJI, "timestamp": origin["message_ts"]},
+                    allowed_errors=("already_reacted",),
+                )
+        except (ConnectorError, TimeoutError, httpx.HTTPError, ValueError) as error:
+            logger.info("Slack acknowledgement reaction was not added (%s).", type(error).__name__)
 
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""

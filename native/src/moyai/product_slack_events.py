@@ -125,6 +125,7 @@ class SlackEvents:
         )
         if conversation is None:
             return {"ok": True}
+        await self.slack.acknowledge(message.origin)
         return await self._admit(message, conversation, actor, principal, installed)
 
     def _eligible_event(self, payload: dict, installed: dict) -> dict | None:

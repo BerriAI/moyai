@@ -25,6 +25,7 @@ CHANNEL = "CTEST0001"
 ROOT_TS = "1792255740.000"
 MENTION_TS = "1792255800.001"
 DEEPSEEK_URL = "https://x.com/deepseek_ai/status/2111375640717033777?s=46"
+ACK_URL = "https://slack.com/api/reactions.add"
 
 
 def root_message():
@@ -82,6 +83,8 @@ async def test_first_reply_receives_parent_link_and_unfurl_in_prepared_input(ing
     parent["text"] += " Quoted skill: " + marker("bundled:ship")
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         assert method == "GET" and url == "https://slack.com/api/conversations.replies"
         assert kwargs["params"]["channel"] == CHANNEL
         assert kwargs["params"]["ts"] == ROOT_TS
@@ -130,6 +133,8 @@ async def test_thread_pages_exclude_other_threads_and_messages_after_the_request
     }
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         assert url == "https://slack.com/api/conversations.replies"
         cursor = kwargs["params"].get("cursor", "")
         cursors.append(cursor)
@@ -161,6 +166,8 @@ async def test_duplicate_slack_delivery_keeps_the_admitted_thread_snapshot(ingre
     calls = []
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         assert url == "https://slack.com/api/conversations.replies"
         calls.append(deepcopy(parent))
         return {"ok": True, "messages": [deepcopy(parent), mention_message()], "has_more": False}
@@ -190,6 +197,8 @@ async def test_thread_read_failure_preserves_request_origin_and_reports_the_caus
         monkeypatch.setattr("moyai.product_slack_context.READ_TIMEOUT_SECONDS", 0.1)
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         assert url == "https://slack.com/api/conversations.replies"
         if failure == "timeout":
             try:
@@ -230,6 +239,8 @@ async def test_personal_slack_uses_only_bot_access_for_this_thread(ingress, acto
     calls = []
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         assert url == "https://slack.com/api/conversations.replies"
         assert kwargs["headers"]["Authorization"] == "Bearer synthetic-bot-token"
         assert kwargs["params"]["channel"] == CHANNEL
@@ -301,6 +312,8 @@ async def test_historical_continuation_admits_enriched_input_before_outer_submit
         return {"id": session.id}
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         assert url == "https://slack.com/api/conversations.replies"
         calls.append(url)
         return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
@@ -324,6 +337,8 @@ async def test_revoked_authority_during_read_does_not_admit_thread_content(ingre
     service, runtime = ingress.service, ingress.runtime
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         ingress.authority["current"] = False
         return {"ok": True, "messages": [root_message()], "has_more": False}
 
@@ -346,7 +361,9 @@ async def test_paused_thread_does_not_fetch_unaddressed_followup_context(ingress
         binding = await db.scalar(select(ProductSlackBinding))
         binding.paused = True
 
-    async def forbidden_request(*args, **kwargs):
+    async def forbidden_request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         pytest.fail("A paused, unmentioned thread must not read new Slack context.")
 
     monkeypatch.setattr(service.connectors, "request", forbidden_request)
@@ -360,7 +377,9 @@ async def test_paused_thread_does_not_fetch_unaddressed_followup_context(ingress
 async def test_direct_message_does_not_read_shared_history(ingress, monkeypatch):
     service, runtime = ingress.service, ingress.runtime
 
-    async def forbidden_request(*args, **kwargs):
+    async def forbidden_request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         pytest.fail("A direct message must not read organization history for context.")
 
     monkeypatch.setattr(service.connectors, "request", forbidden_request)
@@ -376,7 +395,9 @@ async def test_direct_message_does_not_read_shared_history(ingress, monkeypatch)
 async def test_dm_current_preview_is_retained_without_history_and_frozen_on_retry(ingress, monkeypatch):
     service, runtime = ingress.service, ingress.runtime
 
-    async def forbidden_request(*args, **kwargs):
+    async def forbidden_request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         pytest.fail("Current DM evidence must not read shared Slack history.")
 
     monkeypatch.setattr(service.connectors, "request", forbidden_request)
@@ -407,6 +428,8 @@ async def test_current_preview_survives_when_history_is_unavailable(ingress, mon
     calls = []
 
     async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
         assert failure == "missing_scope", "No grant must mean no external Slack read."
         calls.append(url)
         raise ConnectorError("Slack thread access is missing a required scope.", code="missing_scope")
