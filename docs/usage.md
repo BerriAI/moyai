@@ -185,12 +185,49 @@ independently of the recent-turn table's pagination. The cards measure overlappi
 intervals; only the complete-cohort startup breakdown is additive.
 
 Native timings live as content-free `performance.v1.*` observations in the
-existing `moyai_events` table. Roll out the native frontend, API, execution worker
+existing `moyai_events` table. Every new turn commits a receipt in its admission
+transaction, including Slack, scheduled/internal inputs, approval resumes and
+Slack control notices. Successful preparation commits its worker observation
+with the prepared turn, replacing the separate timing transaction.
+
+Web messages and web approval replies start at server HTTP receipt. Other
+admissions start at entry to native admission, excluding upstream delivery or
+scheduler delay. Each exported row identifies `timing_start_source` and
+`timing_surface`. The existing `api_received_at`, `api_to_dispatch_ms` and
+`api_to_worker_ms` keys are retained for compatibility; they now refer to this
+explicit per-row receipt boundary, which is not always an HTTP API boundary.
+
+Dispatch telemetry never awaits persistence before the outbound attempt. One
+background writer per database instance coalesces observations by turn, writes
+up to 32 at a time, and retries transient failures up to three times with a
+one-second timeout per attempt. Its pending queue and successful-observation
+cache are each capped at 4,096 turns. Database conflict handling still selects
+the earliest observation across processes, keeping its own broker timestamp.
+Retries concern telemetry only and never repeat inference. Deleted turns cannot
+discard other turns' observations in a batch.
+
+Each card accounts for all admissions in range:
+`total = samples + pending + missing + excluded`. Its `reasons` counts sum to
+`total`; per-turn `*_timing_status` fields are available in the table and CSV.
+Steering inputs and control notices are explicitly excluded from startup
+averages. Missing receipt evidence, old/uninstrumented records, invalid clocks,
+failed or incomplete acquisitions, and missing telemetry have distinct reasons.
+An ended turn without dispatch evidence does **not** prove dispatch never happened.
+Turns with no computer acquisition recorded are not zero-duration successes.
+Turns pulled into usage by an inference outside their admission window are
+marked `outside_range` and do not change the admission cohort.
+
+The writer remains bounded best effort: process crashes, sustained storage
+outages or queue exhaustion can lose dispatch observations. Such turns retain
+their durable admission and show a missing-observation status. Computer
+acquisition writes also remain best effort. Accounting for a turn is not a claim
+that every timing was captured.
+
+Roll out the native frontend, API, execution worker
 and broker together through the normal release process; no schema migration or
 new Temporal workflow commands are introduced. Existing history is not backfilled.
-Web messages (including original-session continuation) get an API receipt;
-steering inputs, delegate/maintenance model calls and non-HTTP admissions do not
-become foreground startup samples. The report keeps missing evidence unknown,
+Delegated and maintenance model calls do not become additional foreground
+startup samples. The report keeps missing evidence unknown,
 requires ordered server clocks, and uses the first observed outbound attempt's
 own broker receipt even if retries settle out of order. Measurements appear on
 `/api/settings/performance` and in its per-turn CSV export.

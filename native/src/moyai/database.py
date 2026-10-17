@@ -78,6 +78,8 @@ class Database:
         self.settings = settings
         self.security = security
         self.performance_tasks: set[asyncio.Task[None]] = set()
+        from .performance import DispatchRecorder
+        self.dispatch_timings = DispatchRecorder(self)
         self.product_identity: ProductIdentityAdapter | None = None
         self.product_connections: ProductConnections | None = None
         self.product_drain: ProductDrainService | None = None
@@ -335,18 +337,21 @@ class Database:
         swarm_generated: bool = False,
         received_at: str | None = None,
     ) -> Turn:
+        admitted_at = now()
         fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
         if db is not None:
             # Do not recover a conflicting receipt in an independent transaction.
             # The caller must roll back/retry its complete occurrence admission.
             return await self._submit(
                 actor, session_id, body, fingerprint, db=db, swarm_generated=swarm_generated,
-                received_at=received_at,
+                received_at=received_at, admitted_at=admitted_at,
             )
         if swarm_generated:
             raise ValueError("Generated swarm input requires its mission transaction.")
         try:
-            return await self._submit(actor, session_id, body, fingerprint, received_at=received_at)
+            return await self._submit(
+                actor, session_id, body, fingerprint, received_at=received_at, admitted_at=admitted_at,
+            )
         except IntegrityError:
             # Two requests can race the first lookup. The database's unique identity decides.
             async with self.sessions() as lookup:
@@ -362,7 +367,7 @@ class Database:
     async def _submit(
         self, actor: User, session_id: str, body: NewMessage, fingerprint: str,
         *, db: AsyncSession | None = None, received_at: str | None = None,
-        swarm_generated: bool = False,
+        swarm_generated: bool = False, admitted_at: str | None = None,
     ) -> Turn:
         async with self._admission_session(db) as transaction:
             product_grant = await self._actor_product_grant(transaction, actor)
@@ -441,11 +446,11 @@ class Database:
                     turn.status = "steering"
             transaction.add(turn)
             await transaction.flush()
-            if received_at is not None:
-                from .performance import evidence
-                # Commit with the original admission, never with an idempotent
-                # resend. Rejected submissions produce no timing observation.
-                transaction.add(Event(**evidence(session_id, turn.id, "received", received_at)))
+            from .performance import admission
+            admission(
+                transaction, turn, received_at or admitted_at or turn.created_at,
+                source="http" if received_at else "admission", surface=session.surface,
+            )
             self._bind_product_grant(transaction, turn, product_grant)
             await self.swarms.bind(transaction, mission, turn, generated=swarm_generated)
             for position, image_id in enumerate(body.attachments):
@@ -646,7 +651,8 @@ class Database:
                 Turn.status.in_(["starting", "running", "saving"])
             ).order_by(Turn.created_at).limit(100))).all())
 
-    async def prepare(self, turn_id: str) -> PreparedTurn:
+    async def prepare(self, turn_id: str, *, picked_up_at: str | None = None) -> PreparedTurn:
+        picked_up_at = picked_up_at or now()
         async with self.sessions.begin() as db:
             turn = await db.get(Turn, turn_id)
             if turn is None:
@@ -742,6 +748,8 @@ class Database:
                 if turn.deferred_results else None,
             )
             turn.preparation = self.security.seal(TypeAdapter(PreparedTurn).dump_json(prepared))
+            from .performance import evidence
+            db.add(Event(**evidence(session.id, turn.id, "worker", picked_up_at)))
             return prepared
 
     async def authorize_scope(self, scope: RunScope, *, input_id: str | None = None) -> None:
@@ -951,13 +959,17 @@ class Database:
 
     async def resume(
         self, actor: User, session_id: str, previous_id: str,
-        request_key: str, results: dict[str, Any],
+        request_key: str, results: dict[str, Any], *, received_at: str | None = None,
     ) -> Turn:
+        admitted_at = now()
         fingerprint = hashlib.sha256(json.dumps(
             {"previous": previous_id, "results": results}, sort_keys=True
         ).encode()).hexdigest()
         try:
-            return await self._resume(actor, session_id, previous_id, request_key, results, fingerprint)
+            return await self._resume(
+                actor, session_id, previous_id, request_key, results, fingerprint,
+                received_at=received_at, admitted_at=admitted_at,
+            )
         except (IntegrityError, HTTPException) as error:
             if isinstance(error, HTTPException) and error.status_code != 409:
                 raise
@@ -973,6 +985,7 @@ class Database:
     async def _resume(
         self, actor: User, session_id: str, previous_id: str,
         request_key: str, results: dict[str, Any], fingerprint: str,
+        *, received_at: str | None = None, admitted_at: str | None = None,
     ) -> Turn:
         async with self._admission_session(None) as db:
             product_grant = await self._actor_product_grant(db, actor)
@@ -1033,6 +1046,11 @@ class Database:
                 raise HTTPException(409, "Another response already resumed this request.")
             db.add(turn)
             await db.flush()
+            from .performance import admission
+            admission(
+                db, turn, received_at or admitted_at or turn.created_at,
+                source="http" if received_at else "admission", surface=session.surface,
+            )
             self._bind_product_grant(db, turn, product_grant)
             if member is not None:
                 await self.swarms.bind(db, mission, turn, generated=True)

@@ -554,6 +554,8 @@ class ProductSlack:
                     )
                     db.add(turn)
                     await db.flush()
+                    from .performance import admission
+                    admission(db, turn, turn.created_at, source="control", surface="slack")
                     self.runtime.database._bind_product_grant(db, turn, grant)
                     db.add(Message(
                         session_id=thread.session_id, turn_id=turn.id, role="assistant",
