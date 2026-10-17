@@ -308,6 +308,38 @@ for(const width of [1440,768,320])test(`space home respects reduced motion and k
   assert.equal(await page.getByRole('button',{name:'Swarm',exact:true}).isVisible(),true);
 });
 
+test('reference meteor shaders render front, side and back and restore Home after remount',async t=>{
+  reset({status:'idle'});
+  const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
+  t.after(()=>page.close());
+  const errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  page.on('console',message=>{if(message.type()==='error'&&/WebGL|shader|texture|GLTF/i.test(message.text()))errors.push(message.text());});
+  await page.route('**/static/models/moyai.glb',route=>route.fulfill({
+    path:path.resolve('native/web/public/moyai.glb'),contentType:'model/gltf-binary',
+  }));
+  await page.goto(base+'/');
+  const canvas=page.locator('.home-sculpture canvas');
+  await canvas.waitFor({state:'visible'});
+  const painted=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await canvas.press('Home');await painted();
+  const front=await canvas.screenshot();
+  assert.ok(front.length>4000,'The actual model and textures must render, not an empty canvas.');
+  for(let index=0;index<9;index++)await canvas.press('ArrowRight');
+  await painted();const side=await canvas.screenshot();
+  for(let index=0;index<9;index++)await canvas.press('ArrowRight');
+  await painted();const back=await canvas.screenshot();
+  assert.equal(front.equals(side),false);assert.equal(side.equals(back),false);
+  await canvas.press('Home');await painted();
+  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the reference view.');
+  await page.getByRole('link',{name:'idle Current native work',exact:true}).click();
+  await canvas.waitFor({state:'detached'});
+  await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).click();
+  await canvas.waitFor({state:'visible'});await painted();
+  assert.equal(await canvas.count(),1);
+  assert.deepEqual(errors,[]);
+});
+
 test('decode animation settles on input and can be paused without losing the draft',async t=>{
   reset({status:'idle'});const page=await pageFor(t,'');
   await page.emulateMedia({reducedMotion:'no-preference'});
