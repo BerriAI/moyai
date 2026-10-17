@@ -300,6 +300,27 @@ async def offered_tool_names(
     return sorted(names)
 
 
+def slack_transport(
+    history: list[dict[str, Any]], reads: list[dict[str, Any]],
+) -> httpx.MockTransport:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/conversations.replies"):
+            reads.append({
+                "method": request.method,
+                "url": str(request.url),
+                "params": dict(request.url.params),
+            })
+            return httpx.Response(200, json={"ok": True, "messages": history, "has_more": False})
+        if path.endswith(("/chat.postMessage", "/chat.update")):
+            return httpx.Response(200, json={
+                "ok": True, "channel": CHANNEL, "ts": "1792100000.001",
+            })
+        return httpx.Response(200, json={"ok": True})
+
+    return httpx.MockTransport(handle)
+
+
 async def execute_turn(
     case: dict[str, Any],
     *,
@@ -311,41 +332,41 @@ async def execute_turn(
 ) -> dict[str, Any]:
     service = runtime.product_slack
     assert service is not None and runtime.product_connections is not None
-    prior = case["thread"]
     stamp = 1_700_000_000 + trial * 10
-    root_ts = f"{stamp:.6f}" if prior else ""
+    current = f"{stamp + len(thread) + 1:.6f}"
+    thread_ts = current
     history = [{
         "ts": f"{stamp + index * 0.1:.6f}",
         "user": BOT_USER if message["role"] == "you" else SLACK_USER,
         "username": message["display_name"],
         "text": message["text"],
         **({"files": [{"id": "FROOT01"}]} if message.get("files") else {}),
-    } for index, message in enumerate(prior)]
-    current = f"{stamp + len(prior) + 1:.6f}"
-    root_ts = root_ts or current
-    history.append({"ts": current, "thread_ts": root_ts, "user": SLACK_USER, "text": case["prompt"]})
+    } for index, message in enumerate(case["thread"])]
+    history.append({
+        "ts": current, "thread_ts": thread_ts, "user": SLACK_USER, "text": case["prompt"],
+    })
     slack_reads: list[dict[str, Any]] = []
+    transport = slack_transport(history, slack_reads)
+    original_client = httpx.AsyncClient
 
-    async def slack_request(method: str, url: str, *, allowed_errors=(), **kwargs: Any) -> dict[str, Any]:
-        if url.endswith("/conversations.replies"):
-            slack_reads.append({"method": method, "url": url, "params": kwargs.get("params", {})})
-            return {"ok": True, "messages": history, "has_more": False}
-        return {"ok": True}
+    def routed_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs.setdefault("transport", transport)
+        return original_client(*args, **kwargs)
 
     payload = {
         "type": "event_callback", "team_id": TEAM, "event_id": f"eval-{case['id']}-{trial}",
         "event": {
             "type": "app_mention", "user": SLACK_USER, "channel": CHANNEL,
-            "channel_type": "channel", "ts": current, "thread_ts": root_ts, "text": case["prompt"],
+            "channel_type": "channel", "ts": current, "thread_ts": thread_ts, "text": case["prompt"],
         },
     }
-    with patch.object(runtime.product_connections.connectors, "request", slack_request):
-        await service.events.receive(payload)
+    with patch("httpx.AsyncClient", routed_client):
+        await service.receive_payload(payload)
     async with runtime.database.sessions() as db:
         slack_thread = await db.scalar(sqlalchemy.select(SlackThread).where(
             SlackThread.team_id == TEAM,
             SlackThread.channel_id == CHANNEL,
-            SlackThread.thread_ts == root_ts,
+            SlackThread.thread_ts == thread_ts,
         ))
         if slack_thread is None:
             raise RuntimeError(f"ProductSlack did not bind {case['id']}.")
@@ -367,7 +388,7 @@ async def execute_turn(
         posted.append(body)
         return httpx.Response(200, json={"ok": True, "channel": body["channel"], "ts": "1792100000.001"})
 
-    async with httpx.AsyncClient(
+    async with original_client(
         base_url="https://slack.com/api/", transport=httpx.MockTransport(post_stub), timeout=20,
     ) as delivery:
         for _ in range(4):
@@ -396,7 +417,7 @@ async def execute_turn(
         "slack_thread_reads": slack_reads,
         "prompt_received": prompt,
         "thread_messages_in_prompt": [
-            message["text"] for message in prior if message["text"] in prompt
+            message["text"] for message in case["thread"] if message["text"] in prompt
         ],
         "attached_image_names": [],
         "posted_reply": reply,
