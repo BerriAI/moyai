@@ -49,7 +49,8 @@ GIT_OPERATION_SCHEMA_VERSION = "2026-10-15-product-git-operations-v13"
 EXECUTION_COMPATIBILITY_SCHEMA_VERSION = "2026-10-16-product-execution-v14"
 BILLING_STORAGE_SCHEMA_VERSION = "2026-10-16-product-billing-storage-v15"
 SWARM_SCHEMA_VERSION = "2026-10-16-native-swarms-v16"
-PRODUCT_SCHEMA_VERSION = SWARM_SCHEMA_VERSION
+GITHUB_WORKFLOW_SCHEMA_VERSION = "2026-10-16-product-github-workflows-v17"
+PRODUCT_SCHEMA_VERSION = GITHUB_WORKFLOW_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -121,6 +122,8 @@ MIGRATIONS = (
     # backfill records and select the read source after exact validation.
     (BILLING_STORAGE_SCHEMA_VERSION, frozenset({"moyai_billing_records", "moyai_billing_storage"})),
     (SWARM_SCHEMA_VERSION, SWARM_TABLES),
+    # New tool schemas/operation kinds cannot be resumed by the previous worker.
+    (GITHUB_WORKFLOW_SCHEMA_VERSION, frozenset()),
 )
 
 

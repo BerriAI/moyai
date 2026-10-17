@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -128,7 +129,7 @@ class OnDemandRepository(WrapperCapability[RunScope]):
         self, ctx: RunContext[RunScope], *, call: ToolCallPart,
         tool_def: ToolDefinition, args: dict[str, Any],
     ) -> dict[str, Any]:
-        if tool_def.name not in COMPUTER_TOOLS:
+        if tool_def.name not in COMPUTER_TOOLS and not re.fullmatch(r"github_[A-Za-z0-9]{8}_checkout", tool_def.name):
             return args
         async with self.lock:
             if not self.ready:

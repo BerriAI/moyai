@@ -259,9 +259,10 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
         except Exception:
             raise ConnectorError('The GitHub App signing key is invalid. An administrator must reconnect it.') from None
 
-    async def request(self, method, path, *, token='', missing=False, repository_redirect=False, **kwargs):
+    async def request(self, method, path, *, token='', missing=False, repository_redirect=False,
+                      api_version='2022-11-28', include_status=False, **kwargs):
         # Every caller below constructs a fixed GitHub API path; no user URL.
-        headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+        headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': api_version}
         if token:
             headers['Authorization'] = 'Bearer ' + token
         try:
@@ -276,7 +277,8 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
                     return None
                 if not 200 <= response.status_code < 300:
                     raise GitHubError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.', response.status_code)
-                return response.json() if response.content else {}
+                data = response.json() if response.content else {}
+                return {'status_code': response.status_code, 'data': data} if include_status else data
         except (httpx.HTTPError, ValueError):
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
 

@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from app.db import database as source_database
-from app.github import Publish, Update, workflow_changes
-from app.github_coding import PRWrite, PublicationStatus
+from app.github import Publish as LegacyPublish
+from app.github import Update, workflow_changes
+from app.github_coding import PRWrite
 from app.github_write_access import GitHubWriteAccess
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ToolCallPart
@@ -21,6 +23,17 @@ from sqlalchemy import select
 
 from .contracts import Grant, RunScope
 from .effects import effect_id
+from .github_request_policy import validate_request
+from .github_workflow_types import (
+    AuthorityRef,
+    DispatchAuthority,
+    LifecycleAccess,
+    PublicationStatus,
+    Publish,
+    PublishBranch,
+    PullRequest,
+    Rebase,
+)
 from .models import Effect, Turn, User, now
 from .pr_publications import creation_receipt, persist_publication, positive_id
 from .product_github_models import ProductGitOperation as Operation
@@ -31,6 +44,7 @@ if TYPE_CHECKING:
 SHA = re.compile(r"^[0-9a-f]{40}$")
 READ = {"annotations": {"readOnlyHint": True}}
 WRITE = {"annotations": {"readOnlyHint": False}}
+AUTHORITIES = TypeAdapter(dict[str, DispatchAuthority])
 
 
 class Publications:
@@ -63,6 +77,7 @@ class Publications:
             raise ToolFailed("This tool is scoped to a different selected repository.")
 
     async def request(self, method: str, path: str, token: str, **kwargs) -> Any:
+        validate_request(method, path, kwargs.get("json"))
         return await self.service.execution.call(
             lambda bound: bound.github.request(method, path, token=token, **kwargs),
             authorize=lambda: self.service.check(self.scope, self.grant), recheck=method == "GET",
@@ -86,10 +101,18 @@ class Publications:
             raise ToolFailed("Publication needs a native tool identity.")
         await self.check_target(request)
         name = f"github_{self.grant.id[:8]}_{kind}"
-        stored_kind = "pr_write_access" if kind == "request_pull_request_write_access" else kind
+        stored_kind = {
+            "request_pull_request_write_access": "pr_write_access",
+            "request_pr_lifecycle_access": "pr_lifecycle_access",
+        }.get(kind, kind)
         effect = effect_id(ctx, ToolCallPart(name, {}, tool_call_id=ctx.tool_call_id))
         identity = hashlib.sha256(f"{self.scope.session_id}:{stored_kind}:{request.request_key}".encode()).hexdigest()
-        fingerprint = hashlib.sha256(json.dumps(request.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
+        arguments = request.model_dump(mode="json")
+        if kind == "create_pull_request":
+            # Omitted branch overrides retain the historical request-key identity.
+            arguments = {key: value for key, value in arguments.items()
+                         if key not in {"base_branch", "head_branch"} or value is not None}
+        fingerprint = hashlib.sha256(json.dumps(arguments, sort_keys=True).encode()).hexdigest()
         async with self.database.sessions.begin() as db:
             await self.authorize(db)
             receipt = await db.get(Effect, effect)
@@ -130,6 +153,25 @@ class Publications:
             row.document = current.document
             return document
 
+    async def bind_authority(
+        self, row: Operation, authority: AuthorityRef, *, number: int, head: str, base: str, lifecycle: bool = False,
+    ) -> None:
+        scope = DispatchAuthority(
+            **authority.model_dump(), number=number, head=head, base=base, lifecycle=lifecycle,
+        ).model_dump(mode="json")
+        async with self.database.sessions.begin() as db:
+            current = await db.get(Operation, row.id, with_for_update=True)
+            if current is None:
+                raise ToolFailed("The publication reservation disappeared.")
+            document = self.document(current)
+            scopes = document.setdefault("required_authorities", {})
+            previous = scopes.get(str(number))
+            if previous is not None and previous != scope:
+                raise ToolFailed("The PR authority changed within this operation.")
+            scopes[str(number)] = scope
+            current.document = self.database.security.seal(document)
+            row.document = current.document
+
     async def finish(self, row: Operation, result: dict) -> dict:
         original, receipt = None, None
         async with self.database.sessions.begin() as db:
@@ -139,9 +181,9 @@ class Publications:
             if current is None or effect is None or original_turn is None:
                 raise ToolFailed("The original publication evidence is unavailable.")
             confirmed = effect.settled_at or now()
-            if row.kind == "create_pull_request":
+            if row.kind in {"create_pull_request", "open_pull_request"}:
                 original = replace(self.scope, turn_id=row.turn_id, model=original_turn.model)
-                name = f"github_{self.grant.id[:8]}_create_pull_request"
+                name = f"github_{self.grant.id[:8]}_{row.kind}"
                 base = result.get("base")
                 repository = (base.get("repo") or {}).get("full_name", "") if isinstance(base, dict) else ""
                 owner, _, repo = repository.partition("/") if isinstance(repository, str) else ("", "", "")
@@ -156,7 +198,8 @@ class Publications:
             await persist_publication(self.database, original, row.original_effect_id, receipt)
         return result
 
-    async def step(self, row: Operation, key: str, method: str, path: str, token: str, body: dict) -> dict:
+    async def step(self, row: Operation, key: str, method: str, path: str, token: str, body: dict,
+                   *, api_version: str = "2022-11-28", include_status: bool = False) -> dict:
         if row.kind == "update_pull_request":
             document = self.document(row)
             await self.authority(document["number"], base_sha=document["base_sha"])
@@ -169,9 +212,42 @@ class Publications:
                 return document["steps"][key]
             if key in document["attempts"]:
                 raise ToolFailed(f"GitHub {key} has an unconfirmed receipt. Inspect it; this write will not be repeated.")
+            if row.kind not in {"create_pull_request", "create_branch", "publish_branch", "open_pull_request"}:
+                try:
+                    scopes = AUTHORITIES.validate_python(document.get("required_authorities"))
+                except ValidationError:
+                    raise ToolFailed("The operation has no valid admitted PR authority.") from None
+                if not scopes:
+                    raise ToolFailed("The operation has no admitted PR authority.")
+                for scope in sorted(scopes.values(), key=lambda item: item.id or ""):
+                    if scope.legacy_owned:
+                        continue
+                    if scope.id is None:
+                        raise ToolFailed("The PR authority is unavailable.")
+                    authority = await db.get(Operation, scope.id, with_for_update=True)
+                    if authority is None:
+                        raise ToolFailed("The PR grant is unavailable.")
+                    saved = self.document(authority)
+                    receipt = saved.get("result", {})
+                    required_grant = "pr_lifecycle_access" if scope.lifecycle else "pr_write_access"
+                    if (
+                        authority.connection_id != row.connection_id
+                        or authority.connection_revision != row.connection_revision
+                        or authority.repository_id != row.repository_id
+                        or receipt.get("number") != scope.number
+                        or authority.kind not in {"create_pull_request", "open_pull_request", required_grant}
+                        or saved.get("revoked")
+                        or (saved.get("authorized_base") or receipt.get("base", {}).get("ref")) != scope.base
+                        or (authority.kind == "pr_write_access" and receipt.get("head", {}).get("sha") != scope.head)
+                        or (authority.kind in {"pr_lifecycle_access", "pr_write_access"} and (
+                            authority.actor_id != row.actor_id or authority.session_id != row.session_id
+                            or authority.turn_id != self.scope.turn_id
+                        ))
+                    ):
+                        raise ToolFailed("The PR grant was revoked or changed before dispatch.")
             document["attempts"].append(key)
             current.document, current.updated_at = self.database.security.seal(document), now()
-        value = await self.request(method, path, token, json=body)
+        value = await self.request(method, path, token, json=body, api_version=api_version, include_status=include_status)
         if not isinstance(value, dict):
             raise ToolFailed("GitHub returned no verifiable operation receipt.")
         # A received provider result is evidence even after Stop/revocation.
@@ -184,7 +260,7 @@ class Publications:
             row.document = current.document
         return value
 
-    async def commit(self, row: Operation, request: Publish | Update, token: str) -> str:
+    async def commit(self, row: Operation, request: Publish | Update | PublishBranch | Rebase, token: str) -> str:
         prefix = f"/repositories/{self.target}"
         base = await self.request("GET", prefix + "/git/commits/" + request.base_sha, token)
         tree = (base.get("tree") or {}).get("sha") if isinstance(base, dict) else None
@@ -229,62 +305,41 @@ class Publications:
             raise ToolFailed("GitHub did not confirm the exact ready-for-review PR identity.")
         return value
 
-    async def create(self, ctx: RunContext[RunScope], request: Publish) -> dict:
-        row = await self.operation(ctx, "create_pull_request", request)
-        document = self.document(row)
-        if document.get("result"):
-            return await self.finish(row, document["result"])
-        token = await self.token(workflows=workflow_changes(request))
-        prefix = f"/repositories/{self.target}"
-        repo = await self.request("GET", prefix, token)
-        if repo.get("id") != self.target or not GitHubWriteAccess.valid_branch(repo.get("default_branch")):
-            raise ToolFailed("GitHub did not confirm the repository's default branch.")
-        branch = f"moyai/{self.scope.session_id[:12]}/{row.id[:16]}"
-        base = repo["default_branch"]
-        current = await self.request("GET", prefix + "/commits/" + quote(base, safe=""), token)
-        if current.get("sha") != request.base_sha:
-            compare = await self.request("GET", prefix + "/compare/" + request.base_sha + "..." + str(current.get("sha", "")), token)
-            if compare.get("status") not in {"ahead", "identical"}:
-                raise ToolFailed("The requested base is not an ancestor of the current default branch.")
-        if document.get("base_branch") and document["base_branch"] != base:
-            raise ToolFailed("The repository default branch changed. Review a fresh publication intent.")
-        await self.save(row, base_branch=base, branch=branch, repository=repo.get("full_name", ""))
-        commit = await self.commit(row, request, token)
-        ref = await self.request("GET", prefix + "/git/ref/heads/" + quote(branch, safe="/"), token, missing=True)
-        if ref and (ref.get("object") or {}).get("sha") != commit:
-            raise ToolFailed("The publication branch changed externally; it was not overwritten.")
-        if not ref:
-            await self.step(row, "branch", "POST", prefix + "/git/refs", token, {"ref": "refs/heads/" + branch, "sha": commit})
-        pulls = await self.request("GET", prefix + "/pulls", token, params={
-            "state": "all", "head": repo["full_name"].split("/")[0] + ":" + branch, "base": base,
-        })
-        if not isinstance(pulls, list) or len(pulls) > 1:
-            raise ToolFailed("GitHub did not return a unique publication readback.")
-        value = pulls[0] if pulls else await self.step(row, "pull-request", "POST", prefix + "/pulls", token, {
-            "title": request.title, "body": request.body, "head": branch, "base": base,
-            "draft": False, "maintainer_can_modify": True,
-        })
-        value = self.verified_pr(value, branch, base, commit)
-        return await self.finish(row, value)
+    async def create(self, ctx: RunContext[RunScope], request: Publish | LegacyPublish) -> dict:
+        from .product_github_workflows import Workflows
+        return await Workflows(self).create(ctx, Publish.model_validate(request.model_dump()))
 
-    async def authority(self, number: int, *, base_sha: str | None = None) -> dict:
+    async def authority(self, number: int, *, base_sha: str | None = None,
+                        branch_write: bool = True, lifecycle: bool = False) -> dict:
         async with self.database.sessions() as db:
             rows = list(await db.scalars(select(Operation).where(
                 Operation.repository_id == self.target, Operation.connection_id == self.grant.id,
                 Operation.connection_revision == self.grant.revision,
-                Operation.kind.in_(["create_pull_request", "pr_write_access"]),
+                Operation.kind.in_(["create_pull_request", "open_pull_request", "pr_write_access", "pr_lifecycle_access"]),
             )))
-        for row in rows:
+        for row in sorted(rows, key=lambda value: (
+            value.kind in {"pr_write_access", "pr_lifecycle_access"}, value.created_at,
+        ), reverse=True):
             document = self.document(row)
             value = document.get("result")
             if value and value.get("number") == number:
-                if row.kind == "pr_write_access" and (
+                if row.kind == "pr_lifecycle_access" and not lifecycle:
+                    continue
+                if row.kind == "pr_write_access" and lifecycle:
+                    continue
+                if row.kind in {"create_pull_request", "open_pull_request"} and branch_write:
+                    from .product_github_workflows import Workflows
+                    if not await Workflows(self).branch_owned(value["head"]["ref"], base_sha):
+                        continue
+                if row.kind in {"pr_write_access", "pr_lifecycle_access"} and (
                     row.actor_id != self.scope.actor_id or row.session_id != self.scope.session_id
                     or row.turn_id != self.scope.turn_id or document.get("revoked")
-                    or (base_sha is not None and value.get("head", {}).get("sha") != base_sha)
+                    or (row.kind == "pr_write_access" and base_sha is not None
+                        and value.get("head", {}).get("sha") != base_sha)
                 ):
                     continue
-                return value
+                return {**value, "_authority_id": row.id, "base": {**value.get("base", {}),
+                        **({"ref": document["authorized_base"]} if document.get("authorized_base") else {})}}
         version = await source_database(self.service.connectors.github.connection_version)
         rows = await source_database(self.service.store.rows,
             "SELECT * FROM github_publications WHERE connection_version=? AND result!=?", (version, ""))
@@ -294,15 +349,56 @@ class Publications:
             except (ValueError, TypeError):
                 continue
             if isinstance(value, dict) and value.get("repository_id") == self.target and value.get("number") == number:
-                return {"number": number, "head": {"ref": row["branch"], "repo": {"id": self.target}},
+                return {"number": number, "_legacy_owned": True,
+                        "head": {"ref": row["branch"], "repo": {"id": self.target}},
                         "base": {"repo": {"id": self.target}}}
+        if lifecycle:
+            raise ToolFailed("This external PR needs request_pr_lifecycle_access approval for metadata actions.")
         raise ToolFailed("This external PR needs requester approval for its exact head in the current task.")
+
+    async def approve_lifecycle(self, ctx: RunContext[RunScope], request: LifecycleAccess) -> dict:
+        from .product_github_workflows import parse
+        if not ctx.tool_call_approved or ctx.run_id != self.scope.turn_id or self.scope.surface not in {"web", "slack"}:
+            raise ToolFailed("Only explicit requester approval may grant PR lifecycle access.")
+        row = await self.operation(ctx, "request_pr_lifecycle_access", request)
+        if row.turn_id != self.scope.turn_id:
+            raise ToolFailed("That approval belongs to an earlier task. Use a fresh request key.")
+        token = await self.token()
+        value = await self.request("GET", f"/repositories/{self.target}/pulls/{request.number}", token)
+        pr = parse(PullRequest, value)
+        if (pr.number != request.number or pr.base.repo.id != self.target or pr.head.repo.id != self.target
+                or pr.head.sha != request.head_sha or pr.merged or pr.merged_at):
+            raise ToolFailed("The unmerged PR identity changed before consent.")
+        await self.finish(row, value)
+        return {"status": "approved", "number": request.number, "scope": "task_pr_lifecycle",
+                "url": pr.html_url}
 
     async def update(self, ctx: RunContext[RunScope], request: Update) -> dict:
         row = await self.operation(ctx, "update_pull_request", request)
         saved = self.document(row).get("result")
         if saved:
             return await self.finish(row, saved)
+        document = self.document(row)
+        acknowledgement = document["steps"].get("advance-branch")
+        if acknowledgement:
+            from .github_workflow_types import GitReference
+            from .product_github_workflows import parse
+            acknowledged = parse(GitReference, acknowledgement)
+            commit = document["steps"]["commit"]["sha"]
+            token = await self.token()
+            value = document.get("update_scope") or await self.request(
+                "GET", f"/repositories/{self.target}/pulls/{request.number}", token,
+            )
+            pr = parse(PullRequest, value)
+            if (
+                acknowledged.object.sha != commit or acknowledged.ref != "refs/heads/" + pr.head.ref
+                or pr.number != request.number or pr.head.repo.id != self.target
+            ):
+                raise ToolFailed("The saved update acknowledgment does not match the original PR.")
+            return await self.finish(row, {
+                "number": pr.number, "html_url": pr.html_url, "commit": commit, "branch": pr.head.ref,
+                "repository_id": self.target, "state": pr.state, "draft": pr.draft,
+            })
         owned = await self.authority(request.number, base_sha=request.base_sha)
         token = await self.token(workflows=workflow_changes(request))
         prefix = f"/repositories/{self.target}"
@@ -312,10 +408,14 @@ class Publications:
             owned.get("base", {}).get("ref") and owned["base"]["ref"] != base
         ):
             raise ToolFailed("The approved PR no longer points to its original selected-repository branch.")
+        await self.bind_authority(
+            row, AuthorityRef.model_validate(owned), number=request.number, head=request.base_sha, base=base,
+        )
         document = self.document(row)
         commit = (document["steps"].get("commit") or {}).get("sha")
         if pr["head"]["sha"] not in {request.base_sha, commit}:
             raise ToolFailed("The PR head changed. Read its current revision before preparing a new update.")
+        await self.save(row, update_scope=pr)
         commit = commit or await self.commit(row, request, token)
         path = prefix + "/git/refs/heads/" + quote(branch, safe="/")
         current = await self.request("GET", prefix + "/git/ref/heads/" + quote(branch, safe="/"), token)
@@ -323,6 +423,8 @@ class Publications:
         if sha not in {request.base_sha, commit}:
             raise ToolFailed("The branch changed externally; it was not overwritten.")
         if sha != commit:
+            from .product_github_workflows import Workflows
+            await Workflows(self).writable(token, branch, existing=True)
             current = await self.step(row, "advance-branch", "PATCH", path, token, {"sha": commit, "force": False})
             if (current.get("object") or {}).get("sha") != commit:
                 raise ToolFailed("GitHub did not confirm the branch update.")
@@ -348,10 +450,15 @@ class Publications:
     async def status(self, request: PublicationStatus) -> dict:
         await self.service.check(self.scope, self.grant)
         await self.check_target(request)
-        identity = hashlib.sha256(f"{self.scope.session_id}:create_pull_request:{request.request_key}".encode()).hexdigest()
+        identity = hashlib.sha256(
+            f"{self.scope.session_id}:{request.operation}:{request.request_key}".encode()
+        ).hexdigest()
         async with self.database.sessions() as db:
             row = await db.get(Operation, identity)
-        if row is None or row.connection_id != self.grant.id or row.actor_id != self.scope.actor_id:
+        if (
+            row is None or row.connection_id != self.grant.id or row.actor_id != self.scope.actor_id
+            or row.connection_revision != self.grant.revision or row.repository_id != self.target
+        ):
             return {"status": "not_found"}
         document = self.document(row)
         if document.get("result"):
@@ -364,6 +471,8 @@ class Publications:
 def toolset(service: ProductConnections, scope: RunScope, grant: Grant):
     publisher = Publications(service, scope, grant)
     tools: FunctionToolset[RunScope] = FunctionToolset(id=f"product_github_publication_{grant.id}")
+    from .product_github_tools import register
+    register(tools, publisher)
 
     @tools.tool(metadata=READ)
     async def publication_status(ctx: RunContext[RunScope], request: PublicationStatus) -> dict:
@@ -371,6 +480,18 @@ def toolset(service: ProductConnections, scope: RunScope, grant: Grant):
         return await publisher.status(request)
 
     if not grant.read_only:
+        @tools.tool(metadata=WRITE, sequential=True)
+        async def request_pr_lifecycle_access(
+            ctx: RunContext[RunScope], request: LifecycleAccess,
+        ) -> dict:
+            """Ask the requester to allow this PR's metadata changes for the current task.
+
+            Allows close, reopen, retarget and explicit draft conversion even if new commits
+            arrive after approval. This never grants branch writes, review approval or merging.
+            Supply the current head for the consent display; retargeting revokes this grant.
+            """
+            return await publisher.approve_lifecycle(ctx, request)
+
         @tools.tool(metadata=WRITE, sequential=True)
         async def create_pull_request(ctx: RunContext[RunScope], request: Publish) -> dict:
             """Publish bounded, validated file changes from an exact checkout base as a regular PR.
@@ -402,9 +523,13 @@ def toolset(service: ProductConnections, scope: RunScope, grant: Grant):
 
     async def prepare_approval(_ctx, definitions):
         return [
-            replace(tool, kind="unapproved") if tool.name == "request_pull_request_write_access" else tool
+            replace(tool, kind="unapproved") if tool.name in {
+                "request_pull_request_write_access", "request_pr_lifecycle_access",
+            } else tool
             for tool in definitions
         ]
     return tools.prepared(prepare_approval).approval_required(
-        lambda _ctx, tool, _args: tool.name == "request_pull_request_write_access",
+        lambda _ctx, tool, _args: tool.name in {
+            "request_pull_request_write_access", "request_pr_lifecycle_access",
+        },
     )
