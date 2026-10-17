@@ -129,6 +129,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .composer-actions > [data-slot="select-trigger"] { max-width: 210px; font-size: 12px; height: 34px; }
 .send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; max-width: 100%; }
 .send-actions [data-slot="select-trigger"] { font-size: 12px; width: 112px; }
+.composer-save-icon { display: none; }
 .composer-hint { text-align: center; color: var(--ui-muted); font-size: 11px; margin-top: 8px; }
 .working { display: flex; gap: 10px; align-items: center; color: var(--ui-muted); margin: 24px auto; font-size: 13px; max-width: var(--chat-width); }
 .running-dot { width: 6px; height: 6px; background: var(--ui-success); border-radius: 50%; flex: none; }
@@ -245,8 +246,10 @@ legend { margin-bottom: 12px; font-weight: 500; }
   .transcript { padding: 24px var(--chat-gutter); }
   .composer-wrap { padding: 8px var(--chat-gutter) 12px; }
   .composer-actions { gap: 12px; }
-  .composer-actions > [data-slot="select-trigger"] { max-width: 100%; width: 100%; }
-  .send-actions { width: 100%; justify-content: flex-end; }
+  .conversation .composer .composer-actions { flex-wrap: nowrap; gap: 8px; }
+  .conversation .composer-actions > [data-slot="select-trigger"] { flex: 1; min-width: 0; max-width: 210px; width: auto; height: 40px; }
+  .conversation .composer-actions [data-slot="button"] { height: 40px; }
+  .conversation .send-actions { flex: none; flex-wrap: nowrap; width: auto; }
   .pending { padding: 16px; }
   input, textarea, [data-slot="select-trigger"] { font-size: 16px !important; }
   .empty-chat { margin-top: 6vh; }
@@ -267,3 +270,11 @@ legend { margin-bottom: 12px; font-weight: 500; }
   .computer-panel { min-height: 0; }
 }
 @media (prefers-reduced-motion: reduce) { *, *:before, *:after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+@media (max-width: 400px) {
+  .conversation .composer-actions .composer-optional-label { display: none; }
+  .conversation .composer-actions .composer-save-icon { display: block; }
+  .conversation .composer-actions button[aria-label="Attach"],
+  .conversation .composer-actions button[aria-label="Stop task"],
+  .conversation .composer-actions button[aria-label="Save queued message"] { width: 40px; padding: 0; }
+}

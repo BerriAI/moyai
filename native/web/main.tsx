@@ -790,8 +790,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
-                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button>}
-                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
+                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
+                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? <><Check className="composer-save-icon" /><span className="composer-optional-label">Save message</span></> : <ArrowUp />}</Button>
               </div>
             </div>
           </div>

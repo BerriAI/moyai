@@ -118,6 +118,6 @@ export function AttachButton({ add, disabled, compact = false }: { add: (files: 
   const input = useRef<HTMLInputElement>(null)
   return <>
     <input ref={input} className="visually-hidden" type="file" multiple disabled={disabled} aria-label="Attach files" onChange={event => { void add(Array.from(event.target.files ?? [])); event.target.value = "" }} />
-    <Button type="button" variant="ghost" size={compact ? "icon-sm" : "sm"} aria-label="Attach" title="Attach files" disabled={disabled} onClick={() => input.current?.click()}><Paperclip size={16} />{!compact && "Attach"}</Button>
+    <Button type="button" variant="ghost" size={compact ? "icon-sm" : "sm"} aria-label="Attach" title="Attach files" disabled={disabled} onClick={() => input.current?.click()}><Paperclip size={16} />{!compact && <span className="composer-optional-label">Attach</span>}</Button>
   </>
 }
