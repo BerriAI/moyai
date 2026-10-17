@@ -11,19 +11,8 @@ from uuid import uuid4
 
 import httpx
 import sqlalchemy
-from app.credentials import SaveSecret
-from app.db import Store
-from app.security import Security as ProductSecurity
-from product_database_fixtures import product_database_state
-from pydantic import SecretStr
-from pydantic_ai import ConversationTypeAdapter
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from sqlalchemy import text
-from temporalio.testing import WorkflowEnvironment
-from test_product_identity import google_cookie, request, settings_for
-
 from moyai.agent import inference_models, make_agent
+from moyai.inference_usage import InferenceUsage
 from moyai.models import SlackThread, Turn
 from moyai.product_connections import ProductConnections
 from moyai.product_continuation import ProductContinuationService
@@ -41,6 +30,19 @@ from moyai.storage import ObjectStore, encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
+from product_database_fixtures import product_database_state
+from pydantic import SecretStr
+from pydantic_ai import ConversationTypeAdapter
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+from sqlalchemy import text
+from temporalio.testing import WorkflowEnvironment
+from test_product_identity import google_cookie, request, settings_for
+
+from app.credentials import SaveSecret
+from app.db import Store
+from app.security import Security as ProductSecurity
+from moyai_harbor.costs import recorded_costs
 
 EVALS = Path(__file__).resolve().parents[1]
 MODEL_COMPLETION = {
@@ -433,7 +435,15 @@ async def execute_turn(
         id=turn.workflow_id,
         task_queue=runtime.settings.temporal_queue,
     )
-    await asyncio.wait_for(handle.result(), timeout=300)
+    execution_error = ""
+    try:
+        await asyncio.wait_for(handle.result(), timeout=300)
+    except Exception as error:  # noqa: BLE001 - retain observed charges for failed agent runs
+        execution_error = f"{type(error).__name__}: {error}"
+        for key in ("LITELLM_API_KEY", "LITELLM_GATEWAY_ADMIN_KEY"):
+            if value := os.getenv(key):
+                execution_error = execution_error.replace(value, "[redacted]")
+        execution_error = execution_error[:4000]
     posted: list[dict[str, Any]] = []
 
     def post_stub(request: httpx.Request) -> httpx.Response:
@@ -454,6 +464,9 @@ async def execute_turn(
             await service.pump(delivery)
     async with runtime.database.sessions() as db:
         completed = await db.get(Turn, turn.id)
+        ledger = (await db.scalars(sqlalchemy.select(InferenceUsage).where(
+            InferenceUsage.turn_id == turn.id,
+        ))).all()
     if completed is None:
         raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
     reply = next((
@@ -465,6 +478,13 @@ async def execute_turn(
         if any(block.get("type") == "section" for block in item.get("blocks", []))
     ), "")
     prompt = runtime.security.unseal(completed.prompt).decode()
+    usage = json.loads(completed.usage or "{}")
+    usage.update(recorded_costs([
+        {name: getattr(row, name) for name in (
+            "cost_usd", "cost_status", "cost_source", "status", "coverage_error",
+        )}
+        for row in ledger
+    ], usage, execution_complete=not execution_error))
     return {
         "case": case["id"],
         "trial": trial,
@@ -474,5 +494,6 @@ async def execute_turn(
         "attached_image_names": [],
         "posted_reply": reply,
         "tool_trace": conversation_trace(completed.conversation, runtime.security),
-        "tokens_cost": json.loads(completed.usage or "{}"),
+        "tokens_cost": usage,
+        **({"execution_error": execution_error} if execution_error else {}),
     }

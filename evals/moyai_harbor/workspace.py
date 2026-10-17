@@ -5,6 +5,7 @@ import shlex
 from collections.abc import Mapping, Sequence
 
 from harbor.environments.base import BaseEnvironment
+from moyai.contracts import RunScope
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.workspaces import (
@@ -14,8 +15,6 @@ from pydantic_ai.workspaces import (
     WorkspaceBackend,
     WorkspaceRef,
 )
-
-from moyai.contracts import RunScope
 
 
 class HarborCommandBackend(SupportsCommands):

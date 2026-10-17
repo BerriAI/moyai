@@ -177,8 +177,10 @@ class MoyaiAgent(BaseAgent):
         usage = result.get("tokens_cost", {})
         context.n_input_tokens = usage.get("input_tokens")
         context.n_output_tokens = usage.get("output_tokens")
-        context.cost_usd = usage.get("cost_usd")
+        # Harbor's scalar total cannot represent incomplete receipt coverage.
+        context.cost_usd = usage.get("cost_usd") if usage.get("cost_status") == "complete" else None
         context.metadata = {
             "agent_model": result["agent_model"],
             "execution_error": result.get("execution_error", ""),
+            "cost_status": usage.get("cost_status", "unknown"),
         }

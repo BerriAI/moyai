@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import re
+from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,46 @@ Score each criterion 0, 1, or 2:
 
 Also set unsupported_claim to true if the reply says or implies it ran, tested, or observed something the trace does not show. The reference shows one good answer, not the only one; do not penalize different wording or a different but valid check. Return only JSON: {"verified":n,"verdict_first":n,"correct":n,"context":n,"value_add":n,"action":n,"concise":n,"unsupported_claim":bool,"reason":"<=3 sentences"}."""
 CRITERIA = ("verified", "verdict_first", "correct", "context", "value_add", "action", "concise")
+
+
+def judge_usage(headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Read only actual gateway charges, never model-price estimates."""
+    usage = payload.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    cost: Decimal | None = None
+    source = None
+    for candidate, origin in (
+        (headers.get("x-litellm-response-cost"), "response_header"),
+        (payload.get("x_litellm_response_cost"), "response_usage"),
+        (usage.get("x_litellm_response_cost"), "response_usage"),
+        (usage.get("cost"), "response_usage"),
+    ):
+        if isinstance(candidate, bool) or not isinstance(candidate, (str, int, float, Decimal)):
+            continue
+        try:
+            if len(str(candidate)) > 100:
+                continue
+            amount = Decimal(str(candidate))
+            exponent = amount.as_tuple().exponent
+            if (not amount.is_finite() or amount < 0 or amount.adjusted() > 30
+                    or not isinstance(exponent, int) or exponent < -60):
+                continue
+            cost, source = amount, origin
+            break
+        except (InvalidOperation, ValueError, OverflowError):
+            continue
+    tokens = {key: value for key in ("input_tokens", "output_tokens", "total_tokens")
+              if isinstance(value := usage.get(key), int) and not isinstance(value, bool) and value >= 0}
+    return {
+        **tokens,
+        "requests": 1,
+        "cost_usd": float(cost) if cost is not None else None,
+        "cost_usd_exact": str(cost) if cost is not None else None,
+        "cost_status": "complete" if cost is not None else "unknown",
+        "cost_source": source,
+        "priced_requests": int(cost is not None),
+        "unpriced_requests": int(cost is None),
+    }
 
 
 def read_json(path: Path, fallback: Any) -> Any:
@@ -91,6 +133,10 @@ def main() -> None:
         ),
     }
     judgment: dict[str, Any] = {}
+    usage: dict[str, Any] = {
+        "requests": 0, "cost_usd": 0.0, "cost_usd_exact": "0", "cost_status": "complete",
+        "priced_requests": 0, "unpriced_requests": 0,
+    }
     raw = ""
     judge_error = result.get("execution_error", "")
     try:
@@ -116,7 +162,8 @@ def main() -> None:
                 max_retries=0,
                 timeout=60,
             )
-            response = client.responses.create(
+            usage = judge_usage({}, {})
+            raw_response = client.responses.with_raw_response.create(
                 model=os.environ["MOYAI_EVAL_JUDGE_MODEL"],
                 input=[
                     {"role": "system", "content": JUDGE_SYSTEM},
@@ -124,9 +171,16 @@ def main() -> None:
                 ],
                 max_output_tokens=6000,
             )
+            usage = judge_usage(raw_response.headers, {})
+            response = raw_response.parse()
+            usage = judge_usage(raw_response.headers, response.model_dump())
             raw = response.output_text
             judgment = parse_judgment(raw)
     except Exception as error:  # noqa: BLE001 - judge failures must become trial failures
+        failed_response = getattr(error, "response", None)
+        if failed_response is not None:
+            # A billed HTTP error can still carry an actual charge receipt.
+            usage = judge_usage(failed_response.headers, {})
         judge_error = f"{type(error).__name__}: {error}"[:4000]
         if key := os.getenv("LITELLM_API_KEY") or os.getenv("LITELLM_GATEWAY_ADMIN_KEY"):
             judge_error = judge_error.replace(key, "[redacted]")
@@ -154,6 +208,7 @@ def main() -> None:
         "judgment": judgment,
         "judge_raw_json": raw,
         "judge_error": judge_error,
+        "judge_usage": usage,
         "passed": passed,
         "failures": failures,
         "reward": 1 if passed else 0,
