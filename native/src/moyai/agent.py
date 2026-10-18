@@ -65,6 +65,7 @@ from .storage import ObjectStore
 from .stores import NativeStores
 from .swarm_tools import SwarmCapability
 from .tools import WORKSPACE_TOOLS
+from .tools.desktop import desktop_capability
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / "resources"
 if not PACKAGE_ROOT.is_dir():
@@ -318,6 +319,7 @@ def workspace_image() -> modal.Image:
         .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
         .add_local_file(PACKAGE_ROOT / "browser_guest.py", "/opt/moyai/browser_guest.py", copy=True)
         .add_local_file(PACKAGE_ROOT / "browser_driver.py", "/opt/moyai/browser_driver.py", copy=True)
+        .add_local_file(PACKAGE_ROOT / "ocu_guest.py", "/opt/moyai/ocu_guest.py", copy=True)
     )
 
 
@@ -383,6 +385,7 @@ def make_agent(
             artifact_capability(database, objects),
             attachment_capability(database, objects),
             browser_capability(database),
+            desktop_capability(database),
             BrowserLogin(database),
             on_demand_coder(authority.save_workspace, database),
             WorkflowPlanning(

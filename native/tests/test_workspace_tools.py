@@ -27,6 +27,18 @@ class FakeImage:
         self.calls.append(("run_commands", commands))
         return self
 
+    def env(self, values: dict[str, str]) -> FakeImage:
+        self.calls.append(("env", tuple(values)))
+        return self
+
+    def pip_install(self, *packages: str) -> FakeImage:
+        self.calls.append(("pip_install", packages))
+        return self
+
+    def add_local_dir(self, local_path: str | Path, remote_path: str, *, copy: bool = False) -> FakeImage:
+        self.calls.append(("add_local_dir", (str(local_path), remote_path, str(copy))))
+        return self
+
 
 def test_open_computer_use_installs_accessibility_dependencies() -> None:
     image = FakeImage()
@@ -54,6 +66,16 @@ def test_open_computer_use_installs_accessibility_dependencies() -> None:
 
 def test_open_computer_use_is_a_workspace_tool() -> None:
     assert any(isinstance(tool, OpenComputerUse) for tool in WORKSPACE_TOOLS)
+
+
+def test_restored_project_images_include_locked_desktop_tools() -> None:
+    from moyai.product_continuation_restore import runtime_image
+
+    image = FakeImage()
+    assert runtime_image(image) is image
+    assert any(name == "run_commands" and "npm ci --ignore-scripts" in args[0] for name, args in image.calls)
+    assert any(name == "add_local_file" and args[1] == "/opt/moyai/ocu_guest.py" for name, args in image.calls)
+    assert any(name == "env" and "DBUS_SESSION_BUS_ADDRESS" in args for name, args in image.calls)
 
 
 def test_open_computer_use_package_lock_is_pinned() -> None:

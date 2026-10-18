@@ -102,8 +102,8 @@ async def reserve_agent(database: Database, scope: RunScope, *, starting: bool) 
         stamp = int(time.time())
         if current and current.expires_at > stamp:
             raise BrowserNotDispatched(
-                "A person has control of the shared browser, including while its panel is hidden. "
-                "Do not retry browser writes or bypass control with shell/CDP. Chat and coding can continue."
+                "A person has control of the shared computer, including while its panel is hidden. "
+                "Do not retry desktop/browser writes or bypass control with shell/CDP/OCU. Chat and coding can continue."
             )
         if pending and pending.expires_at > stamp:
             raise BrowserNotDispatched(
@@ -139,20 +139,40 @@ async def agent_request(
     database: Database, scope: RunScope, workspace: Workspace, command: dict, *, writing: bool,
     before_dispatch: Callable[[], Awaitable[None]] | None = None,
     after_dispatch: Callable[[], Awaitable[None]] | None = None,
+    surface: Literal["browser", "desktop"] = "browser",
 ) -> dict:
     identity = None
     try:
         await database.authorize_scope(scope)
         reference = workspace.ref
-        if reference is None or reference.provider != "modal":
+        if reference is None or reference.provider not in (
+            {"modal", "lambda"} if surface == "desktop" else {"modal"}
+        ):
             raise BrowserNotDispatched("The shared browser requires this conversation's live Modal workspace.")
         await database.save_workspace_reference(scope, TypeAdapter(WorkspaceRef).dump_python(reference, mode="json"))
         async with database.sessions() as db:
             desktop = await db.get(ComputerDesktop, scope.session_id)
             starting = not desktop or desktop.version != DESKTOP_VERSION or desktop.workspace_id != reference.id
+        if starting and not writing and desktop and desktop.workspace_id == reference.id:
+            # Reading an existing computer after a helper upgrade must remain
+            # possible while a previous write is still awaiting reconciliation.
+            # guest_request installs helper files only; no UI startup or input.
+            starting = False
+        if surface == "desktop" and command["action"] == "start":
+            starting = True
         if starting and not writing:
-            raise BrowserNotDispatched("Use browser_open to start the shared browser first.")
+            raise BrowserNotDispatched(
+                "Use desktop_action with action=start to start the shared computer first."
+                if surface == "desktop" else "Use browser_open to start the shared browser first."
+            )
         identity = await reserve_agent(database, scope, starting=starting) if writing else None
+        if surface == "desktop":
+            # For writes, read the epoch after reserving control: a claim/release
+            # between the initial availability read and reservation invalidates
+            # the earlier observation even if the pixels happen to look identical.
+            async with database.sessions() as db:
+                desktop = await db.get(ComputerDesktop, scope.session_id)
+            command = {**command, "context": f"{scope.turn_id}:{desktop.control_epoch if desktop else ''}"}
         if before_dispatch:
             await before_dispatch()
     except (BrowserNotDispatched, BrowserOutcomeUnknown):
@@ -173,7 +193,7 @@ async def agent_request(
                 # Setup is already a dispatched write. Revocation here cannot
                 # turn that earlier effect into a known-not-dispatched refusal.
                 await database.authorize_scope(scope)
-            value = await guest_request(workspace, {"action": "browser", "command": command, "deadline": deadline})
+            value = await guest_request(workspace, {"action": surface, "command": command, "deadline": deadline})
     except DesktopCommandFailed as error:
         if identity:
             await settle(database, scope.session_id, identity, workspace_id=reference.id if started else "")

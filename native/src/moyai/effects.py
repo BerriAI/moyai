@@ -244,6 +244,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
         tool_def: ToolDefinition, args: dict[str, Any], result: Any,
     ) -> Any:
         if tool_def.name in BROWSER_WRITES:
+            surface = "desktop" if tool_def.name == "desktop_action" else "browser"
             outcome = (result.metadata or {}).get(BROWSER_OUTCOME) if isinstance(result, ToolReturn) else None
             if outcome in {"not_dispatched", "unknown"}:
                 guarded = requires_receipt(tool_def)
@@ -254,16 +255,16 @@ class EffectReceipts(AbstractCapability[RunScope]):
                     raise ToolFailed(str(result.return_value))
                 state = await self.browser_state(identity) if guarded else None
                 if state == "confirmed":
-                    raise ToolFailed("The browser action completed, but its result could not be delivered. Do not repeat it.")
+                    raise ToolFailed(f"The {surface} action completed, but its result could not be delivered. Do not repeat it.")
                 if state == "not_dispatched":
-                    raise ToolFailed("This browser call was already refused before dispatch. It was not repeated.")
+                    raise ToolFailed(f"This {surface} call was already refused before dispatch. It was not repeated.")
                 raise ToolFailed(
-                    "The browser outcome is uncertain. Use browser_read to inspect it, then reconcile "
+                    f"The {surface} outcome is uncertain. Use {surface}_read to inspect it, then reconcile "
                     "the pending action before another write. Do not repeat the action."
                 )
             if requires_receipt(tool_def) and outcome != "completed":
                 # A missing/malformed result marker cannot attest success.
-                raise ToolFailed("The browser result has no confirmed outcome. Inspect and reconcile the pending action.")
+                raise ToolFailed(f"The {surface} result has no confirmed outcome. Inspect and reconcile the pending action.")
         if requires_receipt(tool_def):
             await self.confirm(effect_id(ctx, call))
             is_creation = call.tool_name.startswith("github_") and call.tool_name.endswith(
@@ -289,6 +290,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
     ) -> Any:
         cause = error.cause if isinstance(error, ActivityError) else None
         if tool_def.name in BROWSER_WRITES and requires_receipt(tool_def):
+            surface = "desktop" if tool_def.name == "desktop_action" else "browser"
             identity = effect_id(ctx, call)
             if isinstance(cause, ApplicationError) and cause.type in {
                 "MoyaiGuidanceChanged", "MoyaiPermissionDenied", "MoyaiMissingExecutionScope",
@@ -296,11 +298,11 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 raise ToolFailed("Execution authority changed before browser dispatch. The action did not execute.") from error
             state = await self.browser_state(identity)
             if state == "confirmed":
-                raise ToolFailed("The browser action completed, but its result could not be delivered. Do not repeat it.") from error
+                raise ToolFailed(f"The {surface} action completed, but its result could not be delivered. Do not repeat it.") from error
             if state == "not_dispatched":
-                raise ToolFailed("This browser call was already refused before dispatch. It was not repeated.") from error
+                raise ToolFailed(f"This {surface} call was already refused before dispatch. It was not repeated.") from error
             raise ToolFailed(
-                "The browser outcome is uncertain. Inspect with browser_read and reconcile "
+                f"The {surface} outcome is uncertain. Inspect with {surface}_read and reconcile "
                 "the pending action before another write."
             ) from error
         if (

@@ -20,4 +20,6 @@ class OpenComputerUse(WorkspaceTool):
                 "npm ci --ignore-scripts --prefix /opt/moyai/tools && "
                 "ln -sf /opt/moyai/tools/node_modules/.bin/ocu /usr/local/bin/ocu",
             )
+            .env({"DISPLAY": ":99", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/moyai-dbus",
+                  "XDG_RUNTIME_DIR": "/tmp/moyai-xdg", "NO_AT_BRIDGE": "0", "GTK_A11Y": "always"})
         )
