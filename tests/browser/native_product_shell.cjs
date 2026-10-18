@@ -21,6 +21,12 @@ async function handle(req,res,next) {
   state.requests.push({path:url.pathname,query:url.search,method:req.method,body:data,headers:req.headers});
   if(state.holds?.[url.pathname])await state.holds[url.pathname];
   const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
+  const failure=state.httpErrors?.[`${req.method}:${url.pathname}`];
+  if(failure) {
+    if(failure.network){req.socket.destroy();return;}
+    res.writeHead(failure.status,{'Content-Type':failure.type||'text/plain','Cache-Control':'no-store'});
+    res.end(failure.body??'Internal Server Error');return;
+  }
   if(url.pathname==='/api/auth/config')return json({mode:state.mode,password_enabled:state.password,google_enabled:state.google,access_enabled:state.access});
   if(url.pathname==='/api/login'){state.signedIn=true;return json({csrf:'fixture-csrf'});}
   if(url.pathname==='/api/auth/google/start')return json({url:'https://accounts.google.com/fixture'});
@@ -910,6 +916,83 @@ test('a streaming answer stays above another requester’s already visible queue
   await page.locator('.live-message').getByText('Hi there.',{exact:true}).waitFor();
   assert.deepEqual(await page.locator('.transcript .message .message-content').allTextContents(),['hello','Hi there.','My next task.']);
   assert.equal(await page.locator('.turn-progress-toggle').getAttribute('aria-expanded'),'true');
+});
+
+for(const width of [1440,768,320])test(`transient global and conversation errors recover independently at ${width}px`,async t=>{
+  const conversation=`GET:/api/sessions/${sessionId}`,catalog='GET:/api/connections';
+  reset({httpErrors:{[catalog]:{status:503}}});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const globalError=page.locator('.global-error'),localError=page.locator('.composer-wrap [role="alert"]');
+  await globalError.getByText(/temporarily unavailable \(HTTP 503\)/).waitFor();
+  await page.getByRole('textbox',{name:'Message Moyai'}).fill('Keep this draft.');
+  await waitFor(()=>clients.size>0,'SSE connected');
+  state.httpErrors[conversation]={status:500};
+  emit({},undefined,'refresh');
+  await localError.getByText(/temporarily unavailable \(HTTP 500\)/).waitFor();
+  delete state.httpErrors[conversation];
+  emit({},undefined,'refresh');
+  await localError.waitFor({state:'hidden'});
+  assert.equal(await globalError.count(),1,'a successful conversation read cannot clear a catalog error');
+  delete state.httpErrors[catalog];
+  await globalError.waitFor({state:'hidden'});
+  assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).innerText(),'Keep this draft.');
+  assert.equal(await page.getByText(/SyntaxError|Unexpected token/).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('successful background refresh cannot clear a failed global user action',async t=>{
+  reset({httpErrors:{'POST:/api/logout':{status:500}}});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
+  await page.getByRole('button',{name:'Sign out',exact:true}).click();
+  const error=page.locator('.global-error');
+  await error.getByText(/temporarily unavailable \(HTTP 500\)/).waitFor();
+  const count=state.requests.filter(req=>req.path==='/api/session-folders').length;
+  await waitFor(()=>state.requests.filter(req=>req.path==='/api/session-folders').length>count,'successful sidebar refresh');
+  assert.equal(await error.count(),1);
+  await error.getByRole('button',{name:'Dismiss'}).click();
+  await error.waitFor({state:'hidden'});
+});
+
+test('plain-text access revocation clears the protected transcript and draft',async t=>{
+  reset();
+  const page=await pageFor(t),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Private unsent draft.');
+  await waitFor(()=>clients.size>0,'SSE connected');
+  state.httpErrors={[`GET:/api/sessions/${sessionId}`]:{status:403,body:'Forbidden'}};
+  emit({},undefined,'refresh');
+  await page.getByText(/You no longer have access/).waitFor();
+  assert.equal(await input.count(),0);
+  assert.equal(await page.getByText('Inspect this repository.',{exact:true}).count(),0);
+  assert.equal(await page.getByText('Private unsent draft.',{exact:true}).count(),0);
+});
+
+test('network refresh errors recover without masking or replaying a failed message send',async t=>{
+  reset();
+  const page=await pageFor(t),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.waitFor();await waitFor(()=>clients.size>0,'SSE connected');
+  const read=`GET:/api/sessions/${sessionId}`,write=`POST:/api/sessions/${sessionId}/messages`;
+  state.httpErrors={[read]:{network:true}};
+  emit({},undefined,'refresh');
+  const error=page.locator('.composer-wrap [role="alert"]');
+  await error.getByText(/Could not reach Moyai/).waitFor();
+  delete state.httpErrors[read];
+  emit({},undefined,'refresh');
+  await error.waitFor({state:'hidden'});
+  state.httpErrors[write]={status:503,type:'application/json',body:JSON.stringify({detail:'Message was not accepted.'})};
+  await input.fill('Keep my unsent message.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await error.getByText(/Message was not accepted/).waitFor();
+  const reads=state.requests.filter(req=>req.method==='GET'&&req.path===`/api/sessions/${sessionId}`).length;
+  emit({},undefined,'refresh');
+  await waitFor(()=>state.requests.filter(req=>req.method==='GET'&&req.path===`/api/sessions/${sessionId}`).length>reads);
+  assert.equal(await error.getByText(/Message was not accepted/).count(),1);
+  assert.equal(await input.innerText(),'Keep my unsent message.');
+  assert.equal(state.requests.filter(req=>req.method==='POST'&&req.path===`/api/sessions/${sessionId}/messages`).length,1);
+  delete state.httpErrors[write];
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await error.waitFor({state:'hidden'});
+  await waitFor(()=>state.requests.filter(req=>req.method==='POST'&&req.path===`/api/sessions/${sessionId}/messages`).length===2);
 });
 
 test('root streaming survives saved-state polling, reconnect replay, per-round retry and final settlement',async t=>{
