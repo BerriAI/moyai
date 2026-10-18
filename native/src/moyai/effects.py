@@ -45,6 +45,10 @@ SHELL_RECOVERY_VERSION = "moyai-shell-readiness-v1"
 SHELL_READINESS_SUPPORTED = "moyai_shell_readiness_supported"
 
 
+class PendingEffectError(PermissionError):
+    """A new call was refused before dispatch; the earlier receipt stays pending."""
+
+
 def requires_receipt(tool: ToolDefinition) -> bool:
     if tool.name in SKILL_EFFECTS:
         return not workflow.in_workflow() or workflow.patched("moyai-skill-receipts-v1")
@@ -130,7 +134,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 if await db.scalar(select(Effect.id).where(
                     Effect.session_id == scope.session_id, Effect.state == "pending"
                 )):
-                    raise PermissionError("An earlier action needs reconciliation before another write.")
+                    raise PendingEffectError("An earlier action needs reconciliation before another write.")
                 db.add(Effect(
                     id=identity, session_id=scope.session_id, turn_id=scope.turn_id,
                     actor_id=scope.actor_id, tool_name=name,
@@ -143,7 +147,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
                     ),
                 ))
         except IntegrityError as error:
-            raise PermissionError("Another action is awaiting a confirmed outcome.") from error
+            raise PendingEffectError("Another action is awaiting a confirmed outcome.") from error
 
     @durable_operation("confirm")
     async def confirm(self, identity: str) -> None:
@@ -221,6 +225,15 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 else:
                     await self.reserve(ctx.deps, identity, call.tool_name, args)
             except Exception as error:
+                cause = error.cause if isinstance(error, ActivityError) else error
+                if isinstance(cause, PendingEffectError) or (
+                    isinstance(cause, ApplicationError) and cause.type == "PendingEffectError"
+                ):
+                    raise ToolFailed(
+                        "This action did not run. An earlier action has an unconfirmed outcome. "
+                        "Use available read tools to inspect it and explain what still needs review. "
+                        "Do not repeat the earlier action or attempt other writes until it is reconciled."
+                    ) from error
                 if tool_def.name in BROWSER_WRITES and await self.not_dispatched(identity):
                     raise ToolFailed("Browser reservation failed before dispatch. The action did not execute.") from error
                 raise
