@@ -500,3 +500,109 @@ async def test_canonical_capture_in_real_temporal_replays_without_rewriting_memo
             assert len(receipts) == 1 and receipts[0].source_revision == 1
     finally:
         await runtime.close()
+
+
+@pytest.mark.parametrize("native_files,max_tokens", [(0, 2000), (3, 2000), (110, 20), (110, 2000)])
+async def test_batched_snapshot_matches_harness_bounds_with_half_the_live_views(
+    memory_product, monkeypatch, native_files, max_tokens,
+):
+    from pydantic_ai_harness import Memory
+
+    product = memory_product
+    await product.memory.save(product.principal.grant, memory_fixtures.note())
+    await product.memory.save(product.principal.grant, memory_fixtures.note(
+        key="other-repo", kind="project", repo_url="https://github.com/other/repo",
+        request_id="other-repo", content="Keep repository-specific facts in their repository.",
+    ))
+    _, turn, scope, _ = await memory_execution(product)
+    prefix = scope.memory_namespace + "/main/"
+    backend = InMemoryStore({prefix + f"note-{index:03d}.md": "Native note" for index in range(native_files)})
+    ctx = RunContext(deps=scope, model=TestModel(), usage=RunUsage(), run_id=turn.id)
+    calls = []
+    original = ProductMemoryStore._view
+
+    async def view(self, **kwargs):
+        calls.append(kwargs.get("content", True))
+        return await original(self, **kwargs)
+
+    monkeypatch.setattr(ProductMemoryStore, "_view", view)
+    legacy = Memory(
+        store_resolver=lambda ctx: ProductMemoryStore(product.memory, scope, turn.id, native_store=backend),
+        namespace=scope.memory_namespace, max_tokens=max_tokens, injection_errors="raise",
+    )
+    expected = await legacy._load_snapshot(ctx)
+    assert calls == [True, True, True, True]
+    calls.clear()
+    current = memory_capability(product.memory, native_store=backend)
+    current.max_tokens = max_tokens
+    actual = await current._load_snapshot(ctx)
+    assert actual == expected
+    assert calls == [False, True]
+    assert actual[0] is not None
+    assert "other-repo" not in actual[0].content
+    # Existing on-demand listing includes repository filenames, not contents.
+    if max_tokens == 2000:
+        assert "personal-other-repo.md" in actual[1]
+
+
+@pytest.mark.parametrize("change", ["forget", "disable", "private", "revoke", "stop"])
+async def test_batched_snapshot_rechecks_mutations_during_native_read(memory_product, change):
+    from moyai.models import Session, Turn
+
+    product = memory_product
+    saved = await product.memory.save(product.principal.grant, memory_fixtures.note())
+    session, turn, scope, _ = await memory_execution(product)
+    prefix = scope.memory_namespace + "/main/"
+
+    class ChangingNativeStore(InMemoryStore):
+        async def read(self, path, *, max_chars):
+            result = await super().read(path, max_chars=max_chars)
+            if change == "forget":
+                await product.memory.forget(product.principal.grant, saved["id"], 1)
+            elif change == "disable":
+                await product.memory.preferences(product.principal.grant, Preferences(enabled=False, revision=0))
+            else:
+                async with product.database.sessions.begin() as db:
+                    if change == "private":
+                        (await db.get(Session, session.id)).visibility = "private"
+                    elif change == "revoke":
+                        (await db.get(User, scope.actor_id)).auth_version += 1
+                    else:
+                        (await db.get(Turn, turn.id)).status = "stopped"
+            return result
+
+    backend = ChangingNativeStore({prefix + "MEMORY.md": "native-private-marker"})
+    capability = memory_capability(product.memory, native_store=backend)
+    ctx = RunContext(deps=scope, model=TestModel(), usage=RunUsage(), run_id=turn.id)
+    if change in {"revoke", "stop"}:
+        with pytest.raises((HTTPException, ToolFailed)):
+            await capability._load_snapshot(ctx)
+    else:
+        main, names, _, _ = await capability._load_snapshot(ctx)
+        assert main is not None
+        assert "Use the existing formatter." not in main.content
+        assert "personal-editor-preference.md" not in names
+        if change != "forget":
+            assert "native-private-marker" not in main.content
+            assert names == []
+
+
+async def test_batched_snapshot_reloads_each_step_after_note_edits_and_forget(memory_product):
+    product = memory_product
+    saved = await product.memory.save(product.principal.grant, memory_fixtures.note())
+    _, turn, scope, _ = await memory_execution(product)
+    capability = memory_capability(product.memory, native_store=InMemoryStore())
+    ctx = RunContext(deps=scope, model=TestModel(), usage=RunUsage(), run_id=turn.id)
+    first = await capability._load_snapshot(ctx)
+    await product.memory.save(product.principal.grant, memory_fixtures.note(
+        content="Updated between model steps.", revision=1, request_id="step-update",
+    ), note_id=saved["id"])
+    second = await capability._load_snapshot(ctx)
+    assert first[0] is not None and second[0] is not None
+    assert "Updated between model steps." in second[0].content
+    assert second[0].version != first[0].version
+    await product.memory.forget(product.principal.grant, saved["id"], 2)
+    third = await capability._load_snapshot(ctx)
+    assert third[0] is not None
+    assert "Updated between model steps." not in third[0].content
+    assert "personal-editor-preference.md" not in third[1]

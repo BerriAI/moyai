@@ -67,10 +67,12 @@ class ConnectionCatalog:
         # Include the complete admitted grant snapshot, not just connection IDs.
         # Encrypted credential material contributes only to this digest.
         value = asdict(ctx.deps)
-        # This execution-version decision is resolved after initial SDK tool
-        # discovery. It does not change connector authority or definitions.
+        # Execution-version decisions can resolve after initial SDK discovery;
+        # Continue-As-New increments the segment of the same admitted turn.
+        # Neither changes connector authority or definitions.
         # Keep all admitted identity/grant/provenance fields in the cache key.
-        value.pop("interactive_delegation")
+        for field in ("interactive_delegation", "workflow_public_events", "history_segment"):
+            value.pop(field)
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
     def discard(self, key: str) -> None:
