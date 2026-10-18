@@ -30,10 +30,12 @@ GUEST_CONTENT = GUEST.read_bytes()
 BROWSER_GUEST = GUEST.with_name("browser_guest.py")
 BROWSER_CONTENT = BROWSER_GUEST.read_bytes()
 DRIVER_CONTENT = GUEST.with_name("browser_driver.py").read_bytes()
-DESKTOP_VERSION = hashlib.sha256(GUEST_CONTENT + BROWSER_CONTENT + DRIVER_CONTENT).hexdigest()
+OCU_CONTENT = GUEST.with_name("ocu_guest.py").read_bytes()
+DESKTOP_VERSION = hashlib.sha256(GUEST_CONTENT + BROWSER_CONTENT + DRIVER_CONTENT + OCU_CONTENT).hexdigest()
 REMOTE_GUEST = f"/opt/moyai/desktop-{DESKTOP_VERSION}.py"
 REMOTE_BROWSER = f"/opt/moyai/browser-{DESKTOP_VERSION}.py"
 REMOTE_DRIVER = f"/opt/moyai/browser-driver-{DESKTOP_VERSION}.py"
+REMOTE_OCU = f"/opt/moyai/ocu-{DESKTOP_VERSION}.py"
 LEASE_SECONDS = 180
 logger = logging.getLogger(__name__)
 
@@ -111,7 +113,7 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str, clie
     if not session.workspace:
         raise HTTPException(409, "Send Moyai a task to start this conversation's computer.")
     async with runtime.database.sessions.begin() as db:
-        # Serialize human control and agent browser writes only. Chat and
+        # Serialize human control and agent desktop/browser input. Chat and
         # native coding continue independently.
         locked = await db.scalar(update(Session).where(
             Session.id == session_id, Session.deleted.is_(False),
@@ -132,7 +134,7 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str, clie
         if pending and pending.expires_at > stamp and action in {"claim", "heartbeat"} and (
             current is None or current.expires_at <= stamp or current.actor_id != user.id
         ):
-            raise HTTPException(409, "A browser action is still settling. Inspect the screen before taking control.")
+            raise HTTPException(409, "A computer action is still settling. Inspect the screen before taking control.")
         if pending and pending.expires_at > stamp and action not in {"claim", "heartbeat"}:
             raise HTTPException(409, "Wait for the current desktop action to settle before continuing or releasing control.")
         if action == "release":
@@ -182,16 +184,19 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str, clie
 
 async def guest_request(workspace: Workspace, body: dict) -> dict:
     """One bounded guest dispatch, used by HTTP and native Temporal tools."""
-    if body["action"] == "start":
+    if body["action"] == "start" or (
+        body["action"] in {"browser", "desktop"} and not await workspace.exists(REMOTE_GUEST)
+    ):
         await workspace.write_bytes(REMOTE_GUEST, GUEST_CONTENT)
         await workspace.write_bytes(REMOTE_BROWSER, BROWSER_CONTENT)
         await workspace.write_bytes(REMOTE_DRIVER, DRIVER_CONTENT)
+        await workspace.write_bytes(REMOTE_OCU, OCU_CONTENT)
     elif not await workspace.exists(REMOTE_GUEST):
         if body["action"] == "frame":
             return {"available": False, "width": 1280, "height": 800}
         raise HTTPException(409, "Open the computer before sending desktop input.")
     body = {
-        **body, "browser_helper": REMOTE_BROWSER, "browser_driver": REMOTE_DRIVER,
+        **body, "browser_helper": REMOTE_BROWSER, "browser_driver": REMOTE_DRIVER, "ocu_helper": REMOTE_OCU,
         "browser_diagnostics": logger.isEnabledFor(logging.DEBUG),
     }
     result = await workspace.run(

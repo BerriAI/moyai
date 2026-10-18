@@ -122,3 +122,34 @@ async def test_only_successful_hashed_build_assets_can_be_cached(runtime, tmp_pa
         for path in ["/", "/api/me", "/assets/licenses.md", "/assets/missing-1234abcd.js"]:
             response = await client.get(path)
             assert response.headers["cache-control"] == "no-store"
+
+
+async def test_response_security_allows_fontshare_only_for_styles_and_fonts(runtime, tmp_path, monkeypatch):
+    from moyai import api
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<!doctype html><title>Moyai</title>")
+    monkeypatch.setattr(api, "STATIC", tmp_path)
+    async with sign_in(runtime) as client:
+        for path in ["/", "/api/me"]:
+            response = await client.get(path)
+            assert response.status_code == 200
+            directives = {
+                parts[0]: set(parts[1:])
+                for directive in response.headers["content-security-policy"].split(";")
+                if (parts := directive.split())
+            }
+            assert directives == {
+                "default-src": {"'self'"},
+                "script-src": {"'self'"},
+                "style-src": {"'self'", "'unsafe-inline'", "https://api.fontshare.com"},
+                "img-src": {"'self'", "data:", "blob:"},
+                "media-src": {"'self'", "blob:"},
+                "connect-src": {"'self'", "ws://testserver"},
+                "font-src": {"'self'", "https://cdn.fontshare.com"},
+                "frame-ancestors": {"'none'"},
+                "base-uri": {"'self'"},
+                "object-src": {"'none'"},
+            }
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert response.headers["referrer-policy"] == "same-origin"
+            assert response.headers["x-frame-options"] == "DENY"

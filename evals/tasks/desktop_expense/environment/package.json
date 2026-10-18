@@ -1,0 +1,7 @@
+{
+  "name": "moyai-workspace-tools",
+  "private": true,
+  "dependencies": {
+    "open-computer-use": "1.1.2"
+  }
+}

@@ -32,7 +32,7 @@ COPY app ./app
 COPY native/src ./native/src
 COPY --from=native-ui /build/native/src/moyai/static ./native/src/moyai/static
 COPY native/skills ./native/skills
-COPY native/instructions.md native/desktop.py native/browser_guest.py native/browser_driver.py native/hatch_build.py ./native/
+COPY native/instructions.md native/desktop.py native/browser_guest.py native/browser_driver.py native/ocu_guest.py native/hatch_build.py ./native/
 RUN uv sync --frozen --no-dev --no-editable
 COPY render_start.py build_workspace_image.py docker_start.py docker_healthcheck.py ./
 ENV PYTHONPATH=/app

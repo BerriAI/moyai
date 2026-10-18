@@ -32,7 +32,7 @@ STARTUP_VERSION = "moyai-on-demand-computer-v1"
 COMPUTER_TOOLS = frozenset({
     "shell", "read_file", "write_file", "edit_file", "list_files", "grep",
     "save_artifact", "attachment_copy", "browser_open", "browser_read", "browser_action",
-    "credentials_run", "delegate_task",
+    "desktop_read", "desktop_action", "credentials_run", "delegate_task",
 })
 ProjectInstructions = Callable[[RunContext[RunScope]], Awaitable[str]]
 PublishWorkspace = Callable[[RunScope, dict[str, Any]], Awaitable[None]]

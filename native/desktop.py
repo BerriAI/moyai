@@ -24,7 +24,8 @@ from pathlib import Path
 WIDTH, HEIGHT = 1280, 800
 DISPLAY = ":99"
 STATE = Path("/tmp/moyai-native-desktop")
-ENV = {**os.environ, "DISPLAY": DISPLAY}
+ENV = {**os.environ, "DISPLAY": DISPLAY, "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/moyai-dbus",
+       "XDG_RUNTIME_DIR": "/tmp/moyai-xdg", "NO_AT_BRIDGE": "0", "GTK_A11Y": "always"}
 KEYS = {
     "Enter": "Return", "Tab": "Tab", "Escape": "Escape", "Backspace": "BackSpace",
     "Delete": "Delete", "ArrowUp": "Up", "ArrowDown": "Down", "ArrowLeft": "Left",
@@ -228,6 +229,17 @@ def start(deadline):
             time.sleep(.1)
         else:
             raise RuntimeError("The desktop display did not start.")
+    if shutil.which("dbus-daemon"):
+        Path(ENV["XDG_RUNTIME_DIR"]).mkdir(mode=0o700, exist_ok=True)
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(1)
+                probe.connect("/run/moyai-dbus")
+        except (FileNotFoundError, ConnectionRefusedError):
+            # A filesystem checkpoint can retain the socket after its daemon dies.
+            Path("/run/moyai-dbus").unlink(missing_ok=True)
+            subprocess.run(["dbus-daemon", "--session", "--address=" + ENV["DBUS_SESSION_BUS_ADDRESS"],
+                            "--fork", "--nopidfile"], env=ENV, check=True, timeout=remaining(deadline, 10))
     ensure_process("openbox", "openbox", "--sm-disable")
     subprocess.run(["xsetroot", "-solid", "#0b1627"], env=ENV, check=True, timeout=remaining(deadline, 10))
     # A window switcher keeps Chromium and terminals accessible as ordinary
@@ -322,6 +334,17 @@ def command(body):
         remaining(deadline, 1)
         if action == "start":
             start(deadline)
+        if action == "desktop":
+            if not display_alive():
+                return {"available": False, "action_executed": False,
+                        "message": "The display stopped. Use desktop_action with action=start."}
+            driver = body.get("browser_driver", str(Path(__file__).with_name("browser_driver.py")))
+            driver_spec = importlib.util.spec_from_file_location("moyai_desktop_driver", driver)
+            driver_runtime = importlib.util.module_from_spec(driver_spec)
+            sys.modules[driver_spec.name] = driver_runtime
+            driver_spec.loader.exec_module(driver_runtime)
+            helper = Path(body.get("ocu_helper", str(Path(__file__).with_name("ocu_guest.py"))))
+            return driver_runtime.call(STATE / "ocu", helper, body["command"], deadline, ENV)
         if action == "browser":
             if not display_alive() or not browser_runtime.endpoint_alive():
                 if body["command"]["action"] == "tabs":

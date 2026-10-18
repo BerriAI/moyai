@@ -82,7 +82,7 @@ class ProductCredentialExecution:
             raise HTTPException(403, "This credential execution is unavailable.")
         await self.database._check_product_turn(db, turn, scope.product_grant)
         cast(Any, actor).product_grant = scope.product_grant
-        session = await self.database.allowed_session(db, scope.session_id, actor)
+        session = await self.database.execution_session(db, scope.session_id, actor)
         if (
             principal.id != scope.actor_id or turn.actor_id != principal.id or turn.session_id != session.id
             or session.active_turn != turn.id or session.status != "running" or turn.status != "running"

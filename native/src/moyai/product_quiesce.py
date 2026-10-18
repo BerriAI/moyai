@@ -94,6 +94,12 @@ class ProductQuiescence:
             if self.life.handoff is not None:
                 self.life.handoff.stop.set()
                 await finish(self.life.handoff.task)
+                # Standbys can acknowledge durable HTTP intake without owning
+                # the coordinator's background context. Their accepted tasks
+                # must also finish before this process reports drained.
+                slack = getattr(self.life.runtime, "product_slack", None)
+                if slack is not None:
+                    await slack.close()
             await self.check_owner()
         except BaseException:
             # A failed drain is not permission to retire or start it again.

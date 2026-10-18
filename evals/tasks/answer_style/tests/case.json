@@ -1,5 +1,6 @@
 {
   "id": "answer_style",
+  "task_version": 2,
   "prompt": "whats the difference between a litellm virtual key and a team, and when should i use which?",
   "thread": [
     {
@@ -9,5 +10,12 @@
       "files": []
     }
   ],
-  "reference_reply": "A virtual key is the credential an app sends to the proxy and a team is the group that owns keys and holds shared budgets, model access, and members. Use them together: create a team per group or project, then issue virtual keys under it. Use a standalone key only for a one-off integration that does not need shared limits."
+  "case_facts": [
+    "A virtual key is a credential string that an app or script presents to LiteLLM Proxy to authenticate API requests.",
+    "A team is a management group for members and virtual keys, with shared controls such as budgets and model access. The team object or ID is not the API credential an app sends.",
+    "Separate virtual keys can identify applications or environments. Teams organize people and keys for a department or project that needs shared ownership, access or spending controls.",
+    "Keys and teams can be used together. A standalone virtual key can also be appropriate for an isolated integration that does not need shared team controls."
+  ],
+  "style_target": {"words": 80, "word_count_is_a_gate": false},
+  "reference_reply": "A virtual key is the secret credential an app sends to LiteLLM Proxy. A team is a management group for people and keys, with shared budgets and model access. Use a key per app or environment; use a team when a department or project needs shared ownership and limits. Keys can belong to a team, so you often use both."
 }

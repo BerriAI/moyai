@@ -48,6 +48,15 @@ from moyai.workflow import TurnWorkflow
 SCOPE = RunScope("session", "turn", "actor", "route-alias")
 
 
+@pytest.fixture(autouse=True)
+def accounting_result_deadline(monkeypatch):
+    # Content/receipt assertions should not depend on a loaded CI runner
+    # committing to PostgreSQL within the production best-effort deadline.
+    # The contention test below sets its own short deadline and verifies that
+    # database stalls cannot cause another paid model request.
+    monkeypatch.setattr(inference_usage, "WRITE_TIMEOUT_SECONDS", 10.0)
+
+
 class WireStream(httpx.AsyncByteStream):
     def __init__(self, body: bytes, *, size: int = 17, fail: bool = False):
         self.body, self.size, self.fail = body, size, fail

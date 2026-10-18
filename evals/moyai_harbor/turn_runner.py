@@ -3,21 +3,31 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from importlib import import_module
 from pathlib import Path
 from socket import socket
 from typing import Any
-from unittest.mock import patch
 from uuid import uuid4
 
 import boto3
 import httpx
 import sqlalchemy
+from app.credentials import SaveSecret
 from botocore.config import Config
 from cryptography.fernet import Fernet
 from moto.server import ThreadedMotoServer
+from pydantic import SecretStr
+from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
+from pydantic_ai.capabilities.abstract import leaf_capabilities
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
+from temporalio.client import WorkflowFailureError
+from temporalio.testing import WorkflowEnvironment
+
 from moyai.models import SlackThread, Turn
 from moyai.product_config import (
     NATIVE_KEY_FORMAT,
@@ -35,15 +45,8 @@ from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
-from pydantic import SecretStr
-from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
-from pydantic_ai.capabilities.abstract import leaf_capabilities
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from temporalio.testing import WorkflowEnvironment
 
-from app.credentials import SaveSecret
-
+from .slack_fixture import route_slack_clients
 from .workspace import HarborWorkspace
 
 EVALS = Path(__file__).resolve().parents[1]
@@ -51,6 +54,7 @@ database_fixtures = import_module("product_database_fixtures")
 product_database_state = database_fixtures.product_database_state
 CREDENTIAL_TOOLS = ("credentials_list", "credentials_request", "credentials_run")
 BOT_USER = "UBOT00001"
+SLACK_BOT_TOKEN = "synthetic-slack-bot-token"
 SLACK_USER = "UTEST0001"
 TEAM = "TTEST0001"
 CHANNEL = "CTEST0001"
@@ -64,19 +68,23 @@ def conversation_trace(conversation_json: str | None, security: Any) -> list[dic
     if not conversation_json:
         return []
     conversation = ConversationTypeAdapter.validate_json(security.unseal(conversation_json))
+    return message_trace(conversation.messages)
+
+
+def message_trace(messages: Any) -> list[dict[str, Any]]:
     calls: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    for message in conversation.messages:
+    for message in messages:
         for part in message.parts:
             if isinstance(part, ToolCallPart):
                 calls[part.tool_call_id] = {
                     "name": part.tool_name, "args": part.args_as_dict(), "result": "",
                 }
                 order.append(part.tool_call_id)
-            elif isinstance(part, ToolReturnPart):
+            elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
                 record = calls.get(part.tool_call_id)
                 if record is not None:
-                    record["result"] = json.dumps(part.content, ensure_ascii=False, default=str)[:4000]
+                    record["result"] = json.dumps(part.content, ensure_ascii=False, default=str)
     return [calls[identity] for identity in order if identity in calls]
 
 
@@ -160,6 +168,8 @@ def moto_object_storage() -> Iterator[str]:
 
 
 def seed_credentials(runtime: Runtime, values: dict[str, str]) -> None:
+    if not values:
+        return
     store = runtime.product_store
     secrets = runtime.product_secrets
     assert store is not None and secrets is not None
@@ -243,9 +253,7 @@ async def run_runtime_turn(
             data_converter=encrypted_converter(runtime.security, runtime.objects),
         ) as temporal:
             runtime.client = temporal.client
-            skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
-            if skills.return_code != 0:
-                raise RuntimeError("Could not prepare the workspace skill directory.")
+            await workspace.environment.upload_dir(EVALS.parent / "native" / "skills", "/workspace/skills")
             await runtime.start(workspace=workspace, skills_directory="skills")
             assert runtime.product_connections is not None
             assert runtime.product_slack is not None
@@ -253,10 +261,10 @@ async def run_runtime_turn(
             bot_credentials = {
                 "access_token": "synthetic-slack-user-token",
                 "bot": {
-                    "access_token": "synthetic-slack-bot-token",
+                    "access_token": SLACK_BOT_TOKEN,
                     "bot_user_id": BOT_USER,
                     "team": {"id": TEAM},
-                    "scope": "channels:history,groups:history,chat:write",
+                    "scope": "channels:read,channels:history,groups:history,chat:write,users:read,users:read.email",
                 },
             }
             runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
@@ -305,6 +313,27 @@ def slack_transport(
 ) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/api/users.info":
+            if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
+            if request.url.params.get("user") != SLACK_USER:
+                return httpx.Response(200, json={"ok": False, "error": "user_not_found"})
+            return httpx.Response(200, json={"ok": True, "user": {
+                "id": SLACK_USER, "team_id": TEAM, "real_name": "Ishaan",
+                "profile": {"email": "ishaan@example.test", "real_name": "Ishaan"},
+            }})
+        if path == "/api/conversations.info":
+            if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
+            if request.url.params.get("channel") != CHANNEL:
+                return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+            # The synthetic event belongs to this public, unshared channel. Let
+            # the real audience checker verify its caller and current binding.
+            return httpx.Response(200, json={"ok": True, "channel": {
+                "id": CHANNEL, "name": "harbor-eval", "is_channel": True,
+                "is_private": False, "is_ext_shared": False, "is_member": True,
+                "is_im": False, "is_mpim": False, "is_group": False,
+            }})
         if path.endswith("/conversations.replies"):
             reads.append({
                 "method": request.method,
@@ -316,7 +345,7 @@ def slack_transport(
             return httpx.Response(200, json={
                 "ok": True, "channel": CHANNEL, "ts": "1792100000.001",
             })
-        return httpx.Response(200, json={"ok": True})
+        return httpx.Response(404, json={"ok": False, "error": "unsupported_slack_fixture_method"})
 
     return httpx.MockTransport(handle)
 
@@ -348,11 +377,6 @@ async def execute_turn(
     slack_reads: list[dict[str, Any]] = []
     transport = slack_transport(history, slack_reads)
     original_client = httpx.AsyncClient
-
-    def routed_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
-        kwargs.setdefault("transport", transport)
-        return original_client(*args, **kwargs)
-
     payload = {
         "type": "event_callback", "team_id": TEAM, "event_id": f"eval-{case['id']}-{trial}",
         "event": {
@@ -360,27 +384,6 @@ async def execute_turn(
             "channel_type": "channel", "ts": current, "thread_ts": thread_ts, "text": case["prompt"],
         },
     }
-    with patch("httpx.AsyncClient", routed_client):
-        await service.receive_payload(payload)
-    async with runtime.database.sessions() as db:
-        slack_thread = await db.scalar(sqlalchemy.select(SlackThread).where(
-            SlackThread.team_id == TEAM,
-            SlackThread.channel_id == CHANNEL,
-            SlackThread.thread_ts == thread_ts,
-        ))
-        if slack_thread is None:
-            raise RuntimeError(f"ProductSlack did not bind {case['id']}.")
-        turn = await db.scalar(sqlalchemy.select(Turn).where(
-            Turn.session_id == slack_thread.session_id,
-        ).order_by(Turn.created_at.desc()))
-    if turn is None:
-        raise RuntimeError(f"ProductSlack did not submit a turn for {case['id']}.")
-    await runtime.database.claim_next()
-    available_tools = await offered_tool_names(runtime, turn.id, workspace)
-    handle = await temporal.client.start_workflow(
-        TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
-    )
-    await asyncio.wait_for(handle.result(), timeout=300)
     posted: list[dict[str, Any]] = []
 
     def post_stub(request: httpx.Request) -> httpx.Response:
@@ -388,39 +391,99 @@ async def execute_turn(
         posted.append(body)
         return httpx.Response(200, json={"ok": True, "channel": body["channel"], "ts": "1792100000.001"})
 
+    # Construct the explicit outbox fixture before mounting context-read clients.
     async with original_client(
         base_url="https://slack.com/api/", transport=httpx.MockTransport(post_stub), timeout=20,
     ) as delivery:
-        for _ in range(4):
-            await service.pump(delivery)
-    async with runtime.database.sessions() as db:
-        completed = await db.get(Turn, turn.id)
-    if completed is None:
-        raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
-    reply = next((
-        "\n\n".join(
-            block["text"]["text"] for block in item.get("blocks", [])
-            if block.get("type") == "section" and isinstance(block.get("text"), dict)
-        )
-        for item in reversed(posted)
-        if any(block.get("type") == "section" for block in item.get("blocks", []))
-    ), "")
-    prompt = runtime.security.unseal(completed.prompt).decode()
-    return {
-        "case": case["id"],
-        "trial": trial,
-        "turn_id": turn.id,
-        "agent_model": runtime.settings.default_model,
-        "offered_tool_names": available_tools,
-        "slack_event_input": payload,
-        "slack_thread_input": thread,
-        "slack_thread_reads": slack_reads,
-        "prompt_received": prompt,
-        "thread_messages_in_prompt": [
-            message["text"] for message in case["thread"] if message["text"] in prompt
-        ],
-        "attached_image_names": [],
-        "posted_reply": reply,
-        "tool_trace": conversation_trace(completed.conversation, runtime.security),
-        "tokens_cost": json.loads(completed.usage or "{}"),
-    }
+        with route_slack_clients(transport):
+            await service.receive_payload(payload)
+            async with runtime.database.sessions() as db:
+                slack_thread = await db.scalar(sqlalchemy.select(SlackThread).where(
+                    SlackThread.team_id == TEAM,
+                    SlackThread.channel_id == CHANNEL,
+                    SlackThread.thread_ts == thread_ts,
+                ))
+                if slack_thread is None:
+                    raise RuntimeError(f"ProductSlack did not bind {case['id']}.")
+                turn = await db.scalar(sqlalchemy.select(Turn).where(
+                    Turn.session_id == slack_thread.session_id,
+                ).order_by(Turn.created_at.desc()))
+            if turn is None:
+                raise RuntimeError(f"ProductSlack did not submit a turn for {case['id']}.")
+            await runtime.database.claim_next()
+            available_tools = await offered_tool_names(runtime, turn.id, workspace)
+            handle = await temporal.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            execution_error = ""
+            execution_traceback = ""
+            try:
+                await asyncio.wait_for(handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")))
+            except TimeoutError:
+                execution_error = "TimeoutError: The eval turn exceeded its execution deadline."
+                # Only stop this trial's owned workflow, before the surrounding
+                # worker/database are torn down. Never repeat its pending actions.
+                await handle.cancel()
+                try:
+                    await asyncio.wait_for(handle.result(), timeout=30)
+                except WorkflowFailureError:
+                    pass  # A terminal cancelled/failed workflow is settled.
+                except TimeoutError:
+                    await handle.terminate(reason="Harbor eval cancellation did not settle within 30 seconds.")
+            except WorkflowFailureError as error:
+                # A failed workflow is terminal; its saved tool evidence is
+                # still useful. Transport errors must not imply completion.
+                execution_error = f"{type(error).__name__}: {error}"
+                execution_traceback = traceback.format_exc()
+                for key in ("LITELLM_API_KEY", "LITELLM_GATEWAY_ADMIN_KEY"):
+                    if value := os.getenv(key):
+                        execution_error = execution_error.replace(value, "[redacted]")
+                        execution_traceback = execution_traceback.replace(value, "[redacted]")
+            for _ in range(4):
+                await service.pump(delivery)
+            async with runtime.database.sessions() as db:
+                completed = await db.get(Turn, turn.id)
+            if completed is None:
+                raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
+            trace = conversation_trace(completed.conversation, runtime.security)
+            failure_evidence: dict[str, Any] = {}
+            if execution_error or completed.status == "failed":
+                snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id, include_interrupted=True)
+                if snapshot is not None:
+                    trace = message_trace(snapshot.messages)
+                failure_evidence = {
+                    "execution_error": execution_error or completed.error,
+                    "execution_traceback": execution_traceback,
+                    "step_events": json.loads(json.dumps([
+                        asdict(event) for event in await runtime.stores.steps.list_events(run_id=turn.id)
+                    ], default=str)),
+                    "usage_incomplete": True,
+                }
+            reply = next((
+                "\n\n".join(
+                    block["text"]["text"] for block in item.get("blocks", [])
+                    if block.get("type") == "section" and isinstance(block.get("text"), dict)
+                )
+                for item in reversed(posted)
+                if any(block.get("type") == "section" for block in item.get("blocks", []))
+            ), "")
+            prompt = runtime.security.unseal(completed.prompt).decode()
+            return {
+                "case": case["id"],
+                "trial": trial,
+                "turn_id": turn.id,
+                "agent_model": runtime.settings.default_model,
+                "offered_tool_names": available_tools,
+                "slack_event_input": payload,
+                "slack_thread_input": thread,
+                "slack_thread_reads": slack_reads,
+                "prompt_received": prompt,
+                "thread_messages_in_prompt": [
+                    message["text"] for message in case["thread"] if message["text"] in prompt
+                ],
+                "attached_image_names": [],
+                "posted_reply": reply,
+                "tool_trace": trace,
+                "tokens_cost": json.loads(completed.usage or "{}"),
+                **failure_evidence,
+            }

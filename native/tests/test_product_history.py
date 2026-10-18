@@ -637,7 +637,7 @@ async def unified(product, tmp_path):
     runtime.database.security = security
     runtime.database.product_identity = None
     runtime.database.product_authority_enabled = False
-    for method in ("allowed_session", "check_source_audience", "same_person"):
+    for method in ("allowed_session", "execution_session", "check_source_audience", "same_person"):
         setattr(runtime.database, method, MethodType(getattr(Database, method), runtime.database))
 
     async def actor():

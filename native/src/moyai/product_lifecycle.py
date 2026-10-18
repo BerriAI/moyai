@@ -208,6 +208,11 @@ class ProductRoleLifecycle:
                 await self.start_broker()
             elif self.role == "coordinator":
                 from app.coordinator_handoff import CoordinatorHandoff
+                slack = self.runtime.product_slack
+                if slack is not None:
+                    # HTTP intake acknowledgements also exist on a standby.
+                    # Keep their cleanup inside the process's resource lifetime.
+                    stack.push_async_callback(slack.close)
                 self.handoff = CoordinatorHandoff(product.store, _CoordinatorClient(self.runtime))
                 await stack.enter_async_context(self.handoff.lifespan(self.coordinator_background))
             self.ready = True

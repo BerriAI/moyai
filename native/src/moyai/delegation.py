@@ -157,7 +157,7 @@ class DelegationService:
                 return previous
             if locked is None:
                 raise PermissionError("The original requester authority changed.")
-            parent = await database.allowed_session(db, scope.session_id, actor)
+            parent = await database.execution_session(db, scope.session_id, actor)
             locked = await db.scalar(update(Session).where(
                 Session.id == parent.id, Session.active_turn == scope.turn_id,
                 Session.deleted.is_(False), Session.status == "running",

@@ -45,6 +45,10 @@ SHELL_RECOVERY_VERSION = "moyai-shell-readiness-v1"
 SHELL_READINESS_SUPPORTED = "moyai_shell_readiness_supported"
 
 
+class PendingEffectError(PermissionError):
+    """A new call was refused before dispatch; the earlier receipt stays pending."""
+
+
 def requires_receipt(tool: ToolDefinition) -> bool:
     if tool.name in SKILL_EFFECTS:
         return not workflow.in_workflow() or workflow.patched("moyai-skill-receipts-v1")
@@ -130,7 +134,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 if await db.scalar(select(Effect.id).where(
                     Effect.session_id == scope.session_id, Effect.state == "pending"
                 )):
-                    raise PermissionError("An earlier action needs reconciliation before another write.")
+                    raise PendingEffectError("An earlier action needs reconciliation before another write.")
                 db.add(Effect(
                     id=identity, session_id=scope.session_id, turn_id=scope.turn_id,
                     actor_id=scope.actor_id, tool_name=name,
@@ -143,7 +147,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
                     ),
                 ))
         except IntegrityError as error:
-            raise PermissionError("Another action is awaiting a confirmed outcome.") from error
+            raise PendingEffectError("Another action is awaiting a confirmed outcome.") from error
 
     @durable_operation("confirm")
     async def confirm(self, identity: str) -> None:
@@ -221,6 +225,15 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 else:
                     await self.reserve(ctx.deps, identity, call.tool_name, args)
             except Exception as error:
+                cause = error.cause if isinstance(error, ActivityError) else error
+                if isinstance(cause, PendingEffectError) or (
+                    isinstance(cause, ApplicationError) and cause.type == "PendingEffectError"
+                ):
+                    raise ToolFailed(
+                        "This action did not run. An earlier action has an unconfirmed outcome. "
+                        "Use available read tools to inspect it and explain what still needs review. "
+                        "Do not repeat the earlier action or attempt other writes until it is reconciled."
+                    ) from error
                 if tool_def.name in BROWSER_WRITES and await self.not_dispatched(identity):
                     raise ToolFailed("Browser reservation failed before dispatch. The action did not execute.") from error
                 raise
@@ -231,6 +244,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
         tool_def: ToolDefinition, args: dict[str, Any], result: Any,
     ) -> Any:
         if tool_def.name in BROWSER_WRITES:
+            surface = "desktop" if tool_def.name == "desktop_action" else "browser"
             outcome = (result.metadata or {}).get(BROWSER_OUTCOME) if isinstance(result, ToolReturn) else None
             if outcome in {"not_dispatched", "unknown"}:
                 guarded = requires_receipt(tool_def)
@@ -241,16 +255,16 @@ class EffectReceipts(AbstractCapability[RunScope]):
                     raise ToolFailed(str(result.return_value))
                 state = await self.browser_state(identity) if guarded else None
                 if state == "confirmed":
-                    raise ToolFailed("The browser action completed, but its result could not be delivered. Do not repeat it.")
+                    raise ToolFailed(f"The {surface} action completed, but its result could not be delivered. Do not repeat it.")
                 if state == "not_dispatched":
-                    raise ToolFailed("This browser call was already refused before dispatch. It was not repeated.")
+                    raise ToolFailed(f"This {surface} call was already refused before dispatch. It was not repeated.")
                 raise ToolFailed(
-                    "The browser outcome is uncertain. Use browser_read to inspect it, then reconcile "
+                    f"The {surface} outcome is uncertain. Use {surface}_read to inspect it, then reconcile "
                     "the pending action before another write. Do not repeat the action."
                 )
             if requires_receipt(tool_def) and outcome != "completed":
                 # A missing/malformed result marker cannot attest success.
-                raise ToolFailed("The browser result has no confirmed outcome. Inspect and reconcile the pending action.")
+                raise ToolFailed(f"The {surface} result has no confirmed outcome. Inspect and reconcile the pending action.")
         if requires_receipt(tool_def):
             await self.confirm(effect_id(ctx, call))
             is_creation = call.tool_name.startswith("github_") and call.tool_name.endswith(
@@ -276,6 +290,7 @@ class EffectReceipts(AbstractCapability[RunScope]):
     ) -> Any:
         cause = error.cause if isinstance(error, ActivityError) else None
         if tool_def.name in BROWSER_WRITES and requires_receipt(tool_def):
+            surface = "desktop" if tool_def.name == "desktop_action" else "browser"
             identity = effect_id(ctx, call)
             if isinstance(cause, ApplicationError) and cause.type in {
                 "MoyaiGuidanceChanged", "MoyaiPermissionDenied", "MoyaiMissingExecutionScope",
@@ -283,11 +298,11 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 raise ToolFailed("Execution authority changed before browser dispatch. The action did not execute.") from error
             state = await self.browser_state(identity)
             if state == "confirmed":
-                raise ToolFailed("The browser action completed, but its result could not be delivered. Do not repeat it.") from error
+                raise ToolFailed(f"The {surface} action completed, but its result could not be delivered. Do not repeat it.") from error
             if state == "not_dispatched":
-                raise ToolFailed("This browser call was already refused before dispatch. It was not repeated.") from error
+                raise ToolFailed(f"This {surface} call was already refused before dispatch. It was not repeated.") from error
             raise ToolFailed(
-                "The browser outcome is uncertain. Inspect with browser_read and reconcile "
+                f"The {surface} outcome is uncertain. Inspect with {surface}_read and reconcile "
                 "the pending action before another write."
             ) from error
         if (
