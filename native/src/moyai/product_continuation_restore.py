@@ -57,19 +57,26 @@ def repository_requested(context: dict[str, Any], plan: dict | None) -> bool:
 def runtime_image(base: Any = None):
     """Overlay native runtime resources on a validated *environment* image."""
     from .agent import PACKAGE_ROOT
+    from .tools import WORKSPACE_TOOLS
 
     image = base or modal.Image.debian_slim(python_version="3.13")
-    return (
+    image = (
         image.apt_install(
             "git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm", "python3", "python3-pip",
             "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
             "x11-xserver-utils", "fonts-dejavu-core",
         )
         .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
+    )
+    for tool in WORKSPACE_TOOLS:
+        image = tool.install(image)
+    return (
+        image
         .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)
         .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
         .add_local_file(PACKAGE_ROOT / "browser_guest.py", "/opt/moyai/browser_guest.py", copy=True)
         .add_local_file(PACKAGE_ROOT / "browser_driver.py", "/opt/moyai/browser_driver.py", copy=True)
+        .add_local_file(PACKAGE_ROOT / "ocu_guest.py", "/opt/moyai/ocu_guest.py", copy=True)
         .add_local_file(GUEST, "/opt/moyai/product_restore.py", copy=True)
     )
 

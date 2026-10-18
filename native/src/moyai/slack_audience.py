@@ -3,15 +3,56 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
+import re
 from types import SimpleNamespace
 from typing import Any, cast
 
+from app.connector_errors import ConnectorError
 from app.db import database as source_database
 from fastapi import HTTPException
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .product_slack_models import ProductSlackBinding
+from .slack_audience_reads import SlackAudienceReads
+
+logger = logging.getLogger(__name__)
+DENIED_ERRORS = frozenset({
+    "access_denied", "account_inactive", "channel_not_found", "invalid_auth",
+    "missing_scope", "not_authed", "not_in_channel", "token_revoked",
+})
+
+
+def provider_failure(error: Exception) -> bool:
+    """Keep reads closed, but do not turn an unavailable provider into a denial."""
+    code = "timeout" if isinstance(error, TimeoutError) else "provider_unavailable"
+    status, retry_after = None, None
+    if isinstance(error, ConnectorError):
+        code = error.code if isinstance(error.code, str) and re.fullmatch(r"[a-z_]{1,64}", error.code) else code
+        status = error.status_code if isinstance(error.status_code, int) else None
+        if isinstance(error.retry_after, (int, float)) and math.isfinite(error.retry_after) and error.retry_after > 0:
+            retry_after = math.ceil(error.retry_after)
+        denied = code in DENIED_ERRORS and not error.retryable
+    else:
+        status = error.status_code if isinstance(error, HTTPException) else None
+        denied = status in {401, 403, 404}
+    # Only structured identifiers and numbers; never exception strings, request
+    # headers, provider payloads, message bodies or credentials.
+    logger.warning("Slack audience check %s: code=%s status=%s retry_after=%s",
+                   "denied" if denied else "unavailable", code, status, retry_after)
+    if denied:
+        return False
+    if code == "invalid_refresh_token":
+        raise HTTPException(
+            503, "The Slack bot connection could not be renewed. An administrator must reconnect Slack "
+            "in Settings → Connections.",
+        ) from None
+    raise HTTPException(
+        503, "Slack access could not be verified right now. Try again shortly.",
+        headers={"Retry-After": str(retry_after)} if retry_after else None,
+    ) from None
 
 
 async def can_read(slack, db, session, actor) -> bool:
@@ -49,12 +90,12 @@ async def can_read_binding(slack, db, binding, actor) -> bool:
     cache = getattr(actor, "slack_read_cache", db.info)
     if key in cache:
         return cache[key]
+    reads = getattr(slack, "audience_reads", None)
+    if reads is None:
+        slack.audience_reads = reads = SlackAudienceReads()
     try:
         async with asyncio.timeout(8):
-            token = await slack.connectors.slack_bot_token()
-            headers = {"Authorization": "Bearer " + token}
-            info = await slack.connectors.request("GET", "https://slack.com/api/conversations.info",
-                                                  headers=headers, params={"channel": binding.channel_id})
+            info = await reads.read(slack, installed, "conversations.info", binding.channel_id)
             channel = info.get("channel", {})
             if (not info.get("ok") or channel.get("id") != binding.channel_id
                     or channel.get("is_ext_shared") is not False):
@@ -64,8 +105,7 @@ async def can_read_binding(slack, db, binding, actor) -> bool:
             for _ in range(50):
                 if allowed:
                     break
-                page = await slack.connectors.request("GET", "https://slack.com/api/conversations.members",
-                    headers=headers, params={"channel": binding.channel_id, "cursor": cursor, "limit": 200})
+                page = await reads.read(slack, installed, "conversations.members", binding.channel_id, cursor)
                 if not page.get("ok"):
                     return False
                 allowed = bool(set(users) & set(page.get("members", [])))
@@ -75,12 +115,8 @@ async def can_read_binding(slack, db, binding, actor) -> bool:
                 seen.add(cursor)
             current = await source_database(slack.installation)
             allowed = allowed and current["authority"] == installed["authority"]
-    except (TimeoutError, HTTPException):
-        return False
-    except Exception:  # noqa: BLE001 - provider failure must fail closed at this read boundary
-        # A failed provider read never broadens the audience. No provider data
-        # or credentials enter a browser-facing error or logs here.
-        return False
+    except Exception as error:  # noqa: BLE001 - provider failures never widen the read audience
+        return provider_failure(error)
     cache[key] = allowed
     return allowed
 

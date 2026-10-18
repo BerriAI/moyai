@@ -50,6 +50,31 @@ def save(service, provider, **extra):
     service.connectors.save(provider, {"access_token": "synthetic-token", "kind": "personal", **extra}, provider)
 
 
+@pytest.mark.parametrize('bot', [False, True])
+@pytest.mark.parametrize('identity_linking', [False, True])
+@pytest.mark.parametrize('thread_chat', [False, True])
+def test_slack_oauth_retains_existing_scope_contract(bridge, bot, identity_linking, thread_chat):
+    from urllib.parse import parse_qs, urlsplit
+
+    bridge.settings.slack_bot_enabled = bot
+    bridge.settings.slack_identity_linking_enabled = identity_linking
+    bridge.settings.slack_thread_chat_enabled = thread_chat
+    params = parse_qs(urlsplit(bridge.connectors.authorization_url('slack', 'local-state')).query)
+    assert params['user_scope'] == ['search:read,channels:history,groups:history,im:history,mpim:history']
+    if not bot:
+        assert 'scope' not in params
+        return
+    expected = {
+        'app_mentions:read', 'chat:write', 'im:write', 'im:history', 'reactions:read',
+        'reactions:write', 'assistant:write', 'files:write', 'files:read',
+    }
+    if identity_linking:
+        expected |= {'users:read', 'users:read.email'}
+    if thread_chat:
+        expected |= {'channels:history', 'groups:history', 'channels:read', 'groups:read'}
+    assert set(params['scope'][0].split(',')) == expected
+
+
 async def scope_for(bridge, kind):
     grants = await bridge.resolve_grants("google:owner", [kind])
     return RunScope("native-session", "native-turn", "google:owner", "test", grants)
@@ -491,6 +516,53 @@ async def test_onboarding_reuses_canonical_auth_csrf_and_provider_routes(bridge,
         assert not bridge.store.rows("SELECT 1 FROM oauth_states WHERE provider='linear'")
         with pytest.raises(HTTPException):
             await bridge.require_scope(scope)
+
+
+async def test_slack_reconnect_rechecks_blocked_profiles_without_granting_identity(bridge, monkeypatch):
+    from app.connection_authority import save_if_unchanged
+    bridge.settings.slack_identity_linking_enabled = True
+    value = {'access_token': 'user-token', 'bot': {
+        'access_token': 'bot-token', 'team': {'id': 'TTEST0001'}, 'bot_user_id': 'UBOT00001',
+        'scope': 'users:read,users:read.email',
+    }}
+    bridge.connectors.save('slack', value, 'Previous installation')
+    with bridge.store.connect() as conn:
+        sender = bridge.store.slack_identity_in(conn, 'TTEST0001', 'UTEST0001')
+        other = bridge.store.slack_identity_in(conn, 'TOTHER001', 'UTEST0002')
+        conn.execute("UPDATE users SET profile_next_check=?,link_status='review',profile_eligible=0 WHERE kind='slack'",
+                     (int(time.time()) + 300,))
+    before = bridge.store.rows('SELECT * FROM users WHERE id=?', (sender,))[0]
+    unrelated = bridge.store.rows('SELECT * FROM users WHERE id=?', (other,))[0]
+    expected = bridge.connectors.connection_revision('slack')
+    save_if_unchanged(bridge.store, bridge.security, 'slack', value, 'Reconnected', expected)
+    current = bridge.store.rows('SELECT * FROM users WHERE id=?', (sender,))[0]
+    assert current == {**before, 'profile_next_check': 0}
+    assert bridge.store.rows('SELECT * FROM users WHERE id=?', (other,))[0] == unrelated
+
+    async def profile(method, url, **kwargs):
+        assert url.endswith('/users.info') and kwargs['params'] == {'user': 'UTEST0001'}
+        return {'ok': True, 'user': {'id': 'UTEST0001', 'team_id': 'TTEST0001',
+                'profile': {'email': 'owner@example.test', 'real_name': 'Verified owner'}}}
+
+    monkeypatch.setattr(bridge.connectors, 'request', profile)
+    await bridge.identities.resolve(current, 'TTEST0001')
+    verified = bridge.store.rows('SELECT * FROM users WHERE id=?', (sender,))[0]
+    assert verified['profile_eligible'] == 1 and verified['profile_conflict'] == 0
+    assert verified['link_status'] != 'review'
+
+
+async def test_superseded_slack_reconnect_does_not_change_profile_retry_state(bridge):
+    from app.connection_authority import save_if_unchanged
+    value = {'access_token': 'user-token', 'bot': {'access_token': 'bot-token', 'team': {'id': 'TTEST0001'}}}
+    bridge.connectors.save('slack', value, 'Original')
+    expected = bridge.connectors.connection_revision('slack')
+    with bridge.store.connect() as conn:
+        sender = bridge.store.slack_identity_in(conn, 'TTEST0001', 'UTEST0001')
+        conn.execute('UPDATE users SET profile_next_check=12345 WHERE id=?', (sender,))
+    bridge.connectors.save('slack', value, 'Concurrent replacement')
+    with pytest.raises(ConnectorError, match='changed'):
+        save_if_unchanged(bridge.store, bridge.security, 'slack', value, 'Superseded', expected)
+    assert bridge.store.rows('SELECT profile_next_check FROM users WHERE id=?', (sender,))[0]['profile_next_check'] == 12345
 
 
 async def test_personal_slack_keeps_bot_operations_separate_and_never_uses_user_token(bridge, monkeypatch):

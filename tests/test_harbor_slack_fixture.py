@@ -78,9 +78,19 @@ def test_fixture_restores_client_constructor_after_workflow_failure():
 
 
 @pytest.mark.asyncio
-async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(monkeypatch, harbor_runner):
+@pytest.mark.parametrize("outcome", ["completed", "failed", "timeout", "cancel_timeout"])
+async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(monkeypatch, harbor_runner, outcome):
     # The complete runner integration uses Harbor's optional development overlay.
     from openai import AsyncOpenAI
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        RetryPromptPart,
+        ToolCallPart,
+        ToolReturnPart,
+    )
+    from pydantic_ai_harness.step_persistence import StepEvent
+    from temporalio.client import WorkflowFailureError
 
     runner = harbor_runner
     network_calls = []
@@ -94,7 +104,10 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", network)
     monkeypatch.setattr(runner, "offered_tool_names", AsyncMock(return_value=[]))
     received = False
-    completed = SimpleNamespace(prompt=b"Explain team", conversation=None, usage="{}")
+    completed = SimpleNamespace(
+        prompt=b"Explain team", conversation=None, usage="{}",
+        status="completed" if outcome == "completed" else "failed", error="Synthetic turn failure",
+    )
     scalar_values = iter([SimpleNamespace(session_id="session"), SimpleNamespace(id="turn", workflow_id="workflow")])
     db = SimpleNamespace(scalar=AsyncMock(side_effect=lambda *_: next(scalar_values)), get=AsyncMock(return_value=completed))
 
@@ -106,7 +119,15 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
         nonlocal received
         received = True
 
+    result_calls = 0
+
     async def workflow_result():
+        nonlocal result_calls
+        result_calls += 1
+        if result_calls > 1:
+            if outcome == "cancel_timeout":
+                raise TimeoutError("The cancellation did not settle.")
+            return
         await asyncio.sleep(0)
         assert received
         # This read happens after receive_payload, exactly where the old fixture
@@ -122,6 +143,10 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
             )
             gateway = await gateway_client.responses.create(model="real-model", input="Test input")
             assert gateway.id == "gateway-result"
+        if outcome in {"timeout", "cancel_timeout"}:
+            raise TimeoutError("The owned eval workflow exceeded its deadline.")
+        if outcome == "failed":
+            raise WorkflowFailureError(cause=RuntimeError("The synthetic workflow failed after its tool call."))
 
     async def pump(client):
         await client.post("chat.postMessage", json={"channel": "CTEST0001", "blocks": [
@@ -133,9 +158,22 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
         database=SimpleNamespace(sessions=sessions, claim_next=AsyncMock()),
         settings=SimpleNamespace(temporal_queue="test", default_model="model"),
         security=SimpleNamespace(unseal=lambda value: value),
+        stores=SimpleNamespace(steps=SimpleNamespace(
+            latest_snapshot=AsyncMock(return_value=SimpleNamespace(messages=[
+                ModelResponse(parts=[ToolCallPart("browser_open", {"url": "https://example.test"}, tool_call_id="open")]),
+                ModelRequest(parts=[ToolReturnPart("browser_open", "uncertain " + "x" * 5000, tool_call_id="open")]),
+                ModelResponse(parts=[ToolCallPart("shell", {"command": "not dispatched"}, tool_call_id="blocked")]),
+                ModelRequest(parts=[RetryPromptPart(tool_name="shell", content="Earlier action pending", tool_call_id="blocked")]),
+            ])),
+            list_events=AsyncMock(return_value=[StepEvent(
+                run_id="turn", kind="tool_call_failed", step_index=1,
+                tool_name="shell", tool_call_id="blocked", error="Earlier action pending",
+            )]),
+        )),
     )
+    handle = SimpleNamespace(result=workflow_result, cancel=AsyncMock(), terminate=AsyncMock())
     temporal = SimpleNamespace(client=SimpleNamespace(start_workflow=AsyncMock(
-        return_value=SimpleNamespace(result=workflow_result),
+        return_value=handle,
     )))
     case = {"id": "style", "prompt": "Explain team", "thread": [
         {"role": "human", "display_name": "Reviewer", "text": "Earlier context"},
@@ -144,6 +182,23 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
     assert result["posted_reply"] == "A concrete answer"
     assert len(result["slack_thread_reads"]) == 1
     assert [request.url.host for request in network_calls] == ["gateway.example"]
+    if outcome != "completed":
+        assert result["execution_error"]
+        assert result["usage_incomplete"]
+        assert [call["name"] for call in result["tool_trace"]] == ["browser_open", "shell"]
+        assert len(result["tool_trace"][0]["result"]) > 5000
+        assert "Earlier action pending" in result["tool_trace"][1]["result"]
+        assert result["step_events"][0]["tool_call_id"] == "blocked"
+        # Events contain datetimes in the native store; the result must remain a
+        # writable Harbor JSON artifact even when the workflow failed.
+        import json
+        json.dumps(result)
+    else:
+        runtime.stores.steps.latest_snapshot.assert_not_awaited()
+    assert handle.cancel.await_count == (1 if outcome in {"timeout", "cancel_timeout"} else 0)
+    assert handle.terminate.await_count == (1 if outcome == "cancel_timeout" else 0)
+    if outcome == "failed":
+        assert "synthetic workflow failed after its tool call" in result["execution_traceback"]
 
 
 @pytest.mark.asyncio
@@ -159,6 +214,7 @@ async def test_fixture_metadata_obeys_native_audience_assertion(
     monkeypatch, harbor_runner, change, allowed, provider_reads,
 ):
     from fastapi import HTTPException
+
     from moyai.database import Database
     from moyai.product_slack_models import ProductSlackBinding
     from moyai.slack_audience import can_read
