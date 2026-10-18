@@ -148,9 +148,12 @@ async def test_unexpected_attachment_read_error_is_logged_and_does_not_drop_turn
 
     assert "file_unavailable" in prepared.prompt
     assert any(
-        record.name == "moyai.product_slack_files" and record.exc_info
+        record.name == "moyai.product_slack_files"
+        and record.getMessage() == "Slack attachment read unavailable (RuntimeError)"
+        and not record.exc_info
         for record in caplog.records
     )
+    assert "synthetic attachment reader failure" not in caplog.text
     async with runtime.database.sessions() as db:
         assert len(list(await db.scalars(select(Turn)))) == 1
 

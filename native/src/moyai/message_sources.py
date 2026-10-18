@@ -25,7 +25,7 @@ FILES_END = (
 
 async def record_source(database, db, identity: str, body) -> None:
     await db.flush()  # the message's unique identity is the provenance FK
-    source = body._source or {"kind": "web"}
+    source = body.source
     db.add(MessageSource(message_identity=identity, kind=source["kind"], mirror=source["kind"] == "web",
                          data=database.security.seal(source)))
 

@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from moyai.contracts import NewMessage, NewSession
+from moyai.inbound_events import InboundEvent
 from moyai.slack_permalink import permalink
 
 
@@ -17,9 +18,11 @@ from moyai.slack_permalink import permalink
 ])
 async def test_source_link_validates_destination_and_never_returns_credentials(runtime, actor, url, valid):
     session = await runtime.database.create_session(actor, NewSession())
-    body = NewMessage(prompt='Original message', request_key='permalink')
-    body._source = {'kind': 'slack', 'team_id': 'TTEST001', 'channel_id': 'CTEST001',
-                    'thread_ts': '1792255740.000', 'message_ts': '1792255741.001', 'user_id': 'UTEST001'}
+    body = NewMessage.from_event(InboundEvent(
+        source='slack', sender_id=actor.id, deduplication_key='permalink', text='Original message',
+        provenance={'team_id': 'TTEST001', 'channel_id': 'CTEST001',
+                    'thread_ts': '1792255740.000', 'message_ts': '1792255741.001', 'user_id': 'UTEST001'},
+    ))
     await runtime.database.submit(actor, session.id, body)
     message = (await runtime.database.messages(actor, session.id))[0]
     async def token():

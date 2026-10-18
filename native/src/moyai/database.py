@@ -269,6 +269,13 @@ class Database:
         return session
 
     async def check_source_audience(self, db: AsyncSession, session: Session, actor: User) -> None:
+        if session.surface == "slack":
+            delegated = await db.get(DelegatedSession, session.id)
+            member = await db.get(SwarmMember, session.id)
+            parent_id = delegated.parent_session_id if delegated else member.mission_id if member else None
+            if parent_id and parent_id != session.id:
+                await self.allowed_session(db, parent_id, actor)
+                return
         if (session.surface == "slack" and self.product_authority_enabled
                 and (self.slack_access is None or not await self.slack_access(db, session, actor))):
             raise HTTPException(404, "Conversation unavailable. For Slack chats, verify your linked Slack account "
@@ -410,6 +417,7 @@ class Database:
         received_at: str | None = None,
     ) -> Turn:
         admitted_at = now()
+        body.validate_event(actor.id)
         # Preserve transport receipts admitted before clarification replies
         # acquired an explicit target.
         fingerprint = hashlib.sha256(body.model_dump_json(
@@ -811,6 +819,7 @@ class Database:
                 ).values(auth_version=User.auth_version).returning(User.id))
                 if locked_actor is None:
                     raise PermissionError("The requester changed before preparation.")
+                cast(Any, actor).product_grant = product_grant
             session = await self.allowed_session(db, turn.session_id, actor)
             member = await self.swarms.authorize(db, turn)
             delegation = await db.get(DelegatedSession, session.id)
@@ -916,6 +925,7 @@ class Database:
             if actor is None or not actor.enabled or turn is None:
                 raise PermissionError("This execution no longer has an authorized requester.")
             await self._check_product_turn(db, turn, scope.product_grant)
+            cast(Any, actor).product_grant = scope.product_grant
             await self.swarms.authorize(db, turn, scope=scope)
             session = await self.allowed_session(db, scope.session_id, actor)
             if (

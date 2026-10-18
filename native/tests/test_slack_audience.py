@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from moyai.contracts import NewMessage, NewSession
+from moyai.inbound_events import InboundEvent
 from moyai.models import Session, SlackThread
 from moyai.product_routes import ProductReadService, Reader
 from moyai.product_slack_models import ProductSlackBinding
@@ -49,9 +50,11 @@ async def audience(slack_admission):
         db.add(SlackThread(session_id=session.id, team_id='TLOCAL001', channel_id='GPRIVATE1', thread_ts='1792255700.001'))
         db.add(ProductSlackBinding(session_id=session.id, requester_id=sender.id, team_id='TLOCAL001',
             channel_id='GPRIVATE1', thread_ts='1792255700.001', started_ts='1792255700.001', connection_authority='a' * 64))
-    body = NewMessage(prompt='Private channel input', request_key='private-slack')
-    body._source = {'kind': 'slack', 'team_id': 'TLOCAL001', 'channel_id': 'GPRIVATE1',
-                    'thread_ts': '1792255700.001', 'message_ts': '1792255700.001', 'user_id': 'UACTUAL01'}
+    body = NewMessage.from_event(InboundEvent(
+        source='slack', sender_id=sender.id, deduplication_key='private-slack', text='Private channel input',
+        provenance={'team_id': 'TLOCAL001', 'channel_id': 'GPRIVATE1',
+                    'thread_ts': '1792255700.001', 'message_ts': '1792255700.001', 'user_id': 'UACTUAL01'},
+    ))
     await product.database.submit(sender, session.id, body)
     del sender.slack_channel_evidence
     runtime = SimpleNamespace(database=product.database, security=product.database.security,
@@ -116,6 +119,7 @@ async def test_revocation_blocks_file_export_and_live_endpoints(audience, runtim
     import httpx
 
     from moyai.api import create_app
+    from moyai.file_preview import FilePreviewService
     from moyai.models import Upload
     product = audience
     original = runtime.database
@@ -133,7 +137,12 @@ async def test_revocation_blocks_file_export_and_live_endpoints(audience, runtim
             db.add(upload)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
             assert (await client.get('/api/uploads/' + upload.id)).status_code == 200
+            previews = FilePreviewService(runtime)
+            assert (await previews.record(product.actor, product.session_id, 'upload', upload.id)).name == 'private.txt'
             product.state['members'] = []
+            with pytest.raises(HTTPException) as denied:
+                await previews.record(product.actor, product.session_id, 'upload', upload.id)
+            assert denied.value.status_code == 404
             for path in ('/api/uploads/' + upload.id,
                          f'/api/sessions/{product.session_id}/debug-trace',
                          f'/api/sessions/{product.session_id}/progress/unused',
@@ -143,6 +152,17 @@ async def test_revocation_blocks_file_export_and_live_endpoints(audience, runtim
                 assert raw.decode() not in response.text
     finally:
         runtime.database = original
+
+
+async def test_worker_reuses_admitted_grant_and_rechecks_channel_membership(audience):
+    database = audience.database
+    turn = await database.claim_next()
+    prepared = await database.prepare(turn.id)
+    await database.authorize_scope(prepared.scope)
+    audience.state['members'] = []
+    with pytest.raises(HTTPException) as denied:
+        await database.authorize_scope(prepared.scope)
+    assert denied.value.status_code == 404
 
 
 async def test_historical_reads_use_native_controls_and_preserve_verified_attribution(audience):

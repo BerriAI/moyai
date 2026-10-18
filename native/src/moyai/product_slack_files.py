@@ -102,8 +102,8 @@ class ProductSlackFiles:
                 except SlackFileError as error:
                     context.append({"file_id": file_id, "error": error.diagnostic()})
                     continue
-                except Exception:
-                    logger.exception("Slack attachment read failed for file %s", file_id)
+                except Exception as error:  # noqa: BLE001 - failed references must not drop the authored message
+                    logger.warning("Slack attachment read unavailable (%s)", type(error).__name__)
                     context.append({
                         "file_id": file_id,
                         "error": {"phase": "slack_attachment_read", "code": "file_unavailable"},

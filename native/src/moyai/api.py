@@ -716,7 +716,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def steer_queued(turn_id: str, user: User = Depends(actor)):
         async with runtime.database.sessions() as db:
             turn = await db.get(Turn, turn_id)
-            if turn is None:
+            if turn is None or not await runtime.database.same_person(db, user, turn.actor_id):
                 raise HTTPException(404, "Message not found.")
         original = await answer_actor(runtime, user, turn)
         return turn_view(await runtime.database.steer_queued(original, turn_id))

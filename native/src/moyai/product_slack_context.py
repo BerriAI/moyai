@@ -40,7 +40,7 @@ class SlackThreadContext:
         await self.slack.product.identity.require_current(principal.grant)
         cached = await self._cached_prompt(actor, origin, body)
         if cached is not None:
-            return body.model_copy(update={"prompt": cached})
+            return body.with_model_input(cached)
         # Current signed evidence is safe to retain in DMs; shared search
         # credentials must never hydrate their earlier messages.
         direct = origin["channel_id"].startswith("D")
@@ -84,9 +84,7 @@ class SlackThreadContext:
             else:
                 grant = None
         await self._authorize(principal, installed, grant)
-        if body._source is not None:
-            body._source = {**body._source, "context_status": context["status"]}
-        return body.model_copy(update={"prompt": body.prompt + self._render(context)})
+        return body.with_model_input(body.prompt + self._render(context), context_status=str(context["status"]))
 
     async def _cached_prompt(self, actor: User, origin: dict[str, str], body: NewMessage) -> str | None:
         database = self.slack.runtime.database

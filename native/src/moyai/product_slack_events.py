@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import update
 
 from .contracts import NewMessage
+from .inbound_events import InboundEvent
 from .models import Session, User
 from .product_identity import ProductPrincipal
 from .product_slack_controls import answer
@@ -174,15 +175,12 @@ class SlackEvents:
         selections = [grant["id"] for grant in await self.slack.connections.catalog(
             actor.id, shared_session=True, surface="slack",
         )]
-        body = NewMessage(
-            prompt=message.prompt + attachments["context"], request_key="slack-message:" + message.key,
-            mode="asap", connections=selections, attachments=attachments["images"],
-        )
-        body._authored_text = message.prompt
-        body._source = {
-            "kind": "slack", **message.origin,
-            "files": attachments.get("files", []),
-        }
+        body = NewMessage.from_event(InboundEvent(
+            source="slack", sender_id=actor.id, deduplication_key=message.key,
+            text=message.prompt, model_context=attachments["context"],
+            attachments=tuple(attachments["images"]),
+            provenance={**message.origin, "files": attachments.get("files", [])},
+        ), connections=selections)
         body = await self.slack.context.prepare(actor, principal, message.origin, installed, body, source=message.source)
         return SlackSubmission(body, attachments["uploads"])
 

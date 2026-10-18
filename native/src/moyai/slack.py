@@ -153,9 +153,12 @@ async def admit_one(runtime: Runtime, inbox: SlackInbox) -> None:
         # app_mention and message envelopes can describe the same Slack message.
         # Channel + message timestamp identifies that message independently of event_id.
         message_key = hashlib.sha256(json.dumps([team, channel, event["ts"]]).encode()).hexdigest()
-        body = NewMessage(prompt=event["text"], request_key=f"slack-message:{message_key}", mode="asap")
-        body._source = {"kind": "slack", "team_id": team, "channel_id": channel,
-                        "thread_ts": thread_ts, "message_ts": event["ts"], "user_id": event["user"]}
+        from .inbound_events import InboundEvent
+        body = NewMessage.from_event(InboundEvent(
+            source="slack", sender_id=actor.id, deduplication_key=message_key, text=event["text"],
+            provenance={"team_id": team, "channel_id": channel, "thread_ts": thread_ts,
+                        "message_ts": event["ts"], "user_id": event["user"]},
+        ))
         turn = await runtime.database.submit(actor, thread.session_id, body)
     except HTTPException as error:
         if error.status_code not in (401, 403, 404):

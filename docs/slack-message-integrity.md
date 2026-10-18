@@ -4,6 +4,12 @@ This change requires native application schema **v20** (`2026-10-18-message-sour
 
 A Slack message displays its Slack icon, sender name, verified **You** label, timestamp and source link above the authored text. Slack thread references and file inspection text remain encrypted execution input. They do not become the visible message, search snippet or personal-memory evidence. A matching email or an analytics identity alone never establishes **You** or authorizes an action.
 
+## Adding another event source
+
+Both Slack entry points build an `InboundEvent` after verifying the sender and source. It carries the source name, admitted sender ID, stable message identity, authored text, model context, attachment references and encrypted provenance. `NewMessage.from_event` feeds the existing transactional admission path, which checks sender/payload consistency and retains its authorization, attachment ownership and duplicate-request checks. Slack receipt keys stay unchanged.
+
+A future GitHub adapter can use this contract after verifying its webhook, mapping the sender to an authorized actor and checking repository access. It must supply a stable message identity rather than a delivery-attempt ID. Provider permission checks, conversation routing, context hydration and outbound delivery remain adapter responsibilities. Public provenance requires an explicit display whitelist. This change includes a synthetic GitHub event admission test; it does not install a GitHub webhook or grant repository access.
+
 ## Coverage and behavior
 
 | Touch point | Behavior in this change |
@@ -12,7 +18,7 @@ A Slack message displays its Slack icon, sender name, verified **You** label, ti
 | Names and controls | Uses the current verified Slack-to-sign-in relationship for self labels, archive/rename, queued input controls, requester activity and effects. Execution retains its original authority. |
 | Conversation audience | Checks the Slack installation and current caller. DMs require the verified requester; private channels and group conversations require current membership. Public channels still require a verified workspace identity. External shared channels fail closed. |
 | Other read surfaces | The same audience check covers session inventory, search, history, files, descendants, progress, streams and debug exports. Stream checks repeat while connected. Provider failures do not widen access. |
-| Model context | Thread context still reaches the actual prepared input. Shared follow-ups rebuild from authored messages. Retrying intake reuses its frozen input. |
+| Model context | For shared channel mentions, the bot reads only the signed event’s channel and thread, with the authorized connection fallback from Ishaan’s #559. Thread context still reaches the actual prepared input. Shared follow-ups rebuild from authored messages. Retrying intake reuses its frozen input. |
 | Personal memory | Quoted context cannot become requester evidence. Existing native chat-backed notes with invalid quotes are excluded from recall and marked for owner review in Memory settings. Review & edit saves a manual note; Delete remains available. |
 | Attachments | Shows retained originals, with generic failure notices. Preview text and internal diagnostics stay out of public message metadata. An edit to Slack attachments requires a follow-up to give the task new files. |
 | Web follow-ups | Newly admitted web messages in Slack chats are mirrored with author attribution and durable per-message/revision identities. Slack-originated inputs are not mirrored back. Older web messages are not backfilled. |
