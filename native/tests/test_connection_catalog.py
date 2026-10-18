@@ -99,7 +99,11 @@ async def test_workflow_version_resolution_reuses_catalog_without_erasing_admiss
 
     # SDK discovery can precede the first versioned instruction hook. Resolving
     # execution mode must not rebuild otherwise identical connector schemas.
-    for selected in [context(), context(interactive_delegation=True)]:
+    for selected in [
+        context(), context(interactive_delegation=True),
+        context(interactive_delegation=True, workflow_public_events=True),
+        context(interactive_delegation=True, workflow_public_events=True, history_segment=1),
+    ]:
         async with CatalogToolset(catalog, selected, factory) as tools:
             await tools.get_tools(selected)
     assert len(builds) == 1
