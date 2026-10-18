@@ -301,7 +301,11 @@ async def offered_tool_names(
 def slack_transport(
     history: list[dict[str, Any]], reads: list[dict[str, Any]],
 ) -> httpx.MockTransport:
-    def handle(request: httpx.Request) -> httpx.Response:
+    upstream = httpx.AsyncHTTPTransport()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "slack.com":
+            return await upstream.handle_async_request(request)
         path = request.url.path
         if path.endswith("/conversations.replies"):
             reads.append({
@@ -358,8 +362,36 @@ async def execute_turn(
             "channel_type": "channel", "ts": current, "thread_ts": thread_ts, "text": case["prompt"],
         },
     }
-    with patch("httpx.AsyncClient", routed_client):
-        await service.receive_payload(payload)
+    slack_routing = patch("httpx.AsyncClient", routed_client)
+    slack_routing.start()
+    try:
+        return await run_admitted_turn(
+            case, trial=trial, thread=thread, runtime=runtime, temporal=temporal,
+            workspace=workspace, payload=payload, thread_ts=thread_ts, slack_reads=slack_reads,
+            original_client=original_client,
+        )
+    finally:
+        slack_routing.stop()
+
+
+async def run_admitted_turn(
+    case: dict[str, Any],
+    *,
+    trial: int,
+    thread: list[dict[str, Any]],
+    runtime: Runtime,
+    temporal: Any,
+    workspace: HarborWorkspace,
+    payload: dict[str, Any],
+    thread_ts: str,
+    slack_reads: list[dict[str, Any]],
+    original_client: Any,
+) -> dict[str, Any]:
+    # Slack membership is checked again when the turn is prepared, so the stub stays routed
+    # for the whole turn, not only for intake.
+    service = runtime.product_slack
+    assert service is not None
+    await service.receive_payload(payload)
     async with runtime.database.sessions() as db:
         slack_thread = await db.scalar(sqlalchemy.select(SlackThread).where(
             SlackThread.team_id == TEAM,
