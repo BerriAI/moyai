@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUp, Bug, Code2, Globe, ListChecks, LockKeyhole } from "lucide-react"
+import { Bug, Code2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -117,7 +117,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
               </Button>
             </div>
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>
-              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
+              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><Send /></Button>
             </div>
           </div>
         </div>

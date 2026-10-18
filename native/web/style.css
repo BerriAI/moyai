@@ -89,8 +89,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .topbar > div:first-child { flex: 1; min-width: 0; }
 .workspace-toggle { flex-shrink: 0; }
 .header-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.header-debug-trace { gap: 6px; }
-.conversation .header-controls > .header-debug-trace { width: auto; padding-inline: 10px; }
+.header-debug-trace { color: var(--ui-muted); }
 .topbar.has-trace-error { flex-wrap: wrap; }
 .header-debug-trace-error { flex: 1 0 100%; margin: 0; }
 .action-toast { position: fixed; z-index: 100; bottom: 20px; right: 20px; display: flex; align-items: center; gap: 12px; max-width: min(420px, calc(100vw - 32px)); border: 1px solid var(--ui-border); border-radius: 8px; padding: 10px 14px; background: var(--ui-secondary); color: var(--ui-foreground); font-size: 13px; overflow-wrap: anywhere; }
@@ -248,8 +247,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
   .sidebar.open + .main .mobile-menu { left: auto; right: 8px; }
   .topbar { padding: 20px 12px 16px 58px; min-height: 86px; align-items: flex-start; }
   .topbar h1 { font-size: 15px; }
-  .header-debug-trace-label { display: none; }
-  .conversation .header-controls > .header-debug-trace { width: 40px; padding-inline: 8px; }
   .privacy { display: none; }
   .chat { --chat-gutter: 16px; }
   .transcript { padding: 24px var(--chat-gutter); }
@@ -315,15 +312,15 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .chat .composer-entry { position: relative; border: 1px solid #343434; border-radius: 8px; background: var(--ui-background); }
 .chat .composer-entry:focus-within { border-color: var(--ui-primary); box-shadow: 0 0 0 1px #b69af726; }
 .chat .composer-entry .skill-editor { min-height: 54px; padding: 15px 52px 15px 16px; font-size: 13px; line-height: 1.7; }
-.chat .composer-entry .skill-editor-placeholder { top: 15px; left: 16px; right: 52px; font-size: 13px; }
+.chat .composer-entry .skill-editor-placeholder { top: 15px; left: 16px; right: 52px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat .composer-entry:has([aria-label="Save queued message"]) .skill-editor { padding-right: 130px; }
-.chat .composer-entry .send-actions { position: absolute; right: 8px; bottom: 9px; }
-.chat .composer-entry .send-actions > button { width: 32px; height: 32px; min-height: 32px; border-radius: 6px; color: var(--ui-primary); background: transparent; }
+.chat .composer-entry .send-actions { position: absolute; right: 10px; bottom: 12px; }
+.chat .composer-entry .send-actions > button { width: 28px; height: 28px; min-height: 28px; border-radius: 6px; color: var(--ui-primary); background: transparent; }
 .chat .composer-entry .send-actions > button:hover:not(:disabled) { background: var(--ui-selection); }
 .chat .composer-entry .send-actions > button[aria-label="Save queued message"] { width: auto; }
 .chat .composer-entry .send-actions > button:disabled { opacity: .55; color: var(--ui-muted); }
 .chat .composer-actions { min-height: 38px; padding: 4px 0 0; gap: 6px; color: var(--ui-muted); }
-.chat .composer-actions > button { min-height: 30px; height: 30px; border-radius: 6px; }
+.chat .composer-actions > button { min-height: 28px; height: 28px; border-radius: 6px; }
 .chat .composer-actions > [data-slot="select-trigger"] { margin-left: auto; width: auto; max-width: min(260px, 65%); }
 .chat .composer-actions [data-slot="select-trigger"] { border: 0; background: transparent; font-size: 11px; color: var(--ui-muted); padding-inline: 8px; height: 30px; }
 @media (max-width: 600px) {

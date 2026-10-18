@@ -15,13 +15,16 @@
 .home-privacy-toggle { color: var(--ui-muted); font-size: 12px; }
 .home-privacy-toggle[aria-pressed="true"] { color: var(--ui-primary); background: var(--ui-secondary); }
 .home-composer .send-actions { margin-left: auto; }
+.home-composer .send-actions > button { color: var(--ui-primary); background: transparent; }
+.home-composer .send-actions > button:hover:not(:disabled) { background: var(--ui-selection); }
+.home-composer .send-actions > button:disabled { color: var(--ui-muted); }
 .home-composer .send-actions [data-slot="select-trigger"] { width: auto; max-width: 230px; background: transparent; border: 0; }
 .home-composer-hint { display: flex; justify-content: flex-end; gap: 12px; color: var(--ui-muted); font-size: 11px; margin: 10px 0 0; }
 .home-composer-hint [role="status"] { margin-right: auto; }
-.home-starters { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
+.home-starters { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px; margin-top: 24px; }
 .home-starters[aria-hidden="true"] { visibility: hidden; }
-.home-starters > button { min-height: 38px; padding: 8px 12px; gap: 8px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--ui-canvas); color: var(--ui-muted); font-size: 12px; font-weight: 500; }
-.home-starters > button:hover { background: var(--ui-secondary); color: var(--ui-foreground); border-color: var(--ui-control-border); }
+.home-starters > button { height: 30px; min-height: 30px; padding: 4px 9px; gap: 6px; border: 1px solid var(--ui-border); border-radius: 6px; background: transparent; color: var(--ui-muted); font-size: 12px; font-weight: 400; }
+.home-starters > button:hover { background: var(--ui-secondary); color: var(--ui-foreground); }
 .home-starters > button:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 3px; }
 .home-starters > button > svg { width: 14px; height: 14px; }
 @media (max-width: 1000px) {
@@ -37,6 +40,7 @@
   .home .home-composer .skill-editor { min-height: 128px; padding: 18px; font-size: 16px; }
   .home .home-composer .skill-editor-placeholder { top: 18px; left: 18px; right: 18px; font-size: 16px; }
   .home-composer .send-actions { width: auto; max-width: 100%; }
+  .home-composer .send-actions > button { width: 44px; height: 44px; }
   .home-composer .send-actions [data-slot="select-trigger"] { max-width: 175px; font-size: 12px !important; }
   .home-composer-hint { flex-wrap: wrap; justify-content: flex-start; }
   .home-starters { justify-content: flex-start; margin-top: 24px; }

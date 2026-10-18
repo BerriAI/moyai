@@ -76,7 +76,8 @@
   overscroll-behavior: contain;
 }
 [data-slot="popover-content"] { background: var(--ui-background); z-index: 1002; }
-[data-slot="button"][data-variant="default"] { font-family: var(--ui-font); font-size: 12px; font-weight: 500; border-radius: 6px; }
+[data-slot="button"] { font-family: var(--ui-font); font-size: 12px; font-weight: 400; }
+[data-slot="button"][data-variant="default"] { font-weight: 500; border-radius: 6px; }
 [data-slot="tooltip-content"] { z-index: 1003; max-width: min(320px, calc(100vw - 24px)); }
 /* Closed tooltips must release their Escape-key layer before a dialog opens. */
 [data-slot="tooltip-content"][data-state="closed"] { animation: none; }

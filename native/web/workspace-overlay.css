@@ -100,16 +100,16 @@
   position: relative;
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
   background: transparent;
   transition: background .15s, box-shadow .2s;
 }
-.conversation .header-controls > .workspace-orbit-key:hover { background: #ffffff19; box-shadow: inset 0 0 0 1px #ffffff24; }
+.conversation .header-controls > .workspace-orbit-key:hover { background: var(--ui-secondary); }
 .conversation .header-controls > .workspace-orbit-key[data-open="true"] {
   background: color-mix(in srgb, var(--ui-primary) 16%, var(--ui-canvas));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-primary) 60%, transparent), 0 0 16px #a48cf033;
+  color: var(--ui-primary);
 }
 .workspace-orbit-glyph { display: block; position: relative; width: 16px; height: 16px; border: 1.2px solid currentColor; border-radius: 50%; }
 .workspace-orbit-glyph > i { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }

@@ -27,7 +27,7 @@
 .conversation .topbar .privacy-icon { display: inline-flex; align-items: center; color: var(--ui-muted); flex: none; }
 .conversation .header-controls { gap: 2px; }
 .conversation .header-controls > button,
-.conversation .header-controls [data-slot="popover-trigger"] { width: 30px; height: 30px; padding: 0; }
+.conversation .header-controls [data-slot="popover-trigger"] { width: 28px; height: 28px; padding: 0; }
 .tabbed-panel.details-panel {
   grid-column: 3;
   grid-row: 1 / -1;
