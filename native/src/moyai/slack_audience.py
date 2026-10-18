@@ -16,6 +16,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .product_slack_models import ProductSlackBinding
+from .slack_audience_reads import SlackAudienceReads
 
 logger = logging.getLogger(__name__)
 DENIED_ERRORS = frozenset({
@@ -84,12 +85,12 @@ async def can_read_binding(slack, db, binding, actor) -> bool:
     cache = getattr(actor, "slack_read_cache", db.info)
     if key in cache:
         return cache[key]
+    reads = getattr(slack, "audience_reads", None)
+    if reads is None:
+        slack.audience_reads = reads = SlackAudienceReads()
     try:
         async with asyncio.timeout(8):
-            token = await slack.connectors.slack_bot_token()
-            headers = {"Authorization": "Bearer " + token}
-            info = await slack.connectors.request("GET", "https://slack.com/api/conversations.info",
-                                                  headers=headers, params={"channel": binding.channel_id})
+            info = await reads.read(slack, installed, "conversations.info", binding.channel_id)
             channel = info.get("channel", {})
             if (not info.get("ok") or channel.get("id") != binding.channel_id
                     or channel.get("is_ext_shared") is not False):
@@ -99,8 +100,7 @@ async def can_read_binding(slack, db, binding, actor) -> bool:
             for _ in range(50):
                 if allowed:
                     break
-                page = await slack.connectors.request("GET", "https://slack.com/api/conversations.members",
-                    headers=headers, params={"channel": binding.channel_id, "cursor": cursor, "limit": 200})
+                page = await reads.read(slack, installed, "conversations.members", binding.channel_id, cursor)
                 if not page.get("ok"):
                     return False
                 allowed = bool(set(users) & set(page.get("members", [])))
