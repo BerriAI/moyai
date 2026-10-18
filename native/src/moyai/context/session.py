@@ -43,5 +43,5 @@ class SessionContext(AbstractCapability[RunScope]):
         for name, error in failures:
             if not isinstance(error, Exception):
                 raise error
-            logger.warning("Session context source %s failed: %s", name, error)
+            logger.warning("Session context source %s failed (%s)", name, type(error).__name__)
         return "\n\n".join(rendered)

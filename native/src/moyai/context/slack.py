@@ -14,8 +14,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from ..contracts import Grant, RunScope
+from ..models import MessageSource, Turn
 from ..models import SlackThread as SlackThreadRecord
-from ..models import Turn
 from ..product_slack_models import ProductSlackBinding, SlackTurnSource
 from .base import ContextSource
 
@@ -43,11 +43,21 @@ def make_slack_thread_reader(slack: ProductSlack) -> SlackThreadReader:
                 SlackThreadRecord.session_id == scope.session_id,
             ))
             source = await db.get(SlackTurnSource, scope.turn_id)
+            if source is None:
+                # Historical continuation can admit its first turn before the
+                # adapter's second receipt transaction. Generic provenance is
+                # already committed atomically with that turn's message.
+                saved = await db.get(MessageSource, f"user:{scope.turn_id}")
+                if saved is not None and saved.kind == "slack":
+                    origin = json.loads(database.security.unseal(saved.data))
+                    keys = ("team_id", "channel_id", "thread_ts", "message_ts", "user_id")
+                    if all(isinstance(origin.get(key), str) and origin[key] for key in keys):
+                        source = SlackTurnSource(turn_id=scope.turn_id, **{key: origin[key] for key in keys})
             turn = await db.get(Turn, scope.turn_id)
             binding = await db.get(ProductSlackBinding, scope.session_id)
         if (
             thread is None or source is None or turn is None or binding is None
-            or turn.session_id != scope.session_id
+            or turn.session_id != scope.session_id or turn.actor_id != scope.actor_id
             or (
                 source.team_id, source.channel_id, source.thread_ts
             ) != (thread.team_id, thread.channel_id, thread.thread_ts)
@@ -179,12 +189,7 @@ async def _read(
 
 def _render(context: dict[str, Any]) -> str:
     if context["status"] != "complete":
-        logger.warning(
-            "Slack conversation context %s: team=%s channel=%s thread=%s message=%s reason=%s",
-            context["status"], context["team_id"], context["channel_id"],
-            context["thread_ts"], context["message_ts"],
-            context.get("error") or context.get("warning") or "context limit reached",
-        )
+        logger.warning("Slack conversation context %s", context["status"])
     reference = json.dumps(context, ensure_ascii=False).replace("moyai-skill:", r"moyai\u002dskill:")
     return REFERENCE + reference + (
         "\nResolve references such as 'this' from the conversation above before asking the user to restate them. "

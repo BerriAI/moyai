@@ -606,3 +606,36 @@ async def test_batched_snapshot_reloads_each_step_after_note_edits_and_forget(me
     assert third[0] is not None
     assert "Updated between model steps." not in third[0].content
     assert "personal-editor-preference.md" not in third[1]
+
+
+@pytest.mark.parametrize("change", ["deleted", "edited_after_start"])
+async def test_batched_snapshot_filters_slack_input_changed_during_native_read(memory_product, change):
+    from moyai.models import MessageSource
+
+    product = memory_product
+    note_content = "Pytest tracks fixture setup."
+    await product.memory.save(product.principal.grant, memory_fixtures.note(
+        key="execution-guide", title="Execution guide", kind="reference", content=note_content,
+    ))
+    _, turn, scope, message_id = await memory_execution(product)
+    store = ProductMemoryStore(product.memory, scope, turn.id)
+    before, _ = await store.snapshot(max_chars=32000, path_limit=100)
+    assert note_content in before.content
+    async with product.database.sessions() as db:
+        original = (await db.get(Message, message_id)).content
+
+    class ChangingNativeStore(InMemoryStore):
+        async def read(self, path, *, max_chars):
+            async with product.database.sessions.begin() as db:
+                source = await db.get(MessageSource, f"user:{turn.id}")
+                source.kind = "slack"
+                source.data = product.database.security.seal({"kind": "slack", change: True})
+            return await super().read(path, max_chars=max_chars)
+
+    store.native_store = ChangingNativeStore()
+    after, _ = await store.snapshot(max_chars=32000, path_limit=100)
+    explicit = await store.read(store.prefix + "MEMORY.md", max_chars=32000)
+    assert note_content not in after.content
+    assert explicit is not None and note_content not in explicit.content
+    async with product.database.sessions() as db:
+        assert (await db.get(Message, message_id)).content == original

@@ -124,7 +124,7 @@ async function handle(req,res,next) {
         if(data.reply_to){state.status='idle';state.pending=undefined;state.answerAccepted=true;}
         return json({id:'turn-skill',actor_id:'viewer',status:'completed',model:data.model,connections:data.connections||[]});
       }
-      return json(messages);
+      return json(state.paginate ? messages.filter(row=>row.id>Number(url.searchParams.get('after')||0)).slice(0,200) : messages);
     }
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname===`/api/sessions/${sessionId}/debug-trace`&&req.method==='GET')
@@ -154,7 +154,8 @@ async function handle(req,res,next) {
     const row=session(url.pathname.split('/')[3]);
     const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
-      result.messages=state.messagesBySession?.[row.id]||state.messages;
+      result.messages=(state.messagesBySession?.[row.id]||state.messages).slice(0,state.paginate?200:undefined);
+    if(state.slackDelivery)result.slack_delivery=state.slackDelivery;
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
   }
@@ -2033,4 +2034,49 @@ test('side-chat actions open in the parent panel',async t=>{
   await side.getByRole('button',{name:'Open Run command action',exact:true}).click();
   await page.getByRole('region',{name:'Action details',exact:true}).getByText('README.md\nnative/\nfrontend/',{exact:true}).waitFor();
   assert.ok(state.requests.some(row=>row.path===`/api/sessions/${child}/progress/${turnId}/actions/shell-call`));
+});
+
+for(const width of [1440,768,320])test(`Slack attribution, original files and delivery recovery at ${width}px`,async t=>{
+  reset({status:'completed',ownerId:'slack:TTEST:UME',
+    sessionOverrides:{[sessionId]:{surface:'slack',visibility:'shared',can_manage:true}},
+    slackDelivery:{pending:0,sending:1,rejected:0},
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'slack:TTEST:UME',author_name:'Avery Chen',is_self:true,
+      source:'slack',source_timestamp:'1792281607.232469',source_url:'/api/sessions/source-test',content:'Please review the launch notes.',
+      attachments:[{id:'original-pdf',name:'Launch notes.pdf',media_type:'application/pdf',size:321}]},
+      {id:2,turn_id:'other',role:'user',author_id:'slack:TTEST:UOTHER',author_name:'Jordan Lee',is_self:false,
+       source:'slack',content:'The updated dates are ready.',edited:true,edited_after_start:true}]});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.locator('.message-author').filter({hasText:'Avery Chen · You'}).waitFor();
+  await page.getByText('Jordan Lee',{exact:true}).waitFor();
+  await page.getByText('Launch notes.pdf',{exact:true}).waitFor();
+  assert.equal(await page.locator('.message-author img[alt="Slack"]').count(),2);
+  assert.equal(await page.getByRole('link',{name:'Open message in Slack'}).count(),1);
+  assert.equal(await page.locator('.message-author time').count(),1);
+  assert.equal(await page.getByText('Teammate',{exact:true}).count(),0);
+  await page.getByText('Confirming Slack delivery. Your message will not be sent twice.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Retry delivery'}).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await page.screenshot({path:`/tmp/moyai-slack-ui-${width}.png`});
+  state.slackDelivery={pending:0,sending:0,rejected:1};
+  await page.reload();
+  await page.getByRole('button',{name:'Retry delivery'}).waitFor();
+});
+
+test('Slack history pages beyond 200 and navigation discards the old transcript while loading',async t=>{
+  const nextId='d'.repeat(32);
+  reset({status:'completed',paginate:true,messages:Array.from({length:205},(_,i)=>({id:i+1,turn_id:turnId,
+    role:'user',author_id:'viewer',content:`Authored message ${i+1}`})),
+    sessionOverrides:{[nextId]:{title:'Next conversation'}},
+    messagesBySession:{[nextId]:[{id:206,turn_id:turnId,role:'user',author_id:'viewer',content:'The next conversation body.'}]}});
+  const page=await pageFor(t);
+  await page.getByText('Authored message 205',{exact:true}).waitFor();
+  assert(state.requests.some(row=>row.path.endsWith('/messages')&&row.query==='?after=200'));
+  let release;state.holds={[`/api/sessions/${nextId}`]:new Promise(resolve=>{release=resolve})};
+  t.after(()=>release());
+  await page.evaluate(id=>{location.hash=id},nextId);
+  await waitFor(()=>state.requests.some(row=>row.path===`/api/sessions/${nextId}`));
+  assert.equal(await page.getByText('Authored message 205',{exact:true}).count(),0);
+  release();
+  await page.getByText('The next conversation body.',{exact:true}).waitFor();
+  assert.equal(await page.getByText('Authored message 205',{exact:true}).count(),0);
 });

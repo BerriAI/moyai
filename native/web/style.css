@@ -298,3 +298,12 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .workspace.panel-expanded .browser-login-panel-hint,
 .workspace.panel-split-compact .browser-login-panel-hint { display: grid; }
 @media (max-width: 1000px) { .browser-login-panel-hint { display: grid; } }
+
+.message-author img, .composer-hint img { flex: 0 0 auto; vertical-align: middle; }
+.message-source-link { display: inline-flex; color: var(--muted-foreground); padding: 3px; }
+.message-source-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.message-source-time { color: var(--muted-foreground); font-size: 11px; font-weight: 400; }
+
+.user-bubble > p.muted { padding: 0 18px 12px; margin: 0; font-size: 12px; }
+.composer-hint img { margin-right: 4px; }

@@ -9,6 +9,8 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 
+import httpx
+
 from fastapi import APIRouter, HTTPException, Request
 
 from .db import database, now
@@ -184,6 +186,8 @@ class SlackIdentities:
             connection_status = await database(self.status)
             if not connection_status['ready'] or connection_status['team_id'] != team:
                 return  # Connection/policy changed while the request was in flight.
+            if result.get('error') == 'ratelimited':
+                raise ConnectorError('Slack profile lookup is rate limited.', code='ratelimited', retryable=True)
             if not result.get('ok'):
                 raise ValueError('Profile unavailable')
             profile = result.get('user')
@@ -196,7 +200,12 @@ class SlackIdentities:
             eligible &= bool(re.fullmatch(r'[^\s@]+@[^\s@]+', email)) and email.rpartition('@')[2] in self.settings.google_domains()
             name = data.get('real_name') or data.get('display_name') or profile.get('real_name') or row['name']
             name = str(name)[:160]
-        except Exception:
+        except Exception as error:
+            if isinstance(error, (TimeoutError, OSError, httpx.TransportError)) or (isinstance(error, ConnectorError) and error.retryable):
+                # Keep the last verified observation unchanged, but do not admit
+                # this message using it. The durable inbox retries the lookup.
+                raise ConnectorError('Slack profile lookup is temporarily unavailable.',
+                                     code='profile_unavailable', retryable=True) from error
             await database(self.store.execute, "UPDATE users SET link_status=CASE WHEN link_method='manual' THEN 'manual' WHEN linked_user_id IS NOT NULL THEN 'review' ELSE 'unavailable' END,profile_eligible=0,profile_next_check=? WHERE id=?", (int(time.time()) + 300, row['id']))
             return
         await database(self.record_profile, row, email, eligible, checked, name)

@@ -170,7 +170,10 @@ async def test_real_canonical_hook_inbox_signature_dedupe_and_no_api_side_effect
         for _ in range(2):
             response = await client.post("/hooks/slack/events", content=body, headers=headers)
             assert response.status_code == 200
-    rows = service.store.rows("SELECT id,status FROM coordinator_hooks")
+    rows = service.store.rows("SELECT id,status,payload FROM coordinator_hooks")
+    assert rows[0]["payload"].startswith("sealed:v1:")
+    assert "local-only input" not in rows[0]["payload"]
+    assert service.inbox.decode(rows[0]["payload"])["event"]["text"].endswith("local-only input")
     assert len(rows) == 1 and rows[0]["status"] == "pending"
     async with slack.runtime.database.sessions() as db:
         assert await db.scalar(select(func.count()).select_from(Turn)) == 0
@@ -265,7 +268,8 @@ async def test_long_answers_and_artifacts_are_staged_atomically_without_broadcas
     async with slack.runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Delivery).order_by(Delivery.identity)))
     values = [json.loads(slack.runtime.security.unseal(row.content))["text"] for row in rows]
-    assert len(rows) == 2  # One reserved acknowledgement and one final revision of that slot.
+    assert len(rows) == 3  # Web input mirror, acknowledgement, and final revision.
+    assert sum("(from Moyai)" in value for value in values) == 1
     assert all("<!channel>" not in value for value in values)
     assert any("/api/files/" in value and "report.txt" in value for value in values)
     assert len({row.identity for row in rows}) == len(rows)
@@ -457,3 +461,85 @@ async def test_automation_bridge_uses_provider_channel_privacy_not_id_prefix(sla
 
     monkeypatch.setattr(service.connectors, "request", metadata)
     assert await service.automation_channel_allowed("GTEST001", bot) is expected
+
+
+async def test_rate_limit_is_retryable_but_lost_response_stays_uncertain(slack, active):
+    from moyai.models import DeliverySchedule
+    delivery = await queued(slack, active)
+    async def limited(request):
+        return httpx.Response(429, headers={'Retry-After': '120'}, json={'ok': False, 'error': 'ratelimited'})
+    async with httpx.AsyncClient(base_url='https://slack.test/', transport=httpx.MockTransport(limited)) as client:
+        await slack.service.deliver(client, delivery)
+    async with slack.runtime.database.sessions() as db:
+        row = await db.get(Delivery, delivery.id)
+        schedule = await db.get(DeliverySchedule, delivery.id)
+        assert row.status == 'pending'
+        assert schedule.next_attempt > time.time() + 100
+
+
+async def test_uncertain_backlog_cannot_starve_pending_delivery(slack, active, monkeypatch):
+    delivery = await queued(slack, active)
+    async with slack.runtime.database.sessions.begin() as db:
+        for index in range(25):
+            db.add(Delivery(id=new_id(), identity=f'product-slack:uncertain:{index}',
+                session_id=delivery.session_id, turn_id=delivery.turn_id, destination=delivery.destination,
+                content=delivery.content, status='sending', created_at='2020-01-01'))
+    async def no_stage(*args, **kwargs):
+        return None
+    seen = []
+    async def capture(client, rows):
+        seen.extend(rows)
+        return set()
+    monkeypatch.setattr(slack.service, 'stage', no_stage)
+    monkeypatch.setattr(slack.service, '_deliver_batch', capture)
+    monkeypatch.setattr(slack.service, 'source_notices', no_stage)
+    await slack.service.pump(object())
+    assert any(row.id == delivery.id for row in seen)
+    assert sum(row.status == 'sending' for row in seen) <= 10
+
+
+async def test_web_mirror_dedup_and_edit_supersedes_known_unsent_content(slack, active):
+    from moyai.models import MessageSource
+    await bind(slack, active)
+    service = slack.service
+    await service.stage_web_inputs()
+    await service.stage_web_inputs()
+    async with slack.runtime.database.sessions() as db:
+        rows = list(await db.scalars(select(Delivery)))
+        assert len(rows) == 1
+        original = rows[0]
+    assert await service.delivery_allowed(original)
+    async with slack.runtime.database.sessions.begin() as db:
+        source = await db.get(MessageSource, f'user:{active[1].id}')
+        source.revision += 1
+    assert not await service.delivery_allowed(original)
+    await service.stage_web_inputs()
+    async with slack.runtime.database.sessions() as db:
+        rows = list(await db.scalars(select(Delivery).order_by(Delivery.created_at)))
+        assert len(rows) == 2
+        assert await service.delivery_allowed(rows[-1])
+
+
+async def test_delivery_retry_only_resets_explicit_rejections(slack, active, actor):
+    from moyai.slack_delivery_status import retry, status
+    delivery = await queued(slack, active)
+    async with slack.runtime.database.sessions.begin() as db:
+        (await db.get(Delivery, delivery.id)).status = 'sending'
+    assert await retry(slack.runtime, actor, active[0].id) == {'retried': 0}
+    async with slack.runtime.database.sessions.begin() as db:
+        assert (await status(slack.runtime.database, db, active[0].id))['sending'] == 1
+        (await db.get(Delivery, delivery.id)).status = 'rejected'
+    assert await retry(slack.runtime, actor, active[0].id) == {'retried': 1}
+    async with slack.runtime.database.sessions() as db:
+        assert (await db.get(Delivery, delivery.id)).status == 'pending'
+
+
+async def test_pending_inbox_is_encrypted_and_expires_without_admission(slack):
+    inbox = slack.service.inbox
+    inbox.enqueue('old-event', {'text': 'private pending message'})
+    old = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    slack.service.store.execute('UPDATE coordinator_hooks SET created_at=? WHERE id=?', (old, 'old-event'))
+    inbox.prune()
+    row = slack.service.store.rows('SELECT status,payload,detail FROM coordinator_hooks WHERE id=?', ('old-event',))[0]
+    assert row['status'] == 'expired' and row['payload'] == ''
+    assert 'private pending message' not in row['detail']
