@@ -11,6 +11,7 @@ from app.db import database as source_io
 from starlette.responses import JSONResponse
 
 from .models import now
+from .product_quiesce import ProductQuiescence
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -65,10 +66,11 @@ class ProductRoleLifecycle:
         self.worker: Any = None
         self.watch_task: asyncio.Task[None] | None = None
         self.retire: Any = None
+        self.quiescence = ProductQuiescence(self)
 
     @property
     def healthy(self) -> bool:
-        if not self.ready or self.failed or self.closing:
+        if not self.ready or self.failed or self.closing or self.quiescence.requested:
             return False
         if self.handoff is not None and not self.handoff.healthy:
             return False
@@ -103,17 +105,26 @@ class ProductRoleLifecycle:
             if slack is not None:
                 slack.start()
             tasks = [
-                asyncio.create_task(dispatcher(self.runtime), name="native-dispatch"),
-                asyncio.create_task(reconcile_workflows(self.runtime), name="native-reconciliation"),
+                asyncio.create_task(
+                    dispatcher(self.runtime, stop=self.quiescence.background_stop), name="native-dispatch",
+                ),
+                asyncio.create_task(
+                    reconcile_workflows(self.runtime, stop=self.quiescence.background_stop),
+                    name="native-reconciliation",
+                ),
             ]
             yield
         finally:
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            if not self.quiescence.requested:
+                for task in tasks:
+                    task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             if slack is not None:
                 await slack.close()
+            if self.quiescence.requested:
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
 
     async def start_broker(self) -> None:
         from app.broker_ownership import BrokerMaintenance, BrokerRequests, BrokerWork
@@ -152,7 +163,9 @@ class ProductRoleLifecycle:
                 await source_io(product.store.database.check_owner)
                 if self.broker is not None and self.broker.failed:
                     raise RuntimeError("Broker ownership ended.")
-                if self.handoff is not None and not self.handoff.healthy:
+                if self.handoff is not None and not self.handoff.healthy and (
+                    not self.quiescence.requested or self.handoff.status == "failed"
+                ):
                     raise RuntimeError("Coordinator ownership ended.")
                 if self.worker is not None and not self.worker.is_running:
                     raise RuntimeError("Native worker polling ended.")
@@ -195,6 +208,11 @@ class ProductRoleLifecycle:
                 await self.start_broker()
             elif self.role == "coordinator":
                 from app.coordinator_handoff import CoordinatorHandoff
+                slack = self.runtime.product_slack
+                if slack is not None:
+                    # HTTP intake acknowledgements also exist on a standby.
+                    # Keep their cleanup inside the process's resource lifetime.
+                    stack.push_async_callback(slack.close)
                 self.handoff = CoordinatorHandoff(product.store, _CoordinatorClient(self.runtime))
                 await stack.enter_async_context(self.handoff.lifespan(self.coordinator_background))
             self.ready = True
@@ -204,6 +222,7 @@ class ProductRoleLifecycle:
                 yield
             finally:
                 self.closing, self.ready = True, False
+                await self.quiescence.close()
 
 
 class ProductRoleMiddleware:
@@ -248,5 +267,15 @@ class ProductRoleMiddleware:
             return await JSONResponse({"status": "ok"}, headers=life.headers())(scope, receive, send)
         if life.role == "broker":
             from app.broker_ownership import BrokerOwnershipMiddleware
-            return await BrokerOwnershipMiddleware(self.app, life.broker)(scope, receive, send)
-        await self.app(scope, receive, send)
+            downstream = BrokerOwnershipMiddleware(self.app, life.broker)
+        else:
+            downstream = self.app
+        task = asyncio.current_task()
+        assert task is not None
+        life.quiescence.requests.add(task)
+        scope.setdefault("state", {})["moyai_reconnect"] = life.quiescence.reconnect
+        try:
+            await downstream(scope, receive, send)
+        finally:
+            life.quiescence.requests.discard(task)
+            life.quiescence.requests_changed.set()

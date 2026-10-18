@@ -875,7 +875,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                     raise HTTPException(403, "Requester access changed.")
 
         return StreamingResponse(
-            authorized_events(stream(), authorize_viewer, request.is_disconnected),
+            authorized_events(
+                stream(), authorize_viewer, request.is_disconnected,
+                reconnect=getattr(request.state, "moyai_reconnect", None),
+            ),
             media_type="text/event-stream",
         )
 

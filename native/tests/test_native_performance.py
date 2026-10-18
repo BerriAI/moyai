@@ -73,7 +73,10 @@ async def test_broker_ingress_is_captured_before_ownership_database_wait(monkeyp
         await JSONResponse({"received": scope["state"]["moyai_received_at"]})(scope, receive, send)
 
     owner = SimpleNamespace(draining=False, tasks=set(), check=lambda: None)
-    app = ProductRoleMiddleware(downstream, SimpleNamespace(role="broker", healthy=True, broker=owner))
+    from moyai.product_quiesce import ProductQuiescence
+    life = SimpleNamespace(role="broker", healthy=True, broker=owner)
+    life.quiescence = ProductQuiescence(life)
+    app = ProductRoleMiddleware(downstream, life)
     async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://broker") as client:
         response = await client.post("/broker/native/v1/responses", headers={"x-moyai-received-at": stamp(9)})
     assert response.json()["received"] == stamp(0) and clock["at"] == stamp(3)
@@ -87,7 +90,10 @@ async def test_native_api_preserves_the_outer_role_ingress_timestamp(runtime, ac
     monkeypatch.setattr("moyai.product_lifecycle.now", lambda: stamp(0))
     session = await runtime.database.create_session(actor, NewSession())
     app = create_app(runtime, run_dispatcher=False)
-    app.add_middleware(ProductRoleMiddleware, lifecycle=SimpleNamespace(role="api", healthy=True))
+    from moyai.product_quiesce import ProductQuiescence
+    life = SimpleNamespace(role="api", healthy=True)
+    life.quiescence = ProductQuiescence(life)
+    app.add_middleware(ProductRoleMiddleware, lifecycle=life)
     token, csrf = runtime.security.issue_session(actor.id, actor.auth_version)
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=app), base_url="http://api",

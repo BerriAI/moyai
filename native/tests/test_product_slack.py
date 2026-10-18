@@ -593,6 +593,81 @@ async def test_cancelled_confirmed_receipt_drains_and_contender_never_reposts(sl
         assert row.status == "sent" and row.receipt
 
 
+@pytest.mark.parametrize("boundary", ["post", "receipt", "lost-response"])
+async def test_planned_close_finishes_accepted_send_without_reposting(slack, active, receiver, monkeypatch, boundary):
+    service = slack.service
+    delivery = await queued(slack, active)
+    receiver.outcome["hold"] = boundary != "receipt"
+    receiver.outcome["drop"] = boundary == "lost-response"
+    entered, release = asyncio.Event(), asyncio.Event()
+    settle = service._settle
+
+    async def blocked_settle(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        await settle(*args, **kwargs)
+
+    if boundary == "receipt":
+        monkeypatch.setattr(service, "_settle", blocked_settle)
+    async with httpx.AsyncClient(base_url=receiver.url, timeout=3) as client:
+        async def pump():
+            await service._deliver_batch(client, [delivery])
+        monkeypatch.setattr(service, "pump", pump)
+        service.delivery_task = asyncio.create_task(service.watch())
+        if boundary == "receipt":
+            await asyncio.wait_for(entered.wait(), 2)
+        else:
+            assert await asyncio.to_thread(receiver.entered.wait, 2)
+        service.stop_admitting()
+        closing = asyncio.create_task(service.close())
+        await asyncio.sleep(0)
+        closing.cancel()
+        await asyncio.sleep(.02)
+        assert not closing.done() and not service.delivery_task.cancelling()
+        async with slack.runtime.database.sessions() as db:
+            assert (await db.get(Delivery, delivery.id)).status == "sending"
+        receiver.release.set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        await service.close()
+        await service.deliver(client, delivery)
+    assert len(receiver.requests) == 1
+    async with slack.runtime.database.sessions() as db:
+        row = await db.get(Delivery, delivery.id)
+        assert row.status == ("sending" if boundary == "lost-response" else "sent")
+        assert bool(row.receipt) is (boundary != "lost-response")
+
+
+async def test_standby_quiescence_waits_for_accepted_intake_acknowledgement(slack, monkeypatch):
+    from test_product_quiesce import role
+
+    entered, release, acknowledged = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def acknowledge(_payload):
+        entered.set()
+        await release.wait()
+        acknowledged.set()
+
+    service = slack.service
+    monkeypatch.setattr(service.events, "acknowledge_intake", acknowledge)
+    service.acknowledge_soon({"type": "event_callback"})
+    await entered.wait()
+    life = role("coordinator")
+    life.runtime.product_slack = service
+    stop = asyncio.Event()
+    life.handoff = SimpleNamespace(
+        healthy=True, status="standby", stop=stop, task=asyncio.create_task(stop.wait()),
+    )
+    life.quiescence.begin(life.quiescence.identity(), "standby-intake-drain")
+    await asyncio.sleep(.02)
+    assert life.quiescence.state == "quiescing" and not acknowledged.is_set()
+    assert service.intake_tasks and all(not task.cancelling() for task in service.intake_tasks)
+    release.set()
+    await asyncio.wait_for(life.quiescence.close(), 2)
+    assert acknowledged.is_set() and life.quiescence.state == "drained"
+
+
 async def test_claim_writer_wait_and_competing_poll_keep_loop_responsive(slack, active, receiver):
     delivery = await queued(slack, active)
     ticks = []

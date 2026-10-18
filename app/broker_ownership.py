@@ -176,7 +176,8 @@ class BrokerRequests:
         while True:
             try:
                 await database(self.check)
-                await self.recover()
+                if not self.closing:
+                    await self.recover()
             except Exception as exc:
                 self.failed = True
                 logger.error('Broker ownership failed; cancelling owned requests: %s',
@@ -217,6 +218,27 @@ class BrokerRequests:
             if not task.done() and not task.cancelling():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def quiesce(self):
+        """Planned retirement keeps live requests and their cleanup uncancelled."""
+        self.closing = True
+        current = asyncio.current_task()
+        while tasks := {
+            task for task in set(self.tasks) | set(self.slots._maintenance)
+            if task is not current and not task.done()
+        }:
+            # wait() observes completion without forwarding cancellation to the
+            # accepted HTTP tasks or their accounting/transport cleanup.
+            await asyncio.wait(tasks)
+        maintenance_task = self.maintenance.task
+        await self.maintenance.close()
+        if maintenance_task is not None and not maintenance_task.cancelled():
+            error = maintenance_task.exception()
+            if error is not None:
+                raise error
+        if self.maintenance.owned or self.failed:
+            raise DatabaseError('Broker quiescence did not settle ownership.')
+        await database(self.check)
 
 
 class BrokerOwnershipMiddleware:
