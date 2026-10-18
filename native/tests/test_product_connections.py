@@ -50,6 +50,31 @@ def save(service, provider, **extra):
     service.connectors.save(provider, {"access_token": "synthetic-token", "kind": "personal", **extra}, provider)
 
 
+@pytest.mark.parametrize('bot', [False, True])
+@pytest.mark.parametrize('identity_linking', [False, True])
+@pytest.mark.parametrize('thread_chat', [False, True])
+def test_slack_oauth_retains_existing_scope_contract(bridge, bot, identity_linking, thread_chat):
+    from urllib.parse import parse_qs, urlsplit
+
+    bridge.settings.slack_bot_enabled = bot
+    bridge.settings.slack_identity_linking_enabled = identity_linking
+    bridge.settings.slack_thread_chat_enabled = thread_chat
+    params = parse_qs(urlsplit(bridge.connectors.authorization_url('slack', 'local-state')).query)
+    assert params['user_scope'] == ['search:read,channels:history,groups:history,im:history,mpim:history']
+    if not bot:
+        assert 'scope' not in params
+        return
+    expected = {
+        'app_mentions:read', 'chat:write', 'im:write', 'im:history', 'reactions:read',
+        'reactions:write', 'assistant:write', 'files:write', 'files:read',
+    }
+    if identity_linking:
+        expected |= {'users:read', 'users:read.email'}
+    if thread_chat:
+        expected |= {'channels:history', 'groups:history', 'channels:read', 'groups:read'}
+    assert set(params['scope'][0].split(',')) == expected
+
+
 async def scope_for(bridge, kind):
     grants = await bridge.resolve_grants("google:owner", [kind])
     return RunScope("native-session", "native-turn", "google:owner", "test", grants)

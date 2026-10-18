@@ -586,7 +586,7 @@ class ProductAutomationService:
             raise PermissionError("The execution requester is no longer authorized.")
         await self.database._check_product_turn(db, turn, scope.product_grant)
         cast(Any, actor).product_grant = scope.product_grant
-        session = await self.database.allowed_session(db, scope.session_id, actor)
+        session = await self.database.execution_session(db, scope.session_id, actor)
         if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
             raise PermissionError("The execution was stopped or superseded.")
         current = await self.database.scope_grants(db, scope, session)

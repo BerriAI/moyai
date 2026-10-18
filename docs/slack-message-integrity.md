@@ -1,6 +1,6 @@
 # Slack messages in Moyai
 
-This change requires native application schema **v21** (`2026-10-18-message-sources-v21`). It has not been validated on the production deployment. Use the coordinated upgrade procedure below before enabling it there.
+Slack message provenance requires native application schema **v21** (`2026-10-18-message-sources-v21`). Deployments on an earlier schema must use the coordinated upgrade procedure below. The execution authorization cleanup does not require another schema migration or a Slack reconnect.
 
 A Slack message displays its Slack icon, sender name, verified **You** label, timestamp and source link above the authored text. Slack thread references and file inspection text remain encrypted execution input. They do not become the visible message, search snippet or personal-memory evidence. A matching email or an analytics identity alone never establishes **You** or authorizes an action.
 
@@ -16,7 +16,8 @@ A future GitHub adapter can use this contract after verifying its webhook, mappi
 | --- | --- |
 | Signed intake | Stores authored text, encrypted source metadata and frozen model input separately. Browser JSON cannot set trusted provenance. |
 | Names and controls | Uses the current verified Slack-to-sign-in relationship for self labels, archive/rename, queued input controls, requester activity and effects. The coordinator refreshes native Slack senders in bounded batches while chats are idle. Execution retains its original authority. |
-| Conversation audience | Checks the Slack installation and current caller. DMs require the verified requester; private channels and group conversations require current membership. Public channels still require a verified workspace identity. External shared channels fail closed. |
+| Conversation audience | Browser reads and new input check the Slack installation and current caller. DMs require the verified requester; private channels require current membership. Public channels still require a verified workspace identity. External shared channels and conversations whose audience cannot be verified remain unavailable. |
+| Execution authority | Admitted work revalidates its saved product identity, selected connections and task state without repeating Slack membership API calls during preparation or each tool operation. Slack installation, sender and selected-account revocation still stop execution. Removing channel membership prevents subsequent browser reads and new input; it does not retroactively cancel admitted work. |
 | Other read surfaces | The same audience check covers session inventory, search, history, files, descendants, progress, streams and debug exports. Stream checks repeat while connected. Provider failures do not widen access. |
 | Model context | Ishaan’s #559 supplies thread history through the shared `SessionContext` pipeline at execution time, with bot-first reads and an authorized connection fallback. A regression verifies the actual model request receives this reference in its instructions. Authored text and retained file context remain separate at admission; shared follow-ups rebuild from authored messages. The context capability uses the existing durable-operation mechanism for execution replay. |
 | Personal memory | Quoted context cannot become requester evidence. Existing native chat-backed notes with invalid quotes are excluded from recall and marked for owner review in Memory settings. Review & edit saves a manual note; Delete remains available. |
@@ -66,9 +67,13 @@ Do not roll back an old coordinator onto encrypted pending hooks or remove the v
 
 ## Slack permissions and recovery
 
-The bot OAuth request includes `channels:read`, `groups:read`, `im:read` and `mpim:read` for audience checks. Verified identity linking additionally needs `users:read` and `users:read.email`. Thread history/file reading retains its separate existing scopes and authorization checks.
+The OAuth request retains the scope set used before the message-provenance change. The base bot scopes are `app_mentions:read`, `chat:write`, `im:write`, `im:history`, `reactions:read`, `reactions:write`, `assistant:write`, `files:write` and `files:read`. Identity linking adds `users:read` and `users:read.email`; thread chat adds `channels:history`, `groups:history`, `channels:read` and `groups:read`. User-token scopes remain `search:read`, `channels:history`, `groups:history`, `im:history` and `mpim:history`.
 
-If a chat becomes unavailable, check the signed-in user's verified Slack account, profile freshness, workspace, channel membership and the connection in **Settings → Connections**. An administrator may need to reconnect an installation missing these scopes. Reconnecting changes installation authority: existing tasks/destinations remain fenced and do not silently regain execution or delivery permission. Use a new Slack conversation for work under the new installation. Do not manually rewrite old turn-authority records to bypass this fence.
+Neither `im:read` nor `mpim:read` is requested. DM access uses the verified requester relationship without a conversation-info call. Group conversations remain unavailable in the browser if the existing installation cannot verify their audience; this cleanup does not expand permissions to enable them.
+
+For **Slack access could not be verified right now**, retry the read shortly. Provider timeouts, rate limits and other unavailable responses return HTTP 503; rate limits preserve `Retry-After`. Operator logs record `Slack audience check` with a safe error code, HTTP status and retry delay, without credentials or provider payloads. These failures do not expose the conversation or cancel an already admitted turn.
+
+For **Conversation unavailable**, check the signed-in user's verified Slack account, profile freshness, workspace, channel membership and the connection in **Settings → Connections**. Inspect the recorded reason before changing the installation. Reconnecting changes installation authority: existing tasks/destinations remain fenced and do not silently regain execution or delivery permission. Use a new Slack conversation for work under a replacement installation. Do not manually rewrite old turn-authority records to bypass this fence.
 
 For **Confirming Slack delivery**, inspect the original Slack thread and allow read reconciliation to settle it. Do not repost an uncertain send. For an explicit rejection, correct the connection/access problem and use **Retry delivery** if the original authority remains valid. A rate-limit rejection retries automatically.
 
@@ -83,6 +88,8 @@ Requester debug exports intentionally include the original received prompt as di
 ## Verification
 
 Automated coverage uses real encrypted native records, disposable local PostgreSQL, verified identity logic, synthetic Slack membership responses and a local HTTP receiver. Browser tests use the real React app with synthetic API data. These checks do not prove Slack provider configuration or production deployment.
+
+The execution regression admits a Slack input with eight selected GitHub repositories, runs concurrent credential discovery through the real connection toolset, and verifies that a model request occurs with zero Slack audience API calls during provider failure. Separate tests retain installation, sender, connection, policy, stopped-task and deleted-session fences, and check the OAuth scopes under every feature-flag combination.
 
 Run from the repository root:
 
