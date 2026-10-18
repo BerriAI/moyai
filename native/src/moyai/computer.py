@@ -113,7 +113,7 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str, clie
     if not session.workspace:
         raise HTTPException(409, "Send Moyai a task to start this conversation's computer.")
     async with runtime.database.sessions.begin() as db:
-        # Serialize human control and agent browser writes only. Chat and
+        # Serialize human control and agent desktop/browser input. Chat and
         # native coding continue independently.
         locked = await db.scalar(update(Session).where(
             Session.id == session_id, Session.deleted.is_(False),
@@ -134,7 +134,7 @@ async def lease(runtime: Runtime, session_id: str, user: User, action: str, clie
         if pending and pending.expires_at > stamp and action in {"claim", "heartbeat"} and (
             current is None or current.expires_at <= stamp or current.actor_id != user.id
         ):
-            raise HTTPException(409, "A browser action is still settling. Inspect the screen before taking control.")
+            raise HTTPException(409, "A computer action is still settling. Inspect the screen before taking control.")
         if pending and pending.expires_at > stamp and action not in {"claim", "heartbeat"}:
             raise HTTPException(409, "Wait for the current desktop action to settle before continuing or releasing control.")
         if action == "release":

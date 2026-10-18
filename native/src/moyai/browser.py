@@ -1,6 +1,6 @@
 """Shared visible browser tools on native Harness workspaces and Temporal.
 
-Only browser operations contend with human control. No model/tool loop, public
+Browser and native desktop input contend with human control. No model/tool loop, public
 debugger endpoint, arbitrary evaluation API, or legacy computer dependency.
 """
 from __future__ import annotations
@@ -107,8 +107,8 @@ async def reserve_agent(database: Database, scope: RunScope, *, starting: bool) 
             )
         if pending and pending.expires_at > stamp:
             raise BrowserNotDispatched(
-                "A previous browser action is still settling or has an uncertain outcome. "
-                "Inspect with browser_read before continuing; do not retry the write."
+                "A previous computer action is still settling or has an uncertain outcome. "
+                "Inspect with browser_read or desktop_read before continuing; do not retry the write."
             )
         identity = new_id()
         expiry = stamp + (660 if starting else 90)
@@ -142,6 +142,7 @@ async def agent_request(
     surface: Literal["browser", "desktop"] = "browser",
 ) -> dict:
     identity = None
+    reader = "desktop_read" if surface == "desktop" else "browser_read"
     try:
         await database.authorize_scope(scope)
         reference = workspace.ref
@@ -197,11 +198,15 @@ async def agent_request(
     except DesktopCommandFailed as error:
         if identity:
             await settle(database, scope.session_id, identity, workspace_id=reference.id if started else "")
-        raise ToolFailed("The browser command returned an error. Inspect with browser_read before another write.") from error
+        raise ToolFailed(
+            f"The {surface} command returned an error. Inspect with {reader} before another write."
+        ) from error
     except (TimeoutError, OSError) as error:
         # The guest deadline and additional expiry margin fence delayed execs.
         # Do not clear an operation merely because its worker stopped waiting.
-        raise ToolFailed("Browser outcome is uncertain. Inspect with browser_read; do not repeat the action.") from error
+        raise ToolFailed(
+            f"{surface.capitalize()} outcome is uncertain. Inspect with {reader}; do not repeat the action."
+        ) from error
     # Persist a received success outside the ambiguous-dispatch exception
     # handler, before cleanup, access rechecks or activity-response delivery.
     if after_dispatch:
