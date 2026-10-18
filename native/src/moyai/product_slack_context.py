@@ -44,26 +44,45 @@ class SlackThreadContext:
         # Current signed evidence is safe to retain in DMs; shared search
         # credentials must never hydrate their earlier messages.
         direct = origin["channel_id"].startswith("D")
-        grants = [] if direct else await self.slack.connections.resolve_grants(
-            actor.id, body.connections, shared_session=True, surface="slack",
-        )
-        grant = next((item for item in grants if item.kind == "slack"), None)
         host = SlackHost(
             bot_user_id=installed["user_id"], workspace_id=origin["team_id"], exclude_prefixes=ASIDE_PREFIXES,
         )
-        if grant is None:
+        if direct:
             context = dict(await host.thread_context(source))
-            if direct and not context["messages"]:
+            if not context["messages"]:
                 return body.model_copy()
-            context["error"] = (
-                "Earlier DM messages were not read; only the current message was supplied."
-                if direct else "No Slack read connection is available on this surface."
-            )
+            context["error"] = "Earlier DM messages were not read; only the current message was supplied."
+            grant = None
         else:
             context = await self.slack.connections.execution.call(
-                lambda bound: self._read(bound, host, source, grant),
-                authorize=lambda: self._authorize(principal, installed, grant), recheck=True,
+                lambda bound: self._read(bound, host, source, as_bot=True),
+                authorize=lambda: self._authorize(principal, installed, None), recheck=True,
             )
+            bot_error = context.get("error")
+            if bot_error:
+                grants = await self.slack.connections.resolve_grants(
+                    actor.id, body.connections, shared_session=True, surface="slack",
+                )
+                grant = next((
+                    item for item in grants
+                    if item.kind == "slack" and item.policy["product"]["access"] != "bot"
+                ), None)
+                if grant is None:
+                    context = dict(await host.thread_context(source))
+                    context["status"] = "unavailable"
+                    context["error"] = (
+                        f"{bot_error}: No Slack read connection is available on this surface."
+                    )
+                else:
+                    context = await self.slack.connections.execution.call(
+                        lambda bound: self._read(
+                            bound, host, source,
+                            as_bot=grant.policy["product"]["access"] == "bot",
+                        ),
+                        authorize=lambda: self._authorize(principal, installed, grant), recheck=True,
+                    )
+            else:
+                grant = None
         await self._authorize(principal, installed, grant)
         return body.model_copy(update={"prompt": body.prompt + self._render(context)})
 
@@ -96,7 +115,7 @@ class SlackThreadContext:
             )
 
     async def _read(
-        self, bound: Any, host: SlackHost, source: SlackHostEvent, grant: Grant,
+        self, bound: Any, host: SlackHost, source: SlackHostEvent, *, as_bot: bool,
     ) -> dict[str, Any]:
         async def request_page(params: Mapping[str, Any]) -> dict[str, Any]:
             try:
@@ -105,7 +124,7 @@ class SlackThreadContext:
                 return await bound.call("slack_thread", {
                     "channel": params["channel"], "thread_ts": params["ts"],
                     "page_size": params["limit"], "cursor": params.get("cursor", ""),
-                    "as_bot": grant.policy["product"]["access"] == "bot",
+                    "as_bot": as_bot,
                 })
             except ConnectorError as error:
                 return {"ok": False, "error": error.code}
