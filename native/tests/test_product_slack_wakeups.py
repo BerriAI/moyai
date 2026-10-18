@@ -40,7 +40,7 @@ async def test_settled_answer_wakes_slack_on_existing_dispatch_connection(postgr
                 delivered.set()
         first_scan.set()
 
-    slack = SimpleNamespace(delivery_wakeup=asyncio.Event(), pump=pump)
+    slack = SimpleNamespace(delivery_wakeup=asyncio.Event(), stopping=asyncio.Event(), pump=pump)
     runtime = SimpleNamespace(
         database=database, settings=database.settings, product_slack=slack, product_automations=None,
         connect=AsyncMock(return_value=SimpleNamespace(start_workflow=AsyncMock())),
@@ -77,7 +77,7 @@ async def test_hint_during_pump_is_retained_and_bursts_are_paced(monkeypatch):
     monkeypatch.setattr(slack_module, "MIN_DELIVERY_INTERVAL", .05)
     starts = []
     twice = asyncio.Event()
-    slack = SimpleNamespace(delivery_wakeup=asyncio.Event())
+    slack = SimpleNamespace(delivery_wakeup=asyncio.Event(), stopping=asyncio.Event())
 
     async def pump():
         starts.append(time.monotonic())
@@ -111,10 +111,30 @@ async def test_slack_watcher_keeps_polling_without_notifications(monkeypatch, fi
         if len(attempts) == 2:
             completed.set()
 
-    slack = SimpleNamespace(delivery_wakeup=asyncio.Event(), pump=pump)
+    slack = SimpleNamespace(delivery_wakeup=asyncio.Event(), stopping=asyncio.Event(), pump=pump)
     task = asyncio.create_task(ProductSlack.watch(slack))
     try:
         await asyncio.wait_for(completed.wait(), 1)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_planned_stop_interrupts_idle_wait_without_another_pump(monkeypatch):
+    import moyai.product_slack as slack_module
+
+    monkeypatch.setattr(slack_module, "DELIVERY_POLL_SECONDS", 30)
+    monkeypatch.setattr(slack_module, "MIN_DELIVERY_INTERVAL", 1)
+    entered = asyncio.Event()
+    calls = []
+
+    async def pump():
+        calls.append(True)
+        entered.set()
+
+    slack = SimpleNamespace(delivery_wakeup=asyncio.Event(), stopping=asyncio.Event(), pump=pump)
+    task = asyncio.create_task(ProductSlack.watch(slack))
+    await entered.wait()
+    slack.stopping.set()
+    await asyncio.wait_for(task, .2)
+    assert calls == [True]

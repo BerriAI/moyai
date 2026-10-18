@@ -226,7 +226,9 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
     return dispatched
 
 
-async def dispatcher(runtime: Runtime, *, wakeups: DispatchWakeups | None = None) -> None:
+async def dispatcher(
+    runtime: Runtime, *, wakeups: DispatchWakeups | None = None, stop: asyncio.Event | None = None,
+) -> None:
     state = DispatchState()
     question_cursor = 0
     slack = getattr(runtime, "product_slack", None)
@@ -235,7 +237,7 @@ async def dispatcher(runtime: Runtime, *, wakeups: DispatchWakeups | None = None
     async with wakeups or DispatchWakeups(
         runtime.settings, observers=(slack.delivery_wakeup,) if slack is not None else (),
     ) as listener:
-        while True:
+        while stop is None or not stop.is_set():
             # Clear before reading durable rows, so a commit during/after the
             # scan cannot be lost between deciding to wait and actually waiting.
             listener.event.clear()
@@ -254,13 +256,15 @@ async def dispatcher(runtime: Runtime, *, wakeups: DispatchWakeups | None = None
                 await listener.wait()
 
 
-async def reconcile_workflows(runtime: Runtime) -> None:
+async def reconcile_workflows(runtime: Runtime, *, stop: asyncio.Event | None = None) -> None:
     """Reflect terminal Temporal outcomes after an app write/ack failed.
 
     This never resumes a snapshot or starts an agent; Temporal stays the sole
     execution authority. It only settles stale application status records.
     """
-    while True:
+    from .background_stop import pause
+
+    while stop is None or not stop.is_set():
         try:
             client = await runtime.connect()
             for turn in await runtime.database.unsettled_turns():
@@ -284,5 +288,5 @@ async def reconcile_workflows(runtime: Runtime) -> None:
             raise
         except Exception:
             logger.exception("Execution status reconciliation is temporarily unavailable.")
-        await asyncio.sleep(5)
+        await pause(5, stop)
 

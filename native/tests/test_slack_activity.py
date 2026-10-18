@@ -235,7 +235,7 @@ async def test_product_coordinator_owns_and_drains_both_lanes(slack, monkeypatch
 
     monkeypatch.setattr(slack.service.inbox, "start", Mock())
     monkeypatch.setattr(slack.service.inbox, "close", AsyncMock())
-    monkeypatch.setattr(slack.runtime.slack_activity, "watch", lambda: watch(status_started, status_closed))
+    monkeypatch.setattr(slack.runtime.slack_activity, "watch", lambda **_: watch(status_started, status_closed))
     monkeypatch.setattr(slack.service, "watch", lambda: watch(delivery_started, delivery_closed))
     slack.service.start()
     await asyncio.wait_for(asyncio.gather(status_started.wait(), delivery_started.wait()), timeout=1)
