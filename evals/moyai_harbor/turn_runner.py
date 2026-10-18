@@ -14,16 +14,20 @@ import sqlalchemy
 from app.credentials import SaveSecret
 from app.db import Store
 from app.security import Security as ProductSecurity
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from product_database_fixtures import product_database_state
 from pydantic import SecretStr
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart
 from sqlalchemy import text
 from temporalio.testing import WorkflowEnvironment
 from test_product_identity import google_cookie, request, settings_for
 
 from moyai.agent import inference_models, make_agent
+from moyai.context import SessionContext
+from moyai.context.github import GitHubRepositories, make_repository_names
 from moyai.models import SlackThread, Turn
 from moyai.product_connections import ProductConnections
 from moyai.product_continuation import ProductContinuationService
@@ -41,6 +45,7 @@ from moyai.storage import ObjectStore, encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
+from moyai_harbor.github_stub import GitHubStub, block_github_dns
 
 EVALS = Path(__file__).resolve().parents[1]
 MODEL_COMPLETION = {
@@ -79,6 +84,17 @@ def conversation_trace(conversation_json: str | None, security: Any) -> list[dic
     return [calls[identity] for identity in order if identity in calls]
 
 
+def conversation_instructions(conversation_json: str | None, security: Any) -> list[str]:
+    if not conversation_json:
+        return []
+    conversation = ConversationTypeAdapter.validate_json(security.unseal(conversation_json))
+    return [
+        message.instructions
+        for message in conversation.messages
+        if isinstance(message, ModelRequest) and message.instructions
+    ]
+
+
 def slack_transport(history: list[dict[str, Any]]) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -115,6 +131,16 @@ def seed_credentials(
     return store.rows(
         "SELECT * FROM provider_secrets WHERE client_id=?", ("moyai-eval-deepseek",),
     )[0]
+
+
+def github_app_config() -> dict[str, Any]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    return {"id": 401, "pem": pem, "owner_id": 301, "owner_login": "eval"}
 
 
 async def seed_slack_source(
@@ -278,9 +304,10 @@ async def run_moyai_turn(
             "repository_ids": github_repository_ids,
         }
         connections.connectors.save("github", github_credentials, "Eval GitHub")
+        connections.connectors.github.save_app(github_app_config())
         connections.store.execute(
-            "INSERT INTO connection_policies(provider,enabled,read_only) VALUES('github',0,0) "
-            "ON CONFLICT(provider) DO UPDATE SET enabled=0",
+            "INSERT INTO connection_policies(provider,enabled,read_only) VALUES('github',1,1) "
+            "ON CONFLICT(provider) DO UPDATE SET enabled=1,read_only=1",
         )
         for repository_id, repository in zip(
             github_repository_ids,
@@ -354,7 +381,16 @@ async def run_moyai_turn(
         runtime.product_slack = service
         configure(runtime)
         converter = encrypted_converter(runtime.security, objects)
+        github_stub = GitHubStub()
         try:
+            github_stub.start()
+            connections.connectors.github.api_url = github_stub.api_url
+            connections.github_mcp_url = github_stub.mcp_url
+            if (
+                connections.connectors.github.api_url != github_stub.api_url
+                or connections.github_mcp_url != github_stub.mcp_url
+            ):
+                raise RuntimeError("GitHub API and MCP must use the local evaluation stub.")
             await product_inference.start(recovery=False)
             async with await WorkflowEnvironment.start_local(
                 plugins=[PydanticAIPlugin()],
@@ -373,20 +409,28 @@ async def run_moyai_turn(
                     models=models,
                     workspace=workspace,
                     skills_directory="skills",
-                    product_capabilities=[credentials],
+                    product_capabilities=[
+                        credentials,
+                        SessionContext(sources=[
+                            GitHubRepositories(make_repository_names(connections)),
+                        ]),
+                    ],
                 )
                 async with make_worker(runtime):
-                    result = await execute_turn(
-                        case,
-                        trial=trial,
-                        thread=thread,
-                        service=service,
-                        runtime=runtime,
-                        temporal=temporal,
-                    )
+                    with block_github_dns():
+                        result = await execute_turn(
+                            case,
+                            trial=trial,
+                            thread=thread,
+                            service=service,
+                            runtime=runtime,
+                            temporal=temporal,
+                        )
+                    result["github_stub_requests"] = github_stub.requests
                     result["offered_tool_names"] = sorted(credentials.get_toolset().tools)
                     return result
         finally:
+            github_stub.close()
             await product_inference.close()
             await stores.close()
             store.close()
@@ -495,5 +539,6 @@ async def execute_turn(
         "attached_image_names": [],
         "posted_reply": reply,
         "tool_trace": conversation_trace(completed.conversation, runtime.security),
+        "model_instructions": conversation_instructions(completed.conversation, runtime.security),
         "tokens_cost": json.loads(completed.usage or "{}"),
     }

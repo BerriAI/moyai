@@ -13,7 +13,6 @@ from sqlalchemy import func, select
 
 from moyai.contracts import NewSession
 from moyai.models import Turn
-from moyai.product_slack_context import REFERENCE, WORKSPACE
 from moyai.product_slack_models import ProductSlackBinding
 from moyai.skill_invocations import has_invocations
 from moyai.skill_mentions import marker
@@ -110,65 +109,6 @@ async def test_first_reply_receives_parent_link_and_unfurl_in_prepared_input(ing
     assert await runtime.skill_invocations.expand(prepared.prompt, prepared.scope) == prepared.prompt
 
 
-async def test_channel_thread_appends_connected_repositories_after_slack_reference(ingress, monkeypatch):
-    service, runtime = ingress.service, ingress.runtime
-
-    async def request(method, url, **kwargs):
-        assert url == "https://slack.com/api/conversations.replies"
-        return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
-
-    monkeypatch.setattr(service.connectors, "request", request)
-    monkeypatch.setattr(
-        service.connectors.github, "targets", lambda: ["BerriAI/litellm", "BerriAI/moyai"],
-    )
-    await service.receive_payload(envelope(mention_message()))
-    turn = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
-
-    workspace = WORKSPACE + "BerriAI/litellm, BerriAI/moyai\n"
-    assert prepared.prompt.endswith(workspace)
-    assert prepared.prompt.index(REFERENCE) < prepared.prompt.index(WORKSPACE)
-
-
-async def test_channel_thread_without_github_connection_has_no_workspace_block(ingress, monkeypatch):
-    service, runtime = ingress.service, ingress.runtime
-    assert service.connectors.github.saved_credentials() == {}
-
-    async def request(method, url, **kwargs):
-        assert url == "https://slack.com/api/conversations.replies"
-        return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
-
-    monkeypatch.setattr(service.connectors, "request", request)
-    await service.receive_payload(envelope(mention_message()))
-    turn = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
-
-    assert WORKSPACE not in prepared.prompt
-    assert "do we support this?" in prepared.prompt
-    assert "DeepSeek-V4.1-Flash-1017" in prepared.prompt
-
-
-async def test_github_targets_error_does_not_prevent_slack_admission(ingress, monkeypatch):
-    service, runtime = ingress.service, ingress.runtime
-
-    async def request(method, url, **kwargs):
-        assert url == "https://slack.com/api/conversations.replies"
-        return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
-
-    def unavailable():
-        raise ConnectorError("GitHub connection unavailable.")
-
-    monkeypatch.setattr(service.connectors, "request", request)
-    monkeypatch.setattr(service.connectors.github, "targets", unavailable)
-    await service.receive_payload(envelope(mention_message()))
-    turn = await runtime.database.claim_next()
-    assert turn is not None
-    prepared = await runtime.database.prepare(turn.id)
-
-    assert "do we support this?" in prepared.prompt
-    assert WORKSPACE not in prepared.prompt
-
-
 async def test_thread_pages_exclude_other_threads_and_messages_after_the_request(ingress, monkeypatch):
     service, runtime = ingress.service, ingress.runtime
     cursors = []
@@ -226,7 +166,6 @@ async def test_duplicate_slack_delivery_keeps_the_admitted_thread_snapshot(ingre
         return {"ok": True, "messages": [deepcopy(parent), mention_message()], "has_more": False}
 
     monkeypatch.setattr(service.connectors, "request", request)
-    monkeypatch.setattr(service.connectors.github, "targets", lambda: ["BerriAI/moyai"])
     await service.receive_payload(envelope(mention_message()))
     parent["text"] = "Edited parent received after the original admission."
     # Slack can deliver the same message in both event envelope types.
@@ -238,7 +177,6 @@ async def test_duplicate_slack_delivery_keeps_the_admitted_thread_snapshot(ingre
     prepared = await runtime.database.prepare(turn.id)
     assert DEEPSEEK_URL in prepared.prompt
     assert "Edited parent" not in prepared.prompt
-    assert prepared.prompt.endswith(WORKSPACE + "BerriAI/moyai\n")
     assert len(calls) == 1
 
 
@@ -433,32 +371,6 @@ async def test_direct_message_does_not_read_shared_history(ingress, monkeypatch)
     turn = await runtime.database.claim_next()
     prepared = await runtime.database.prepare(turn.id)
     assert prepared.prompt == "do we support this?"
-
-
-async def test_dm_without_history_appends_repositories_and_accepts_retry(ingress, monkeypatch):
-    service, runtime = ingress.service, ingress.runtime
-
-    async def forbidden_request(*args, **kwargs):
-        pytest.fail("A direct message must not read organization history for context.")
-
-    monkeypatch.setattr(service.connectors, "request", forbidden_request)
-    monkeypatch.setattr(service.connectors.github, "targets", lambda: ["BerriAI/litellm", "BerriAI/moyai"])
-    message = {
-        "channel": "DTEST0001", "type": "message", "channel_type": "im",
-        "user": "UTEST0001", "ts": MENTION_TS, "text": "do we support this?",
-    }
-    await service.receive_payload(envelope(message))
-    await service.receive_payload({
-        **envelope(message), "event_id": "retry-" + MENTION_TS,
-    })
-    turn = await runtime.database.claim_next()
-    prepared = await runtime.database.prepare(turn.id)
-
-    assert prepared.prompt == (
-        "do we support this?" + WORKSPACE + "BerriAI/litellm, BerriAI/moyai\n"
-    )
-    async with runtime.database.sessions() as db:
-        assert await db.scalar(select(func.count()).select_from(Turn)) == 1
 
 
 async def test_dm_current_preview_is_retained_without_history_and_frozen_on_retry(ingress, monkeypatch):

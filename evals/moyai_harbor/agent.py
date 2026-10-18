@@ -133,6 +133,8 @@ class MoyaiAgent(BaseAgent):
         prompt_log = self.logs_dir / "prompt_received.txt"
         reply_log = self.logs_dir / "posted_reply.txt"
         trace_log = self.logs_dir / "tool_trace.json"
+        github_stub_log = self.logs_dir / "github_stub_requests.jsonl"
+        model_request_log = self.logs_dir / "model_request.txt"
         thread_log.write_text(json.dumps(
             result.get("slack_thread_input", []), ensure_ascii=False, indent=2,
         ) + "\n")
@@ -141,6 +143,11 @@ class MoyaiAgent(BaseAgent):
         trace_log.write_text(json.dumps(
             result.get("tool_trace", []), ensure_ascii=False, indent=2,
         ) + "\n")
+        github_stub_log.write_text("".join(
+            json.dumps(item, ensure_ascii=False) + "\n"
+            for item in result.get("github_stub_requests", [])
+        ))
+        model_request_log.write_text("\n\n".join(result.get("model_instructions", [])))
         trajectory = Trajectory(
             schema_version="ATIF-v1.8",
             session_id=self.session_id,
@@ -160,6 +167,8 @@ class MoyaiAgent(BaseAgent):
                         "slack_thread_input": result.get("slack_thread_input", []),
                         "prompt_received": result.get("prompt_received", ""),
                         "tool_trace": result.get("tool_trace", []),
+                        "model_instructions": result.get("model_instructions", []),
+                        "github_stub_requests": result.get("github_stub_requests", []),
                     },
                 ),
             ],
