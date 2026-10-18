@@ -2,6 +2,8 @@
 
 This directory contains the Harbor 0.24.0 evaluations, one task per use case under `tasks/`. `deepseek_support_live` v2 checks a support answer against a real, pinned LiteLLM proxy with a deterministic local HTTPS provider fixture. It does not validate external DeepSeek availability. `answer_style` checks a plain explanation follows the Answer style rules in `native/instructions.md`. Harbor is installed as a temporary `uv` overlay so it does not change the native production dependency lock.
 
+`desktop_license` opens a GTK License Manager window on an Xvfb desktop, and Moyai must reply with its activation code. Run it with `-a moyai_harbor.desktop_agent:MoyaiDesktopAgent`; set `MOYAI_EVAL_OCU=0` to remove OCU for the baseline, and `MOYAI_EVAL_TURN_TIMEOUT` controls the turn timeout (default 300 seconds). On `bedrock_mantle/openai.gpt-5.6-luna`, it passed 5/5 trials with OCU and 0/5 without; the baseline replies that it cannot see or transcribe the code.
+
 The DeepSeek v2 gate requires a successful LiteLLM SDK callback receipt matching
 the provider fixture's unique response ID, package version, route, model, and
 result. Direct provider calls and catalog lookups cannot pass this gate, even if

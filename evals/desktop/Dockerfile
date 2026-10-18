@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ripgrep curl jq ca-certificates xvfb openbox xterm xdotool x11-xserver-utils \
     fonts-dejavu-core dbus dbus-x11 at-spi2-core python3 python3-gi python3-pil \
-    gir1.2-gtk-3.0 gir1.2-atspi-2.0 mousepad nodejs npm imagemagick \
+    gir1.2-gtk-3.0 gir1.2-atspi-2.0 nodejs npm imagemagick \
     && rm -rf /var/lib/apt/lists/* \
     && npm i -g open-computer-use@1.1.2
 ENV DISPLAY=:99 \

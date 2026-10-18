@@ -9,19 +9,10 @@ HERE = Path(__file__).resolve().parent
 TASKS = HERE.parent / "tasks"
 LAUNCH = {
     "license": "nohup python3 /eval/apps.py license >/tmp/app.log 2>&1 &\n",
-    "note": "python3 /eval/note_setup.py >/tmp/app.log 2>&1\n",
-    "expense": "nohup python3 /eval/apps.py expense >/tmp/app.log 2>&1 &\n",
-    "preferences": "nohup python3 /eval/apps.py preferences >/tmp/app.log 2>&1 &\n",
 }
 PROMPTS = {
     "license": "there's a License Manager window open on your computer's desktop. "
                "what activation code does it show? reply with the code",
-    "note": "I typed some notes into Mousepad on your computer but never saved them. "
-            "save that document to /workspace/out/notes.txt exactly as it is",
-    "expense": "the Expense Report app is open on your computer. submit an expense for "
-               "Dana Whitfield, 184.50 USD, category Travel, reimbursable",
-    "preferences": "in the Preferences app on your computer, turn off usage statistics, set max "
-                   "retries to 7, set the proxy URL to http://proxy.internal:3128, and apply",
 }
 TASK_TOML = """schema_version = "1.4"
 
@@ -48,7 +39,7 @@ def main() -> None:
         (task / "task.toml").write_text(TASK_TOML)
         (task / "instruction.md").write_text(prompt + "\n")
         shutil.copy(HERE / "Dockerfile", env / "Dockerfile")
-        for file in ("apps.py", "note_setup.py", "start_desktop.sh"):
+        for file in ("apps.py", "start_desktop.sh"):
             shutil.copy(HERE / file, env / "eval" / file)
         (env / "eval" / "launch_apps.sh").write_text("#!/bin/sh\n" + LAUNCH[name])
         (env / "eval" / "case_id.json").write_text(json.dumps({"case_id": f"desktop_{name}"}) + "\n")

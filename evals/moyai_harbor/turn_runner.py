@@ -14,9 +14,17 @@ from uuid import uuid4
 import boto3
 import httpx
 import sqlalchemy
+from app.credentials import SaveSecret
 from botocore.config import Config
 from cryptography.fernet import Fernet
 from moto.server import ThreadedMotoServer
+from pydantic import SecretStr
+from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
+from pydantic_ai.capabilities.abstract import leaf_capabilities
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+from temporalio.testing import WorkflowEnvironment
+
 from moyai.models import SlackThread, Turn
 from moyai.product_config import (
     NATIVE_KEY_FORMAT,
@@ -34,14 +42,6 @@ from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
-from pydantic import SecretStr
-from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
-from pydantic_ai.capabilities.abstract import leaf_capabilities
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from temporalio.testing import WorkflowEnvironment
-
-from app.credentials import SaveSecret
 
 from .slack_fixture import route_slack_clients
 from .workspace import HarborWorkspace
@@ -257,7 +257,7 @@ async def run_runtime_turn(
                     "access_token": SLACK_BOT_TOKEN,
                     "bot_user_id": BOT_USER,
                     "team": {"id": TEAM},
-                    "scope": "channels:read,channels:history,groups:history,chat:write",
+                    "scope": "channels:read,channels:history,groups:history,chat:write,users:read,users:read.email",
                 },
             }
             runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
@@ -306,6 +306,15 @@ def slack_transport(
 ) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/api/users.info":
+            if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
+            if request.url.params.get("user") != SLACK_USER:
+                return httpx.Response(200, json={"ok": False, "error": "user_not_found"})
+            return httpx.Response(200, json={"ok": True, "user": {
+                "id": SLACK_USER, "team_id": TEAM, "real_name": "Ishaan",
+                "profile": {"email": "ishaan@example.test", "real_name": "Ishaan"},
+            }})
         if path == "/api/conversations.info":
             if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
                 return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
