@@ -44,6 +44,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 from .artifacts import artifact_capability
 from .browser import browser_capability
+from .browser_login import BrowserLogin
 from .bundled_skills import bundled_skill_catalog
 from .commentary import Commentary
 from .computer_startup import OnDemandDurability, on_demand_coder
@@ -376,6 +377,7 @@ def make_agent(
             artifact_capability(database, objects),
             attachment_capability(database, objects),
             browser_capability(database),
+            BrowserLogin(database),
             on_demand_coder(authority.save_workspace),
             WorkflowPlanning(
                 store_resolver=lambda ctx: stores.plan(
