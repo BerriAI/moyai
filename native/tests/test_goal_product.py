@@ -6,6 +6,7 @@ import os
 import pytest
 import test_product_authority as authority
 from sqlalchemy import func, select
+from test_goals import report_complete
 
 from moyai.contracts import NewMessage, NewSession
 from moyai.dispatch_wakeups import DispatchWakeups
@@ -76,3 +77,32 @@ async def test_pause_racing_dispatch_never_starts_work_after_pause_commits(admit
             turn = await db.get(Turn, turn_id)
             assert turn.status in {"queued", "stopped"}
             assert (await db.get(Goal, session.id)).status == "paused"
+
+
+@pytest.mark.parametrize("mode", ["asap", "send_now"])
+async def test_concurrent_ticks_complete_consumed_steering_without_duplicate_work(admitted_product, mode):
+    product = admitted_product
+    database = product.database
+    session, initial = await start(product)
+    await database.claim_next()
+    prepared = await database.prepare(initial)
+    correction = await database.submit(product.actor, session.id, NewMessage(
+        prompt="Verify the checksum too.", request_key="correction",
+        mode="asap" if mode == "asap" else "when_idle",
+    ))
+    if mode == "send_now":
+        await database.steer_queued(product.actor, correction.id)
+    await database.steering_receipt(correction.id, "accepted-correction")
+    await report_complete(product, prepared, input_id=correction.id)
+    await database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output="Verified all requested outcomes.",
+        workspace=None, usage={"input_tokens": 8, "output_tokens": 3},
+    )
+    await database.settle(initial)
+    await asyncio.gather(*(database.goals.tick(session.id) for _ in range(3)))
+    async with database.sessions() as db:
+        saved = await db.get(Goal, session.id)
+        assert saved.status == "complete" and saved.turns == 1 and saved.tokens_used == 11
+        assert (await db.get(Turn, correction.id)).status == "included"
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 2
+    assert await database.claim_next() is None

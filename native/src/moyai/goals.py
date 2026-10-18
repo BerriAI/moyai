@@ -12,7 +12,7 @@ import re
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import HTTPException
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .contracts import NewMessage, RunScope
@@ -287,6 +287,13 @@ class Goals:
         # continuation alone does not revoke a turn already admitted to run.
         return goal
 
+    async def invalidate_for_guidance(self, db: AsyncSession, turn: Turn) -> None:
+        """New steering supersedes an earlier report under the admission session fence."""
+        if turn.parent_turn is not None:
+            await db.execute(update(GoalTurn).where(
+                GoalTurn.turn_id == turn.parent_turn,
+            ).values(decision=None, evidence=""))
+
     async def enqueue(
         self, db: AsyncSession, actor: User, goal: Goal, key: str, prompt: str, *, generated: bool,
         attachments: list[str] | None = None,
@@ -390,6 +397,10 @@ class Goals:
                         GoalTurn.session_id == session_id, GoalTurn.generation == goal.generation,
                         GoalTurn.generated.is_(False), Turn.created_at > turn.created_at,
                         Turn.status != "stopped",
+                        # Included steering was handled by this accepted result.
+                        # Admission already invalidated any report made before
+                        # that guidance, including an older queued "Send now".
+                        or_(Turn.status != "included", Turn.parent_turn.is_distinct_from(turn.id)),
                     ).limit(1))
                     if newer is None:
                         self.change(goal, "complete", self.database.security.unseal(binding.evidence).decode())

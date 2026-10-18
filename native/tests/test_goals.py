@@ -17,7 +17,7 @@ from sqlalchemy import func, select, update
 from temporalio.client import WorkflowExecutionStatus
 
 from moyai.api import COOKIE, create_app
-from moyai.contracts import NewMessage, NewSession
+from moyai.contracts import GuidanceChanged, NewMessage, NewSession
 from moyai.goal_models import Goal, GoalTurn
 from moyai.goal_tools import GoalCapability
 from moyai.goals import is_goal_command, parse_command
@@ -203,6 +203,96 @@ async def test_followup_invalidates_completion_based_on_older_input(runtime, act
     await runtime.database.goals.tick(session.id)
     assert (await goal(runtime, session.id))["status"] == "active"
     assert (await runtime.database.claim_next()).id == followup.id
+
+
+async def report_complete(runtime, prepared, *, input_id=None, call_id="verified-goal"):
+    ctx = RunContext(
+        deps=prepared.scope, model=TestModel(), usage=RunUsage(),
+        run_id=prepared.scope.turn_id, tool_call_id=call_id,
+        metadata={"moyai_input_id": input_id} if input_id else {},
+    )
+    tools = GoalCapability(runtime.database.goals).tools.tools
+    return await tools["update_goal"].function(ctx, "complete", "Verified the objective and current guidance.")
+
+
+@pytest.mark.parametrize("mode", ["asap", "send_now"])
+@pytest.mark.parametrize("queued_followup", [False, True])
+async def test_included_steering_allows_verified_completion_but_queued_work_does_not(
+    runtime, actor, mode, queued_followup,
+):
+    session, _ = await start(runtime, actor, "/goal --budget 100 Finish the verified task.")
+    parent = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(parent.id)
+    correction = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Also verify the checksum.", request_key="correction",
+        mode="asap" if mode == "asap" else "when_idle",
+    ))
+    if mode == "send_now":
+        correction = await runtime.database.steer_queued(actor, correction.id)
+    await runtime.database.prepare_steering(parent.id, correction.id)
+    await runtime.database.steering_receipt(correction.id, "accepted-correction")
+    await report_complete(runtime, prepared, input_id=correction.id)
+    # Retrying an already admitted Send now must not invalidate the new report.
+    await runtime.database.steer_queued(actor, correction.id)
+    followup = None
+    if queued_followup:
+        followup = await runtime.database.submit(actor, session.id, NewMessage(
+            prompt="Then verify a separate output.", request_key="later-input",
+        ))
+    assert await runtime.database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output="Current guidance verified.",
+        workspace=None, usage={"input_tokens": 60, "output_tokens": 30},
+    )
+    await runtime.database.settle(parent.id)
+    await runtime.database.goals.tick(session.id)
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Turn, correction.id)).status == "included"
+        assert await db.scalar(select(func.count()).select_from(GoalTurn).where(GoalTurn.generated.is_(True))) == 0
+    view = await goal(runtime, session.id)
+    assert view["turns"] == 1 and view["tokens_used"] == 90
+    assert view["status"] == ("active" if queued_followup else "complete")
+    next_turn = await runtime.database.claim_next()
+    assert next_turn.id == followup.id if followup else next_turn is None
+
+
+@pytest.mark.parametrize("mode", ["asap", "send_now"])
+@pytest.mark.parametrize("reverify", [False, True])
+async def test_new_steering_invalidates_an_earlier_completion_until_reverified(runtime, actor, mode, reverify):
+    session, _ = await start(runtime, actor)
+    parent = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(parent.id)
+    correction = None
+    if mode == "send_now":
+        correction = await runtime.database.submit(actor, session.id, NewMessage(
+            prompt="Verify the changed requirement.", request_key="queued-correction",
+        ))
+    await report_complete(runtime, prepared)
+    if correction is None:
+        correction = await runtime.database.submit(actor, session.id, NewMessage(
+            prompt="Verify the changed requirement.", request_key="new-correction", mode="asap",
+        ))
+    else:
+        correction = await runtime.database.steer_queued(actor, correction.id)
+    async with runtime.database.sessions() as db:
+        binding = await db.get(GoalTurn, parent.id)
+        assert binding.decision is None and binding.evidence == ""
+    await runtime.database.steering_receipt(correction.id, "accepted-correction")
+    with pytest.raises(GuidanceChanged):
+        await report_complete(runtime, prepared, call_id="stale-goal-report")
+    # A retried old tool receipt must not revive the superseded decision.
+    await report_complete(runtime, prepared, input_id=correction.id)
+    async with runtime.database.sessions() as db:
+        assert (await db.get(GoalTurn, parent.id)).decision is None
+    if reverify:
+        await report_complete(runtime, prepared, input_id=correction.id, call_id="reverified-goal")
+    await runtime.database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output="Result after steering.",
+        workspace=None, usage={},
+    )
+    await runtime.database.settle(parent.id)
+    await runtime.database.goals.tick(session.id)
+    assert (await goal(runtime, session.id))["status"] == ("complete" if reverify else "active")
+    assert (await runtime.database.claim_next() is None) == reverify
 
 
 async def test_goal_can_be_queued_while_ordinary_work_is_running(runtime, actor, active):

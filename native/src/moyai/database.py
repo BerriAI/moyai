@@ -578,7 +578,7 @@ class Database:
             transaction.add(turn)
             await transaction.flush()
             if turn.status == "steering":
-                self._record_guidance(transaction, turn, session.revision)
+                await self._record_guidance(transaction, turn, session.revision)
             from .performance import admission
             admission(
                 transaction, turn, received_at or admitted_at or turn.created_at,
@@ -775,10 +775,10 @@ class Database:
                     raise HTTPException(409, "This message needs its own run. It will start after the active task.")
                 turn.parent_turn = active.id
                 turn.status = "steering"
-                self._record_guidance(db, turn, session.revision)
+                await self._record_guidance(db, turn, session.revision)
             return turn
 
-    def _record_guidance(self, db: AsyncSession, turn: Turn, revision: int) -> None:
+    async def _record_guidance(self, db: AsyncSession, turn: Turn, revision: int) -> None:
         # Event IDs order admissions while holding the session fence, including
         # "Send now" for an older queued message. Message creation time cannot
         # order those corrections. A repeated promotion can have a new receipt.
@@ -787,6 +787,7 @@ class Database:
             identity=f"guidance:{turn.id}:{revision}",
             content=self.security.seal({"parent_turn": turn.parent_turn}),
         ))
+        await self.goals.invalidate_for_guidance(db, turn)
 
     async def dispatch_boundary(self) -> tuple[str, str] | None:
         async with self.sessions() as db:
