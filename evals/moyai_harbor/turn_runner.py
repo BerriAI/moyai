@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from importlib import import_module
 from pathlib import Path
 from socket import socket
@@ -22,7 +24,8 @@ from pydantic import SecretStr
 from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
 from pydantic_ai.capabilities.abstract import leaf_capabilities
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
+from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 
 from moyai.models import SlackThread, Turn
@@ -65,19 +68,23 @@ def conversation_trace(conversation_json: str | None, security: Any) -> list[dic
     if not conversation_json:
         return []
     conversation = ConversationTypeAdapter.validate_json(security.unseal(conversation_json))
+    return message_trace(conversation.messages)
+
+
+def message_trace(messages: Any) -> list[dict[str, Any]]:
     calls: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    for message in conversation.messages:
+    for message in messages:
         for part in message.parts:
             if isinstance(part, ToolCallPart):
                 calls[part.tool_call_id] = {
                     "name": part.tool_name, "args": part.args_as_dict(), "result": "",
                 }
                 order.append(part.tool_call_id)
-            elif isinstance(part, ToolReturnPart):
+            elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
                 record = calls.get(part.tool_call_id)
                 if record is not None:
-                    record["result"] = json.dumps(part.content, ensure_ascii=False, default=str)[:4000]
+                    record["result"] = json.dumps(part.content, ensure_ascii=False, default=str)
     return [calls[identity] for identity in order if identity in calls]
 
 
@@ -408,15 +415,50 @@ async def execute_turn(
             handle = await temporal.client.start_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
             )
-            await asyncio.wait_for(
-                handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")),
-            )
+            execution_error = ""
+            execution_traceback = ""
+            try:
+                await asyncio.wait_for(handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")))
+            except TimeoutError:
+                execution_error = "TimeoutError: The eval turn exceeded its execution deadline."
+                # Only stop this trial's owned workflow, before the surrounding
+                # worker/database are torn down. Never repeat its pending actions.
+                await handle.cancel()
+                try:
+                    await asyncio.wait_for(handle.result(), timeout=30)
+                except WorkflowFailureError:
+                    pass  # A terminal cancelled/failed workflow is settled.
+                except TimeoutError:
+                    await handle.terminate(reason="Harbor eval cancellation did not settle within 30 seconds.")
+            except WorkflowFailureError as error:
+                # A failed workflow is terminal; its saved tool evidence is
+                # still useful. Transport errors must not imply completion.
+                execution_error = f"{type(error).__name__}: {error}"
+                execution_traceback = traceback.format_exc()
+                for key in ("LITELLM_API_KEY", "LITELLM_GATEWAY_ADMIN_KEY"):
+                    if value := os.getenv(key):
+                        execution_error = execution_error.replace(value, "[redacted]")
+                        execution_traceback = execution_traceback.replace(value, "[redacted]")
             for _ in range(4):
                 await service.pump(delivery)
             async with runtime.database.sessions() as db:
                 completed = await db.get(Turn, turn.id)
             if completed is None:
                 raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
+            trace = conversation_trace(completed.conversation, runtime.security)
+            failure_evidence: dict[str, Any] = {}
+            if execution_error or completed.status == "failed":
+                snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id, include_interrupted=True)
+                if snapshot is not None:
+                    trace = message_trace(snapshot.messages)
+                failure_evidence = {
+                    "execution_error": execution_error or completed.error,
+                    "execution_traceback": execution_traceback,
+                    "step_events": json.loads(json.dumps([
+                        asdict(event) for event in await runtime.stores.steps.list_events(run_id=turn.id)
+                    ], default=str)),
+                    "usage_incomplete": True,
+                }
             reply = next((
                 "\n\n".join(
                     block["text"]["text"] for block in item.get("blocks", [])
@@ -441,6 +483,7 @@ async def execute_turn(
                 ],
                 "attached_image_names": [],
                 "posted_reply": reply,
-                "tool_trace": conversation_trace(completed.conversation, runtime.security),
+                "tool_trace": trace,
                 "tokens_cost": json.loads(completed.usage or "{}"),
+                **failure_evidence,
             }
