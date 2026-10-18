@@ -53,6 +53,7 @@ from .contracts import GuidanceChanged, RunScope
 from .database import Database
 from .delegation import InteractiveDelegation
 from .effects import EffectReceipts
+from .goal_tools import GoalCapability
 from .inference_usage import InferenceUsageTransport
 from .input_attachments import attachment_capability
 from .input_identity import DELEGATED_INPUT, input_identity
@@ -362,6 +363,7 @@ def make_agent(
             authority,
             InteractiveDelegation(database),
             SwarmCapability(database.swarms),
+            GoalCapability(database.goals),
             Commentary(database),
             EffectReceipts(database),
             *product_capabilities,

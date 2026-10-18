@@ -56,6 +56,7 @@ class RunScope:
     history_segment: int = 0
     # Recorded by the workflow, so old activity inputs keep the original stream.
     workflow_public_events: bool = False
+    goal_generation: int | None = None
 
     @property
     def root_run_id(self) -> str:

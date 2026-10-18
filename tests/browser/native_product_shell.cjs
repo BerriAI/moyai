@@ -837,8 +837,10 @@ test('skill catalog retries and excludes personal skills in shared sessions',asy
   const page=await pageFor(t,'#'),input=page.getByRole('textbox',{name:'Message Moyai'});
   await input.fill('/');await page.getByText('Couldn’t load your skills.').waitFor();
   state.skillError=false;await page.getByRole('button',{name:'Retry skills'}).click();
-  await page.getByText('No matching skills available in shared sessions.').waitFor();
-  assert.equal(await page.getByRole('option').count(),0);
+  await page.getByText('Couldn’t load your skills.').waitFor({state:'hidden'});
+  await page.getByRole('option',{name:/Goal/}).waitFor();
+  assert.equal(await page.getByRole('option').count(),1);
+  assert.equal(await page.getByRole('option',{name:/private-only/}).count(),0);
 });
 
 for(const width of [1440,768,320])test(`palette keyboard, escaped body search, focus handoff and historical isolation at ${width}px`,async t=>{

@@ -445,6 +445,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 ],
             }
             swarm_member = await runtime.database.swarms.member(db, session_id)
+            from .goal_models import Goal
+            result["goal"] = runtime.database.goals.view(await db.get(Goal, session_id))
             if swarm_member is not None:
                 result["session"]["swarm_id"] = swarm_member.mission_id
             from .delegation_models import DelegatedSession
@@ -625,7 +627,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
 
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
+        from .goals import is_goal_command
         from .skill_invocations import has_invocations
+        if is_goal_command(body.prompt):
+            return await runtime.database.goals.command(user, session_id, body)
         if body.reply_to is not None:
             async with runtime.database.sessions() as db:
                 await runtime.database.allowed_session(db, session_id, user)
