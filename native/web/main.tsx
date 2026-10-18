@@ -105,6 +105,7 @@ function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState("")
+  const [refreshError, setRefreshError] = useState("")
   const [folders, setFolders] = useState<SessionFolder[]>([])
   const refreshVersion = useRef(0)
   const [sessions, setSessions] = useState<Session[]>([])
@@ -232,6 +233,7 @@ function App() {
       if (!current()) return
       const failure = results.find(result => result.status === "rejected")
       if (failure?.status === "rejected") throw failure.reason
+      setRefreshError("")
     } catch (reason) {
       if (version !== refreshVersion.current) return
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
@@ -280,7 +282,7 @@ function App() {
   }, [])
   useEffect(() => {
     if (!me) return
-    const stop = pollVisible(refresh, () => sessionsNow.current.some(row => activeSession(row.status)) ? 4000 : 15000, reason => setError(String(reason)))
+    const stop = pollVisible(refresh, () => sessionsNow.current.some(row => activeSession(row.status)) ? 4000 : 15000, reason => setRefreshError(String(reason)))
     return () => { stop(); ++refreshVersion.current }
   }, [me, refresh])
 
@@ -300,7 +302,7 @@ function App() {
   }, [me?.user.id, prSessionIds, connectionVersion, prRefresh])
 
   if (!ready) return <div className="center muted" role="status">Opening Moyai…</div>
-  if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError("") }} />
+  if (!me) return <Login onLogin={value => { setCsrf(value.csrf); setMe(value); setError(""); setRefreshError("") }} />
   const newSession = () => { location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
   const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
   const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
@@ -340,7 +342,7 @@ function App() {
     </aside>}
     <main className="main">
       {!settingsOpen && <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>}
-      {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
+      {(error || refreshError) && <div className="error global-error" role="alert">{error || refreshError}<Button variant="ghost" onClick={() => error ? setError("") : setRefreshError("")}>Dismiss</Button></div>}
       {settingsOpen
         ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} sidebarCollapsed={sidebarHidden} onToggleSidebar={toggleSidebar} onPreferences={preferences => setMe(current => current?.user.id === me.user.id && current.csrf === me.csrf ? { ...current, preferences } : current)} /></React.Suspense>
         : historical && !nativeSelected
@@ -450,6 +452,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const mode = me.preferences?.delivery_mode ?? "when_idle"
   const [skippedAccountScope, setSkippedAccountScope] = useState("")
   const [error, setError] = useState("")
+  const [loadError, setLoadError] = useState("")
   const pictures = useAttachments(setError)
   const [busy, setBusy] = useState(false)
   const [activity, setActivity] = useState<Activity[]>([])
@@ -498,6 +501,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
+    setLoadError("")
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
     openedBrowserLogin.current = ""
@@ -538,6 +542,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         if (signal?.aborted || version !== loadVersion.current) return
         readThrough.current = latestMessage
       }
+      setLoadError("")
     } catch (reason) {
       if (signal?.aborted || version !== loadVersion.current) return
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) {
@@ -546,12 +551,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       throw reason
     }
   }, [id, me.user.id, sideMode])
+  async function reloadAfterAction() {
+    try { await load() }
+    catch (reason) { setLoadError(String(reason)) }
+  }
   useEffect(() => {
     if (sideMode && !visible) return
     return pollVisible(load, () => {
       const current = viewNow.current
       return !current || activeSession(current.session.status) || current.turns.some(turn => activeSession(turn.status)) ? 1500 : 10000
-    }, reason => setError(String(reason)))
+    }, reason => setLoadError(String(reason)))
   }, [load, sideMode, visible])
   const auxiliaryPanel = panelState.visible && visible
     ? panelState.tabs.find(tab => tab.id === panelState.activeId)?.kind : undefined
@@ -650,7 +659,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     let closed = false
     const stream = new EventSource(`/api/sessions/${encodeURIComponent(id)}/events?turn_id=${encodeURIComponent(activeId)}&offset=${liveNow.current.offset + 1}`)
     const current = () => !closed && auth === csrfToken() && visibleNow.current
-    const refreshSaved = () => { if (current()) void load().catch(reason => { if (current()) setError(String(reason)) }) }
+    const refreshSaved = () => { if (current()) void load().catch(reason => { if (current()) setLoadError(String(reason)) }) }
     stream.onmessage = event => {
       if (!current() || !/^\d+$/.test(event.lastEventId)) return
       try {
@@ -674,7 +683,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       closed = true; stream.close(); setReconnecting(false); endedStreams.current.add(activeId)
       clearSensitiveNow.current()
       window.dispatchEvent(new Event("moyai:access-changed"))
-      void load().catch(reason => { if (auth === csrfToken()) setError(String(reason)) })
+      void load().catch(reason => { if (auth === csrfToken()) setLoadError(String(reason)) })
     })
     stream.onerror = () => { if (current()) { setReconnecting(true); refreshSaved() } }
     return () => { closed = true; stream.close() }
@@ -688,7 +697,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     if (editing) {
       if (busy || !prompt.trim()) return
       setBusy(true); setError("")
-      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt }); setEditing(null); await load() }
+      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt }); setEditing(null); await reloadAfterAction() }
       catch (error) { setError(String(error)) } finally { setBusy(false) }
       return
     }
@@ -708,7 +717,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       accepted = true
       if (body.reply_to) setAnsweredRequest(body.reply_to)
       setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
-    } catch (e) { setError(accepted && body.reply_to ? "Your response was sent, but the conversation could not be refreshed." : String(e)) } finally { setBusy(false) }
+    } catch (e) {
+      if (accepted) setLoadError(body.reply_to ? "Your response was sent, but the conversation could not be refreshed." : "Your message was sent, but the conversation could not be refreshed.")
+      else setError(String(e))
+    } finally { setBusy(false) }
   }
   async function sendNow(turnId: string) {
     if (busy) return
@@ -717,13 +729,13 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     try {
       const turn = await api<Turn>(`/turns/${turnId}/steer`, "POST")
       setView(previous => previous ? { ...previous, turns: previous.turns.map(item => item.id === turn.id ? turn : item) } : previous)
-      await load()
+      await reloadAfterAction()
     } catch (reason) {
       setSendingNow(previous => { const next = new Set(previous); next.delete(turnId); return next })
       setError(String(reason))
     } finally { setBusy(false) }
   }
-  if (!view) return <div className="center" role="status">{error || "Opening conversation…"}</div>
+  if (!view) return <div className="center" role="status">{error || loadError || "Opening conversation…"}</div>
   const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
   const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
   const finalText = liveFinalAnswer(liveText)
@@ -816,7 +828,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {session.save_warning && <p className="notice" role="status">{session.save_warning}</p>}
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
-          {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
+          {(error || loadError) && <div className="error" role="alert">{error || loadError}<Button size="sm" variant="ghost" onClick={() => error ? setError("") : setLoadError("")}>Dismiss</Button></div>}
           {answeringQuestion && <p className="question-reply-hint">Your reply will answer the pending question.</p>}
           {requestAnswered && <p className="question-reply-hint">Your answer was sent. You can send a follow-up.</p>}
           {session.status === "waiting" && view.can_answer && !answeringQuestion && !requestAnswered && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
@@ -824,7 +836,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
-            <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={async () => { try { await api(`/turns/${message.turn_id}`, "DELETE"); if (editing?.id === message.id) setEditing(null); await load() } catch (error) { setError(String(error)) } }}><X size={14} /></Button>
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={async () => { try { await api(`/turns/${message.turn_id}`, "DELETE"); if (editing?.id === message.id) setEditing(null); await reloadAfterAction() } catch (error) { setError(String(error)) } }}><X size={14} /></Button>
           </div>)}</div>}
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
@@ -834,7 +846,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
-                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
+                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await reloadAfterAction() } catch (e) { setError(String(e)) } }}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
                 <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? <><Check className="composer-save-icon" /><span className="composer-optional-label">Save message</span></> : <ArrowUp />}</Button>
               </div>
             </div>
