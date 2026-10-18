@@ -1,10 +1,11 @@
 import React, { createContext, useContext, useRef, useState } from "react"
-import { Archive, Check, ChevronRight, Copy, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
+import { Archive, Check, ChevronRight, Copy, Download, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api } from "./api"
+import { downloadDebugTrace } from "./debug-trace"
 
 export type SidebarSession = {
   id: string; title: string; owner_id: string; status: string; archived: boolean; deleted?: boolean
@@ -58,7 +59,21 @@ export function SessionMenu({ session: row, header = false, onOpenSideChat }: {
   session: SidebarSession; header?: boolean; onOpenSideChat?: () => void
 }) {
   const actions = useSessionActions()
+  const [traceBusy, setTraceBusy] = useState(false)
+  const [traceError, setTraceError] = useState("")
   const owner = row.owner_id === actions.userId
+  const exportTrace = async (close: () => void) => {
+    setTraceBusy(true)
+    setTraceError("")
+    try {
+      await downloadDebugTrace(row.id)
+      close()
+    } catch (error) {
+      setTraceError(String(error))
+    } finally {
+      setTraceBusy(false)
+    }
+  }
   return <ActionMenu header={header} label={header ? "Session actions" : `Session actions for ${row.title}`}>{close => {
     if (sessionIsReadOnly(row)) return <>
       <ActionItem disabled={row.deleted || row.deleting} onClick={() => { close(); location.hash = sessionHash(row) }}><History />Open history</ActionItem>
@@ -66,6 +81,8 @@ export function SessionMenu({ session: row, header = false, onOpenSideChat }: {
     </>
     const editor = (action: Action) => { close(); actions.openEditor({ action, session: row }) }
     return <>
+      <ActionItem disabled={traceBusy} onClick={() => void exportTrace(close)}><Download />{traceBusy ? "Preparing trace…" : "Get debug trace"}</ActionItem>
+      {traceError && <p className="error" role="alert">{traceError}</p>}
       {row.deleted ? <ActionItem disabled={!owner || actions.busy} onClick={() => editor("restore")}><RotateCcw />Restore session</ActionItem> : <>
         {onOpenSideChat && <ActionItem onClick={() => { close(); onOpenSideChat() }}><PanelRightOpen />Open in side chat</ActionItem>}
         <ActionItem disabled={actions.busy} onClick={() => editor("move")}><Folder />Folder<ChevronRight className="trailing" /></ActionItem>
