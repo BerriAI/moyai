@@ -34,14 +34,24 @@ async def bounded_body(request, limit):
 
 
 class HookInbox:
-    def __init__(self, store, slack, missing_cloud):
+    def __init__(self, store, slack, missing_cloud, *, security=None):
         self.store, self.slack, self.missing_cloud = store, slack, missing_cloud
+        self.security = security
         self.wake = asyncio.Event()
         self.task = None
+        self.last_prune = 0
 
     def prune_in(self, conn):
         cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         conn.execute("DELETE FROM coordinator_hooks WHERE status!='pending' AND created_at<?", (cutoff,))
+        pending_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        conn.execute("UPDATE coordinator_hooks SET status='expired',payload='',detail='Event expired after seven days without admission.' WHERE status='pending' AND created_at<?", (pending_cutoff,))
+        if self.security is not None:
+            # Explicit product cutovers drain old workers before new encrypted
+            # inbox payloads are admitted. Retain read compatibility with old rows.
+            for row in conn.execute("SELECT id,payload FROM coordinator_hooks WHERE status='pending' AND payload NOT LIKE 'sealed:v1:%'").fetchall():
+                conn.execute('UPDATE coordinator_hooks SET payload=? WHERE id=?',
+                             ('sealed:v1:' + self.security.encrypt(row['payload']), row['id']))
 
     def enqueue(self, key, payload):
         with self.store.connect() as conn:
@@ -52,7 +62,18 @@ class HookInbox:
             if conn.execute("SELECT COUNT(*) FROM coordinator_hooks WHERE status='pending'").fetchone()[0] >= MAX_PENDING_EVENTS:
                 raise HTTPException(503, 'The event inbox is full. Retry later.', headers={'Retry-After': '1'})
             conn.execute("INSERT INTO coordinator_hooks VALUES(?,'event',?,'pending','','',?,0)",
-                         (key, json.dumps(payload, separators=(',', ':')), now()))
+                         (key, self.encode(payload), now()))
+
+    def encode(self, payload):
+        value = json.dumps(payload, separators=(',', ':'))
+        return 'sealed:v1:' + self.security.encrypt(value) if self.security is not None else value
+
+    def decode(self, value):
+        if value.startswith('sealed:v1:'):
+            if self.security is None:
+                raise RuntimeError('Encrypted inbox requires product security.')
+            value = self.security.decrypt(value.removeprefix('sealed:v1:'))
+        return json.loads(value)
 
     async def receive_event(self, request):
         body = await bounded_body(request, MAX_EVENT_BYTES)
@@ -118,6 +139,9 @@ class HookInbox:
         return result
 
     async def drain_one(self):
+        if time.monotonic() - self.last_prune >= 60:
+            await database(self.prune)
+            self.last_prune = time.monotonic()
         rows = await database(self.store.rows,
             "SELECT id,payload FROM coordinator_hooks WHERE kind='event' AND status='pending' AND retry_at<=? ORDER BY created_at,id LIMIT 1",
             (time.time(),))
@@ -127,24 +151,36 @@ class HookInbox:
         try:
             # Only the lock holder calls this private path. The HTTP route has
             # no option to skip signature verification or enqueue raw headers.
-            await self.slack.receive_payload(json.loads(row['payload']), self.missing_cloud())
+            await self.slack.receive_payload(self.decode(row['payload']), self.missing_cloud())
         except HTTPException as exc:
             if exc.status_code >= 500 or exc.status_code == 429:
                 await database(self.store.execute, 'UPDATE coordinator_hooks SET retry_at=? WHERE id=?',
-                               (time.time() + 1, row['id']))
+                               (time.time() + self.retry_delay(exc), row['id']))
                 return True
             await database(self.store.execute,
                 "UPDATE coordinator_hooks SET status='rejected',payload='',detail=? WHERE id=?",
                 ('Rejected event (' + str(exc.status_code) + ').', row['id']))
         except Exception as exc:
             await database(self.store.execute, 'UPDATE coordinator_hooks SET retry_at=? WHERE id=?',
-                           (time.time() + 1, row['id']))
+                           (time.time() + 30, row['id']))
             log.warning('Coordinator event will retry (%s)', type(exc).__name__)
             return True
         else:
             await database(self.store.execute,
                 "UPDATE coordinator_hooks SET status='done',payload='' WHERE id=?", (row['id'],))
         return True
+
+    def prune(self):
+        with self.store.connect() as conn:
+            conn.begin_write()
+            self.prune_in(conn)
+
+    @staticmethod
+    def retry_delay(error):
+        try:
+            return max(5, min(3600, float((error.headers or {}).get('Retry-After', 30))))
+        except (ValueError, TypeError):
+            return 30
 
     def start(self):
         self.task = asyncio.create_task(self.watch(), name='coordinator-hook-inbox')

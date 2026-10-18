@@ -227,8 +227,8 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         {!readOnly && !row.deleted && depth === 0 && <>
           <Button type="button" variant="ghost" size="icon-sm" disabled={busy} aria-label={`${row.pinned ? "Unpin" : "Pin"} ${row.title}`} aria-pressed={Boolean(row.pinned)} title={row.pinned ? "Unpin session" : "Pin session"}
             onClick={() => void edit(row, { pinned: !row.pinned }, row.pinned ? "Session unpinned." : "Session pinned.")}>{row.pinned ? <PinOff /> : <Pin />}</Button>
-          <Button type="button" variant="ghost" size="icon-sm" disabled={busy || row.owner_id !== userId} aria-label={`${row.archived ? "Restore from archive" : "Archive"} ${row.title}`}
-            title={row.owner_id !== userId ? "Only the session owner can change its archive status" : row.archived ? "Restore from archive" : "Archive session"} onClick={() => openEditor({ action: "archive", session: row })}>{row.archived ? <ArchiveRestore /> : <Archive />}</Button>
+          <Button type="button" variant="ghost" size="icon-sm" disabled={busy || !(row.can_manage ?? row.owner_id === userId)} aria-label={`${row.archived ? "Restore from archive" : "Archive"} ${row.title}`}
+            title={!(row.can_manage ?? row.owner_id === userId) ? "Only the session owner can change its archive status" : row.archived ? "Restore from archive" : "Archive session"} onClick={() => openEditor({ action: "archive", session: row })}>{row.archived ? <ArchiveRestore /> : <Archive />}</Button>
         </>}
         <SessionMenu session={row} onOpenSideChat={openAside} />
       </div>

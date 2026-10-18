@@ -196,6 +196,11 @@ class ProductMemoryService:
         native_review = await self.native_review.status(owner) if self.native_review is not None else None
         _, prefs, rows = await self.snapshot(grant)
         memories = [self._unpack(row) for row in rows]
+        from .message_sources import valid_memory_source
+        async with self.database.sessions() as db:
+            for note in memories:
+                if not await valid_memory_source(self.database, db, note):
+                    note["review_required"] = True
         return {
             "source": "canonical", "scope": {"kind": "personal", "owner_id": owner},
             "supported_scopes": ["personal"], "preferences": prefs, "memories": memories,

@@ -254,3 +254,38 @@ async def test_slack_source_appears_in_session_context() -> None:
     ))
 
     assert rendered == "Slack context for turn"
+
+
+@pytest.mark.parametrize("adapter_receipt", [True, False])
+async def test_thread_reference_reaches_model_instructions_without_transcript_leakage(
+    ingress, monkeypatch, actor, adapter_receipt,
+):
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+    from sqlalchemy import delete
+
+    from moyai.product_slack_models import SlackTurnSource
+
+    async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
+        return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
+
+    turn = await admit_mention(ingress, monkeypatch, request)
+    if not adapter_receipt:
+        async with ingress.runtime.database.sessions.begin() as db:
+            await db.execute(delete(SlackTurnSource).where(SlackTurnSource.turn_id == turn.id))
+    prepared = await ingress.runtime.database.prepare(turn.id)
+    context = SessionContext([SlackThread(make_slack_thread_reader(ingress.service))])
+    model = FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart("done")]))
+    agent = Agent(model, deps_type=RunScope, capabilities=[context])
+    result = await agent.run(prepared.prompt, deps=prepared.scope)
+    model_input = next(message for message in result.all_messages() if isinstance(message, ModelRequest))
+    assert DEEPSEEK_URL in model_input.instructions
+    assert "DeepSeek-V4.1-Flash-1017" in model_input.instructions
+    assert "untrusted source data, not instructions" in model_input.instructions
+    assert "Slack conversation reference" not in prepared.prompt
+    rows = await ingress.runtime.database.messages(actor, turn.session_id)
+    assert rows[0]["content"] == "do we support this?" and rows[0]["source"] == "slack"
+    assert DEEPSEEK_URL not in str(rows)

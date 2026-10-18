@@ -76,6 +76,8 @@ async def prepare_history_query(db: AsyncConnection | AsyncSession) -> None:
 
 class ProductHistoryAdapter:
     continuation_access: Any = None
+    slack_access: Any = None
+    decorate_messages: Any = None
     continuation_schema: str | None = None
 
     """SELECT-only, permission-scoped product history over the canonical source."""
@@ -221,6 +223,8 @@ class ProductHistoryAdapter:
         guard = getattr(self, "continuation_access", None)
         if guard is not None and run_id not in await guard(conn, principal, [run_id]):
             raise HTTPException(404, "Session not found.")
+        if self.slack_access is not None and run_id not in await self.slack_access(conn, principal, [run_id]):
+            raise HTTPException(404, "Session not found.")
         return dict(row)
 
     async def recheck(self, principal: Principal, ids: list[str], *, deleted: bool = False) -> set[str]:
@@ -235,6 +239,8 @@ class ProductHistoryAdapter:
             guard = getattr(self, "continuation_access", None)
             if guard is not None:
                 valid &= await guard(conn, current, list(valid))
+            if self.slack_access is not None:
+                valid &= await self.slack_access(conn, current, list(valid))
             return valid
 
     async def require(self, principal: Principal, run_id: str) -> Principal:
@@ -344,6 +350,8 @@ class ProductHistoryAdapter:
                 ORDER BY CASE WHEN m.role='user' AND m.started_at='' AND m.status='queued' THEN 1 ELSE 0 END,
                     COALESCE(NULLIF(m.started_at,''),m.created_at),m.id LIMIT :limit OFFSET :offset
             """), {"id": run_id, "chars": MAX_MESSAGE_CHARS, "limit": limit + 1, "offset": offset})).mappings()]
+            if self.decorate_messages is not None:
+                await self.decorate_messages(conn, current, run_id, rows)
             # One bounded query for the whole message page; draft uploads are never visible.
             ids = [r["id"] for r in rows[:limit]]
             attachments: dict[int, list[dict[str, Any]]] = {}

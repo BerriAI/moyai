@@ -35,6 +35,7 @@ from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .contracts import RunScope
+from .message_sources import memory_text, valid_memory_source
 from .models import Message, Session, Turn, User, now
 from .product_identity import ProductGrant
 from .product_memory import ProductMemoryService
@@ -94,6 +95,12 @@ class NativeNote(Note):
         return self
 
 
+@dataclass(frozen=True)
+class MemoryInput:
+    id: int
+    text: str
+
+
 @dataclass
 class ProductMemoryStore:
     service: ProductMemoryService
@@ -147,7 +154,7 @@ class ProductMemoryStore:
         except (KeyError, ValueError, TypeError):
             raise ToolFailed("Repository memory scope requires review.") from None
 
-    async def _view(self, *, automatic: bool = False, content: bool = True) -> tuple[dict[str, Any], list[dict[str, Any]], list[Message], str]:
+    async def _view(self, *, automatic: bool = False, content: bool = True) -> tuple[dict[str, Any], list[dict[str, Any]], list[MemoryInput], str]:
         repository = await self._repository()
         async with self.service.database.sessions.begin() as db:
             # One database snapshot and the canonical writer protocol protect
@@ -189,12 +196,17 @@ class ProductMemoryStore:
                     if row["expires_at"] and row["expires_at"] <= now():
                         continue
                     note = self.service._unpack(dict(row))
+                    if not await valid_memory_source(self.service.database, db, note):
+                        continue  # Keep the note for owner review; never automatically recall suspect evidence.
                     if automatic and note["repo_url"] and note["repo_url"] != repository:
                         continue
                     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", note["key"]) or len(note["key"]) > 80:
                         raise ToolFailed("A canonical note key requires source-format review.")
                     notes.append(note)
-            inputs = await self._inputs(db) if content else []
+            # Resolve authored text under this same release boundary. Catalog
+            # rendering stays pure and never mutates the saved execution input.
+            inputs = [MemoryInput(message.id, await memory_text(self.service.database, db, message))
+                      for message in await self._inputs(db)] if content else []
         return prefs, notes, inputs, repository
 
     async def _connections(self, db: AsyncSession, session: Session) -> None:
@@ -220,7 +232,7 @@ class ProductMemoryStore:
         return "native-" + hashlib.sha256(path.encode()).hexdigest() + ".md"
 
     def _catalog(
-        self, prefs: dict[str, Any], notes: list[dict[str, Any]], inputs: list[Message],
+        self, prefs: dict[str, Any], notes: list[dict[str, Any]], inputs: list[MemoryInput],
         repository: str, native_paths: list[str], native_main: MemoryFile | None, *, max_chars: int,
     ) -> MemoryFile:
         lines = []
@@ -236,9 +248,7 @@ class ProductMemoryStore:
                 f"- {self._native_name(path)} (original: {path[len(self.prefix):]})"
                 for path in native_paths if path.startswith(self.prefix)
             )
-        terms = search_terms(" ".join(
-            self.service.database.security.unseal(message.content).decode() for message in inputs
-        ))
+        terms = search_terms(" ".join(message.text for message in inputs))
         ranked = sorted(notes, key=lambda note: (
             note["kind"] in {"preference", "feedback"},
             len(terms & search_terms(" ".join(note[key] for key in ("key", "title", "content")))),
@@ -556,7 +566,8 @@ class ProductMemoryStore:
                 source.update(body.observation.model_dump())
             else:
                 message = next((row for row in inputs if row.id == body.source_message_id), None)
-                if message is None or body.source_quote not in self.service.database.security.unseal(message.content).decode():
+                authored = await memory_text(self.service.database, db, message) if message else ""
+                if message is None or body.source_quote not in authored:
                     raise ToolFailed("Use an exact quote from the current requester's own message.")
                 source.update(native_message_id=message.id, quote=body.source_quote)
             note = Note.model_validate({

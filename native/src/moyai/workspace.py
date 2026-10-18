@@ -170,15 +170,17 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             } for row in await db.scalars(select(Upload).where(
                 Upload.session_id == session_id,
             ).order_by(Upload.created_at.desc()).limit(100))]
-            public_messages = list(await db.scalars(select(Message.content).where(
+            public_messages = list(await db.scalars(select(Message).where(
                 Message.session_id == session_id,
             ).order_by(Message.id.desc()).limit(100)))
+            from .message_sources import public_message
+            public_messages = [(await public_message(runtime.database, db, row))[0] for row in public_messages]
         # Only public transcript URLs become "mentioned" PRs, never URLs found in
         # private tool output, reasoning, memory, or a delegate's working context.
         known = {row["url"] for row in attached if row["kind"] == "pull_request"}
         mentioned = []
         for content in public_messages:
-            for url in PR_MENTION.findall(runtime.security.unseal(content).decode()):
+            for url in PR_MENTION.findall(content):
                 try:
                     item = LinkInput(kind="pull_request", url=url)
                 except ValidationError:

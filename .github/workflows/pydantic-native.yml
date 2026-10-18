@@ -39,7 +39,7 @@ jobs:
       - name: Require Slack conversation context
         run: >-
           uv run pytest -q
-          tests/test_product_slack_context.py::test_first_reply_receives_parent_link_and_unfurl_in_prepared_input
+          tests/test_context_slack.py::test_thread_reference_reaches_model_instructions_without_transcript_leakage
       - name: Validate Docker helper shell syntax
         run: sh -n ../deploy/docker/moyai.sh
       - run: uv build

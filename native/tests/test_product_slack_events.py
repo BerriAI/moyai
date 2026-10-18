@@ -142,9 +142,12 @@ async def test_unexpected_attachment_read_error_is_logged_and_does_not_drop_turn
 
     assert "file_unavailable" in prepared.prompt
     assert any(
-        record.name == "moyai.product_slack_files" and record.exc_info
+        record.name == "moyai.product_slack_files"
+        and record.getMessage() == "Slack attachment read unavailable (RuntimeError)"
+        and not record.exc_info
         for record in caplog.records
     )
+    assert "synthetic attachment reader failure" not in caplog.text
     async with runtime.database.sessions() as db:
         assert len(list(await db.scalars(select(Turn)))) == 1
 
@@ -331,3 +334,42 @@ async def test_dm_requires_explicit_direct_channel_type(ingress, monkeypatch, ch
 
     async with runtime.database.sessions() as db:
         assert list(await db.scalars(select(Turn))) == []
+
+
+async def test_signed_edits_update_queued_input_but_never_rerun_started_work(ingress, conversation, monkeypatch):
+    from moyai.models import Message, MessageSource
+    service, runtime = ingress.service, ingress.runtime
+    async with runtime.database.sessions() as db:
+        turn = await db.scalar(select(Turn))
+        count_before = len(list(await db.scalars(select(Turn))))
+    original = context_tests.mention_message()
+    original['channel'] = context_tests.CHANNEL
+    changed = {**original, 'text': '<@UBOT00001> updated task', 'edited': {'ts': '1792255900.001'}}
+    payload = context_tests.envelope(original)
+    payload['event'] = {'type': 'message', 'subtype': 'message_changed', 'channel': context_tests.CHANNEL,
+                        'previous_message': original, 'message': changed, 'event_ts': '1792255900.001'}
+    assert (await service.receive_payload(payload))['updated']
+    async with runtime.database.sessions() as db:
+        fresh = await db.get(Turn, turn.id)
+        assert runtime.security.unseal(fresh.prompt).decode().startswith('updated task')
+        assert len(list(await db.scalars(select(Turn)))) == count_before
+    await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+    changed['text'] = '<@UBOT00001> second edit after starting'
+    changed['edited']['ts'] = '1792255910.001'
+    assert (await service.receive_payload(payload))['updated']
+    async with runtime.database.sessions() as db:
+        fresh = await db.get(Turn, turn.id)
+        assert runtime.security.unseal(fresh.prompt).decode() == prepared.prompt
+        message = await db.scalar(select(Message).where(Message.turn_id == turn.id))
+        assert runtime.security.unseal(message.content).decode() == 'second edit after starting'
+        source = await db.get(MessageSource, message.identity)
+        assert not source.mirror
+    deleted = {**payload, 'event': {'type': 'message', 'subtype': 'message_deleted',
+        'channel': context_tests.CHANNEL, 'previous_message': changed,
+        'deleted_ts': original['ts'], 'event_ts': '1792255920.001'}}
+    assert (await service.receive_payload(deleted))['updated']
+    messages = await runtime.database.messages(await runtime.database.user(turn.actor_id), turn.session_id)
+    assert messages[0]['content'] == '' and messages[0]['deleted']
+    assert messages[0]['edited_after_start']
+    assert not (await service.receive_payload(payload))['updated']  # late edit cannot resurrect a deletion
