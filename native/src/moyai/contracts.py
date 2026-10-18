@@ -188,6 +188,7 @@ class ApprovalReply(BaseModel):
     request_key: str = Field(min_length=1, max_length=200)
     approvals: dict[str, bool] = Field(default_factory=dict)
     answers: dict[str, Any] = Field(default_factory=dict)
+    browser_logins: dict[str, Literal["signed_in", "cancelled"]] = Field(default_factory=dict)
 
 
 class QueuedEdit(BaseModel):

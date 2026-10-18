@@ -21,6 +21,7 @@ const toolLabels: Record<string, string> = {
   write_file: "Write file", edit_file: "Edit file", apply_patch: "Apply changes",
   delegate_task: "Delegate work", write_plan: "Update plan", read_plan: "Read plan",
   browser_open: "Open browser", browser_read: "Inspect browser", browser_action: "Use browser",
+  request_browser_login: "Request browser sign-in",
   search_conversation_history: "Search conversation history",
 }
 export const toolLabel = (name: string) => toolLabels[name] ?? name.replaceAll("_", " ")

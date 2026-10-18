@@ -699,6 +699,15 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 calls, approvals = await stored_replies(runtime, db, turn)
                 calls.update(await runtime.product_secrets.execution.resolved_calls(db, turn, resumed_actor))
             questions = {call.tool_call_id: call for call in pending.calls}
+            if body.browser_logins:
+                from .browser_login import TOOL_NAME, login_result
+                for identity, outcome in body.browser_logins.items():
+                    call = questions.get(identity)
+                    if call is None or call.tool_name != TOOL_NAME:
+                        raise HTTPException(422, "Unknown browser sign-in request.")
+                    calls[identity] = await login_result(
+                        db, session_id, (pending.metadata or {}).get(identity) or {}, outcome,
+                    )
             for identity, value in body.answers.items():
                 call = questions.get(identity)
                 if call is None or call.tool_name != "ask_user_question":

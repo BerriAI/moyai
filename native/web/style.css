@@ -278,3 +278,16 @@ legend { margin-bottom: 12px; font-weight: 500; }
   .conversation .composer-actions button[aria-label="Stop task"],
   .conversation .composer-actions button[aria-label="Save queued message"] { width: 40px; padding: 0; }
 }
+/* Human browser sign-in requests share the existing pending-input surface. */
+.browser-login-request { display: grid; gap: 12px; min-width: 0; }
+.browser-login-request h3 { display: flex; align-items: center; gap: 8px; }
+.browser-login-request p { margin: 0; overflow-wrap: anywhere; }
+.browser-login-site { font-weight: 600; }
+.browser-login-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.browser-login-computer { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.browser-login-computer > .computer-panel { flex: 1; min-height: 0; }
+.browser-login-panel-hint { display: none; padding: 12px; gap: 8px; border-bottom: 1px solid var(--ui-border); flex: none; max-height: 40%; overflow: auto; font-size: 13px; }
+.browser-login-panel-hint p { margin: 0; overflow-wrap: anywhere; }
+.workspace.panel-expanded .browser-login-panel-hint,
+.workspace.panel-split-compact .browser-login-panel-hint { display: grid; }
+@media (max-width: 1000px) { .browser-login-panel-hint { display: grid; } }

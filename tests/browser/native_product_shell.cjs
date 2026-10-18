@@ -92,6 +92,7 @@ async function handle(req,res,next) {
       return json({id:'resumed-turn',status:'queued'},202);
     }
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
+    if(url.pathname.endsWith('/computer'))return json({available:false,has_workspace:true,controlled:false,busy:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
     if(url.pathname.includes('/actions/')) {
       const key=decodeURIComponent(url.pathname.split('/actions/')[1]);
@@ -183,6 +184,62 @@ test('another participant can queue a message without answering the requester qu
   const sent=state.requests.find(row=>row.path.endsWith('/messages')&&row.method==='POST');
   assert.equal(sent.body.reply_to,undefined);
   assert.equal(state.requests.some(row=>row.path.endsWith('/answers')),false);
+});
+function loginRequest() {
+  return {calls:[{tool_call_id:'login-call',tool_name:'request_browser_login',args:{url:'https://portal.example.test',reason:'Inspect the protected report.'}}],
+    approvals:[],metadata:{'login-call':{kind:'browser_login',site:'https://portal.example.test',reason:'Inspect the protected report.',workspace_id:'test-computer'}}};
+}
+for(const width of [1440,768,320])test(`browser sign-in opens Computer and submits an explicit acknowledgement at ${width}px`,async t=>{
+  reset({status:'waiting',canAnswer:true,canReply:false,pending:loginRequest()});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  if(width<1000) {
+    await page.getByRole('region',{name:'Browser sign-in instructions',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Back to sign-in request',exact:true}).click();
+    await page.waitForFunction(()=>document.activeElement?.textContent==='I’ve signed in');
+  }
+  await page.getByRole('heading',{name:'Browser sign-in needed',exact:true}).waitFor();
+  assert.equal(await page.locator('.browser-login-request').getByText('Inspect the protected report.',{exact:true}).count(),1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await page.getByRole('button',{name:'I’ve signed in',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/answers')));
+  assert.deepEqual(state.requests.find(row=>row.path.endsWith('/answers')).body.browser_logins,{'login-call':'signed_in'});
+});
+test('browser sign-in respects panel dismissal, can reopen, and restores after reload',async t=>{
+  reset({status:'waiting',canAnswer:true,pending:loginRequest()});
+  const page=await pageFor(t);
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Close Computer tab',exact:true}).click();
+  const readCount=()=>state.requests.filter(row=>row.path===`/api/sessions/${sessionId}`&&row.method==='GET').length;
+  const previous=readCount();await waitFor(()=>readCount()>previous,'session poll after dismissal');
+  assert.equal(await page.getByRole('tab',{name:'Computer',exact:true}).count(),0);
+  await page.getByRole('button',{name:'Open Computer',exact:true}).click();
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  await page.reload();
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Cancel sign-in',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/answers')));
+  assert.deepEqual(state.requests.find(row=>row.path.endsWith('/answers')).body.browser_logins,{'login-call':'cancelled'});
+});
+test('another viewer cannot open or complete the requester browser handoff',async t=>{
+  reset({status:'waiting',canAnswer:false,pending:loginRequest()});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai',exact:true}).waitFor();
+  assert.equal(await page.getByRole('tab',{name:'Computer',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'I’ve signed in',exact:true}).count(),0);
+});
+test('browser sign-in retry keeps its identity and accepted responses cannot be resubmitted',async t=>{
+  reset({status:'waiting',canAnswer:true,pending:loginRequest(),answerError:true});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'I’ve signed in',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'The answer could not be saved'}).waitFor();
+  const sent=()=>state.requests.filter(row=>row.path.endsWith('/answers'));
+  state.answerError=false;state.answerRefreshError=true;
+  await page.getByRole('button',{name:'I’ve signed in',exact:true}).click();
+  await page.getByText('Your response was sent, but the conversation could not be refreshed.',{exact:true}).waitFor();
+  assert.equal(sent().length,2);
+  assert.equal(sent()[0].body.request_key,sent()[1].body.request_key);
+  assert.equal(await page.getByRole('button',{name:'I’ve signed in',exact:true}).isEnabled(),false);
 });
 async function palette(page) {await page.keyboard.press('Control+k');const dialog=page.getByRole('dialog',{name:'Commands and session search'});await dialog.waitFor();return dialog;}
 before(async()=>{

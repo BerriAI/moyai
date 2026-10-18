@@ -40,6 +40,7 @@ import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
 import { QuestionChoices, type Question } from "./question-choices"
+import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./browser-login"
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
@@ -54,7 +55,7 @@ type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: 
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
-type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
+type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, BrowserLoginMetadata & { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
 type View = { session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
@@ -440,6 +441,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const endedStreams = useRef(new Set<string>())
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  const openedBrowserLogin = useRef("")
+  const panelReturnFocus = useRef<HTMLElement | null>(null)
   const sessionActions = useSessionActions()
   const titleCallback = useRef(onTitle)
   titleCallback.current = onTitle
@@ -474,6 +477,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
+    openedBrowserLogin.current = ""
     sessionCallback.current?.(null)
   }
   const clearSensitiveNow = useRef(clearSensitive)
@@ -594,6 +598,19 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     () => clearSensitiveNow.current(),
   )
   const requestAnswered = Boolean(active && answeredRequest === active.id)
+  const browserLoginIds = view?.pending?.calls.filter(call => call.tool_name === "request_browser_login")
+    .map(call => call.tool_call_id).join(",") ?? ""
+  const browserLogin = view?.pending?.calls.find(call => call.tool_name === "request_browser_login")
+  const loginMetadata = browserLogin ? view?.pending?.metadata?.[browserLogin.tool_call_id] : undefined
+  const canResolveInput = Boolean(active && (view?.can_answer ?? active.actor_id === me.user.id))
+  useEffect(() => {
+    if (sideMode || !visible || !browserLoginIds || !canResolveInput || requestAnswered) return
+    const identity = `${id}:${active?.id}:${browserLoginIds}`
+    if (openedBrowserLogin.current === identity) return
+    openedBrowserLogin.current = identity
+    setWorkspaceOpen(false)
+    dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+  }, [id, active?.id, browserLoginIds, canResolveInput, visible, requestAnswered, sideMode])
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
   useEffect(() => {
@@ -762,7 +779,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
             {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
-            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} />
+            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} onOpenComputer={() => sideMode ? sessionActions.openComputer(id) : addTab("computer")} />
           </>}
           {session.status === "waiting" && !view.can_answer && !view.pending && <p className="notice">Waiting for the original requester’s response. New messages will be queued.</p>}
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
@@ -849,7 +866,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       {chat}
 
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
-      <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
+      <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab} returnFocus={panelReturnFocus}>{(tab, activeTab) => {
         if (tab.kind === "action") return <ActionPanel
           key={JSON.stringify([authorityKey, connectionVersion, me.user.id, me.csrf, tab.action])}
           action={tab.action} active={activeTab} onDenied={() => clearSensitiveNow.current()} />
@@ -858,7 +875,19 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
           onOpenFile={openOutput} onName={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
         if (tab.kind === "files") return <FilesPanel sessionId={id} onOpen={openOutput} active={activeTab} />
-        if (tab.kind === "computer") return <React.Suspense fallback={<div className="panel-empty" role="status">Opening computer…</div>}><ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} /></React.Suspense>
+        if (tab.kind === "computer") return <div className="browser-login-computer">
+          {browserLoginIds && canResolveInput && !requestAnswered && <div className="browser-login-panel-hint" role="region" aria-label="Browser sign-in instructions">
+            <strong>Sign in using Computer</strong>
+            {loginMetadata?.site && <p>{loginMetadata.site}</p>}
+            {loginMetadata?.reason && <p>{loginMetadata.reason}</p>}
+            <p>Take control, complete sign-in, then release control. Return to the request to confirm or cancel.</p>
+            <Button type="button" variant="outline" size="sm" onClick={() => {
+              panelReturnFocus.current = transcript.current?.querySelector<HTMLButtonElement>(".browser-login-request button[aria-pressed]") ?? null
+              dispatchPanel({ type: "hide" })
+            }}>Back to sign-in request</Button>
+          </div>}
+          <React.Suspense fallback={<div className="panel-empty" role="status">Opening computer…</div>}><ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} /></React.Suspense>
+        </div>
         if (tab.kind === "activity") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{panelLoading ? "Loading activity…" : session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}</>
         if (tab.kind === "plan") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!plan.length && <div className="panel-empty"><Check /><p>{panelLoading ? "Loading plan…" : "Moyai’s task plan will appear here."}</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>
         if (tab.kind === "side-chat") return tab.sessionId
@@ -934,10 +963,11 @@ function EffectReview({ effect, onDone }: { effect: Effect; onDone: () => Promis
   </form>
 }
 
-function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void> }) {
+function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone, onOpenComputer }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void>; onOpenComputer: () => void }) {
   const [values, setValues] = useState<Record<string, string[]>>({})
   const [custom, setCustom] = useState<Record<string, string>>({})
   const [approvals, setApprovals] = useState<Record<string, boolean>>({})
+  const [browserLogins, setBrowserLogins] = useState<Record<string, LoginOutcome>>({})
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   const form = useRef<HTMLFormElement>(null)
@@ -953,21 +983,23 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
   }, [busy, submitted])
   const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
-  const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
-  const isComplete = (nextValues: typeof values, nextCustom: typeof custom) => questions.every(({ call, questions }) => questions.every(question => {
+  const logins = pending.calls.filter(call => call.tool_name === "request_browser_login")
+  const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request", "request_browser_login"].includes(call.tool_name))
+  const isComplete = (nextValues: typeof values, nextCustom: typeof custom, nextLogins = browserLogins) => questions.every(({ call, questions }) => questions.every(question => {
     const key = `${call.tool_call_id}:${question.header}`
     return Boolean(nextCustom[key]?.trim() || nextValues[key]?.length)
   })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
-  const requiresContinue = pending.approvals.length > 0 || credentials.length > 0
+    && logins.every(call => Boolean(nextLogins[call.tool_call_id]))
+  const requiresContinue = pending.approvals.length > 0 || credentials.length > 0 || logins.length > 1 || (logins.length > 0 && questions.length > 0)
   async function refreshSubmitted() {
     setBusy(true); setError("")
     try { await onDone() }
     catch { setError("Your response was sent, but the conversation could not be refreshed.") }
     finally { setBusy(false) }
   }
-  async function submit(nextValues = values, nextCustom = custom) {
+  async function submit(nextValues = values, nextCustom = custom, nextLogins = browserLogins) {
     if (submitting.current || submitted || unknown) return
-    if (!isComplete(nextValues, nextCustom)) {
+    if (!isComplete(nextValues, nextCustom, nextLogins)) {
       setError(requiresContinue ? "Complete the remaining questions and approval requests before continuing." : "Answer the remaining questions before continuing.")
       return
     }
@@ -979,7 +1011,7 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
       const key = `${call.tool_call_id}:${question.header}`
       return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
     }) }]))
-    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }) }
+    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers, ...(logins.length ? { browser_logins: nextLogins } : {}) }) }
     catch (e) {
       submitting.current = false
       setError(String(e)); setBusy(false)
@@ -996,10 +1028,18 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
-    {(questions.length > 0 || pending.approvals.length > 0) && <form ref={form} aria-busy={busy} className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
+    {(questions.length > 0 || pending.approvals.length > 0 || logins.length > 0) && <form ref={form} aria-busy={busy} className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
     {questions.length
       ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{disabled && <span className="question-send-status" role="status">{submitted ? "Answer sent" : "Sending…"}</span>}</div>
-      : <h3>Your input is needed</h3>}
+      : logins.length === 0 && <h3>Your input is needed</h3>}
+    {logins.map(call => <BrowserLoginCard key={call.tool_call_id} metadata={pending.metadata?.[call.tool_call_id]}
+      outcome={browserLogins[call.tool_call_id]} disabled={disabled} onOpen={onOpenComputer}
+      onAnswer={outcome => {
+        if (submitting.current) return
+        const next = { ...browserLogins, [call.tool_call_id]: outcome }
+        setBrowserLogins(next)
+        if (!requiresContinue && isComplete(values, custom, next)) void submit(values, custom, next)
+      }} />)}
     {questions.map(({ call, questions }) => questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
       return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={disabled}
