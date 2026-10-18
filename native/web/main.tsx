@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useR
 import { createRoot } from "react-dom/client"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { ArrowUp, Download, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, Bug, Download, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -443,6 +443,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const sessionActions = useSessionActions()
+  const exportTrace = useCallback(() => {
+    setTraceBusy(true)
+    setTraceError("")
+    void downloadDebugTrace(id).catch(error => setTraceError(String(error))).finally(() => setTraceBusy(false))
+  }, [id])
   const titleCallback = useRef(onTitle)
   titleCallback.current = onTitle
   const sessionCallback = useRef(onSession)
@@ -818,7 +823,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     <WorkspaceResourceProvider id={id} visible={visible} expanded={workspaceOpen}>
     <WorkspaceOverlay open={workspaceOpen} onOpenChange={setWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
     <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
-      <header className="topbar">
+      <header className={`topbar${traceError ? " has-trace-error" : ""}`}>
         <div className="session-heading"><h1 ref={heading} tabIndex={-1} title={session.title} aria-label={session.title}>
           <SessionTitle session={session} onRenamed={title => {
             // Discard reads started before the rename so they cannot restore the old title.
@@ -833,6 +838,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
         </div>
         <div className="header-controls">
+          <Button type="button" variant="outline" size="sm" className="header-debug-trace" disabled={traceBusy} title="Download this session's debug trace (ATIF JSON)" aria-label="Debug trace" onClick={exportTrace}><Bug size={15} /><span className="header-debug-trace-label">{traceBusy ? "Preparing…" : "Debug trace"}</span></Button>
           {session.parent_session_id && <Button asChild variant="ghost" size="sm"><a href={`#${session.parent_session_id}`}>Parent chat</a></Button>}
           <Button variant={panelState.visible ? "secondary" : "ghost"} size="icon-sm" aria-label={panelState.visible ? "Hide side panel" : "Open side panel"} title={panelState.visible ? "Hide panel" : "Open panel"} onClick={() => dispatchPanel({ type: panelState.visible ? "hide" : "show" })}><PanelRight size={16} /></Button>
           <WorkspaceOverlayTrigger asChild><WorkspaceMenuKey open={workspaceOpen} sessionFailed={session.status === "failed"}
@@ -840,6 +846,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <Button className="header-new-session" type="button" variant="ghost" size="icon-sm" aria-label="New session" title="New session" onClick={sessionActions.newSession}><SquarePen size={16} /></Button>
           <SessionMenu session={session} header />
         </div>
+        {traceError && <p className="error header-debug-trace-error" role="alert">{traceError}</p>}
       </header>
       {chat}
 
@@ -853,13 +860,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         if (tab.kind === "computer") return <React.Suspense fallback={<div className="panel-empty" role="status">Opening computer…</div>}><ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} /></React.Suspense>
         if (tab.kind === "activity") return <>
           <div className="activity-toolbar">
-            <Button variant="outline" size="sm" disabled={traceBusy} onClick={() => {
-              setTraceBusy(true)
-              setTraceError("")
-              void downloadDebugTrace(id).catch(error => setTraceError(String(error))).finally(() => setTraceBusy(false))
-            }}><Download size={15} />{traceBusy ? "Preparing trace…" : "Get debug trace"}</Button>
+            <Button variant="outline" size="sm" disabled={traceBusy} onClick={exportTrace}><Download size={15} />{traceBusy ? "Preparing trace…" : "Get debug trace"}</Button>
           </div>
-          {traceError && <p className="error" role="alert">{traceError}</p>}
           {panelError && <p className="error" role="alert">{panelError}</p>}
           {!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{panelLoading ? "Loading activity…" : session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}
           {displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}

@@ -119,7 +119,7 @@ async function handle(req,res,next) {
     }
     if(url.pathname.endsWith('/plan'))return json(state.plan||[]);
     if(url.pathname===`/api/sessions/${sessionId}/debug-trace`&&req.method==='GET')
-      return json({schema_version:'ATIF-v1.8',session_id:sessionId,agent:{name:'moyai',version:'0.1.0'},steps:[],notes:'Fixture trace.',final_metrics:{total_steps:0}});
+      return state.traceError?json({detail:'Trace unavailable.'},503):json({schema_version:'ATIF-v1.8',session_id:sessionId,agent:{name:'moyai',version:'0.1.0'},steps:[],notes:'Fixture trace.',final_metrics:{total_steps:0}});
     if(url.pathname.endsWith('/activity'))return json([]);
     if(url.pathname.endsWith('/read'))return state.readError?json({detail:'Read marker unavailable.'},503):json({});
     if(url.pathname.endsWith('/stop')&&req.method==='POST') {
@@ -193,6 +193,27 @@ for(const width of [1440,768,320])test(`Activity downloads the session debug tra
   await waitFor(()=>state.requests.some(row=>row.path===`/api/sessions/${sessionId}/debug-trace`));
   const request=state.requests.find(row=>row.path===`/api/sessions/${sessionId}/debug-trace`);
   assert.equal(request.method,'GET');
+});
+for(const width of [1440,768,320])test(`Main header downloads the session debug trace at ${width}px`,async t=>{
+  reset({status:'idle'});
+  const page=await pageFor(t,'#'+sessionId,width);
+  const traceButton=page.getByRole('button',{name:'Debug trace',exact:true});
+  await traceButton.waitFor();
+  assert.equal(await traceButton.isVisible(),true);
+  const bounds=await traceButton.boundingBox();
+  assert(bounds&&bounds.x>=0&&bounds.x+bounds.width<=width);
+  await traceButton.click();
+  await waitFor(()=>state.requests.some(row=>row.path===`/api/sessions/${sessionId}/debug-trace`));
+  const request=state.requests.find(row=>row.path===`/api/sessions/${sessionId}/debug-trace`);
+  assert.equal(request.method,'GET');
+});
+test('Main header shows trace export errors without opening Activity',async t=>{
+  reset({status:'idle',traceError:true});
+  const page=await pageFor(t,'#'+sessionId,1440);
+  await page.getByRole('button',{name:'Debug trace',exact:true}).click();
+  const alert=page.getByRole('alert');
+  await alert.waitFor();
+  assert.match(await alert.textContent(),/Trace unavailable/);
 });
 async function palette(page) {await page.keyboard.press('Control+k');const dialog=page.getByRole('dialog',{name:'Commands and session search'});await dialog.waitFor();return dialog;}
 before(async()=>{
