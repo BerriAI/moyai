@@ -103,3 +103,18 @@ def test_invalid_judge_values_fail_closed(field, value):
     judgment = {**dict.fromkeys(judge.CRITERIA, 2), "unsupported_claim": False, "reason": "OK", field: value}
     with pytest.raises(ValueError):
         judge.parse_judgment(json.dumps(judgment))
+
+
+@pytest.mark.parametrize("existing", ["stub_requests.jsonl", "litellm_routes.jsonl"])
+def test_fixture_rejects_stale_evidence_without_overwriting_it(tmp_path, monkeypatch, existing):
+    spec = importlib.util.spec_from_file_location("deepseek_v2_stub", TASK / "environment/eval/stub.py")
+    assert spec and spec.loader
+    stub = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stub)
+    old_evidence = tmp_path / existing
+    old_evidence.write_text('"old evidence"\n')
+    monkeypatch.setattr(sys, "argv", ["stub.py", "--log-path", str(tmp_path / "stub_requests.jsonl"),
+                                     "--response-path", "unused", "--cert", "unused", "--key", "unused"])
+    with pytest.raises(RuntimeError, match="fresh trial environment"):
+        stub.main()
+    assert old_evidence.read_text() == '"old evidence"\n'

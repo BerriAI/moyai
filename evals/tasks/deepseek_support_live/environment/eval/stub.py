@@ -80,12 +80,15 @@ def main() -> None:
     parser.add_argument("--key", type=Path, required=True)
     args = parser.parse_args()
     args.log_path.parent.mkdir(parents=True, exist_ok=True)
+    receipts_path = args.log_path.with_name("litellm_routes.jsonl")
+    if args.log_path.exists() or receipts_path.exists():
+        raise RuntimeError("Use a fresh trial environment; previous integration evidence must not be reused")
     signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
     credentials = json.loads(Path("/eval/credentials.json").read_text())
     environment = {
         **os.environ,
         **credentials,
-        "LITELLM_ROUTE_RECEIPTS": str(args.log_path.with_name("litellm_routes.jsonl")),
+        "LITELLM_ROUTE_RECEIPTS": str(receipts_path),
     }
     with args.log_path.with_name("litellm_proxy.log").open("a") as proxy_log:
         proxy = subprocess.Popen(
