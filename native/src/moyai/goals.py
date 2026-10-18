@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .contracts import NewMessage, RunScope
 from .delegation_models import DelegatedSession
 from .goal_models import Goal, GoalReceipt, GoalTurn
-from .models import Effect, Message, Session, Turn, User, now
+from .models import Effect, Message, Session, Turn, TurnImage, User, now
 from .swarm_models import SwarmMember
 
 if TYPE_CHECKING:
@@ -148,6 +148,8 @@ class Goals:
             turn: Turn | None = None
             if action == "view":
                 return {"goal": self.view(goal), "help": HELP}
+            if session.archived and action in {"set", "resume"}:
+                raise HTTPException(409, "Unarchive the conversation before starting or resuming a goal.")
             if action == "set":
                 if goal is not None and goal.status not in {"complete", "cleared"}:
                     raise HTTPException(409, "A goal already exists. Use /goal edit, /goal resume, or /goal clear.")
@@ -289,6 +291,8 @@ class Goals:
         self, db: AsyncSession, actor: User, goal: Goal, key: str, prompt: str, *, generated: bool,
         attachments: list[str] | None = None,
     ) -> Turn:
+        if generated and attachments is None:
+            attachments = await self.initial_attachments(db, goal)
         turn = await self.database.submit(actor, goal.session_id, NewMessage(
             prompt=prompt, request_key=key, model=goal.model, connections=json.loads(goal.connections),
             attachments=attachments or [],
@@ -302,6 +306,25 @@ class Goals:
                 Message.turn_id == turn.id, Message.role == "user",
             ).values(role="system", author_id=None, identity=f"goal:{turn.id}"))
         return turn
+
+    async def initial_attachments(self, db: AsyncSession, goal: Goal) -> list[str]:
+        """Retain original inputs across edits and context resets without repeating them every turn."""
+        session = await db.get(Session, goal.session_id)
+        source = select(TurnImage.upload_id).where(
+            TurnImage.turn_id == goal.source_turn_id,
+        ).order_by(TurnImage.position)
+        if session and (
+            session.conversation and session.last_actor_id == goal.owner_id
+            and session.last_model == goal.model and session.last_grants == goal.grants_key
+        ):
+            delivered = select(TurnImage.upload_id).join(Turn, Turn.id == TurnImage.turn_id).join(
+                GoalTurn, GoalTurn.turn_id == Turn.id,
+            ).where(
+                GoalTurn.session_id == goal.session_id, Turn.created_at >= goal.created_at,
+                Turn.result_accepted.is_(True),
+            )
+            source = source.where(TurnImage.upload_id.not_in(delivered))
+        return list(await db.scalars(source))
 
     async def tick(self, session_id: str) -> None:
         # Merely inspecting an active goal must not wake this dispatcher again.
@@ -415,7 +438,10 @@ class Goals:
 def dispatchable():
     """Keep paused user inputs queued; already admitted turns use native authority."""
     return ~exists(select(GoalTurn.turn_id).where(GoalTurn.turn_id == Turn.id)) | exists(
-        select(GoalTurn.turn_id).join(Goal, Goal.session_id == GoalTurn.session_id).where(
+        select(GoalTurn.turn_id).join(Goal, Goal.session_id == GoalTurn.session_id).join(
+            Session, Session.id == Goal.session_id,
+        ).where(
             GoalTurn.turn_id == Turn.id, GoalTurn.generation == Goal.generation, Goal.status == "active",
+            Session.archived.is_(False), Session.deleted.is_(False),
         )
     )

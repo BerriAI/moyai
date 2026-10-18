@@ -617,6 +617,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     @app.patch("/api/sessions/{session_id}")
     async def edit_session(session_id: str, body: SessionEdit, user: User = Depends(actor)):
         async with runtime.database.sessions.begin() as db:
+            if body.archived is True:
+                # Keep the same source/user/session lock order as goal admission.
+                # Archive and goal suspension commit together before dispatch can claim work.
+                await runtime.database.goals.lock(db, user, session_id)
             await lock_sidebar(db, user.id)
             row = await runtime.database.allowed_session(db, session_id, user)
             if body.title is not None or body.archived is not None:
@@ -626,6 +630,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                     row.title = body.title
                 if body.archived is not None:
                     row.archived = body.archived
+                    if body.archived:
+                        from .goal_models import Goal
+                        goal = await db.get(Goal, session_id)
+                        if goal is not None and goal.status == "active":
+                            await runtime.database.goals.pause_continuation(
+                                db, goal, "The conversation was archived. Unarchive it before resuming the goal.",
+                            )
                 row.updated_at = now()
             if body.pinned is not None or body.folder is not None:
                 pref = await db.get(SessionPreference, (user.id, session_id))

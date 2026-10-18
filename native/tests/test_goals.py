@@ -19,7 +19,7 @@ from moyai.contracts import NewMessage, NewSession
 from moyai.goal_models import Goal, GoalTurn
 from moyai.goal_tools import GoalCapability
 from moyai.goals import is_goal_command, parse_command
-from moyai.models import Connection, Message, Turn, TurnImage, Upload, User
+from moyai.models import Connection, Message, Session, Turn, TurnImage, Upload, User
 from moyai.product_schema import GOAL_SCHEMA_VERSION, MESSAGE_SOURCE_SCHEMA_VERSION, application_metadata
 
 
@@ -497,6 +497,81 @@ async def test_goal_cannot_bind_someone_elses_upload(runtime, actor):
         assert await db.get(Goal, session.id) is None
         assert await db.scalar(select(func.count()).select_from(Turn)) == 0
         assert (await db.get(Upload, upload.id)).session_id is None
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_edit_retains_undelivered_initial_files_but_does_not_repeat_delivered_files(runtime, actor, started):
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    digest = await runtime.objects.put(b"original input")
+    async with runtime.database.sessions.begin() as db:
+        upload = Upload(owner_id=actor.id, name="input.txt", media_type="text/plain", size=14, digest=digest)
+        db.add(upload)
+    original = await command(runtime, actor, session.id, "/goal Read the input.", attachments=[upload.id])
+    if started:
+        await runtime.database.claim_next()
+        await runtime.database.prepare(original["id"])
+    await command(runtime, actor, session.id, "/goal edit Verify the original input with the new criterion.")
+    if started:
+        await runtime.database.stopped(original["id"])
+    await runtime.database.goals.tick(session.id)
+    replacement, _ = await finish(runtime)
+    async with runtime.database.sessions() as db:
+        assert await db.get(TurnImage, (replacement.id, upload.id)) is not None
+        assert (await db.get(Turn, original["id"])).status == "stopped"
+    await runtime.database.goals.tick(session.id)
+    next_turn = await runtime.database.claim_next()
+    async with runtime.database.sessions() as db:
+        assert await db.get(TurnImage, (next_turn.id, upload.id)) is None
+
+
+async def test_original_files_are_reintroduced_when_working_history_changes_actor(runtime, actor):
+    session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    digest = await runtime.objects.put(b"original input")
+    async with runtime.database.sessions.begin() as db:
+        upload = Upload(owner_id=actor.id, name="input.txt", media_type="text/plain", size=14, digest=digest)
+        db.add(upload)
+    await command(runtime, actor, session.id, "/goal Read the input.", attachments=[upload.id])
+    await finish(runtime)
+    peer = await mismatched_followup(runtime, actor, session.id, "actor")
+    assert (await finish(runtime))[0].id == peer.id
+    await command(runtime, actor, session.id, "/goal resume")
+    await runtime.database.goals.tick(session.id)
+    replacement = await runtime.database.claim_next()
+    async with runtime.database.sessions() as db:
+        assert await db.get(TurnImage, (replacement.id, upload.id)) is not None
+
+
+@pytest.mark.parametrize("generated", [False, True])
+async def test_archive_atomically_pauses_goal_and_blocks_dispatch_without_waiting_for_tick(runtime, actor, generated):
+    session, _ = await start(runtime, actor)
+    if generated:
+        await finish(runtime)
+        await runtime.database.goals.tick(session.id)
+    token, csrf = runtime.security.issue_session(actor.id, actor.auth_version)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)), base_url="http://test",
+        cookies={COOKIE: token}, headers={"x-moyai-csrf": csrf, "origin": "http://test"},
+    ) as client:
+        response = await client.patch(f"/api/sessions/{session.id}", json={"archived": True})
+        assert response.status_code == 200, response.text
+        assert (await goal(runtime, session.id))["status"] == "paused"
+        assert await runtime.database.claim_next() is None
+        with pytest.raises(HTTPException, match="Unarchive"):
+            await command(runtime, actor, session.id, "/goal resume")
+        response = await client.patch(f"/api/sessions/{session.id}", json={"archived": False})
+        assert response.status_code == 200
+        assert (await goal(runtime, session.id))["status"] == "paused"
+        await command(runtime, actor, session.id, "/goal resume")
+        await runtime.database.goals.tick(session.id)
+        assert await runtime.database.claim_next() is not None
+
+
+async def test_archived_goal_is_ineligible_even_before_legacy_state_is_reconciled(runtime, actor):
+    session, _ = await start(runtime, actor)
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(Session).where(Session.id == session.id).values(archived=True))
+    assert (await goal(runtime, session.id))["status"] == "active"
+    assert await runtime.database.claim_next() is None
 
 
 async def test_goal_tools_are_builtin_and_complete_via_native_agent(runtime, actor):
