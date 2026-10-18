@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, uuid5
@@ -22,6 +23,9 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from .product_slack import ProductSlack
+
+
+logger = logging.getLogger(__name__)
 
 
 class FileConnectors:
@@ -97,6 +101,13 @@ class ProductSlackFiles:
                     name, raw, inspected = await self.reader.read(file_id, provenance["team_id"])
                 except SlackFileError as error:
                     context.append({"file_id": file_id, "error": error.diagnostic()})
+                    continue
+                except Exception:
+                    logger.exception("Slack attachment read failed for file %s", file_id)
+                    context.append({
+                        "file_id": file_id,
+                        "error": {"phase": "slack_attachment_read", "code": "file_unavailable"},
+                    })
                     continue
                 try:
                     content = await asyncio.to_thread(raw.read)
