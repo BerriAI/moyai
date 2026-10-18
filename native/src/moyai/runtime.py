@@ -182,6 +182,17 @@ class Runtime:
             if self.product_secrets is not None:
                 from .product_credential_tools import capability as credential_capability
                 product_capabilities.append(credential_capability(self.product_secrets.execution))
+            if self.product is not None and self.product_connections is not None:
+                from .context import ContextSource, SessionContext
+                from .context.github import GitHubRepositories, make_repository_names
+                from .context.slack import SlackThread, make_slack_thread_reader
+
+                sources: list[ContextSource] = [
+                    GitHubRepositories(make_repository_names(self.product_connections)),
+                ]
+                if self.product_slack is not None:
+                    sources.append(SlackThread(make_slack_thread_reader(self.product_slack)))
+                product_capabilities.append(SessionContext(sources=sources))
             self.agent, self.durability = make_agent(
                 self.settings, self.database, self.stores, self.objects, models=self.models, workspace=workspace,
                 skills_directory=skills_directory, product_capabilities=product_capabilities, memory=memory,
@@ -247,4 +258,3 @@ def current() -> Runtime:
     if _runtime is None:
         raise RuntimeError("Moyai runtime is not initialized.")
     return _runtime
-

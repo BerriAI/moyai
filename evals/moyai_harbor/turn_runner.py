@@ -3,57 +3,61 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
-from types import SimpleNamespace
+from socket import socket
 from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
+import boto3
 import httpx
 import sqlalchemy
-from app.credentials import SaveSecret
-from app.db import Store
-from app.security import Security as ProductSecurity
-from product_database_fixtures import product_database_state
-from pydantic import SecretStr
-from pydantic_ai import ConversationTypeAdapter
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from sqlalchemy import text
-from temporalio.testing import WorkflowEnvironment
-from test_product_identity import google_cookie, request, settings_for
-
-from moyai.agent import inference_models, make_agent
+from botocore.config import Config
+from cryptography.fernet import Fernet
+from moto.server import ThreadedMotoServer
 from moyai.models import SlackThread, Turn
-from moyai.product_connections import ProductConnections
-from moyai.product_continuation import ProductContinuationService
-from moyai.product_continuation_workspace import ProductWorkspaceCompatibility
-from moyai.product_credential_tools import capability as credential_capability
-from moyai.product_history import ProductHistoryAdapter
-from moyai.product_inference import ProductInferenceService
+from moyai.product_config import (
+    NATIVE_KEY_FORMAT,
+    NATIVE_OBJECT_FORMAT,
+    load_product_config,
+)
+from moyai.product_continuation_schema import (
+    install_source_continuation_fence,
+    verify_source_continuation_fence,
+)
 from moyai.product_schema import migrate_product_schema
-from moyai.product_secrets import ProductSecrets
-from moyai.product_slack import ProductSlack, ProductSlackAuthority
-from moyai.runtime import configure
+from moyai.runtime import Runtime, configure
 from moyai.settings import Settings
-from moyai.skill_invocations import SkillInvocations
-from moyai.storage import ObjectStore, encrypted_converter
+from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
+from pydantic import SecretStr
+from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
+from pydantic_ai.capabilities.abstract import leaf_capabilities
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+from temporalio.testing import WorkflowEnvironment
+
+from app.credentials import SaveSecret
+
+from .workspace import HarborWorkspace
 
 EVALS = Path(__file__).resolve().parents[1]
-MODEL_COMPLETION = {
-    "id": "stub-1",
-    "object": "chat.completion",
-    "model": "deepseek-flash",
-    "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}],
-    "usage": {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13},
-}
-
-
-def json_value(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+database_fixtures = import_module("product_database_fixtures")
+product_database_state = database_fixtures.product_database_state
+CREDENTIAL_TOOLS = ("credentials_list", "credentials_request", "credentials_run")
+BOT_USER = "UBOT00001"
+SLACK_USER = "UTEST0001"
+TEAM = "TTEST0001"
+CHANNEL = "CTEST0001"
+OBJECT_STORAGE_BUCKET = "synthetic-bucket"
+OBJECT_STORAGE_REGION = "us-east-1"
+OBJECT_STORAGE_ACCESS_KEY_ID = "synthetic-key-id"
+OBJECT_STORAGE_SECRET_ACCESS_KEY = "synthetic-secret"
 
 
 def conversation_trace(conversation_json: str | None, security: Any) -> list[dict[str, Any]]:
@@ -65,140 +69,110 @@ def conversation_trace(conversation_json: str | None, security: Any) -> list[dic
     for message in conversation.messages:
         for part in message.parts:
             if isinstance(part, ToolCallPart):
-                identity = part.tool_call_id
-                calls[identity] = {
-                    "name": part.tool_name,
-                    "args": part.args_as_dict(),
-                    "result": "",
+                calls[part.tool_call_id] = {
+                    "name": part.tool_name, "args": part.args_as_dict(), "result": "",
                 }
-                order.append(identity)
+                order.append(part.tool_call_id)
             elif isinstance(part, ToolReturnPart):
                 record = calls.get(part.tool_call_id)
                 if record is not None:
-                    record["result"] = json_value(part.content)[:4000]
+                    record["result"] = json.dumps(part.content, ensure_ascii=False, default=str)[:4000]
     return [calls[identity] for identity in order if identity in calls]
 
 
-def slack_transport(history: list[dict[str, Any]]) -> httpx.MockTransport:
-    def handle(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/conversations.replies"):
-            return httpx.Response(200, json={"ok": True, "messages": history})
-        if path.endswith(("/chat.postMessage", "/chat.update")):
-            return httpx.Response(200, json={
-                "ok": True, "channel": "CTEST0001", "ts": "1792100000.001",
-            })
-        return httpx.Response(200, json={"ok": True})
-    return httpx.MockTransport(handle)
+def product_environment(
+    data_dir: Path, database_url: str, native_schema: str, agent_model: str, *,
+    object_storage_endpoint: str,
+) -> dict[str, str]:
+    gateway_url = os.getenv("LITELLM_API_BASE") or os.environ["LITELLM_GATEWAY_BASE_URL"]
+    gateway_url = gateway_url.rstrip("/")
+    if not gateway_url.endswith("/v1"):
+        gateway_url += "/v1"
+    gateway_key = os.getenv("LITELLM_API_KEY") or os.environ["LITELLM_GATEWAY_ADMIN_KEY"]
+    return {
+        "MOYAI_CORE": "pydantic",
+        "MOYAI_PRODUCT_MODE": "existing",
+        "MOYAI_RUNTIME_ROLE": "standalone",
+        "MOYAI_PRODUCT_LOCAL_REHEARSAL": "true",
+        "MOYAI_DATABASE_URL": database_url,
+        "MOYAI_DATABASE_SCHEMA": "moyai",
+        "MOYAI_NATIVE_SCHEMA": native_schema,
+        "MOYAI_SCHEMA_MODE": "verify",
+        "MOYAI_NATIVE_SCHEMA_MODE": "verify",
+        "MOYAI_DATABASE_INITIALIZE": "false",
+        "MOYAI_NATIVE_ENCRYPTION_KEY": "synthetic-native-authority-key-no-production",
+        "MOYAI_NATIVE_KEY_FORMAT": NATIVE_KEY_FORMAT,
+        "MOYAI_NATIVE_OBJECT_FORMAT": NATIVE_OBJECT_FORMAT,
+        "MOYAI_NATIVE_OBJECT_PREFIX": "pydantic-v1",
+        "MOYAI_NATIVE_TASK_QUEUE": "moyai-evals-" + uuid4().hex[:12],
+        "MOYAI_SEPARATE_BROKER": "false",
+        "MOYAI_COORDINATOR_HANDOFF": "false",
+        "SESSION_SECRET": "synthetic-product-session-secret-only",
+        "ENCRYPTION_KEY": Fernet.generate_key().decode(),
+        "GOOGLE_CLIENT_ID": "synthetic-client",
+        "GOOGLE_CLIENT_SECRET": "synthetic-client-secret",
+        "GOOGLE_ALLOWED_DOMAINS": "example.test",
+        "GOOGLE_ADMIN_EMAILS": "admin@example.test",
+        "TEMPORAL_ENABLED": "true",
+        "TEMPORAL_ADDRESS": "127.0.0.1:7233",
+        "TEMPORAL_NAMESPACE": "default",
+        "TEMPORAL_TASK_QUEUE": "existing-sessions-v1",
+        "MOYAI_PUBLIC_URL": "http://127.0.0.1:8796",
+        "LITELLM_API_BASE": gateway_url,
+        "LITELLM_API_KEY": gateway_key,
+        "AGENT_MODEL": agent_model,
+        "DATA_DIR": str(data_dir),
+        "OBJECT_STORAGE_PREFIX": "moyai",
+        "OBJECT_STORAGE_BUCKET": OBJECT_STORAGE_BUCKET,
+        "OBJECT_STORAGE_ENDPOINT": object_storage_endpoint,
+        "OBJECT_STORAGE_REGION": OBJECT_STORAGE_REGION,
+        "OBJECT_STORAGE_ACCESS_KEY_ID": OBJECT_STORAGE_ACCESS_KEY_ID,
+        "OBJECT_STORAGE_SECRET_ACCESS_KEY": OBJECT_STORAGE_SECRET_ACCESS_KEY,
+        "SLACK_BOT_ENABLED": "true",
+        "SLACK_THREAD_CHAT_ENABLED": "true",
+        "SLACK_SESSION_USERS": SLACK_USER,
+        "SLACK_SIGNING_SECRET": "synthetic-eval-signing-secret",
+    }
 
 
-def seed_credentials(
-    store: Store,
-    credential_store: Any,
-    credential_values: dict[str, str],
-) -> dict[str, Any]:
+@contextmanager
+def moto_object_storage() -> Iterator[str]:
+    with socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = int(reservation.getsockname()[1])
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=port)
+    server.start()
+    try:
+        host, port = server.get_host_and_port()
+        endpoint = f"http://{host}:{port}"
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name=OBJECT_STORAGE_REGION,
+            aws_access_key_id=OBJECT_STORAGE_ACCESS_KEY_ID,
+            aws_secret_access_key=OBJECT_STORAGE_SECRET_ACCESS_KEY,
+            config=Config(s3={"addressing_style": "path"}),
+        )
+        client.create_bucket(Bucket=OBJECT_STORAGE_BUCKET)
+        yield endpoint
+    finally:
+        server.stop()
+
+
+def seed_credentials(runtime: Runtime, values: dict[str, str]) -> None:
+    store = runtime.product_store
+    secrets = runtime.product_secrets
+    assert store is not None and secrets is not None
     body = SaveSecret(
-        provider="generic",
-        name="deepseek",
-        format="env",
-        label="DeepSeek test access",
-        scope="organization",
-        lifetime="persistent",
-        value=SecretStr(json.dumps(credential_values)),
+        provider="generic", name="deepseek", format="env", label="DeepSeek test access",
+        scope="organization", lifetime="persistent", value=SecretStr(json.dumps(values)),
         client_id="moyai-eval-deepseek",
     )
     with store.connect() as connection:
         connection.begin_write()
-        credential_store.insert_secret(
-            connection, body, "slack:TTEST0001:UTEST0001", admin=True,
+        secrets.credentials.insert_secret(
+            connection, body, f"slack:{TEAM}:{SLACK_USER}", admin=True,
         )
-    return store.rows(
-        "SELECT * FROM provider_secrets WHERE client_id=?", ("moyai-eval-deepseek",),
-    )[0]
-
-
-async def seed_slack_source(
-    product: Any,
-    bot_credentials: dict[str, Any],
-) -> None:
-    schema = f'"{product.adapter.schema}"'
-
-    def table(name: str) -> str:
-        return f'{schema}."{name}"'
-
-    async with product.source.begin() as connection:
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('connections')}(
-            provider TEXT PRIMARY KEY,encrypted TEXT NOT NULL,label TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '')"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('provider_secrets')}(
-            id TEXT PRIMARY KEY,provider TEXT NOT NULL,label TEXT NOT NULL,scope TEXT NOT NULL,
-            owner_id TEXT NOT NULL,root_id TEXT NOT NULL DEFAULT '',encrypted TEXT NOT NULL,
-            created_at TEXT NOT NULL,revoked_at TEXT NOT NULL DEFAULT '',client_id TEXT NOT NULL,
-            name TEXT NOT NULL DEFAULT '',format TEXT NOT NULL DEFAULT 'env',env_var TEXT NOT NULL DEFAULT '',
-            lifetime TEXT NOT NULL DEFAULT 'persistent',expires_at TEXT NOT NULL DEFAULT '',
-            invalid_reason TEXT NOT NULL DEFAULT '',revision INTEGER NOT NULL DEFAULT 1,
-            UNIQUE(owner_id,client_id))"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('credential_audit')}(
-            id BIGSERIAL PRIMARY KEY,actor_id TEXT NOT NULL,secret_id TEXT NOT NULL,
-            action TEXT NOT NULL,run_id TEXT NOT NULL,created_at TEXT NOT NULL)"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('connection_policies')}(
-            provider TEXT PRIMARY KEY,enabled BIGINT NOT NULL DEFAULT 1,
-            read_only BIGINT NOT NULL DEFAULT 0,checked_at TEXT NOT NULL DEFAULT '',
-            check_status TEXT NOT NULL DEFAULT 'unknown')"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('connection_audit')}(
-            id BIGSERIAL PRIMARY KEY,provider TEXT NOT NULL)"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('personal_slack_grants')}(
-            owner_id TEXT PRIMARY KEY)"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('user_roles')}(
-            email TEXT PRIMARY KEY,role TEXT NOT NULL CHECK(role IN ('admin','member')),
-            revision INTEGER NOT NULL,updated_by TEXT NOT NULL,updated_at TEXT NOT NULL)"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('user_role_audit')}(
-            id BIGSERIAL PRIMARY KEY,email TEXT NOT NULL,previous_role TEXT NOT NULL,
-            role TEXT NOT NULL,actor TEXT NOT NULL,created_at TEXT NOT NULL)"""))
-        await connection.execute(text(f"""CREATE TABLE IF NOT EXISTS {table('access_identities')}(
-            issuer TEXT NOT NULL,subject TEXT NOT NULL,email TEXT NOT NULL,
-            user_id TEXT NOT NULL REFERENCES {table('users')}(id),created_at TEXT NOT NULL,
-            PRIMARY KEY(issuer,subject),UNIQUE(issuer,user_id),UNIQUE(issuer,email))"""))
-        await connection.execute(text(
-            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_eligible BOOLEAN NOT NULL DEFAULT FALSE"
-        ))
-        await connection.execute(text(
-            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_checked_at TEXT NOT NULL DEFAULT ''"
-        ))
-        await connection.execute(text(
-            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_conflict BOOLEAN NOT NULL DEFAULT FALSE"
-        ))
-        await connection.execute(text(
-            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS profile_next_check BIGINT NOT NULL DEFAULT 0"
-        ))
-        await connection.execute(text(
-            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS link_status TEXT NOT NULL DEFAULT ''"
-        ))
-        await connection.execute(text(
-            f"ALTER TABLE {table('users')} ADD COLUMN IF NOT EXISTS link_method TEXT NOT NULL DEFAULT ''"
-        ))
-        await connection.execute(text(f"""INSERT INTO {table('users')}(
-            id,kind,email,name,linked_user_id,created_at,updated_at
-        ) VALUES ('slack:TTEST0001:UTEST0001','slack','','Slack UTEST0001',NULL,'2026-01-01','2026-01-01')
-        ON CONFLICT (id) DO NOTHING"""))
-        await connection.execute(text(f"""INSERT INTO {table('users')}(
-            id,kind,email,name,linked_user_id,created_at,updated_at
-        ) VALUES (:id,'google','admin@example.test','Product admin',NULL,'2026-01-01','2026-01-01')
-        ON CONFLICT (id) DO NOTHING"""), {"id": product.user_id})
-        await connection.execute(text(f"""INSERT INTO {table('user_roles')}(
-            email,role,revision,updated_by,updated_at
-        ) VALUES ('admin@example.test','admin',1,'eval','2026-01-01')
-        ON CONFLICT (email) DO NOTHING"""))
-        await connection.execute(text(f"""INSERT INTO {table('connection_policies')}(provider,enabled,read_only)
-            VALUES ('slack',1,0) ON CONFLICT (provider) DO UPDATE SET enabled=1"""))
-        encrypted = product.adapter.legacy_security.encrypt(json.dumps(bot_credentials))
-        await connection.execute(text(f"""INSERT INTO {table('connections')}(
-            provider,encrypted,label,updated_at
-        ) VALUES ('slack',:encrypted,'Eval Slack','2026-01-01')
-        ON CONFLICT (provider) DO UPDATE SET encrypted=EXCLUDED.encrypted,
-            label=EXCLUDED.label,updated_at=EXCLUDED.updated_at"""), {
-            "encrypted": encrypted,
-        })
 
 
 async def run_moyai_turn(
@@ -206,169 +180,145 @@ async def run_moyai_turn(
     *,
     thread: list[dict[str, Any]],
     credentials: dict[str, str],
-    workspace: Any,
+    workspace: HarborWorkspace,
     agent_model: str,
     trial: int,
 ) -> dict[str, Any]:
     root_dir = EVALS / "jobs" / "runner" / f"{case['id']}-{trial}-{uuid4().hex[:8]}"
     root_dir.mkdir(parents=True, exist_ok=True)
-    async with product_database_state(root_dir) as product:
-        source_schema = "moyai_eval_source"
-        async with product.source.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{source_schema}"'))
-        product.adapter.schema = source_schema
+    async with product_database_state(root_dir, initialize_legacy=True) as product:
         await migrate_product_schema(
-            product.source, schema=product.schema, source_schema=source_schema,
+            product.source, schema=product.schema, source_schema="moyai",
         )
-        await product.database.start()
-        source_settings = settings_for(
-            root_dir,
-            data_dir=root_dir / "legacy-store",
-            moyai_database_url=product.settings.database_url,
-            moyai_database_schema=source_schema,
-            slack_bot_enabled=True,
-            slack_thread_chat_enabled=True,
-            slack_session_users="UTEST0001",
-            slack_signing_secret="synthetic-eval-signing-secret",
-            public_url="https://moyai.invalid",
+        with moto_object_storage() as object_storage_endpoint:
+            return await run_runtime_turn(
+                case,
+                trial=trial,
+                thread=thread,
+                credentials=credentials,
+                workspace=workspace,
+                agent_model=agent_model,
+                root_dir=root_dir,
+                product=product,
+                object_storage_endpoint=object_storage_endpoint,
+            )
+
+
+async def run_runtime_turn(
+    case: dict[str, Any],
+    *,
+    trial: int,
+    thread: list[dict[str, Any]],
+    credentials: dict[str, str],
+    workspace: HarborWorkspace,
+    agent_model: str,
+    root_dir: Path,
+    product: Any,
+    object_storage_endpoint: str,
+) -> dict[str, Any]:
+    environment = product_environment(
+        root_dir / "legacy-store", product.settings.database_url, product.schema, agent_model,
+        object_storage_endpoint=object_storage_endpoint,
+    )
+    product_config = load_product_config(environment)
+    if product_config is None:
+        raise RuntimeError("Could not load the eval's existing-product configuration.")
+    settings = Settings.model_validate(product_config.native_overrides())
+    provisioner = NativeStores(settings.model_copy(update={"product_mode": "standalone"}))
+    try:
+        await provisioner.start(provision=True)
+    finally:
+        await provisioner.close()
+    async with product.source.begin() as connection:
+        await install_source_continuation_fence(
+            connection, source_schema="moyai", native_schema=product.schema,
         )
-        legacy_security = ProductSecurity(source_settings)
-        store = Store(
-            source_settings.data_dir,
-            source_settings.agent_model,
-            database_url=product.settings.database_url,
-            database_schema=source_schema,
-            database_initialize=True,
-            schema_mode="auto",
-            database_pool_size=source_settings.moyai_database_pool_size,
-            application_instance=source_settings.moyai_runtime_role != "standalone",
-            runtime_role=source_settings.moyai_runtime_role,
-            runtime_settings=source_settings,
-        )
-        product_services = SimpleNamespace(
-            identity=product.adapter,
-            security=legacy_security,
-            settings=source_settings,
-            store_proxy=store,
-        )
-        product.adapter.settings = source_settings
-        product.adapter.legacy_security = legacy_security
-        product.adapter.slack_authority = ProductSlackAuthority(product.adapter)
-        bot_credentials = {
-            "access_token": "synthetic-slack-user-token",
-            "bot": {
-                "access_token": "synthetic-slack-bot-token",
-                "bot_user_id": "UBOT00001",
-                "team": {"id": "TTEST0001"},
-                "scope": "chat:write,files:read",
-            },
-        }
-        await seed_slack_source(product, bot_credentials)
-        cookie, _ = google_cookie(product.adapter, sub=product.subject)
-        principal = await product.adapter.authenticate(request(cookie))
-        async with product.database.sessions.begin() as db:
-            product.actor = await product.adapter.project_native_user(db, principal)
-        connections = ProductConnections(product_services, product.database)
-        connections.connectors.save("slack", bot_credentials, "Eval Slack")
-        settings: Settings = product.settings
-        settings.default_model = agent_model
-        settings.model_catalog = agent_model
-        gateway_url = os.getenv("LITELLM_API_BASE") or os.environ["LITELLM_GATEWAY_BASE_URL"]
-        settings.gateway_url = gateway_url.rstrip("/")
-        if not settings.gateway_url.endswith("/v1"):
-            settings.gateway_url += "/v1"
-        gateway_key = os.getenv("LITELLM_API_KEY") or os.environ["LITELLM_GATEWAY_ADMIN_KEY"]
-        settings.gateway_key = SecretStr(gateway_key)
-        settings.data_dir = root_dir / "native-runtime"
-        settings.temporal_queue = "moyai-evals-" + uuid4().hex[:12]
-        settings.worker_shutdown_seconds = 0
-        stores = NativeStores(settings)
-        await stores.start(provision=True)
-        objects = ObjectStore(settings, product.database.security)
-        runtime = SimpleNamespace(
-            settings=settings,
-            database=product.database,
-            security=product.database.security,
-            objects=objects,
-            stores=stores,
-            product=product_services,
-            product_identity=product.adapter,
-            product_history=ProductHistoryAdapter(
-                product.adapter, product.source, schema=source_schema,
-            ),
-            product_connections=connections,
-            product_automations=None,
-            product_memory_review=None,
-            product_drain=None,
-            product_automation_events=None,
-            product_secrets=None,
-            client=None,
-        )
-        runtime.skill_invocations = SkillInvocations(runtime)
-        runtime.product_workspace = ProductWorkspaceCompatibility(runtime)
-        runtime.product_continuations = ProductContinuationService(
-            runtime, workspace=runtime.product_workspace,
-        )
-        secrets_service = ProductSecrets(runtime)
-        runtime.product_secrets = secrets_service
-        runtime.database.product_connections = connections
-        runtime.database.product_identity = product.adapter
-        runtime.database.security = runtime.security
-        product_settings = product.adapter.settings.model_copy(update={
-            "agent_model": agent_model,
-            "litellm_api_base": settings.gateway_url,
-            "litellm_api_key": settings.gateway_key.get_secret_value(),
-        })
-        product_inference = ProductInferenceService(product.database, product_settings, store)
-        runtime.product_inference = product_inference
-        runtime.database.product_inference = product_inference
-        seed_credentials(
-            store,
-            secrets_service.credentials,
-            credentials,
-        )
-        models = inference_models(settings)
-        runtime.models = models
-        service = ProductSlack(runtime)
-        runtime.product_slack = service
-        configure(runtime)
-        converter = encrypted_converter(runtime.security, objects)
-        try:
-            await product_inference.start(recovery=False)
-            async with await WorkflowEnvironment.start_local(
-                plugins=[PydanticAIPlugin()],
-                data_converter=converter,
-            ) as temporal:
-                runtime.client = temporal.client
-                skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
-                if skills.return_code != 0:
-                    raise RuntimeError("Could not prepare the workspace skill directory.")
-                credentials = credential_capability(secrets_service.execution)
-                runtime.agent, runtime.durability = make_agent(
-                    settings,
-                    runtime.database,
-                    stores,
-                    objects,
-                    models=models,
+    await verify_source_continuation_fence(
+        product.source, source_schema="moyai", native_schema=product.schema,
+    )
+    runtime = Runtime(settings, product_config=product_config)
+    try:
+        async with await WorkflowEnvironment.start_local(
+            plugins=[PydanticAIPlugin()],
+            data_converter=encrypted_converter(runtime.security, runtime.objects),
+        ) as temporal:
+            runtime.client = temporal.client
+            skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
+            if skills.return_code != 0:
+                raise RuntimeError("Could not prepare the workspace skill directory.")
+            await runtime.start(workspace=workspace, skills_directory="skills")
+            assert runtime.product_connections is not None
+            assert runtime.product_slack is not None
+            configure(runtime)
+            bot_credentials = {
+                "access_token": "synthetic-slack-user-token",
+                "bot": {
+                    "access_token": "synthetic-slack-bot-token",
+                    "bot_user_id": BOT_USER,
+                    "team": {"id": TEAM},
+                    "scope": "channels:history,groups:history,chat:write",
+                },
+            }
+            runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
+            seed_credentials(runtime, credentials)
+            async with make_worker(runtime):
+                result = await execute_turn(
+                    case, trial=trial, thread=thread, runtime=runtime, temporal=temporal,
                     workspace=workspace,
-                    skills_directory="skills",
-                    product_capabilities=[credentials],
                 )
-                async with make_worker(runtime):
-                    result = await execute_turn(
-                        case,
-                        trial=trial,
-                        thread=thread,
-                        service=service,
-                        runtime=runtime,
-                        temporal=temporal,
-                    )
-                    result["offered_tool_names"] = sorted(credentials.get_toolset().tools)
-                    return result
-        finally:
-            await product_inference.close()
-            await stores.close()
-            store.close()
+                result["credential_tool_calls"] = {
+                    name: any(call["name"] == name for call in result["tool_trace"])
+                    for name in CREDENTIAL_TOOLS
+                }
+                result.pop("turn_id")
+                return result
+    finally:
+        await runtime.close()
+
+
+async def offered_tool_names(
+    runtime: Runtime, turn_id: str, workspace: HarborWorkspace,
+) -> list[str]:
+    prepared = await runtime.database.prepare(turn_id)
+    context = RunContext(
+        deps=prepared.scope,
+        model=runtime.models[prepared.scope.model],
+        usage=RunUsage(),
+        agent=runtime.agent,
+    )
+    context.capabilities = {
+        str(index): capability
+        for index, capability in enumerate(leaf_capabilities(runtime.agent.root_capability))
+    }
+    workspace_backend = workspace.get_workspace(context, ref=workspace.reference)
+    if workspace_backend is None:
+        raise RuntimeError("The Harbor workspace is unavailable to the Runtime agent.")
+    context.workspace = workspace_backend
+    names: set[str] = set()
+    for toolset in runtime.agent.toolsets:
+        names.update((await toolset.get_tools(context)).keys())
+    return sorted(names)
+
+
+def slack_transport(
+    history: list[dict[str, Any]], reads: list[dict[str, Any]],
+) -> httpx.MockTransport:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/conversations.replies"):
+            reads.append({
+                "method": request.method,
+                "url": str(request.url),
+                "params": dict(request.url.params),
+            })
+            return httpx.Response(200, json={"ok": True, "messages": history, "has_more": False})
+        if path.endswith(("/chat.postMessage", "/chat.update")):
+            return httpx.Response(200, json={
+                "ok": True, "channel": CHANNEL, "ts": "1792100000.001",
+            })
+        return httpx.Response(200, json={"ok": True})
+
+    return httpx.MockTransport(handle)
 
 
 async def execute_turn(
@@ -376,21 +326,27 @@ async def execute_turn(
     *,
     trial: int,
     thread: list[dict[str, Any]],
-    service: ProductSlack,
-    runtime: Any,
+    runtime: Runtime,
     temporal: Any,
+    workspace: HarborWorkspace,
 ) -> dict[str, Any]:
+    service = runtime.product_slack
+    assert service is not None and runtime.product_connections is not None
     stamp = 1_700_000_000 + trial * 10
     current = f"{stamp + len(thread) + 1:.6f}"
     thread_ts = current
     history = [{
         "ts": f"{stamp + index * 0.1:.6f}",
-        "user": "UBOT00001" if message["role"] == "you" else "UTEST0001",
+        "user": BOT_USER if message["role"] == "you" else SLACK_USER,
         "username": message["display_name"],
         "text": message["text"],
-        **({"files": [{"id": "FROOT01"}]} if message["files"] else {}),
+        **({"files": [{"id": "FROOT01"}]} if message.get("files") else {}),
     } for index, message in enumerate(case["thread"])]
-    transport = slack_transport(history)
+    history.append({
+        "ts": current, "thread_ts": thread_ts, "user": SLACK_USER, "text": case["prompt"],
+    })
+    slack_reads: list[dict[str, Any]] = []
+    transport = slack_transport(history, slack_reads)
     original_client = httpx.AsyncClient
 
     def routed_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
@@ -398,25 +354,18 @@ async def execute_turn(
         return original_client(*args, **kwargs)
 
     payload = {
-        "type": "event_callback",
-        "team_id": "TTEST0001",
-        "event_id": f"eval-{case['id']}-{trial}",
+        "type": "event_callback", "team_id": TEAM, "event_id": f"eval-{case['id']}-{trial}",
         "event": {
-            "type": "app_mention",
-            "user": "UTEST0001",
-            "channel": "CTEST0001",
-            "channel_type": "channel",
-            "ts": current,
-            "thread_ts": thread_ts,
-            "text": case["prompt"],
+            "type": "app_mention", "user": SLACK_USER, "channel": CHANNEL,
+            "channel_type": "channel", "ts": current, "thread_ts": thread_ts, "text": case["prompt"],
         },
     }
     with patch("httpx.AsyncClient", routed_client):
         await service.receive_payload(payload)
     async with runtime.database.sessions() as db:
         slack_thread = await db.scalar(sqlalchemy.select(SlackThread).where(
-            SlackThread.team_id == "TTEST0001",
-            SlackThread.channel_id == "CTEST0001",
+            SlackThread.team_id == TEAM,
+            SlackThread.channel_id == CHANNEL,
             SlackThread.thread_ts == thread_ts,
         ))
         if slack_thread is None:
@@ -427,11 +376,9 @@ async def execute_turn(
     if turn is None:
         raise RuntimeError(f"ProductSlack did not submit a turn for {case['id']}.")
     await runtime.database.claim_next()
+    available_tools = await offered_tool_names(runtime, turn.id, workspace)
     handle = await temporal.client.start_workflow(
-        TurnWorkflow.run,
-        turn.id,
-        id=turn.workflow_id,
-        task_queue=runtime.settings.temporal_queue,
+        TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
     )
     await asyncio.wait_for(handle.result(), timeout=300)
     posted: list[dict[str, Any]] = []
@@ -439,16 +386,10 @@ async def execute_turn(
     def post_stub(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         posted.append(body)
-        return httpx.Response(200, json={
-            "ok": True,
-            "channel": body["channel"],
-            "ts": "1792100000.001",
-        })
+        return httpx.Response(200, json={"ok": True, "channel": body["channel"], "ts": "1792100000.001"})
 
     async with original_client(
-        base_url="https://slack.com/api/",
-        transport=httpx.MockTransport(post_stub),
-        timeout=20,
+        base_url="https://slack.com/api/", transport=httpx.MockTransport(post_stub), timeout=20,
     ) as delivery:
         for _ in range(4):
             await service.pump(delivery)
@@ -468,9 +409,16 @@ async def execute_turn(
     return {
         "case": case["id"],
         "trial": trial,
+        "turn_id": turn.id,
+        "agent_model": runtime.settings.default_model,
+        "offered_tool_names": available_tools,
         "slack_event_input": payload,
         "slack_thread_input": thread,
+        "slack_thread_reads": slack_reads,
         "prompt_received": prompt,
+        "thread_messages_in_prompt": [
+            message["text"] for message in case["thread"] if message["text"] in prompt
+        ],
         "attached_image_names": [],
         "posted_reply": reply,
         "tool_trace": conversation_trace(completed.conversation, runtime.security),

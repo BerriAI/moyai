@@ -1,10 +1,11 @@
-import React, { createContext, useContext, useRef, useState } from "react"
+import React, { createContext, useContext, useEffect, useRef, useState } from "react"
 import { Archive, Check, ChevronRight, Copy, Download, Folder, FolderPlus, History, Mail, Monitor, MoreHorizontal, PanelRightOpen, Pencil, Pin, RotateCcw, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api } from "./api"
+import { preferencePatch, type SessionPreferenceUpdates } from "./session-preferences"
 import { downloadDebugTrace } from "./debug-trace"
 
 export type SidebarSession = {
@@ -23,6 +24,7 @@ type Action = "rename" | "move" | "archive" | "delete" | "restore" | "folder-cre
 type Editor = { action: Action; session?: SidebarSession; folder?: SessionFolder }
 type Actions = {
   userId: string; busy: boolean
+  preferenceSession: (row: SidebarSession) => SidebarSession
   openEditor: (editor: Editor) => void
   edit: (row: SidebarSession, body: object, message: string) => Promise<boolean>
   copy: (row: SidebarSession) => void
@@ -55,10 +57,11 @@ export function ActionItem({ children, onClick, disabled }: { children: React.Re
   return <Button type="button" role="menuitem" variant="ghost" disabled={disabled} onClick={onClick}>{children}</Button>
 }
 
-export function SessionMenu({ session: row, header = false, onOpenSideChat }: {
+export function SessionMenu({ session, header = false, onOpenSideChat }: {
   session: SidebarSession; header?: boolean; onOpenSideChat?: () => void
 }) {
   const actions = useSessionActions()
+  const row = actions.preferenceSession(session)
   const [traceBusy, setTraceBusy] = useState(false)
   const [traceError, setTraceError] = useState("")
   const owner = row.owner_id === actions.userId
@@ -99,8 +102,9 @@ export function SessionMenu({ session: row, header = false, onOpenSideChat }: {
   }}</ActionMenu>
 }
 
-export function SessionActionsProvider({ userId, folders, refresh, onOpenComputer, onNewSession, onDeleted, children }: {
+export function SessionActionsProvider({ userId, folders, refresh, preferences, preferenceSession, onOpenComputer, onNewSession, onDeleted, children }: {
   userId: string; folders: SessionFolder[]; refresh: () => Promise<void>
+  preferences: SessionPreferenceUpdates; preferenceSession: (row: SidebarSession) => SidebarSession
   onOpenComputer: (id: string) => void; onNewSession: () => void; onDeleted: (id: string) => void
   children: React.ReactNode
 }) {
@@ -110,7 +114,12 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
   const busyRef = useRef(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
-  const openEditor = (value: Editor) => { if (busyRef.current || (value.session && sessionIsReadOnly(value.session))) return; setError(""); setName(value.action === "folder-create" ? "" : value.folder?.name ?? value.session?.title ?? ""); setEditor(value) }
+  const active = useRef(true), preferenceSequence = useRef(0)
+  useEffect(() => {
+    active.current = true
+    return () => { active.current = false }
+  }, [])
+  const openEditor = (value: Editor) => { if (busyRef.current || (value.session && sessionIsReadOnly(value.session))) return; setError(""); setName(value.action === "folder-create" ? "" : value.folder?.name ?? value.session?.title ?? ""); setEditor(value.session ? { ...value, session: preferenceSession(value.session) } : value) }
   async function mutate(action: () => Promise<unknown>, message: string) {
     if (busyRef.current) return false
     busyRef.current = true
@@ -119,9 +128,21 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
     catch (error) { setError(String(error)); return false }
     finally { busyRef.current = false; setBusy(false) }
   }
-  const edit = (row: SidebarSession, body: object, message: string) => sessionIsReadOnly(row)
-    ? Promise.resolve(false)
-    : mutate(() => api(`/sessions/${row.id}`, "PATCH", body), message)
+  async function edit(row: SidebarSession, body: object, message: string) {
+    if (sessionIsReadOnly(row) || busyRef.current) return false
+    const patch = preferencePatch(body)
+    if (!patch) return mutate(() => api(`/sessions/${row.id}`, "PATCH", body), message)
+    const sequence = ++preferenceSequence.current
+    setEditor(null); setError(""); setNotice("")
+    try {
+      await preferences.update(row.id, patch)
+      if (active.current && sequence === preferenceSequence.current) setNotice(message)
+      return true
+    } catch (error) {
+      if (active.current && !(error instanceof DOMException && error.name === "AbortError")) setError(String(error))
+      return false
+    }
+  }
   const title = editor ? ({
     rename: "Rename session", move: "Move session", archive: editor.session?.archived ? "Restore session?" : "Archive session?",
     delete: "Delete session?", restore: "Restore deleted session?", "folder-create": "New folder",
@@ -129,7 +150,7 @@ export function SessionActionsProvider({ userId, folders, refresh, onOpenCompute
   })[editor.action] : ""
   const named = editor && ["rename", "folder-create", "folder-rename"].includes(editor.action)
   return <ActionsContext.Provider value={{
-    userId, busy, openEditor, edit, openComputer: onOpenComputer, newSession: onNewSession,
+    userId, busy, preferenceSession, openEditor, edit, openComputer: onOpenComputer, newSession: onNewSession,
     copy: row => { void navigator.clipboard.writeText(`${location.origin}/#${sessionHash(row)}`).then(
       () => setNotice("Session link copied."),
       () => setError("Could not copy the link. Open the session and copy its address."),
