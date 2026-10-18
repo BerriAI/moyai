@@ -9,12 +9,13 @@ from datetime import timedelta
 
 from pydantic_ai.durable_exec.temporal import AgentPlugin
 from temporalio.client import WorkflowExecutionStatus
-from temporalio.common import WorkflowIDReusePolicy
+from temporalio.common import VersioningBehavior, WorkerDeploymentVersion, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     Interceptor,
     Worker,
+    WorkerDeploymentConfig,
 )
 
 from .activities import ACTIVITIES
@@ -65,6 +66,17 @@ def make_worker(runtime: Runtime) -> WorkerPools:
     # WorkerPools starts all poller shutdowns concurrently, so each active
     # operation gets the shared process budget without multiplying that budget.
     shutdown_timeout = timedelta(seconds=runtime.settings.worker_shutdown_seconds)
+    deployment = (
+        WorkerDeploymentConfig(
+            version=WorkerDeploymentVersion(
+                deployment_name=runtime.settings.worker_deployment,
+                build_id=runtime.settings.worker_build_id,
+            ),
+            use_worker_versioning=True,
+            default_versioning_behavior=VersioningBehavior.PINNED,
+        )
+        if runtime.settings.worker_deployment else None
+    )
     legacy = Worker(
         runtime.client,
         identity=identity,
@@ -75,6 +87,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         max_concurrent_activities=runtime.settings.temporal_worker_activities,
         max_cached_workflows=runtime.settings.temporal_workflow_cache_size,
         graceful_shutdown_timeout=shutdown_timeout,
+        deployment_config=deployment,
     )
     pools = tuple(Worker(
         runtime.client, identity=identity,
@@ -83,6 +96,7 @@ def make_worker(runtime: Runtime) -> WorkerPools:
         max_concurrent_activities=runtime.settings.temporal_worker_activities,
         max_cached_workflows=runtime.settings.temporal_workflow_cache_size,
         graceful_shutdown_timeout=shutdown_timeout,
+        deployment_config=deployment,
     ) for pool in activity_pools)
     # All pollers belong to the same canonical process owner. Register once,
     # before any poller can execute; retirement still follows owner disappearance.
@@ -208,7 +222,12 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
 async def dispatcher(runtime: Runtime, *, wakeups: DispatchWakeups | None = None) -> None:
     state = DispatchState()
     question_cursor = 0
-    async with wakeups or DispatchWakeups(runtime.settings) as listener:
+    slack = getattr(runtime, "product_slack", None)
+    # Answer settlement already commits a dispatch hint. Fan it out on the
+    # coordinator's existing listener; Slack retains its own durable scan/event.
+    async with wakeups or DispatchWakeups(
+        runtime.settings, observers=(slack.delivery_wakeup,) if slack is not None else (),
+    ) as listener:
         while True:
             # Clear before reading durable rows, so a commit during/after the
             # scan cannot be lost between deciding to wait and actually waiting.

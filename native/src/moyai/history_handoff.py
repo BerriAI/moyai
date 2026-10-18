@@ -7,7 +7,7 @@ an interrupted or uncertain external action is never replayed from a snapshot.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
@@ -21,6 +21,7 @@ from temporalio.contrib.workflow_streams import WorkflowStreamState
 from temporalio.exceptions import ApplicationError
 
 from .contracts import PreparedTurn, RunScope
+from .deployment_handoff import DeploymentHandoff
 from .models import Effect, Event
 
 if TYPE_CHECKING:
@@ -40,6 +41,9 @@ class CheckpointSave:
     """A refused checkpoint leaves the paused agent alive in this execution."""
 
     reference: str | None = None
+    # None identifies recorded results from the original handoff protocol.
+    # New saves explicitly distinguish a history-only rollover from an upgrade.
+    deployment_allowed: bool | None = None
 
 
 @dataclass
@@ -50,6 +54,8 @@ class AgentCheckpoint:
     run_step: int
     output_retries_used: int
     tool_retries: dict[str, int] = field(default_factory=dict)
+    deployment_handoff: DeploymentHandoff | None = None
+    allow_history_only: bool = False
 
 
 @dataclass
@@ -58,6 +64,8 @@ class HistoryHandoff:
     stream_state: WorkflowStreamState | None = None
     steered: list[str] = field(default_factory=list)
     pending_steering: list[str] = field(default_factory=list)
+    deployment_handoff: DeploymentHandoff | None = None
+    pending_deployment_handoff: DeploymentHandoff | None = None
 
 
 def is_turn_run(run_id: str | None, turn_id: str) -> bool:
@@ -111,9 +119,37 @@ async def save_history_checkpoint(checkpoint: AgentCheckpoint) -> CheckpointSave
         ).limit(1))
     if pending is not None:
         return CheckpointSave()
+    deployment_allowed = checkpoint.deployment_handoff is not None
+    if deployment_allowed:
+        # A graph boundary alone does not establish that a gateway attempt or
+        # its billing receipt settled. Retain the source deployment if either
+        # ledger still has an unresolved external outcome.
+        from .inference_usage import InferenceUsage
+        from .product_drain import SETTLED_REQUESTS
+        from .product_inference import ProductInferenceRequest
+
+        ledgers: list[type[InferenceUsage | ProductInferenceRequest]] = [InferenceUsage]
+        if runtime.product_inference is not None:
+            ledgers.append(ProductInferenceRequest)
+        async with runtime.database.sessions() as db:
+            for ledger in ledgers:
+                if await db.scalar(select(ledger.id).where(
+                    ledger.turn_id == scope.turn_id,
+                    ledger.status.not_in(SETTLED_REQUESTS),
+                ).limit(1)) is not None:
+                    deployment_allowed = False
+                    if not checkpoint.allow_history_only:
+                        return CheckpointSave()
+                    break
     # No plaintext checkpoint or credentials enter the history. The existing
     # immutable encrypted object store also makes activity redelivery idempotent.
-    return CheckpointSave(await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(checkpoint)))
+    # Control hints are carried separately by HistoryHandoff. A history-only
+    # save must not look like an approved deployment in the agent snapshot.
+    snapshot = replace(checkpoint, deployment_handoff=None, allow_history_only=False)
+    return CheckpointSave(
+        await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(snapshot)),
+        deployment_allowed=deployment_allowed,
+    )
 
 
 @activity.defn(name="moyai_load_history_checkpoint_v1")

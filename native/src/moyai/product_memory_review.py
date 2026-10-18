@@ -177,7 +177,8 @@ class ProductMemoryReviewService:
         ).order_by(Message.id))
         sources = []
         for row in rows:
-            content = self.database.security.unseal(row.content).decode()
+            from .message_sources import memory_text
+            content = await memory_text(self.database, db, row)
             try:
                 check_content(content)
             except HTTPException:

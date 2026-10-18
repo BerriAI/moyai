@@ -1,10 +1,10 @@
 /* Native-scoped counterparts of the established settings-system.css report primitives. */
 .native-analytics {
   --chart-blue: var(--ui-primary);
-  --chart-teal: #8fd9e5;
+  --chart-teal: var(--ui-chart-teal);
   --chart-green: var(--ui-success);
   --chart-amber: var(--ui-warning);
-  --chart-violet: #c4b8ee;
+  --chart-violet: var(--ui-chart-violet);
   min-width: 0;
 }
 .native-analytics .analytics-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 24px; margin: 0 0 24px; }

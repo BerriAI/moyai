@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 from app.db import database as source_database
@@ -59,7 +59,8 @@ class Publications:
         if actor is None or not actor.enabled or turn is None:
             raise ToolFailed("The publication requester is unavailable.")
         await self.database._check_product_turn(db, turn, self.scope.product_grant)
-        session = await self.database.allowed_session(db, self.scope.session_id, actor)
+        cast(Any, actor).product_grant = self.scope.product_grant
+        session = await self.database.execution_session(db, self.scope.session_id, actor)
         if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
             raise ToolFailed("This publication was stopped or superseded.")
         current = await self.database.scope_grants(db, self.scope, session)

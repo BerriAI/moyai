@@ -265,11 +265,12 @@ class Connectors:
                 raise ConnectorError(f"Connect {provider.title()} in Connections first.", dispatched=False)
             credentials = json.loads(self.security.decrypt(rows[0]["encrypted"]))
             if credentials.get("expires_at", 0) and credentials["expires_at"] < time.time() + 90:
+                if provider == "slack":
+                    from .slack_token_refresh import refresh_slack_token
+                    return await database(refresh_slack_token, self, rows[0])
                 if not credentials.get("refresh_token"):
                     raise ConnectorError(f"The {provider.title()} connection expired. Reconnect it.", dispatched=False)
                 fresh = await self.exchange(provider, refresh_token=credentials["refresh_token"])
-                if provider == "slack" and credentials.get("bot") and not fresh.get("bot"):
-                    fresh["bot"] = credentials["bot"]
                 return await database(
                     refresh_connection, self.store, self.security, provider, rows[0], fresh)
             return credentials
@@ -284,7 +285,6 @@ class Connectors:
                 "user_id": bot.get("bot_user_id"), "bot_id": bot.get("bot_id"), "app_id": bot.get("app_id"), "scopes": bot.get("scope", "").split(",")}
 
     async def slack_bot_token(self):
-        from .connection_authority import refresh_connection
         async with self.locks["slack"]:
             rows = await database(self.store.rows, "SELECT * FROM connections WHERE provider='slack'")
             credentials = json.loads(self.security.decrypt(rows[0]["encrypted"])) if rows else {}
@@ -292,12 +292,9 @@ class Connectors:
             if not bot.get("access_token"):
                 raise ConnectorError("Reconnect Slack to install the workspace bot.", dispatched=False)
             if bot.get("expires_at", 0) and bot["expires_at"] < time.time() + 90:
-                if not bot.get("refresh_token"):
-                    raise ConnectorError("The Slack bot connection expired. Reconnect Slack.", dispatched=False)
-                fresh = await self.exchange("slack", refresh_token=bot["refresh_token"])
-                credentials["bot"] = bot = {**bot, **fresh}
-                await database(
-                    refresh_connection, self.store, self.security, "slack", rows[0], credentials)
+                from .slack_token_refresh import refresh_slack_token
+                credentials = await database(refresh_slack_token, self, rows[0], bot=True)
+                bot = credentials["bot"]
             return bot["access_token"]
 
     async def request(self, method, url, *, allowed_errors=(), **kwargs):

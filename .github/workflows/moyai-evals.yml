@@ -6,6 +6,16 @@ on:
 permissions:
   contents: read
 jobs:
+  desktop-integration:
+    name: Desktop integration (no model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the desktop with Chromium and pinned OCU
+        run: docker build -t moyai-desktop-test evals/tasks/desktop_license/environment
+      - name: Check real desktop actions, worker recovery, and browser failures
+        run: docker run --rm --network none -v "$PWD:/repo:ro" moyai-desktop-test python /repo/evals/desktop/smoke.py
   moyai-agent-evals:
     name: Moyai agent evals
     runs-on: ubuntu-latest
@@ -54,9 +64,13 @@ jobs:
           PYTHONPATH: .:evals:native/src:native/tests
         run: |
           for task in evals/tasks/*/; do
-            uv run --project native --python 3.13 --with harbor==0.24.0 --with 'moto[server]==5.1.4' --with openai==3.29.0 harbor run \
+            agent=moyai_harbor.agent:MoyaiAgent
+            if [[ "$task" == evals/tasks/desktop_* ]]; then
+              agent=moyai_harbor.desktop_agent:MoyaiDesktopAgent
+            fi
+            uv run --project native --python 3.13 --with harbor==0.24.0 --with 'moto[server]==5.1.4' --with openai==3.29.0 --with litellm==1.107.0.dev3 harbor run \
               -p "$task" \
-              -a moyai_harbor.agent:MoyaiAgent \
+              -a "$agent" \
               -k 3 -n 1 -o evals/jobs -y
           done
       - name: Report eval result

@@ -33,6 +33,10 @@ def bridge(tmp_path):
 
     async def authorize(scope):
         assert scope.actor_id == "google:owner"
+        return await service.resolve_grants(
+            scope.actor_id, [g.id for g in scope.grants],
+            shared_session=scope.authority.visibility == "shared", surface=scope.authority.surface,
+        )
 
     service = ProductConnections(
         SimpleNamespace(store_proxy=store, security=security, settings=settings),
@@ -46,9 +50,58 @@ def save(service, provider, **extra):
     service.connectors.save(provider, {"access_token": "synthetic-token", "kind": "personal", **extra}, provider)
 
 
+@pytest.mark.parametrize('bot', [False, True])
+@pytest.mark.parametrize('identity_linking', [False, True])
+@pytest.mark.parametrize('thread_chat', [False, True])
+def test_slack_oauth_retains_existing_scope_contract(bridge, bot, identity_linking, thread_chat):
+    from urllib.parse import parse_qs, urlsplit
+
+    bridge.settings.slack_bot_enabled = bot
+    bridge.settings.slack_identity_linking_enabled = identity_linking
+    bridge.settings.slack_thread_chat_enabled = thread_chat
+    params = parse_qs(urlsplit(bridge.connectors.authorization_url('slack', 'local-state')).query)
+    assert params['user_scope'] == ['search:read,channels:history,groups:history,im:history,mpim:history']
+    if not bot:
+        assert 'scope' not in params
+        return
+    expected = {
+        'app_mentions:read', 'chat:write', 'im:write', 'im:history', 'reactions:read',
+        'reactions:write', 'assistant:write', 'files:write', 'files:read',
+    }
+    if identity_linking:
+        expected |= {'users:read', 'users:read.email'}
+    if thread_chat:
+        expected |= {'channels:history', 'groups:history', 'channels:read', 'groups:read'}
+    assert set(params['scope'][0].split(',')) == expected
+
+
 async def scope_for(bridge, kind):
     grants = await bridge.resolve_grants("google:owner", [kind])
     return RunScope("native-session", "native-turn", "google:owner", "test", grants)
+
+
+async def test_connector_check_reuses_current_native_grants_and_compares_full_policy(bridge, monkeypatch):
+    import copy
+    from dataclasses import replace
+
+    save(bridge, "linear")
+    scope = await scope_for(bridge, "linear")
+    resolve = bridge.resolve_grants
+    reads = []
+
+    async def counted(*args, **kwargs):
+        reads.append(1)
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(bridge, "resolve_grants", counted)
+    await bridge.check(scope, scope.grants[0])
+    assert len(reads) == 1
+    # IDs/revisions alone do not permit a changed policy. This is the extra
+    # canonical comparison previously performed by a second source-store read.
+    changed = copy.deepcopy(scope.grants[0])
+    changed.policy["product"]["access"] = "different-access"
+    with pytest.raises(PermissionError, match="authority changed"):
+        await bridge.check(replace(scope, grants=[changed]), changed)
 
 
 async def test_reference_only_grants_follow_live_disconnect_reconnect_and_policy(bridge):
@@ -97,6 +150,120 @@ async def test_refresh_preserves_authority_and_revocation_wins_while_awaiting(br
     with pytest.raises(ConnectorError, match="changed"):
         await bridge.credentials(scope, scope.grants[0])
     assert not bridge.store.rows("SELECT 1 FROM connections WHERE provider='linear'")
+
+
+def github_accounts(bridge, count=16):
+    credentials = {
+        "kind": "github_app", "installation_id": 1, "account_id": 1,
+        "repository_ids": list(range(1, count + 1)),
+    }
+    bridge.connectors.save("github", credentials, "Selected repositories")
+    bridge.connectors.github.save_app({"id": 1})
+    return credentials
+
+
+async def test_github_token_requests_overlap_across_repositories_but_share_same_repository(bridge, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    github_accounts(bridge)
+    scope = await scope_for(bridge, "github")
+    github = bridge.connectors.github
+    monkeypatch.setattr(github, "app_jwt", lambda config: "synthetic-jwt")
+    active = peak = 0
+    requests = []
+    lock = threading.Lock()
+
+    async def request(method, path, **kwargs):
+        nonlocal active, peak
+        assert method == "POST" and path == "/app/installations/1/access_tokens"
+        assert kwargs["json"]["permissions"] == {"contents": "read", "pull_requests": "read"}
+        repositories = kwargs["json"]["repository_ids"]
+        assert len(repositories) == 1  # Never broaden the credential to all repositories.
+        with lock:
+            requests.append(repositories[0])
+            active += 1
+            peak = max(active, peak)
+        try:
+            await asyncio.sleep(.08)
+            return {
+                "token": f"repository-{repositories[0]}",
+                "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(github, "request", request)
+    # Two concurrent callers for every repository exercise single-flight reuse
+    # through the real invocation-local helpers and shared token cache.
+    values = await asyncio.gather(*(
+        bridge.credentials(scope, grant) for grant in scope.grants for _ in range(2)
+    ))
+    assert peak > 1
+    assert sorted(requests) == list(range(1, 17))
+    assert [value["access_token"] for value in values] == [
+        f"repository-{grant.policy['product']['repository_id']}" for grant in scope.grants for _ in range(2)
+    ]
+
+
+@pytest.mark.parametrize("revoke", ["connection", "native", "policy"])
+async def test_github_credentials_recheck_authority_after_parallel_requests(bridge, monkeypatch, revoke):
+    github_accounts(bridge, 2)
+    scope = await scope_for(bridge, "github")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def credentials(grant, *, write):
+        calls.append(grant.id)
+        entered.set()
+        await release.wait()
+        return {"access_token": "must-not-escape-after-revocation"}
+
+    monkeypatch.setattr(bridge, "_credentials", credentials)
+    pending = [asyncio.create_task(bridge.credentials(scope, grant)) for grant in scope.grants]
+    await asyncio.wait_for(entered.wait(), 2)
+    if revoke == "connection":
+        bridge.store.execute("DELETE FROM connections WHERE provider='github'")
+    elif revoke == "policy":
+        bridge.store.execute(
+            "INSERT INTO connection_policies(provider,enabled,read_only) VALUES('github',0,0) "
+            "ON CONFLICT(provider) DO UPDATE SET enabled=0",
+        )
+    else:
+        async def denied(scope):
+            raise PermissionError("Native turn revoked")
+        monkeypatch.setattr(bridge.database, "authorize_scope", denied)
+    release.set()
+    results = await asyncio.gather(*pending, return_exceptions=True)
+    assert all(isinstance(result, (HTTPException, PermissionError)) for result in results)
+
+
+async def test_cancelled_github_credential_request_releases_only_its_repository_lock(bridge, monkeypatch):
+    github_accounts(bridge, 2)
+    scope = await scope_for(bridge, "github")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def credentials(grant, *, write):
+        if grant == scope.grants[0]:
+            entered.set()
+            await release.wait()
+        return {"access_token": grant.id}
+
+    monkeypatch.setattr(bridge, "_credentials", credentials)
+    first = asyncio.create_task(bridge.credentials(scope, scope.grants[0]))
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        assert await asyncio.wait_for(bridge.credentials(scope, scope.grants[1]), 1) == {
+            "access_token": scope.grants[1].id,
+        }
+    finally:
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+    release.set()
+    assert await asyncio.wait_for(bridge.credentials(scope, scope.grants[0]), 1) == {
+        "access_token": scope.grants[0].id,
+    }
 
 
 async def test_personal_slack_is_private_and_never_falls_back(bridge):
@@ -349,6 +516,53 @@ async def test_onboarding_reuses_canonical_auth_csrf_and_provider_routes(bridge,
         assert not bridge.store.rows("SELECT 1 FROM oauth_states WHERE provider='linear'")
         with pytest.raises(HTTPException):
             await bridge.require_scope(scope)
+
+
+async def test_slack_reconnect_rechecks_blocked_profiles_without_granting_identity(bridge, monkeypatch):
+    from app.connection_authority import save_if_unchanged
+    bridge.settings.slack_identity_linking_enabled = True
+    value = {'access_token': 'user-token', 'bot': {
+        'access_token': 'bot-token', 'team': {'id': 'TTEST0001'}, 'bot_user_id': 'UBOT00001',
+        'scope': 'users:read,users:read.email',
+    }}
+    bridge.connectors.save('slack', value, 'Previous installation')
+    with bridge.store.connect() as conn:
+        sender = bridge.store.slack_identity_in(conn, 'TTEST0001', 'UTEST0001')
+        other = bridge.store.slack_identity_in(conn, 'TOTHER001', 'UTEST0002')
+        conn.execute("UPDATE users SET profile_next_check=?,link_status='review',profile_eligible=0 WHERE kind='slack'",
+                     (int(time.time()) + 300,))
+    before = bridge.store.rows('SELECT * FROM users WHERE id=?', (sender,))[0]
+    unrelated = bridge.store.rows('SELECT * FROM users WHERE id=?', (other,))[0]
+    expected = bridge.connectors.connection_revision('slack')
+    save_if_unchanged(bridge.store, bridge.security, 'slack', value, 'Reconnected', expected)
+    current = bridge.store.rows('SELECT * FROM users WHERE id=?', (sender,))[0]
+    assert current == {**before, 'profile_next_check': 0}
+    assert bridge.store.rows('SELECT * FROM users WHERE id=?', (other,))[0] == unrelated
+
+    async def profile(method, url, **kwargs):
+        assert url.endswith('/users.info') and kwargs['params'] == {'user': 'UTEST0001'}
+        return {'ok': True, 'user': {'id': 'UTEST0001', 'team_id': 'TTEST0001',
+                'profile': {'email': 'owner@example.test', 'real_name': 'Verified owner'}}}
+
+    monkeypatch.setattr(bridge.connectors, 'request', profile)
+    await bridge.identities.resolve(current, 'TTEST0001')
+    verified = bridge.store.rows('SELECT * FROM users WHERE id=?', (sender,))[0]
+    assert verified['profile_eligible'] == 1 and verified['profile_conflict'] == 0
+    assert verified['link_status'] != 'review'
+
+
+async def test_superseded_slack_reconnect_does_not_change_profile_retry_state(bridge):
+    from app.connection_authority import save_if_unchanged
+    value = {'access_token': 'user-token', 'bot': {'access_token': 'bot-token', 'team': {'id': 'TTEST0001'}}}
+    bridge.connectors.save('slack', value, 'Original')
+    expected = bridge.connectors.connection_revision('slack')
+    with bridge.store.connect() as conn:
+        sender = bridge.store.slack_identity_in(conn, 'TTEST0001', 'UTEST0001')
+        conn.execute('UPDATE users SET profile_next_check=12345 WHERE id=?', (sender,))
+    bridge.connectors.save('slack', value, 'Concurrent replacement')
+    with pytest.raises(ConnectorError, match='changed'):
+        save_if_unchanged(bridge.store, bridge.security, 'slack', value, 'Superseded', expected)
+    assert bridge.store.rows('SELECT profile_next_check FROM users WHERE id=?', (sender,))[0]['profile_next_check'] == 12345
 
 
 async def test_personal_slack_keeps_bot_operations_separate_and_never_uses_user_token(bridge, monkeypatch):

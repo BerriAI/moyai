@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Archive, ArchiveRestore, ChevronDown, Clock3, Folder, FolderPlus, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, PanelRightOpen, Pencil, Pin, PinOff, Trash2, Users } from "lucide-react"
+import { Archive, ArchiveRestore, ChevronDown, Circle, CircleAlert, CircleDashed, Clock3, Folder, FolderPlus, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, ListFilter, PanelRightOpen, Pencil, Pin, PinOff, Trash2, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
 import { ActionItem, ActionMenu, SessionMenu, sessionHash, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import type { SessionFolder, SidebarSession } from "./session-actions"
 import { currentDragSession, movableSession, SESSION_DRAG_TYPE, sessionCreatedByMe, sessionDrop, sessionPlacement } from "./sidebar-drag"
 import type { SessionDrag, SessionDropTarget, SidebarDragContext } from "./sidebar-drag"
 import { sessionTree } from "./session-tree"
+import { compactSessionAge, groupSessionFamilies, statusGroups, type SessionStatusGroup } from "./sidebar-status"
 import slackLogo from "./assets/slack-logo.svg"
 import "./sidebar-layout.css"
 export type { SessionFolder, SidebarSession } from "./session-actions"
@@ -94,6 +96,17 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
   const [dragging, setDragging] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [dropNotice, setDropNotice] = useState("")
+  const [grouping, setGrouping] = useState<"status" | "folders">(() => {
+    try { return localStorage.getItem(`moyai-sidebar-grouping:${userId}`) === "folders" ? "folders" : "status" } catch { return "status" }
+  })
+  const statusView = view === "active" && grouping === "status"
+  const [expandedStatuses, setExpandedStatuses] = useState(() =>
+    readExpansion(`moyai-sidebar-status:${userId}`, 1, statusGroups.map(group => group.key)))
+  const toggleStatus = (key: string) => setExpandedStatuses(previous => {
+    const next = previous.includes(key) ? previous.filter(item => item !== key) : [...previous, key]
+    try { localStorage.setItem(`moyai-sidebar-status:${userId}`, JSON.stringify({ version: 1, expanded: next })) } catch {}
+    return next
+  })
   const clearDrag = useCallback(() => {
     activeDrag.current = null; setDragging(null); setDropTarget(null)
   }, [])
@@ -119,7 +132,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
       document.removeEventListener("visibilitychange", hidden)
     }
   }, [clearDrag])
-  useEffect(clearDrag, [userId, actionsUserId, view, busy, clearDrag])
+  useEffect(clearDrag, [userId, actionsUserId, view, busy, grouping, clearDrag])
   useEffect(() => {
     if (activeDrag.current && !currentDragSession(activeDrag.current, current.current)) clearDrag()
   }, [sessions, clearDrag])
@@ -149,6 +162,10 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
   const legacyFolders = [...new Map(roots.filter(row => sessionIsReadOnly(row) && row.folder).map(row =>
     [`${row.source ?? "native"}:${row.folder_id ?? row.folder}`, { key: `${row.source ?? "native"}:${row.folder_id ?? row.folder}`, name: row.folder! }],
   )).values()]
+  const statusRows = roots.filter(row => sessionIsReadOnly(row)
+    ? row.pinned || row.folder || row.participated || sessionCreatedByMe(row, userId)
+    : placements.get(row)?.kind !== "hidden")
+  const grouped = groupSessionFamilies(statusRows, tree.children)
   function startDrag(event: React.DragEvent<HTMLDivElement>, row: SidebarSession) {
     if (busy || view === "deleted" || userId !== actionsUserId || !movableSession(row) ||
       (event.target instanceof Element && event.target.closest("button, input, textarea, select, [role='menuitem']"))) {
@@ -200,13 +217,14 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
   function rows(items: SidebarSession[], depth = 0): React.ReactNode {
     return items.map(row => {
       const readOnly = sessionIsReadOnly(row)
+      const statusLabel = readOnly ? "Read-only history" : row.unread ? "Unread" : row.status
       const active = row.source === "legacy" ? selected === `run=${row.id}` || selected === sessionHash(row) : selected === row.id
       const key = sessionKey(row), descendants = view === "deleted" ? [] : tree.children.get(key) ?? []
       const expanded = expandedAgents.includes(key)
       const openAside = !readOnly && !row.deleted && row.parent_session_id && onOpenSideChat
         ? () => onOpenSideChat(row) : undefined
       return <div key={key} className="session-branch">
-      <div data-session-key={key} draggable={!busy && view !== "deleted" && userId === actionsUserId && movableSession(row)}
+      <div data-session-key={key} draggable={!statusView && !busy && view !== "deleted" && userId === actionsUserId && movableSession(row)}
         onDragStart={event => startDrag(event, row)} onDragEnd={clearDrag}
         className={`session-row ${depth ? "session-child" : ""} ${descendants.length ? "session-parent" : ""} ${active ? "selected" : ""} ${row.unread ? "unread" : ""} ${dragging === row.id ? "session-dragging" : ""}`}>
       {descendants.length > 0 && <Button type="button" variant="ghost" size="icon-sm" className="session-children-toggle"
@@ -215,60 +233,77 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         onClick={() => setExpandedAgents(previous => saveExpandedAgents(expanded ? previous.filter(value => value !== key) : [...previous, key]))}>
         <ChevronDown className={expanded ? "" : "closed"} size={12} />
       </Button>}
-      <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
-        <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : !readOnly && row.status === "failed" ? "failed" : ""}`} aria-label={readOnly ? "Read-only history" : row.unread ? "Unread" : row.status} />
+      <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-label={`${statusLabel} ${row.title}`} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
+        <span className="session-leading" aria-hidden="true">
+          {descendants.length === 0 && <span className="session-bullet">·</span>}
+        </span>
         <span className="session-title">{row.title}</span>
       </a>
+      {statusView && <span className="session-row-time" title={`${readOnly ? "Read-only history" : row.status}${row.updated_at ? ` · ${age(row.updated_at)}` : ""}`}>
+        {row.pinned ? <Pin size={12} aria-label="Pinned session" /> : compactSessionAge(row.updated_at)}
+      </span>}
       <div className="session-row-actions">
+        {statusView && !readOnly && <PullRequestIndicators session={row} onOpen={row.deleted ? undefined : onOpenPullRequest} />}
         {openAside && <Button type="button" variant="ghost" size="icon-sm" aria-label={`Open ${row.title} in side chat`} title="Open in side chat" onClick={openAside}><PanelRightOpen /></Button>}
         {!readOnly && !row.deleted && depth === 0 && <>
           <Button type="button" variant="ghost" size="icon-sm" disabled={busy} aria-label={`${row.pinned ? "Unpin" : "Pin"} ${row.title}`} aria-pressed={Boolean(row.pinned)} title={row.pinned ? "Unpin session" : "Pin session"}
             onClick={() => void edit(row, { pinned: !row.pinned }, row.pinned ? "Session unpinned." : "Session pinned.")}>{row.pinned ? <PinOff /> : <Pin />}</Button>
-          <Button type="button" variant="ghost" size="icon-sm" disabled={busy || row.owner_id !== userId} aria-label={`${row.archived ? "Restore from archive" : "Archive"} ${row.title}`}
-            title={row.owner_id !== userId ? "Only the session owner can change its archive status" : row.archived ? "Restore from archive" : "Archive session"} onClick={() => openEditor({ action: "archive", session: row })}>{row.archived ? <ArchiveRestore /> : <Archive />}</Button>
+          <Button type="button" variant="ghost" size="icon-sm" disabled={busy || !(row.can_manage ?? row.owner_id === userId)} aria-label={`${row.archived ? "Restore from archive" : "Archive"} ${row.title}`}
+            title={!(row.can_manage ?? row.owner_id === userId) ? "Only the session owner can change its archive status" : row.archived ? "Restore from archive" : "Archive session"} onClick={() => openEditor({ action: "archive", session: row })}>{row.archived ? <ArchiveRestore /> : <Archive />}</Button>
         </>}
         <SessionMenu session={row} onOpenSideChat={openAside} />
       </div>
+      <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : !readOnly && row.status === "failed" ? "failed" : ""}`} aria-label={statusLabel} />
       <div className="session-row-meta">
         {!readOnly && row.pinned && placements.get(row)?.kind === "folder" && <Pin size={12} aria-label="Pinned session" />}
         <span className={`session-meta-status ${!readOnly && !row.deleted && row.status === "waiting" ? "needs-input" : !readOnly && !row.deleted && row.status === "failed" ? "failed" : ""}`}>{row.deleted ? "Deleted" : readOnly ? "Read-only history" : row.status === "waiting" ? "Needs input" : row.status === "failed" ? "Failed" : ["running", "queued", "saving"].includes(row.status) ? row.status : age(row.updated_at)}</span>
-        {!readOnly && <PullRequestIndicators session={row} onOpen={row.deleted ? undefined : onOpenPullRequest} />}
+        {!statusView && !readOnly && <PullRequestIndicators session={row} onOpen={row.deleted ? undefined : onOpenPullRequest} />}
         {row.surface === "slack" && <img className="session-slack-logo" src={slackLogo} width={14} height={14} alt="Slack conversation" title="Slack conversation" />}
       </div>
     </div>
     {descendants.length > 0 && <div id={`subagents-${encodeURIComponent(key)}`} className="session-children" role="group" aria-label={`Subagents of ${row.title}`} hidden={!expanded}>{rows(descendants, depth + 1)}</div>}
     </div>})
   }
-  function section(key: string, label: string, icon: React.ReactNode, items: SidebarSession[], folder?: SessionFolder) {
-    const expanded = expandedGroups.includes(key)
+  function section(key: string, label: string, icon: React.ReactNode, items: SidebarSession[], folder?: SessionFolder, status?: SessionStatusGroup) {
+    const expanded = (status ? expandedStatuses : expandedGroups).includes(key)
     const target: SessionDropTarget | null = folder ? { kind: "folder", folderId: folder.id }
       : ["recent", "participated"].includes(key) ? { kind: "unfiled" } : null
     const dropKey = folder ? `folder:${folder.id}` : key
-    return <section key={key} className={`session-group ${dropTarget === dropKey ? "session-drop-target" : ""}`}
+    return <section key={key} data-status-group={status} className={`session-group ${status ? "session-status-group" : ""} ${dropTarget === dropKey ? "session-drop-target" : ""}`}
       onDragOver={event => { if (target) dragOver(event, target, dropKey) }}
       onDragLeave={event => leaveDrop(event, dropKey)}
       onDrop={event => { if (target) drop(event, target) }}>
-      <div className="session-group-heading"><Button variant="ghost" className="session-group-toggle" aria-expanded={expanded} aria-controls={`sessions-${encodeURIComponent(key)}`} onClick={() => toggle(key)}>{icon}<span>{label}</span><small>{items.length}</small><ChevronDown className={expanded ? "" : "closed"} size={12} /></Button>
+      <div className="session-group-heading"><Button variant="ghost" className="session-group-toggle" aria-expanded={expanded} aria-controls={`sessions-${encodeURIComponent(key)}`} onClick={() => status ? toggleStatus(key) : toggle(key)}>{icon}<span>{label}</span><small>{items.length}</small><ChevronDown className={expanded ? "" : "closed"} size={12} /></Button>
         {folder && <ActionMenu label={`Folder actions for ${folder.name}`}>{close => <>
           <ActionItem disabled={busy} onClick={() => { close(); openEditor({ action: "folder-rename", folder }) }}><Pencil />Rename folder</ActionItem>
           <ActionItem disabled={busy} onClick={() => { close(); openEditor({ action: "folder-remove", folder }) }}><Trash2 />Remove folder</ActionItem>
         </>}</ActionMenu>}
       </div>
-      <div id={`sessions-${encodeURIComponent(key)}`} hidden={!expanded}>{rows(items)}{!items.length && <p className="folder-empty">{loading && !sessions.length ? "Loading sessions…" : folder ? "Drag sessions here, or use their ⋯ menu." : label === "Participated" ? "Shared sessions you’ve contributed to." : "No sessions here yet."}</p>}</div>
+      <div id={`sessions-${encodeURIComponent(key)}`} hidden={!expanded}>{rows(items)}{!items.length && !status && <p className="folder-empty">{loading && !sessions.length ? "Loading sessions…" : folder ? "Drag sessions here, or use their ⋯ menu." : label === "Participated" ? "Shared sessions you’ve contributed to." : "No sessions here yet."}</p>}</div>
     </section>
   }
   return <>
     <div className="rail-caption"><span>{view === "archived" ? "Archived" : view === "deleted" ? "Deleted" : "Sessions"} <small>{sessions.length}{hasMore ? "+" : ""}</small></span><div>
+      {view === "active" && <Select value={grouping} onValueChange={value => {
+        if (value !== "status" && value !== "folders") return
+        setGrouping(value)
+        try { localStorage.setItem(`moyai-sidebar-grouping:${userId}`, value) } catch {}
+      }}><SelectTrigger className="sidebar-grouping-trigger" aria-label="Group conversations" title={`Group conversations: ${grouping === "status" ? "by status" : "by folder"}`}><ListFilter aria-hidden="true" /></SelectTrigger>
+        <SelectContent><SelectItem value="status">By status</SelectItem><SelectItem value="folders">By folder</SelectItem></SelectContent>
+      </Select>}
       <Button size="icon-sm" variant="ghost" disabled={busy} aria-label="New folder" onClick={() => openEditor({ action: "folder-create" })}><FolderPlus /></Button>
       <Button size="icon-sm" variant="ghost" aria-pressed={view === "archived"} aria-label={view === "archived" ? "Show active conversations" : "Show archived conversations"} onClick={() => onViewChange(view === "archived" ? "active" : "archived")}><Archive /></Button>
       <Button size="icon-sm" variant="ghost" aria-pressed={view === "deleted"} aria-label={view === "deleted" ? "Show active conversations" : "Show deleted conversations"} onClick={() => onViewChange(view === "deleted" ? "active" : "deleted")}><Trash2 /></Button>
     </div></div>
     {dropNotice && <p className="sidebar-drop-notice" role="status">{dropNotice}</p>}
-    <nav aria-label="Conversations" className={`session-list ${dropTarget === "unfiled" ? "session-drop-target" : ""}`}
-      onDragOver={event => { if (onListBackground(event)) dragOver(event, { kind: "unfiled" }, "unfiled") }}
+    <nav aria-label="Conversations" className={`session-list ${statusView ? "status-view" : "folder-view"} ${dropTarget === "unfiled" ? "session-drop-target" : ""}`}
+      onDragOver={event => { if (!statusView && onListBackground(event)) dragOver(event, { kind: "unfiled" }, "unfiled") }}
       onDragLeave={event => leaveDrop(event, "unfiled")}
-      onDrop={event => { if (onListBackground(event)) drop(event, { kind: "unfiled" }) }}>
-      {view === "deleted" ? <>{rows(sessions)}{!sessions.length && <p className="empty-rail muted">No deleted sessions.</p>}</> : <>
+      onDrop={event => { if (!statusView && onListBackground(event)) drop(event, { kind: "unfiled" }) }}>
+      {view === "deleted" ? <>{rows(sessions)}{!sessions.length && <p className="empty-rail muted">No deleted sessions.</p>}</> : statusView ? <>
+        {statusGroups.map(({ key, label }) => section(key, label, key === "needs-you" ? <CircleAlert size={14} /> : key === "in-progress" ? <CircleDashed size={14} /> : key === "in-review" ? <GitPullRequest size={14} /> : <Circle size={14} />, grouped.get(key)!, undefined, key))}
+        {!statusRows.length && <p className="empty-rail muted" role="status">{loading ? "Loading sessions…" : "No sessions here yet."}</p>}
+      </> : <>
         {pinned.length > 0 && section("pinned", "Pinned", <Pin size={15} />, pinned)}
         {folders.map(folder => section(folder.id, folder.name, <Folder size={15} />, nativeRows.filter(row =>
           placements.get(row)?.key === folder.id).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))), folder))}

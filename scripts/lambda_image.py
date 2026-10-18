@@ -18,8 +18,10 @@ def package(destination: Path) -> str:
         for path in sorted((ROOT / "native/lambda_guest").iterdir()):
             if path.is_file() and path.name in {"Dockerfile", "service.py", "checkpoint.py"}:
                 archive.write(path, path.name)
-        for name in ("desktop.py", "browser_guest.py", "browser_driver.py"):
+        for name in ("desktop.py", "browser_guest.py", "browser_driver.py", "ocu_guest.py"):
             archive.write(ROOT / "native" / name, name)
+        for name in ("package.json", "package-lock.json"):
+            archive.write(ROOT / "native/src/moyai/tools" / name, "tools/" + name)
         for path in sorted((ROOT / "native/skills").rglob("*")):
             if path.is_file() and "__pycache__" not in path.parts:
                 archive.write(path, path.relative_to(ROOT / "native"))

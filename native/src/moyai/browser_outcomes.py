@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ToolReturn
 
-BROWSER_WRITES = frozenset({"browser_open", "browser_action"})
+BROWSER_WRITES = frozenset({"browser_open", "browser_action", "desktop_action"})
 BROWSER_OUTCOME = "moyai_browser_dispatch_v1"
 BrowserOutcome = Literal["completed", "not_dispatched", "unknown"]
 

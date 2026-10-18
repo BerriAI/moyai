@@ -57,7 +57,7 @@ def final_notice(delivery: Delivery, product: bool) -> bool:
 
 async def obsolete_segment(db: AsyncSession, delivery: Delivery, root: Turn, *, product: bool) -> bool:
     destination = json.loads(delivery.destination)
-    if destination.get("control"):
+    if destination.get("control") or destination.get("input"):
         return False
     current = await latest_segment(db, root)
     # Older queued final deliveries predate segment metadata. Resolve those to
@@ -230,7 +230,7 @@ async def reply_target(runtime: Runtime, delivery: Delivery, *, product: bool) -
     parts retain existing chunked delivery. Control notices remain independent.
     """
     destination = json.loads(delivery.destination)
-    if destination.get("control"):
+    if destination.get("control") or destination.get("input"):
         return True, None
     primary = anchor_identity(segment_id(delivery), product)
     if delivery.identity == anchor_identity(delivery.turn_id, product):

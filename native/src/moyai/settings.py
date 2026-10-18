@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     temporal_address: str = Field(default="127.0.0.1:7233", validation_alias="TEMPORAL_ADDRESS")
     temporal_namespace: str = Field(default="default", validation_alias="TEMPORAL_NAMESPACE")
     temporal_queue: str = Field(default="moyai-pydantic-v1", validation_alias="TEMPORAL_TASK_QUEUE")
+    worker_deployment: str = Field(
+        default="", pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$",
+        validation_alias="MOYAI_WORKER_DEPLOYMENT",
+    )
+    worker_build_id: str = Field(
+        default="", pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$",
+        validation_alias="MOYAI_WORKER_BUILD_ID",
+    )
     temporal_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="TEMPORAL_API_KEY")
     temporal_tls: bool = Field(default=False, validation_alias="TEMPORAL_TLS")
     compress_temporal_payloads: bool = Field(
@@ -117,6 +125,12 @@ class Settings(BaseSettings):
     artifact_session_token: SecretStr = Field(
         default=SecretStr(""), validation_alias="OBJECT_STORAGE_SESSION_TOKEN",
     )
+
+    @model_validator(mode="after")
+    def worker_version_is_complete(self) -> Settings:
+        if bool(self.worker_deployment) != bool(self.worker_build_id):
+            raise ValueError("Worker deployment name and build ID must be configured together.")
+        return self
 
     @property
     def models(self) -> list[str]:

@@ -118,3 +118,38 @@ async def test_personal_memory_relationship_requires_fresh_unique_verified_owner
     async with api.identity._reader(api.identity.source_engine) as db:
         owner = await api.identity.personal_memory_owner(db, identity)
     assert owner == ("google:owner" if change == "fresh" else None)
+
+
+@pytest.mark.parametrize('failure', [
+    'timeout', 'transport', 'rate-limit', 'invalid_refresh_token', 'token_revoked', 'invalid_auth',
+    'missing_scope', 'database',
+])
+async def test_transient_profile_failures_preserve_the_verified_observation(secrets_api, monkeypatch, failure):
+    import httpx
+    from app.connector_errors import ConnectorError
+    from app.identities import SlackIdentities
+    api = secrets_api
+    identity = await enroll(api)
+    api.bridge.store.execute("UPDATE users SET profile_eligible=1,link_status='linked' WHERE id=?", (identity,))
+    row = api.bridge.store.rows('SELECT * FROM users WHERE id=?', (identity,))[0]
+    service = SlackIdentities(api.bridge.store, api.bridge.connectors, api.bridge.settings,
+                              api.bridge.security, None, lambda *_: False)
+    monkeypatch.setattr(service, 'status', lambda: {'ready': True, 'team_id': 'TTEST0001'})
+    async def failed(*args, **kwargs):
+        if failure == 'timeout':
+            raise TimeoutError()
+        if failure == 'transport':
+            raise httpx.ConnectError('synthetic provider unavailable')
+        if failure == 'database':
+            from app.database import DatabaseBusyError
+            raise DatabaseBusyError('synthetic database unavailable')
+        if failure == 'missing_scope':
+            return {'ok': False, 'error': 'missing_scope'}
+        if failure in {'invalid_refresh_token', 'token_revoked', 'invalid_auth'}:
+            raise ConnectorError('synthetic connection failure', code=failure)
+        return {'ok': False, 'error': 'ratelimited'}
+    monkeypatch.setattr(api.bridge.connectors, 'request', failed)
+    with pytest.raises(ConnectorError) as error:
+        await service.resolve(row, 'TTEST0001')
+    assert error.value.retryable
+    assert api.bridge.store.rows('SELECT * FROM users WHERE id=?', (identity,))[0] == row

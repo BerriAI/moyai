@@ -27,13 +27,16 @@ from app.slack_format import ID, STAMP
 from fastapi import APIRouter, HTTPException, Request
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai_harness.ask_user import AskUserRequest
-from sqlalchemy import select, text, update
+from sqlalchemy import String, cast, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from .failure_report import FailureReport
 from .models import (
     Artifact,
     Delivery,
+    DeliverySchedule,
     Message,
+    MessageSource,
     ProductTurnAuthority,
     Session,
     SlackThread,
@@ -47,6 +50,7 @@ from .product_identity import ProductGrant, ProductPrincipal
 from .product_slack_events import SlackEvents
 from .product_slack_files import ProductSlackFiles
 from .product_slack_models import ProductSlackBinding
+from .slack_file_delivery import SlackFileDelivery
 from .slack_messages import navigation_action, pr_cards, session_url, thread_message
 
 if TYPE_CHECKING:
@@ -54,6 +58,8 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
+DELIVERY_POLL_SECONDS = 3.0
+MIN_DELIVERY_INTERVAL = 1.0
 
 
 class SlackInstallationUnavailable(HTTPException):
@@ -149,9 +155,17 @@ class ProductSlack:
         self.connectors = self.connections.connectors
         self.files = ProductSlackFiles(self)
         self.events = SlackEvents(self)
-        self.inbox = HookInbox(self.store, self, list)
+        from .slack_audience import can_read, historical_access, historical_messages
+        runtime.database.slack_access = lambda db, session, actor: can_read(self, db, session, actor)
+        if runtime.product_history is not None:
+            runtime.product_history.slack_access = lambda conn, principal, ids: historical_access(self, conn, principal, ids)
+            runtime.product_history.decorate_messages = lambda conn, principal, run, rows: historical_messages(self, conn, principal, run, rows)
+        self.inbox = HookInbox(self.store, self, list, security=self.product.security)
+        self.intake_tasks: set[asyncio.Task[None]] = set()
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
+        self.delivery_wakeup = asyncio.Event()
+        self.profile_task: asyncio.Task[None] | None = None
 
     async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
         host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
@@ -168,6 +182,18 @@ class ProductSlack:
         if not await host.acknowledge(source, request):
             logger.info("Slack acknowledgement reaction was not added.")
 
+    def acknowledge_soon(self, payload: dict[str, Any]) -> None:
+        async def acknowledge() -> None:
+            try:
+                async with asyncio.timeout(3):
+                    await self.events.acknowledge_intake(payload)
+            except Exception as error:  # noqa: BLE001 - intake acknowledgement never blocks durable receipt
+                logger.warning("Slack intake acknowledgement failed (%s).", type(error).__name__)
+
+        task = asyncio.create_task(acknowledge(), name="product-slack-intake-ack")
+        self.intake_tasks.add(task)
+        task.add_done_callback(self.intake_tasks.discard)
+
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""
         if self.delivery_task is not None:
@@ -175,10 +201,22 @@ class ProductSlack:
         self.inbox.start()
         self.delivery_task = asyncio.create_task(self.watch(), name="product-slack-delivery")
         self.activity_task = asyncio.create_task(self.runtime.slack_activity.watch(), name="product-slack-activity")
+        from .slack_profile_refresh import watch
+        self.profile_task = asyncio.create_task(watch(self), name="product-slack-profiles")
 
     async def close(self) -> None:
         """Parent retains its coordinator lock until this drain returns."""
+        intake_tasks = tuple(self.intake_tasks)
+        for task in intake_tasks:
+            task.cancel()
+        if intake_tasks:
+            await asyncio.gather(*intake_tasks, return_exceptions=True)
+        self.intake_tasks.difference_update(intake_tasks)
         await self.inbox.close()
+        if self.profile_task is not None:
+            self.profile_task.cancel()
+            await asyncio.gather(self.profile_task, return_exceptions=True)
+            self.profile_task = None
         if self.activity_task is not None:
             self.activity_task.cancel()
             await asyncio.gather(self.activity_task, return_exceptions=True)
@@ -190,13 +228,26 @@ class ProductSlack:
 
     async def watch(self) -> None:
         while True:
+            # Clear before scanning so a commit during the pump cannot get lost
+            # between deciding to wait and beginning the wait.
+            self.delivery_wakeup.clear()
             try:
                 await self.pump()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - preserve the durable queue across provider/store outages
                 logger.warning("Product Slack delivery remains saved (%s).", type(error).__name__)
-            await asyncio.sleep(3)
+            finished = time.monotonic()
+            try:
+                await asyncio.wait_for(self.delivery_wakeup.wait(), DELIVERY_POLL_SECONDS)
+            except TimeoutError:
+                pass
+            # Pump sends at most one update per channel. Even a burst of commit
+            # hints must respect Slack's per-channel pacing; missed hints and
+            # disconnected listeners retain the existing three-second fallback.
+            remaining = MIN_DELIVERY_INTERVAL - (time.monotonic() - finished)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
 
     def verify_signature(self, body: bytes, headers: Any) -> None:
         stamp = headers.get("x-slack-request-timestamp", "")
@@ -225,7 +276,7 @@ class ProductSlack:
         }, sort_keys=True).encode()).hexdigest()
         return bot
 
-    async def actor(self, team: str, user: str) -> tuple[User, ProductPrincipal]:
+    async def actor(self, team: str, user: str, *, refresh_profile: bool = False) -> tuple[User, ProductPrincipal]:
         def enroll():
             with self.store.connect() as conn:
                 conn.begin_write()
@@ -234,7 +285,7 @@ class ProductSlack:
         identity = await source_database(enroll)
         if self.settings.slack_identity_linking_enabled:
             rows = await source_database(self.store.rows, "SELECT * FROM users WHERE id=?", (identity,))
-            if rows and rows[0].get("profile_next_check", 0) <= time.time():
+            if rows and (refresh_profile or rows[0].get("profile_next_check", 0) <= time.time()):
                 await self.connections.identities.resolve(rows[0], team)
         principal = await self.product.identity.current(identity)
         async with self.runtime.database.sessions.begin() as db:
@@ -384,6 +435,8 @@ class ProductSlack:
                         session_id=thread.session_id, turn_id=turn.id,
                         destination=json.dumps({
                             "channel": thread.channel_id, "thread_ts": thread.thread_ts, "control": control,
+                            **({"input": True, "input_message": key.removeprefix("web-input:").rsplit(":", 2)[0],
+                                "input_revision": int(key.rsplit(":", 2)[1])} if key.startswith("web-input:") else {}),
                             "segment_id": turn.id if key == "accepted" or control else segment.id,
                         }),
                         content=self.runtime.security.seal(content),
@@ -394,6 +447,8 @@ class ProductSlack:
 
     async def stage(self):
         from app.slack_format import slack_text
+
+        await self.stage_web_inputs()
 
         async with self.runtime.database.sessions() as db:
             pairs = (await db.execute(select(Turn, SlackThread, ProductSlackBinding).join(
@@ -409,10 +464,13 @@ class ProductSlack:
             # Admission and delivery can run concurrently. Reserve the same
             # primary reply before any later state is queued.
             await self.queue(turn, thread, "accepted", {"text": "Moyai received your message."})
+            failure_report = (
+                await FailureReport.for_turn(self.runtime, turn) if turn.status == "failed" else None
+            )
             text_value = {
                 "queued": "Moyai is getting ready.", "running": "Moyai is working.",
                 "saving": "Moyai is saving the work.", "waiting": "Moyai needs your response.",
-                "failed": "This task stopped before it completed. Open Moyai for details.",
+                "failed": failure_report.text if failure_report is not None else "",
                 "stopped": "The task stopped.",
             }.get(turn.status, "")
             if turn.status == "completed":
@@ -453,10 +511,48 @@ class ProductSlack:
                         "\n<" + self.settings.public_url.rstrip("/") + "/api/files/" + artifact.id
                         + "|" + html.escape(artifact.name, quote=False).replace("|", "¦") + ">"
                     )
-            await self.queue(
-                turn, thread, f"{turn.status}:0",
+            parts = [(
+                f"{turn.status}:0",
                 thread_message(content["text"], url, cards=cards, controls=controls),
-            )
+            )]
+            if failure_report is not None:
+                parts.append(("failed:debug", SlackFileDelivery.content(
+                    failure_report.debug_log,
+                    after=f"product-slack:{turn.id}:failed:0",
+                )))
+            await self.queue_batch(turn, thread, parts)
+
+    async def stage_web_inputs(self):
+        """Mirror only new, authored web input, with a durable per-message identity."""
+        from app.slack_format import slack_text
+
+        from .skill_mentions import display_text
+
+        async with self.runtime.database.sessions() as db:
+            rows = (await db.execute(select(Message, MessageSource, Turn, SlackThread, User).join(
+                MessageSource, MessageSource.message_identity == Message.identity,
+            ).join(Turn, Turn.id == Message.turn_id).join(SlackThread, SlackThread.session_id == Message.session_id).join(
+                User, User.id == Message.author_id,
+            ).where(Message.role == "user", MessageSource.mirror.is_(True), ~select(Delivery.id).where(
+                Delivery.identity == "product-slack:" + Turn.id + ":web-input:" + Message.identity
+                + ":" + cast(MessageSource.revision, String) + ":0",
+            ).exists()).order_by(Message.id).limit(100))).all()
+        for message, source, turn, thread, author in rows:
+            origin = json.loads(self.runtime.security.unseal(source.data))
+            if origin.get("kind") != "web" and origin.get("edited_in") != "web":
+                continue
+            content = slack_text(display_text(self.runtime.security.unseal(message.content).decode()))
+            from app.slack_format import split_reply
+            async with self.runtime.database.sessions() as db:
+                from .models import TurnImage, Upload
+                for upload in await db.scalars(select(Upload).join(TurnImage, TurnImage.upload_id == Upload.id).where(
+                    TurnImage.turn_id == turn.id,
+                ).order_by(TurnImage.position)):
+                    content += f"\n<{self.settings.public_url.rstrip('/')}/api/uploads/{upload.id}|{html.escape(upload.name).replace('|', '¦')}>"
+            parts = split_reply(content, limit=2800) or ["Attached files"]
+            await self.queue_batch(turn, thread, [(f"web-input:{message.identity}:{source.revision}:{index}", {
+                "text": f"*{html.escape(author.display_name, quote=False)} ({'edited in' if source.revision else 'from'} Moyai)*\n{part}",
+            }) for index, part in enumerate(parts)])
 
     async def interact(self, payload: dict[str, Any]):
         bot = await source_database(self.installation)
@@ -529,7 +625,13 @@ class ProductSlack:
             turn = await db.get(Turn, delivery.turn_id)
             actor = await db.get(User, turn.actor_id) if turn else None
             admitted = await db.get(ProductTurnAuthority, delivery.turn_id)
-        control = json.loads(delivery.destination).get("control") is True
+            destination = json.loads(delivery.destination)
+            if destination.get("input"):
+                source = await db.get(MessageSource, destination.get("input_message", ""))
+                if (source is None or source.revision != destination.get("input_revision")
+                        or not source.mirror or turn is None or turn.status == "stopped"):
+                    return False
+        control = destination.get("control") is True
         if (
             binding is None or binding.connection_authority != bot["authority"]
             or (binding.paused and not control) or session is None or session.deleted
@@ -546,6 +648,24 @@ class ProductSlack:
             return False
         return True
 
+    async def _claim(self, delivery: Delivery) -> str | None:
+        from .slack_progress import claim_delivery
+
+        token = await self.connectors.slack_bot_token()
+        if not await self.delivery_allowed(delivery):
+            return None
+        if not await claim_delivery(self.runtime, delivery, product=True):
+            return None
+        try:
+            still_allowed = await self.delivery_allowed(delivery)
+        except BaseException:
+            await self._settle(delivery.id, "pending")
+            raise
+        if not still_allowed:
+            await self._settle(delivery.id, "suppressed")
+            return None
+        return token
+
     async def deliver(self, client: httpx.AsyncClient, delivery: Delivery):
         if not await self.delivery_allowed(delivery):
             async with self.runtime.database.sessions.begin() as db:
@@ -553,12 +673,41 @@ class ProductSlack:
                     Delivery.id == delivery.id, Delivery.status == "pending",
                 ).values(status="suppressed"))
             return
-        from .slack_progress import claim_delivery, reply_target
+
+        destination = json.loads(delivery.destination)
+        content = json.loads(self.runtime.security.unseal(delivery.content))
+        if SlackFileDelivery.is_content(content):
+            if not await SlackFileDelivery.ready(self.runtime, content):
+                return
+            token = await self._claim(delivery)
+            if token is None:
+                return
+
+            async def before_send():
+                if not await self.delivery_allowed(delivery):
+                    raise PermissionError("Slack debug log delivery is no longer authorized.")
+
+            try:
+                receipt = await SlackFileDelivery.send(
+                    client,
+                    content,
+                    destination,
+                    headers={"Authorization": "Bearer " + token},
+                    before_send=before_send,
+                )
+            except asyncio.CancelledError as exc:
+                await self._settle(delivery.id, "rejected", {"error": str(exc)})
+                raise
+            except Exception as exc:  # noqa: BLE001  # [BLE001] Failed uploads must settle rejected.
+                await self._settle(delivery.id, "rejected", {"error": str(exc)})
+                return
+            await self._settle(delivery.id, "sent", receipt)
+            return
+
+        from .slack_progress import reply_target
         ready, reply_ts = await reply_target(self.runtime, delivery, product=True)
         if not ready:
             return
-        destination = json.loads(delivery.destination)
-        content = json.loads(self.runtime.security.unseal(delivery.content))
         request = message_request(
             RichReply(
                 text=content["text"], blocks=tuple(content.get("blocks") or ()),
@@ -569,20 +718,8 @@ class ProductSlack:
             fallback_blocks=False,
         )
         # Refresh only the installation bot. Never use personal/shared user OAuth.
-        token = await self.connectors.slack_bot_token()
-        if not await self.delivery_allowed(delivery):
-            return
-        if not await claim_delivery(self.runtime, delivery, product=True):
-            return
-        try:
-            still_allowed = await self.delivery_allowed(delivery)
-        except BaseException:
-            # No external send has begun. Restore only this known-unsent claim;
-            # the sending handler below never performs this transition.
-            await self._settle(delivery.id, "pending")
-            raise
-        if not still_allowed:
-            await self._settle(delivery.id, "suppressed")
+        token = await self._claim(delivery)
+        if token is None:
             return
         try:
             # AgentChat owns provider rendering/routing; this durable host owns
@@ -590,6 +727,9 @@ class ProductSlack:
             response = await client.post(
                 request["method"], headers={"Authorization": "Bearer " + token}, json=request["payload"],
             )
+            if response.status_code == 429:
+                await self._retry_rejected(delivery.id, response.headers.get("Retry-After", "30"))
+                return
             response.raise_for_status()
             result = response.json()
             if not isinstance(result, dict):
@@ -602,7 +742,27 @@ class ProductSlack:
             "sent" if result.get("ok") and result.get("ts")
             else "rejected" if result.get("ok") is False else "sending"
         )
+        if result.get("ok") is False and result.get("error") == "ratelimited":
+            await self._retry_rejected(delivery.id, result.get("retry_after", 30))
+            return
         await self._settle(delivery.id, status, result)
+
+    async def _schedule(self, identity: str, delay: float):
+        async with self.runtime.database.sessions.begin() as db:
+            row = await db.get(DeliverySchedule, identity)
+            if row is None:
+                row = DeliverySchedule(delivery_id=identity)
+                db.add(row)
+            row.checked_at = time.time()
+            row.next_attempt = row.checked_at + delay
+
+    async def _retry_rejected(self, identity: str, retry_after: Any):
+        try:
+            delay = max(5, min(3600, float(retry_after)))
+        except (ValueError, TypeError):
+            delay = 30
+        await self._schedule(identity, delay)
+        await self._settle(identity, "pending", {"ok": False, "error": "ratelimited", "retry_after": delay})
 
     async def _settle(self, identity: str, status: str, receipt: dict[str, Any] | None = None):
         async def write():
@@ -632,9 +792,14 @@ class ProductSlack:
         from .slack_progress import stage_progress
         await stage_progress(self.runtime, product=True)
         async with self.runtime.database.sessions() as db:
-            deliveries = list(await db.scalars(select(Delivery).where(
-                Delivery.identity.startswith("product-slack:"), Delivery.status.in_(["pending", "sending"]),
-            ).order_by(Delivery.created_at).limit(20)))
+            deliveries = []
+            for status in ("pending", "sending"):
+                deliveries.extend(await db.scalars(select(Delivery).outerjoin(
+                    DeliverySchedule, DeliverySchedule.delivery_id == Delivery.id,
+                ).where(
+                    Delivery.identity.startswith("product-slack:"), Delivery.status == status,
+                    func.coalesce(DeliverySchedule.next_attempt, 0) <= time.time(),
+                ).order_by(func.coalesce(DeliverySchedule.checked_at, 0), Delivery.created_at).limit(10)))
         if client is None:
             async with httpx.AsyncClient(base_url="https://slack.com/api/", timeout=20) as own:
                 channels = await self._deliver_batch(own, deliveries)
@@ -649,6 +814,9 @@ class ProductSlack:
 
         channels: set[str] = set()
         for delivery in deliveries:
+            # Rotate even entries blocked behind another message in the same
+            # channel. Unknown sends never occupy the entire pending-send lane.
+            await self._schedule(delivery.id, 30 if delivery.status == "sending" else 3)
             if delivery.status == "pending":
                 if await skip_obsolete(self.runtime, delivery, product=True):
                     continue
@@ -758,7 +926,7 @@ class ProductSlack:
         @router.post("/hooks/slack")
         @router.post("/hooks/slack/events")
         async def event(request: Request):
-            return await self.inbox.receive_event(request)
+            return await self.inbox.receive_event(request, on_enqueued=self.acknowledge_soon)
 
         @router.post("/hooks/slack/interactions")
         async def interaction(request: Request):
