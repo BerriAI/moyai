@@ -86,6 +86,7 @@ jobs:
       - run: >-
           uv run pytest -x -q --tb=short --durations=20
           --splits 4 --group "$SHARD" --splitting-algorithm least_duration
+          --durations-path .test_durations
           --junitxml="test-results/native-${SHARD}.xml"
       - name: Save shard results
         if: always()
