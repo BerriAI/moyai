@@ -15,6 +15,7 @@ class Ocu(guest.Ocu):
         self.observation = None
         self.state_options = {}  # Pinned Linux 1.1.2 has no include_screenshot option.
         self.text = "App=Test\n\t1 button Submit\n\t2 text Name"
+        self.image = b"test-image"
         self.calls = []
         self.failure = False
 
@@ -24,7 +25,7 @@ class Ocu(guest.Ocu):
             return {"isError": self.failure, "content": [{"type": "text", "text": "done"}]}
         return {"content": [{"type": "text", "text": self.text},
                             {"type": "image", "mimeType": "image/png",
-                             "data": base64.b64encode(b"test-image").decode()}]}
+                             "data": base64.b64encode(self.image).decode()}]}
 
 
 def test_read_preserves_full_text_and_only_returns_requested_media(monkeypatch, tmp_path):
@@ -63,6 +64,20 @@ def test_action_uses_persistent_observed_state_and_only_its_arguments():
     assert [(tool, args) for tool, args in ocu.calls if tool != "get_app_state"] == [
         ("set_value", {"app": "Test", "element_index": "2", "value": "Ada"}),
     ]
+
+
+@pytest.mark.parametrize("change", [False, True])
+def test_coordinate_click_requires_same_screenshot_even_when_text_is_unchanged(monkeypatch, tmp_path, change):
+    monkeypatch.setattr(guest, "SCREENSHOTS", tmp_path)
+    ocu = Ocu()
+    state = ocu.observe("Test", "turn", screenshot=True)
+    if change:
+        ocu.image = b"button-moved-with-unchanged-accessibility-text"
+    result = ocu.perform({"action": "click", "app": "Test", "observation": state["observation"],
+                          "x": 40, "y": 50, "context": "turn"}, time.time() + 10)
+    assert result["action_executed"] is not change
+    assert sum(tool == "click" for tool, _ in ocu.calls) == (0 if change else 1)
+    assert result["text"] == state["text"]
 
 
 def test_native_error_after_input_stays_uncertain_and_invalidates_observation():

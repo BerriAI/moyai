@@ -71,7 +71,7 @@ class Ocu:
         if result.get("isError"):
             return {**value, "available": False}
         token = str(uuid4())
-        self.observation = (token, app, context, value["text"], screenshot)
+        self.observation = (token, app, context, value["text"], screenshot, value["images"])
         return {**value, "available": True, "observation": token}
 
     def perform(self, command, deadline):
@@ -94,6 +94,9 @@ class Ocu:
         if coordinates and not previous[4]:
             return {**current, "action_executed": False,
                     "message": "Inspect the screenshot before choosing coordinates."}
+        if coordinates and (not current["images"] or previous[5] != current["images"]):
+            return {**current, "action_executed": False,
+                    "message": "The screenshot changed. Inspect it before choosing new coordinates."}
         if command.get("element_index") and command["element_index"] not in re.findall(
             r"^\s*(\d+) \S", current["text"], re.MULTILINE,
         ):
