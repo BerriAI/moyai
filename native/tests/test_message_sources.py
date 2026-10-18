@@ -24,7 +24,7 @@ def test_clients_cannot_supply_authored_text_or_provenance():
 
 
 async def test_transcript_cache_version_changes_when_a_senders_name_is_refreshed(runtime, actor):
-    from conftest import sign_in
+    from test_application_boundaries import sign_in
     session = await runtime.database.create_session(actor, NewSession())
     await runtime.database.submit(actor, session.id, NewMessage(prompt='Saved message', request_key='name-cache'))
     async with sign_in(runtime) as client:
