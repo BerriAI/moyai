@@ -88,6 +88,9 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .topbar > div:first-child { flex: 1; min-width: 0; }
 .workspace-toggle { flex-shrink: 0; }
 .header-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.header-debug-trace { gap: 6px; }
+.topbar.has-trace-error { flex-wrap: wrap; }
+.header-debug-trace-error { flex: 1 0 100%; margin: 0; }
 .action-toast { position: fixed; z-index: 100; bottom: 20px; right: 20px; display: flex; align-items: center; gap: 12px; max-width: min(420px, calc(100vw - 32px)); border: 1px solid var(--ui-border); border-radius: 8px; padding: 10px 14px; background: var(--ui-secondary); color: var(--ui-foreground); font-size: 13px; overflow-wrap: anywhere; }
 .privacy { font-size: 12px; margin-left: 12px; }
 .status { display: inline-flex; font-size: 11px; background: var(--ui-secondary); color: var(--ui-muted); padding: 2px 8px; border-radius: 4px; text-transform: capitalize; }
@@ -137,6 +140,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .panel-tabs { display: flex; gap: 4px; padding: 16px; border-bottom: 1px solid var(--ui-border); }
 .panel-body { padding: 16px; overflow: auto; min-height: 0; flex: 1; }
 .panel-empty { display: flex; align-items: center; text-align: center; flex-direction: column; gap: 16px; color: var(--ui-muted); font-size: 13px; padding: 32px 12px; }
+.activity-toolbar { display: flex; justify-content: flex-end; padding: 0 0 12px; }
 .activity-row { border-bottom: 1px solid var(--ui-border); padding: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
 .activity-row summary { cursor: pointer; color: var(--ui-primary); }
 .activity-row pre { max-height: 320px; overflow: auto; }
@@ -241,6 +245,8 @@ legend { margin-bottom: 12px; font-weight: 500; }
   .sidebar.open + .main .mobile-menu { left: auto; right: 8px; }
   .topbar { padding: 20px 12px 16px 58px; min-height: 86px; align-items: flex-start; }
   .topbar h1 { font-size: 15px; }
+  .header-debug-trace-label { display: none; }
+  .header-debug-trace { padding-inline: 8px; }
   .privacy { display: none; }
   .chat { --chat-gutter: 16px; }
   .transcript { padding: 24px var(--chat-gutter); }

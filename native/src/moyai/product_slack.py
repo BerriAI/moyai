@@ -19,6 +19,7 @@ from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
+from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from agentchat.channels.slack.rendering import message_request
 from agentchat.models import RichReply
 from app.db import database as source_database
@@ -153,6 +154,21 @@ class ProductSlack:
         self.inbox = HookInbox(self.store, self, list)
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
+
+    async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
+        host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
+
+        async def request(api_method: str, payload: dict[str, object]) -> dict[str, object]:
+            token = await self.connectors.slack_bot_token()
+            return await self.connectors.request(
+                "POST", "https://slack.com/api/" + api_method,
+                headers={"Authorization": "Bearer " + token},
+                json=payload,
+                allowed_errors=("already_reacted",),
+            )
+
+        if not await host.acknowledge(source, request):
+            logger.info("Slack acknowledgement reaction was not added.")
 
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""

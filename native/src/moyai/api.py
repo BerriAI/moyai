@@ -27,6 +27,7 @@ from temporalio.service import RPCError
 from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
+from .debug_trace import debug_trace
 from .file_preview import routes as file_preview_routes
 from .general_preferences import general_preferences
 from .history_handoff import is_turn_run, latest_turn_snapshot
@@ -563,6 +564,16 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if snapshot is not None:
                 return saved_activity(snapshot.messages, turn.id)
         return []
+
+    @app.get("/api/sessions/{session_id}/debug-trace")
+    async def session_debug_trace(session_id: str, user: User = Depends(actor)):
+        return JSONResponse(
+            content=await debug_trace(runtime, user, session_id),
+            headers={
+                "Content-Disposition": f'attachment; filename="moyai-trace-{session_id}.json"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     @app.patch("/api/sessions/{session_id}")
     async def edit_session(session_id: str, body: SessionEdit, user: User = Depends(actor)):
