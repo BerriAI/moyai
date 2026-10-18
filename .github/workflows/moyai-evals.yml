@@ -6,6 +6,34 @@ on:
 permissions:
   contents: read
 jobs:
+  local-chat-tests:
+    name: Local agent chat
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.13'
+      - run: uv sync --frozen
+      - run: npm ci
+      - run: npm run typecheck:eval-chat
+      - run: npm run build:eval-chat
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:eval-chat
+      - run: uv run --frozen ruff check evals/moyai_harbor evals/tests scripts/local_agent_chat.py
+      - name: Test local chat without provider credentials
+        env:
+          PYTHONPATH: .:evals:native/src:native/tests
+        run: >-
+          uv run --frozen --project native --with harbor==0.24.0
+          --with openai==3.29.0 --with litellm==1.107.0.dev3
+          python -m pytest -q evals/tests
   moyai-agent-evals:
     name: Moyai agent evals
     runs-on: ubuntu-latest
@@ -54,7 +82,7 @@ jobs:
           PYTHONPATH: .:evals:native/src:native/tests
         run: |
           for task in evals/tasks/*/; do
-            uv run --project native --python 3.13 --with harbor==0.24.0 --with openai==3.29.0 harbor run \
+            uv run --project native --python 3.13 --with harbor==0.24.0 --with openai==3.29.0 --with litellm==1.107.0.dev3 harbor run \
               -p "$task" \
               -a moyai_harbor.agent:MoyaiAgent \
               -k 3 -n 1 -o evals/jobs -y

@@ -8,7 +8,10 @@
     "typecheck": "tsc --project native/web/tsconfig.json",
     "typecheck:native": "npm run typecheck",
     "test": "node --test tests/test_native_*.cjs",
-    "test:ui": "node --test --test-concurrency=1 tests/browser/native_*.cjs"
+    "test:ui": "node --test --test-concurrency=1 tests/browser/native_*.cjs",
+    "build:eval-chat": "vite build --config evals/web/vite.config.ts",
+    "typecheck:eval-chat": "tsc --project evals/web/tsconfig.json",
+    "test:eval-chat": "node --test evals/web/chat-ui.test.cjs"
   },
   "dependencies": {
     "@lexical/history": "0.52.0",

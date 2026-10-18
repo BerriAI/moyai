@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,20 +13,8 @@ from uuid import uuid4
 
 import httpx
 import sqlalchemy
-from app.credentials import SaveSecret
-from app.db import Store
-from app.security import Security as ProductSecurity
-from product_database_fixtures import product_database_state
-from pydantic import SecretStr
-from pydantic_ai import ConversationTypeAdapter
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from sqlalchemy import text
-from temporalio.testing import WorkflowEnvironment
-from test_product_identity import google_cookie, request, settings_for
-
 from moyai.agent import inference_models, make_agent
-from moyai.models import SlackThread, Turn
+from moyai.models import Session, SlackThread, Turn
 from moyai.product_connections import ProductConnections
 from moyai.product_continuation import ProductContinuationService
 from moyai.product_continuation_workspace import ProductWorkspaceCompatibility
@@ -34,6 +24,7 @@ from moyai.product_inference import ProductInferenceService
 from moyai.product_schema import migrate_product_schema
 from moyai.product_secrets import ProductSecrets
 from moyai.product_slack import ProductSlack, ProductSlackAuthority
+from moyai.questions import pending_questions
 from moyai.runtime import configure
 from moyai.settings import Settings
 from moyai.skill_invocations import SkillInvocations
@@ -41,6 +32,19 @@ from moyai.storage import ObjectStore, encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
+from product_database_fixtures import product_database_state
+from pydantic import SecretStr, TypeAdapter
+from pydantic_ai import ConversationTypeAdapter
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+from pydantic_ai_harness.ask_user import AskUserRequest
+from sqlalchemy import text
+from temporalio.testing import WorkflowEnvironment
+from test_product_identity import google_cookie, request, settings_for
+
+from app.credentials import SaveSecret
+from app.db import Store
+from app.security import Security as ProductSecurity
 
 EVALS = Path(__file__).resolve().parents[1]
 MODEL_COMPLETION = {
@@ -56,7 +60,19 @@ def json_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def conversation_trace(conversation_json: str | None, security: Any) -> list[dict[str, Any]]:
+def completed_tool_call_ids(conversation_json: str | None, security: Any) -> set[str]:
+    if not conversation_json:
+        return set()
+    conversation = ConversationTypeAdapter.validate_json(security.unseal(conversation_json))
+    return {
+        part.tool_call_id for message in conversation.messages for part in message.parts
+        if isinstance(part, ToolReturnPart)
+    }
+
+
+def conversation_trace(
+    conversation_json: str | None, security: Any, *, exclude_call_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
     if not conversation_json:
         return []
     conversation = ConversationTypeAdapter.validate_json(security.unseal(conversation_json))
@@ -66,6 +82,8 @@ def conversation_trace(conversation_json: str | None, security: Any) -> list[dic
         for part in message.parts:
             if isinstance(part, ToolCallPart):
                 identity = part.tool_call_id
+                if exclude_call_ids and identity in exclude_call_ids:
+                    continue
                 calls[identity] = {
                     "name": part.tool_name,
                     "args": part.args_as_dict(),
@@ -83,7 +101,7 @@ def slack_transport(history: list[dict[str, Any]]) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/conversations.replies"):
-            return httpx.Response(200, json={"ok": True, "messages": history})
+            return httpx.Response(200, json={"ok": True, "messages": history, "has_more": False})
         if path.endswith(("/chat.postMessage", "/chat.update")):
             return httpx.Response(200, json={
                 "ok": True, "channel": "CTEST0001", "ts": "1792100000.001",
@@ -211,6 +229,26 @@ async def run_moyai_turn(
     trial: int,
 ) -> dict[str, Any]:
     root_dir = EVALS / "jobs" / "runner" / f"{case['id']}-{trial}-{uuid4().hex[:8]}"
+    async with open_moyai_runtime(
+        workspace=workspace, credentials=credentials, agent_model=agent_model, root_dir=root_dir,
+    ) as running:
+        result = await execute_turn(
+            case, trial=trial, thread=thread, service=running.service,
+            runtime=running.runtime, temporal=running.temporal,
+        )
+        result["offered_tool_names"] = running.offered_tool_names
+        return result
+
+
+@asynccontextmanager
+async def open_moyai_runtime(
+    *,
+    workspace: Any,
+    credentials: dict[str, str],
+    agent_model: str,
+    root_dir: Path,
+) -> AsyncIterator[SimpleNamespace]:
+    """Keep the real agent runtime alive for one eval or serial local chat turns."""
     root_dir.mkdir(parents=True, exist_ok=True)
     async with product_database_state(root_dir) as product:
         source_schema = "moyai_eval_source"
@@ -343,7 +381,7 @@ async def run_moyai_turn(
                 skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
                 if skills.return_code != 0:
                     raise RuntimeError("Could not prepare the workspace skill directory.")
-                credentials = credential_capability(secrets_service.execution)
+                credential_tools = credential_capability(secrets_service.execution)
                 runtime.agent, runtime.durability = make_agent(
                     settings,
                     runtime.database,
@@ -352,19 +390,17 @@ async def run_moyai_turn(
                     models=models,
                     workspace=workspace,
                     skills_directory="skills",
-                    product_capabilities=[credentials],
+                    product_capabilities=[credential_tools],
                 )
-                async with make_worker(runtime):
-                    result = await execute_turn(
-                        case,
-                        trial=trial,
-                        thread=thread,
-                        service=service,
-                        runtime=runtime,
-                        temporal=temporal,
-                    )
-                    result["offered_tool_names"] = sorted(credentials.get_toolset().tools)
-                    return result
+                workspace_context = getattr(workspace, "runtime_context", None)
+                with workspace_context(runtime.database) if workspace_context else nullcontext():
+                    async with make_worker(runtime):
+                        yield SimpleNamespace(
+                            runtime=runtime,
+                            service=service,
+                            temporal=temporal,
+                            offered_tool_names=sorted(credential_tools.get_toolset().tools),
+                        )
         finally:
             await product_inference.close()
             await stores.close()
@@ -379,17 +415,24 @@ async def execute_turn(
     service: ProductSlack,
     runtime: Any,
     temporal: Any,
+    thread_ts: str | None = None,
+    current: str | None = None,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     stamp = 1_700_000_000 + trial * 10
-    current = f"{stamp + len(thread) + 1:.6f}"
-    thread_ts = current
+    current = current or f"{stamp + len(thread) + 1:.6f}"
+    thread_ts = thread_ts or current
     history = [{
-        "ts": f"{stamp + index * 0.1:.6f}",
+        "ts": message.get("ts") or f"{stamp + index * 0.1:.6f}",
         "user": "UBOT00001" if message["role"] == "you" else "UTEST0001",
         "username": message["display_name"],
         "text": message["text"],
         **({"files": [{"id": "FROOT01"}]} if message["files"] else {}),
     } for index, message in enumerate(case["thread"])]
+    # Slack's replies API includes the current event. The host verifies that
+    # the root exists and removes the current message from model history.
+    if not any(message["ts"] == current for message in history):
+        history.append({"ts": current, "user": "UTEST0001", "text": case["prompt"]})
     transport = slack_transport(history)
     original_client = httpx.AsyncClient
 
@@ -400,7 +443,7 @@ async def execute_turn(
     payload = {
         "type": "event_callback",
         "team_id": "TTEST0001",
-        "event_id": f"eval-{case['id']}-{trial}",
+        "event_id": event_id or f"eval-{case['id']}-{trial}",
         "event": {
             "type": "app_mention",
             "user": "UTEST0001",
@@ -421,19 +464,27 @@ async def execute_turn(
         ))
         if slack_thread is None:
             raise RuntimeError(f"ProductSlack did not bind {case['id']}.")
-        turn = await db.scalar(sqlalchemy.select(Turn).where(
-            Turn.session_id == slack_thread.session_id,
-        ).order_by(Turn.created_at.desc()))
-    if turn is None:
-        raise RuntimeError(f"ProductSlack did not submit a turn for {case['id']}.")
-    await runtime.database.claim_next()
-    handle = await temporal.client.start_workflow(
-        TurnWorkflow.run,
-        turn.id,
-        id=turn.workflow_id,
-        task_queue=runtime.settings.temporal_queue,
-    )
-    await asyncio.wait_for(handle.result(), timeout=300)
+        session = await db.get(Session, slack_thread.session_id)
+        # Keep pending calls: a deferred question can receive its result during
+        # this continuation. IDs remain meaningful if the SDK compacts history.
+        previous_calls = completed_tool_call_ids(session.conversation if session else None, runtime.security)
+    # Answer commands also create a completed acknowledgement. Dispatch the
+    # queued continuation, not whichever row was inserted most recently.
+    turn = await runtime.database.claim_next()
+    if turn is not None:
+        if turn.session_id != slack_thread.session_id:
+            raise RuntimeError("Another chat has a queued turn; local turns must run serially.")
+        handle = await temporal.client.start_workflow(
+            TurnWorkflow.run,
+            turn.id,
+            id=turn.workflow_id,
+            task_queue=runtime.settings.temporal_queue,
+        )
+        try:
+            await asyncio.wait_for(handle.result(), timeout=300)
+        except BaseException:
+            await handle.cancel()
+            raise
     posted: list[dict[str, Any]] = []
 
     def post_stub(request: httpx.Request) -> httpx.Response:
@@ -453,26 +504,46 @@ async def execute_turn(
         for _ in range(4):
             await service.pump(delivery)
     async with runtime.database.sessions() as db:
-        completed = await db.get(Turn, turn.id)
-    if completed is None:
-        raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
+        if turn is not None:
+            completed = await db.get(Turn, turn.id)
+            if completed is None:
+                raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
+        else:
+            # Invalid /answer, /status, and other controls can produce a reply
+            # without running an agent. Preserve any still-pending question.
+            session = await db.get(Session, slack_thread.session_id)
+            completed = await db.get(Turn, session.active_turn) if session and session.active_turn else None
     reply = next((
         "\n\n".join(
             block["text"]["text"] for block in item.get("blocks", [])
             if block.get("type") == "section" and isinstance(block.get("text"), dict)
-        )
+        ) or item.get("text", "")
         for item in reversed(posted)
-        if any(block.get("type") == "section" for block in item.get("blocks", []))
+        if item.get("text") or any(block.get("type") == "section" for block in item.get("blocks", []))
     ), "")
-    prompt = runtime.security.unseal(completed.prompt).decode()
+    questions = []
+    if completed is not None and completed.status == "waiting":
+        pending = pending_questions(runtime.database, completed)
+        if pending:
+            questions = [
+                TypeAdapter(AskUserRequest).dump_python(AskUserRequest.from_tool_call(call), mode="json")
+                for call in pending.calls if call.tool_name == "ask_user_question"
+            ]
     return {
         "case": case["id"],
         "trial": trial,
         "slack_event_input": payload,
         "slack_thread_input": thread,
-        "prompt_received": prompt,
+        "prompt_received": runtime.security.unseal(completed.prompt).decode() if completed else "",
         "attached_image_names": [],
         "posted_reply": reply,
-        "tool_trace": conversation_trace(completed.conversation, runtime.security),
-        "tokens_cost": json.loads(completed.usage or "{}"),
+        "tool_trace": conversation_trace(
+            completed.conversation, runtime.security, exclude_call_ids=previous_calls,
+        ) if turn is not None and completed else [],
+        "tokens_cost": json.loads(completed.usage or "{}") if completed else {},
+        "status": completed.status if completed else "completed",
+        "error": completed.error or "" if completed else "",
+        "questions": questions,
+        "turn_id": completed.id if completed else None,
+        "session_id": slack_thread.session_id,
     }
