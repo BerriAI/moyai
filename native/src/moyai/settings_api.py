@@ -25,6 +25,7 @@ from temporalio.service import RPCError
 
 from .analytics_service import report as analytics_report
 from .contracts import PreparedTurn, RunScope
+from .general_preferences import GeneralPreferences, general_preferences, preference_document
 from .models import Connection, Turn, User, now
 from .pull_requests import PullRequestService
 from .security import password_hash
@@ -316,6 +317,24 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             return checked
 
     router = APIRouter(prefix="/api/settings", tags=["settings"], route_class=RuntimeSettingsRoute)
+
+    @router.get("/general")
+    async def general(user: User = Depends(actor)):
+        return general_preferences(user.preferences)
+
+    @router.patch("/general")
+    async def update_general(body: GeneralPreferences, user: User = Depends(actor)):
+        async with runtime.database.sessions.begin() as db:
+            await lock_actor(db, user)
+            row = await db.get(User, user.id)
+            document = preference_document(row.preferences)
+            current = document.get("general", {})
+            document["general"] = {
+                **(current if isinstance(current, dict) else {}),
+                **body.model_dump(exclude_unset=True),
+            }
+            row.preferences = json.dumps(document)
+            return general_preferences(row.preferences)
 
     def capabilities(user: User) -> dict[str, Any]:
         return {

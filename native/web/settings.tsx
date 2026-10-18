@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react"
-import { ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Gauge, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, Sparkles, Trash2, Users, Wallet, X } from "lucide-react"
+import { ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Gauge, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, SlidersHorizontal, FileText, Trash2, Users, Wallet, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -12,10 +12,11 @@ import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
 import { MoyaiBrand, SidebarToggle } from "./brand"
+import type { GeneralPreferences } from "./general-preferences"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
-type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void; sidebarCollapsed: boolean; onToggleSidebar: () => void }
+type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void; sidebarCollapsed: boolean; onToggleSidebar: () => void; onPreferences: (preferences: GeneralPreferences) => void }
 type Capabilities = { read?: boolean; create?: boolean; update?: boolean; delete?: boolean; roles?: boolean; preferences?: boolean; review?: boolean; reason?: string; runtime_available?: boolean; shared?: boolean; run?: boolean; agent_access?: boolean }
 type Collection = { capabilities?: Capabilities; reason?: string }
 type Skill = { id: string; name: string; description: string; content: string; scope: string; enabled: boolean; editable: boolean; updated_at?: string }
@@ -68,7 +69,8 @@ type FormValues = Record<string, string | number | boolean>
 type Field = { name: string; label: string; type?: "text" | "password" | "textarea" | "select" | "checkbox" | "number" | "url"; required?: boolean; hint?: string; options?: Option[]; disabled?: boolean; min?: number; max?: number; minLength?: number; maxLength?: number; pattern?: string }
 
 const destinations = [
-  { id: "skills", title: "Skills", description: "Save instructions for yourself or your team.", group: "Workflows", Icon: Sparkles },
+  { id: "general", title: "General", description: "Set your chat preferences.", group: "Preferences", Icon: SlidersHorizontal },
+  { id: "skills", title: "Skills", description: "Save instructions for yourself or your team.", group: "Workflows", Icon: FileText },
   { id: "automations", title: "Automations", description: "Schedule recurring work and review past runs.", group: "Workflows", Icon: CalendarClock },
   { id: "memory", title: "Memory", description: "Review the context available to your future sessions.", group: "Workflows", Icon: BookOpen },
   { id: "connections", title: "Connections", description: "Choose the accounts Moyai can use in your sessions.", group: "Integrations", Icon: Link2 },
@@ -78,7 +80,7 @@ const destinations = [
   { id: "performance", title: "Performance", description: "Review recorded turn timings across the workspace.", group: "Administration", Icon: Gauge, admin: true },
   { id: "usage", title: "Spend & usage", description: "Review recorded model usage and cost coverage.", group: "Administration", Icon: Wallet, admin: true },
 ]
-const groups = ["Workflows", "Integrations", "Administration"]
+const groups = ["Preferences", "Workflows", "Integrations", "Administration"]
 const scopeOptions = [{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "shared", label: "Shared" }, { value: "bundled", label: "Bundled" }]
 const scopes = (user: SettingsUser, capabilities?: Capabilities) => scopeOptions.filter(option => option.value === "personal" || (user.role === "admin" && capabilities?.shared === true && option.value === "shared"))
 const contains = (query: string, ...values: (string | undefined)[]) => values.join(" ").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
@@ -529,7 +531,7 @@ export function productSkillFileUrl(id: string, path: string, revision: number):
   return `/api/product/skills/${encodeURIComponent(id)}/files/${parts.map(encodeURIComponent).join("/")}?revision=${revision}`
 }
 export function ProductSkillRows({ skills, onView }: { skills: ProductSkill[]; onView: (skill: ProductSkill) => void }) {
-  return <div className="ns-records">{skills.map(skill => <article className="ns-record" key={skill.id}><Sparkles className="ns-record-icon" aria-hidden="true" />
+  return <div className="ns-records">{skills.map(skill => <article className="ns-record" key={skill.id}><FileText className="ns-record-icon" aria-hidden="true" />
     <div className="ns-record-copy"><div className="ns-record-title"><h2>{skill.name}</h2><span className="ns-badge">{skill.scope === "organization" ? "Organization" : "Personal"}</span>{skill.archived && <span className="ns-badge">Archived</span>}</div>
       <p>{skill.description}</p><small>Saved reference: /{skill.reference} · Updated {dateTime(skill.updated_at)}</small></div>
     <Button size="sm" variant="outline" onClick={() => onView(skill)}>View instructions<span className="visually-hidden"> for {skill.name}</span></Button>
@@ -756,6 +758,47 @@ function ProductPersonalSlack({ individual, heading = "Personal Slack" }: { indi
   </>}</LoadState></section>
 }
 
+function GeneralPage({ onPreferences }: { onPreferences: (preferences: GeneralPreferences) => void }) {
+  const resource = useResource<GeneralPreferences>("/settings/general")
+  return <LoadState resource={resource}>{data => <GeneralForm initial={data} onPreferences={onPreferences} />}</LoadState>
+}
+
+function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; onPreferences: (preferences: GeneralPreferences) => void }) {
+  const [preferences, setPreferences] = useState(initial)
+  const mutation = useMutation()
+  const custom = preferences.connection_ids !== null
+  const accounts = useResource<Connection[]>(custom ? "/connections" : null)
+  const save = (patch: Partial<GeneralPreferences>) => {
+    let updated: GeneralPreferences
+    void mutation.run(async () => { updated = await api<GeneralPreferences>("/settings/general", "PATCH", patch) }, () => {
+      setPreferences(updated); onPreferences(updated)
+    })
+  }
+  return <>
+    <div className="ns-records">
+      <div className="ns-record"><div className="ns-record-copy"><h2>Message delivery</h2><p>When you send a message while Moyai is working.</p></div>
+        <div className="ns-row-actions"><Choice label="Message delivery" value={preferences.delivery_mode} disabled={mutation.busy} onChange={value => save({ delivery_mode: value as GeneralPreferences["delivery_mode"] })}
+          options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /></div>
+      </div>
+      <div className="ns-record"><div className="ns-record-copy"><h2>Connections</h2><p>Use the defaults for each chat, or choose connections for your messages.</p></div>
+        <div className="ns-row-actions"><Choice label="Connection preference" value={custom ? "custom" : "default"} disabled={mutation.busy} onChange={value => save({ connection_ids: value === "custom" ? [] : null })}
+          options={[{ value: "default", label: "Use chat defaults" }, { value: "custom", label: "Choose connections" }]} /></div>
+      </div>
+      {custom && <LoadState resource={accounts}>{rows => {
+        const available = rows.filter(row => row.enabled)
+        return available.length ? available.map(row => <label className="ns-record" key={row.id}>
+          <div className="ns-record-copy"><span className="ns-record-title">{row.name}<span className="ns-badge">{row.shared ? "Shared" : "Personal"}</span></span><p>{row.read_only ? "Read only" : "Can make changes"}</p></div>
+          <Checkbox aria-label={row.name} checked={preferences.connection_ids?.includes(row.id) ?? false} disabled={mutation.busy || (!preferences.connection_ids?.includes(row.id) && (preferences.connection_ids?.length ?? 0) >= 30)}
+            onCheckedChange={checked => save({ connection_ids: checked ? [...(preferences.connection_ids ?? []), row.id] : preferences.connection_ids?.filter(id => id !== row.id) ?? [] })} />
+        </label>) : <p className="ns-muted">No connections available.</p>
+      }}</LoadState>}
+    </div>
+    <p className="ns-muted">Only connections available to the chat are used. Personal connections are limited to private chats. <a className="ns-link" href="#settings/connections">Manage connections</a></p>
+    {mutation.busy && <p className="ns-muted" role="status">Saving…</p>}
+    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+  </>
+}
+
 function ConnectionsPage({ user }: { user: SettingsUser }) {
   const resource = useResource<Connection[]>("/connections")
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
@@ -764,7 +807,7 @@ function ConnectionsPage({ user }: { user: SettingsUser }) {
   const connectionBody = (row: Connection) => ({ name: row.name, kind: row.kind, credential: "", shared: row.shared, read_only: row.read_only, enabled: row.enabled, policy: row.policy ?? { require_approval: true } })
   return <LoadState resource={resource}>{data => {
     const rows = data.filter(row => contains(search, row.name, row.kind) && (filter === "all" || row.kind === filter))
-    return <><p className="ns-muted">Select connections for each message in Context & connections. Credentials stay hidden after saving.</p>
+    return <><p className="ns-muted">Choose default connections in <a className="ns-link" href="#settings/general">General preferences</a>.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...services]} />}
         action={<Button onClick={() => setEditor("new")}><Plus />Add connection</Button>} />
       {rows.length ? <div className="ns-records">{rows.map(row => <article className="ns-record" key={row.id}><Link2 className="ns-record-icon" aria-hidden="true" />
@@ -905,7 +948,7 @@ function SettingsLink({ page, navigate, children, ...props }: { page: string; na
   }}>{children}</a>
 }
 
-export function SettingsPage({ user, page, productMode = "standalone", onNavigate, onBack, sidebarCollapsed, onToggleSidebar }: SettingsPageProps) {
+export function SettingsPage({ user, page, productMode = "standalone", onNavigate, onBack, sidebarCollapsed, onToggleSidebar, onPreferences }: SettingsPageProps) {
   const current = !page || page === "settings" ? "overview" : page === "spend" ? "usage" : page
   const destination = destinations.find(item => item.id === current)
   const [navOpen, setNavOpen] = useState(false)
@@ -937,6 +980,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
           {destination?.productOnly && productMode !== "existing" ? <div className="ns-empty"><h2>Existing product accounts required</h2><p>This page is available when Moyai uses the existing product account service.</p></div>
             : destination?.admin && user.role !== "admin" ? <div className="ns-empty" role="alert"><Shield size={24} /><h2>Administrator access required</h2><p>This page is available to workspace administrators.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview</Button></div>
             : current === "overview" ? <OverviewPage user={user} navigate={navigate} productMode={productMode} />
+              : current === "general" ? <GeneralPage onPreferences={onPreferences} />
               : current === "skills" ? productMode === "existing" ? <ProductSkillsPage /> : <SkillsPage user={user} />
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />

@@ -1,36 +1,38 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-import { ArrowUp, BookOpen, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
+import { ArrowUp, Bug, Download, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
 import { SkillMessage } from "./skill-content"
-import { Checkbox } from "@/components/ui/checkbox"
+import { SkillMarkdown, SkillMarkdownProvider } from "./skill-markdown"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
+import { downloadDebugTrace } from "./debug-trace"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import { Home } from "./home"
+import type { GeneralPreferences } from "./general-preferences"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { SessionTitle } from "./session-title"
+import { useSessionPreferences } from "./use-session-preferences"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
 import { FilesPanel, OutputPanel } from "./output"
 import { PanelTabs, emptyPanelState, panelReducer, type AddTabKind, type PanelAction } from "./panel-tabs"
-import type { OutputResource, WorkspaceTab } from "./workspace-types"
+import type { ActionSelection, OutputResource, WorkspaceTab } from "./workspace-types"
 import { CommandPalette, COMMAND_PALETTE_ID, type PaletteCurrentSession, type PaletteSearchAdapter, type PaletteSession } from "./command-palette"
 import { applyLiveEvent, emptyLiveTranscript, liveFinalAnswer, mergeActivity, type LiveEvent } from "./live-transcript"
-import { TurnProgress } from "./turn-progress"
+import { TurnProgress, toolLabel } from "./turn-progress"
+import { ActionPanel } from "./action-panel"
 import { useWorkProgress } from "./use-work-progress"
 import { orderedWorkMessages, workSegments } from "./work-timeline"
 import { PanelRatioProvider, PanelResizeHandle } from "./panel-resize"
@@ -48,7 +50,7 @@ const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(m
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
-type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing" }
+type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing"; preferences?: GeneralPreferences }
 type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
@@ -58,6 +60,7 @@ type Effect = { id: string; turn_id: string; tool_name: string; arguments: unkno
 type View = { session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 const settingsDestinations = [
+  { page: "general", label: "General" },
   { page: "skills", label: "Skills" }, { page: "automations", label: "Automations" }, { page: "memory", label: "Memory" },
   { page: "connections", label: "Connections" }, { page: "secrets", label: "Secrets" },
   { page: "personal-slack", label: "Personal Slack", productOnly: true },
@@ -130,6 +133,12 @@ function App() {
   const settingsOpen = selected === "settings" || selected.startsWith("settings/")
   const historical = selected.startsWith("run=")
   const scopeKey = `${me?.user.id}:${me?.user.role}:${me?.user.individual}:${me?.csrf}`
+  const preferences = useSessionPreferences(scopeKey)
+  const preferenceRows = new Map(sessions.filter(row => !sessionIsReadOnly(row)).map(row => [row.id, row]))
+  const preferenceSession = (row: SidebarSession) => {
+    const latest = preferenceRows.get(row.id)
+    return preferences.apply(sessionIsReadOnly(row) || !latest ? row : { ...row, pinned: latest.pinned, folder: latest.folder })
+  }
   const routeScope = `${scopeKey}:${routeRevision}`, routeKey = `${routeScope}:${selected}`
   const originalId = historical ? decodeRoute(selected.slice(4)) : ""
   const acceptedStart = (initialConversation?.scope === scopeKey && initialConversation.value.session.id === selected)
@@ -174,6 +183,7 @@ function App() {
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
+    const preferenceCheckpoint = preferences.checkpoint()
     setInventoryState(previous => ({ ...previous, loading: true }))
     const inventory = async () => {
       const rows = new Map<string, Session>(), notices = new Set<string>()
@@ -205,6 +215,7 @@ function App() {
       const results = await Promise.allSettled([
         inventory().then(result => {
           if (result && current()) {
+            preferences.acceptRead(preferenceCheckpoint, result.rows)
             setSessions(result.rows)
             setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
           }
@@ -225,7 +236,7 @@ function App() {
     } finally {
       if (version === refreshVersion.current) setInventoryState(previous => ({ ...previous, loading: false }))
     }
-  }, [listView, sessionPageCount])
+  }, [listView, sessionPageCount, preferences])
 
   useEffect(() => {
     api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
@@ -289,7 +300,7 @@ function App() {
   const newSession = () => { location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
   const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
   const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
-  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
+  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} preferences={preferences} preferenceSession={preferenceSession} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
     setWorkspaceRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1, tab: "computer" }))
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
@@ -299,11 +310,11 @@ function App() {
       <Button variant="ghost" className="rail-palette-trigger" aria-haspopup="dialog" aria-controls={COMMAND_PALETTE_ID} onClick={() => setPaletteOpen(true)}><Search size={16} /><span>Search sessions & commands</span><span className="key-hint">⌘K</span></Button>
       <span className="rail-section-label">Workspace</span>
       <nav className="rail-destinations" aria-label="Workspace tools">
-        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><BookOpen />Skills</Button>
+        <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("skills")}><FileText />Skills</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
-      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
+      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...preferences.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
         hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
         onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
         onOpenSideChat={row => {
@@ -323,7 +334,7 @@ function App() {
       {!settingsOpen && <Button className="mobile-menu" variant="outline" size="icon" aria-label="Toggle conversations" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</Button>}
       {error && <div className="error global-error" role="alert">{error}<Button variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
       {settingsOpen
-        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} sidebarCollapsed={sidebarHidden} onToggleSidebar={toggleSidebar} /></React.Suspense>
+        ? <React.Suspense fallback={<div className="center muted">Opening settings…</div>}><SettingsPage user={me.user} productMode={me.product_mode} page={selected.split("/")[1] || "overview"} onNavigate={page => { location.hash = `settings/${page}` }} onBack={() => { location.hash = lastConversation.current }} sidebarCollapsed={sidebarHidden} onToggleSidebar={toggleSidebar} onPreferences={preferences => setMe(current => current?.user.id === me.user.id && current.csrf === me.csrf ? { ...current, preferences } : current)} /></React.Suspense>
         : historical && !nativeSelected
         ? <React.Suspense fallback={<div className="center muted">Opening saved history…</div>}><ProductHistory key={`${routeScope}:${selected}`} sessionId={originalId} scopeKey={routeScope} onOpenSession={openHistorySession} onStartNewNative={newSession} /></React.Suspense>
         : nativeSelected
@@ -334,7 +345,7 @@ function App() {
           onSession={session => { setCurrentSession(session); setInitialConversation(previous => previous?.value.session.id === (session?.id ?? nativeSelected) ? null : previous) }} />
         : selected
         ? <div className="center" role={routeError ? "alert" : "status"}>{routeError || "Opening conversation…"}{routeError && <Button variant="outline" onClick={() => setRouteRevision(value => value + 1)}>Retry</Button>}</div>
-        : <Home models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
+        : <Home preferences={me.preferences} models={me.models} defaultModel={me.default_model} individual={me.user.individual !== false} productMode={me.product_mode} connectionVersion={connectionVersion} onCreated={refresh}
           onStarted={value => { setInitialConversation({ scope: scopeKey, value }); setSelected(value.session.id); location.hash = value.session.id }} />}
     </main>
     <AppCommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} scopeKey={`${scopeKey}:${selected}`} role={me.user.role} productMode={me.product_mode}
@@ -349,7 +360,7 @@ function AppCommandPalette({ current, historicalId, productMode, ...props }: {
 }) {
   const actions = useSessionActions()
   const session: PaletteCurrentSession | undefined = current ? {
-    ...current, source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
+    ...actions.preferenceSession(current), source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
   } : historicalId ? { id: historicalId, title: "Saved session", source: "legacy", read_only: true } : undefined
   return <CommandPalette {...props} scopeLabel="Your accessible sessions" currentSession={session} busy={actions.busy} search={searchSessions}
     destinations={settingsDestinations.filter(item => !item.productOnly || productMode === "existing")} onOpenSession={openSessionReference}
@@ -405,12 +416,14 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </section></main>
 }
 
-function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
   const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages !== undefined ? resolved : null)
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
   const [plan, setPlan] = useState<Plan[]>([])
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState("")
+  const [traceBusy, setTraceBusy] = useState(false)
+  const [traceError, setTraceError] = useState("")
   const resolvedOnce = useRef(resolved)
   const viewNow = useRef(view)
   viewNow.current = view
@@ -426,7 +439,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [accountRevision, setAccountRevision] = useState(0)
   const [accountNotice, setAccountNotice] = useState("")
   const [accountCatalog, setAccountCatalog] = useState<{ scope: string; rows: Connection[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
-  const [mode, setMode] = useState("when_idle")
+  const mode = me.preferences?.delivery_mode ?? "when_idle"
+  const [skippedAccountScope, setSkippedAccountScope] = useState("")
   const [error, setError] = useState("")
   const pictures = useAttachments(setError)
   const [busy, setBusy] = useState(false)
@@ -438,6 +452,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const sessionActions = useSessionActions()
+  const exportTrace = useCallback(() => {
+    setTraceBusy(true)
+    setTraceError("")
+    void downloadDebugTrace(id).catch(error => setTraceError(String(error))).finally(() => setTraceBusy(false))
+  }, [id])
   const titleCallback = useRef(onTitle)
   titleCallback.current = onTitle
   const sessionCallback = useRef(onSession)
@@ -469,7 +488,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
-    setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice("")
+    setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
   }
@@ -541,8 +560,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     })
   }, [id, auxiliaryPanel, Boolean(view)])
   const accountScope = view ? `${id}:${view.session.visibility}:${view.session.surface}:${connectionVersion}:${accountRevision}` : ""
-  const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows : []
-  const accountBlocked = Boolean(accountNotice) || selectedAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error))
+  const effectiveConnections = accountCatalog.scope === accountScope ? accountCatalog.rows.filter(row => row.enabled && (view?.session.visibility === "private" || row.shared)) : []
+  const preferredAccounts = me.preferences?.connection_ids ?? selectedAccounts
+  const skipAccounts = skippedAccountScope === accountScope
+  const sendAccounts = skipAccounts ? [] : preferredAccounts.filter(id => effectiveConnections.some(row => row.id === id))
+  const accountBlocked = !skipAccounts && (Boolean(accountNotice) || preferredAccounts.length > 0 && (accountCatalog.scope !== accountScope || accountCatalog.loading || Boolean(accountCatalog.error)))
   useEffect(() => {
     if (!view || !visible) return
     const controller = new AbortController(), scope = accountScope
@@ -554,14 +576,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     return () => controller.abort()
   }, [accountScope, visible])
   useEffect(() => {
-    if (accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
+    if (me.preferences?.connection_ids != null || accountCatalog.scope !== accountScope || accountCatalog.loading || accountCatalog.error) return
     const available = new Set(accountCatalog.rows.filter(row => row.enabled).map(row => row.id))
     const retained = selectedAccounts.filter(account => available.has(account))
     if (retained.length !== selectedAccounts.length) {
       setSelectedAccounts(retained)
-      setAccountNotice("Account access changed. Review Context & connections before sending your next message.")
+      setAccountNotice("Some connections are no longer available for this chat.")
     }
-  }, [accountScope, accountCatalog, selectedAccounts])
+  }, [accountScope, accountCatalog, selectedAccounts, me.preferences?.connection_ids])
   useEffect(() => {
     if (!workspaceRequest || sideMode) return
     setWorkspaceOpen(false)
@@ -646,7 +668,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     setBusy(true); setError("")
     const body = {
       prompt, model: answeringQuestion ? active?.model ?? model : model, mode,
-      connections: answeringQuestion ? active?.connections ?? selectedAccounts : selectedAccounts,
+      connections: answeringQuestion ? active?.connections ?? sendAccounts : sendAccounts,
       attachments: pictures.readyFiles.map(file => file.id),
       ...(answeringQuestion ? { reply_to: active?.id } : {}),
     }
@@ -677,18 +699,23 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
   const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
   const finalText = liveFinalAnswer(liveText)
-  const liveMessage = !savedAssistant && finalText ? <article className="message assistant live-message" data-turn-id={liveText.turnId}>
-    <div className="message-author">Moyai</div><div className="message-content"><Markdown remarkPlugins={[remarkGfm]}>{finalText}</Markdown></div>
-  </article> : null
+  const liveMessage: Message | null = !savedAssistant && finalText ? {
+    id: -2, turn_id: liveText.turnId, role: "assistant", author_id: null, content: finalText,
+  } : null
   const displayedActivity = mergeActivity(activity, liveText.activity)
   const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
     turn.id === message.turn_id && waitsBehindActive(turn, active, sendingNow.has(turn.id))))
-  const visibleMessages = orderedWorkMessages(messages.filter(message =>
+  const visibleMessages = orderedWorkMessages((liveMessage ? [...messages, liveMessage] : messages).filter(message =>
     (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
-  const segments = workSegments(visibleMessages, view.turns)
+  const segments = workSegments(visibleMessages.filter(message => message !== liveMessage), view.turns)
   const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
+  function openAction(action: ActionSelection) {
+    if (sideMode && onOpenAction) { onOpenAction(action); return }
+    openTab({ id: "action", kind: "action", title: "Action", action })
+  }
+  const selectedTab = panelState.visible ? panelState.tabs.find(tab => tab.id === panelState.activeId) : undefined
   function openOutput(resource: OutputResource, sourceSessionId = id) {
     openTab({
       id: `output:${sourceSessionId}:${resource.kind}:${resource.id ?? resource.url}`,
@@ -702,7 +729,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   // Questions and effect reviews remain in the conversation where they can be answered.
   const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
     && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
-  const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
+  const chat = <SkillMarkdownProvider messages={visibleMessages}><section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
@@ -721,13 +748,14 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
             const segment = segments.get(message.id)
-            return <React.Fragment key={message.id}><article className={`message ${message.role}`}>
+            return <React.Fragment key={message.id}><article className={`message ${message.role}${message === liveMessage ? " live-message" : ""}`}
+              data-turn-id={message.turn_id}>
               <div className="message-author">{message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
-                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : <SkillMessage content={message.content} />}</div>}
+                {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
@@ -736,6 +764,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               entry={work.entries[segment.turn.id]} request={work.load}
               live={liveText.turnId === segment.turn.id ? liveText : undefined}
               onContentChange={followWork}
+              selectedAction={selectedTab?.kind === "action" ? selectedTab.action : undefined}
+              onAction={(tool, agent) => openAction({ sessionId: id, turnId: segment.turn.id, toolId: tool.id, agentId: agent?.id, name: toolLabel(tool.name) })}
               onSubagent={agent => openTab(agent.session_id ? {
                 id: `side-chat:${agent.session_id}`, kind: "side-chat", title: agent.name, sessionId: agent.session_id,
               } : {
@@ -744,7 +774,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               })}
             />}</React.Fragment>
           })}
-          {!savedAssistant && liveMessage}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
@@ -777,19 +806,15 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
-                {session.active_turn && <><Choice value={mode} onChange={setMode} label="Delivery timing" options={[{ value: "when_idle", label: "Queue next" }, { value: "asap", label: "Send now" }]} /><Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} />Stop</Button></>}
-                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? "Save message" : <ArrowUp />}</Button>
+                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await load() } catch (e) { setError(String(e)) } }}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
+                <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? <><Check className="composer-save-icon" /><span className="composer-optional-label">Save message</span></> : <ArrowUp />}</Button>
               </div>
             </div>
           </div>
-          {accountNotice && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Dismiss</Button></p>}
-          {session.surface !== "slack" && (me.product_mode === "existing" || effectiveConnections.some(item => item.enabled) || selectedAccounts.length > 0 || accountCatalog.error) && <details className="account-selection"><summary>Context & connections{selectedAccounts.length ? ` · ${selectedAccounts.length} selected` : ""}</summary>
-            {(accountCatalog.scope !== accountScope || accountCatalog.loading) && <p className="muted" role="status">Loading accounts for this session…</p>}
-            {accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry accounts</Button>{selectedAccounts.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedAccounts([]); setAccountNotice("") }}>Clear selected accounts</Button>}</p>}
-            <div className="connection-options">{effectiveConnections.filter(item => item.enabled && (session.visibility === "private" || item.shared)).map(item => <label key={item.id}><Checkbox checked={selectedAccounts.includes(item.id)} onCheckedChange={checked => { setAccountNotice(""); setSelectedAccounts(values => checked ? [...values, item.id] : values.filter(value => value !== item.id)) }} />{item.name}<span className="muted">{item.read_only ? "Read only" : "Can make changes"}</span></label>)}</div>
-            {!accountCatalog.loading && !accountCatalog.error && !effectiveConnections.length && <p className="muted">No accounts are available for this conversation. <a href="#settings/connections">Manage Connections</a></p>}
-          </details>}
-          <p className="composer-hint">{pictures.uploading ? "Uploading files…" : "Drop files or paste images · Enter to send · Shift+Enter for a new line"}</p>
+          {accountNotice && !skipAccounts && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Continue</Button><a href="#settings/general">Preferences</a></p>}
+          {accountBlocked && !accountNotice && !accountCatalog.error && <p className="composer-hint" role="status">Loading connections…</p>}
+          {accountBlocked && accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry connections</Button><Button type="button" variant="ghost" size="sm" onClick={() => { setSkippedAccountScope(accountScope); setAccountNotice("") }}>Continue without connections</Button></p>}
+          {pictures.uploading && <p className="composer-hint" role="status">Uploading files…</p>}
         </form>
       </div>
       {!sideMode && <WorkspaceOverlayContent>
@@ -805,7 +830,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           onOutput={openOutput} />
       </WorkspaceOverlayContent>}
       </div>
-      </section>
+      </section></SkillMarkdownProvider>
   if (sideMode) return <div className="conversation side-conversation">
     <header className="side-chat-heading"><h2 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h2><a href={`#${id}`} title="Open as main conversation" aria-label="Open side chat as main conversation"><ExternalLink size={15} /></a></header>
     {chat}
@@ -814,7 +839,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     <WorkspaceResourceProvider id={id} visible={visible} expanded={workspaceOpen}>
     <WorkspaceOverlay open={workspaceOpen} onOpenChange={setWorkspaceOpen} panelVisible={panelState.visible} panelExpanded={panelState.visible && panelState.expanded}>
     <div ref={workspaceElement} className={`workspace ${panelState.visible ? "with-panel" : "panel-closed"} ${panelState.visible && panelState.expanded ? "panel-expanded" : ""}`}>
-      <header className="topbar">
+      <header className={`topbar${traceError ? " has-trace-error" : ""}`}>
         <div className="session-heading"><h1 ref={heading} tabIndex={-1} title={session.title} aria-label={session.title}>
           <SessionTitle session={session} onRenamed={title => {
             // Discard reads started before the rename so they cannot restore the old title.
@@ -829,6 +854,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <span className="privacy-icon" title={session.surface === "slack" ? "Replies are delivered to Slack" : session.visibility === "private" ? "Private conversation" : "Shared conversation"} aria-label={session.surface === "slack" ? "Slack conversation" : `${session.visibility} conversation`}>{session.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}</span>
         </div>
         <div className="header-controls">
+          <Button type="button" variant="outline" size="sm" className="header-debug-trace" disabled={traceBusy} title="Download this session's debug trace (ATIF JSON)" aria-label="Debug trace" onClick={exportTrace}><Bug size={15} /><span className="header-debug-trace-label">{traceBusy ? "Preparing…" : "Debug trace"}</span></Button>
           {session.parent_session_id && <Button asChild variant="ghost" size="sm"><a href={`#${session.parent_session_id}`}>Parent chat</a></Button>}
           <Button variant={panelState.visible ? "secondary" : "ghost"} size="icon-sm" aria-label={panelState.visible ? "Hide side panel" : "Open side panel"} title={panelState.visible ? "Hide panel" : "Open panel"} onClick={() => dispatchPanel({ type: panelState.visible ? "hide" : "show" })}><PanelRight size={16} /></Button>
           <WorkspaceOverlayTrigger asChild><WorkspaceMenuKey open={workspaceOpen} sessionFailed={session.status === "failed"}
@@ -836,21 +862,32 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           <Button className="header-new-session" type="button" variant="ghost" size="icon-sm" aria-label="New session" title="New session" onClick={sessionActions.newSession}><SquarePen size={16} /></Button>
           <SessionMenu session={session} header />
         </div>
+        {traceError && <p className="error header-debug-trace-error" role="alert">{traceError}</p>}
       </header>
       {chat}
 
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
       <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
+        if (tab.kind === "action") return <ActionPanel
+          key={JSON.stringify([authorityKey, connectionVersion, me.user.id, me.csrf, tab.action])}
+          action={tab.action} active={activeTab} onDenied={() => clearSensitiveNow.current()} />
         if (tab.kind === "pull-request") return <PullRequestPanel key={`${connectionVersion}:${session.visibility}:${session.surface}`} sessionId={id} url={tab.url} onBack={() => { dispatchPanel({ type: "hide" }); setWorkspaceOpen(true) }} onUpdated={summary => { dispatchPanel({ type: "rename", id: tab.id, title: summary.title }); onPRUpdated() }} />
         if (tab.kind === "subagent") return <SubagentPanel sessionId={id} agent={{ id: tab.runId, name: tab.name, status: tab.status, avatar: tab.avatar }} active={activeTab} onOpenFile={openOutput} />
         if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
           onOpenFile={openOutput} onName={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
         if (tab.kind === "files") return <FilesPanel sessionId={id} onOpen={openOutput} active={activeTab} />
         if (tab.kind === "computer") return <React.Suspense fallback={<div className="panel-empty" role="status">Opening computer…</div>}><ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} /></React.Suspense>
-        if (tab.kind === "activity") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{panelLoading ? "Loading activity…" : session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}{displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}</>
+        if (tab.kind === "activity") return <>
+          <div className="activity-toolbar">
+            <Button variant="outline" size="sm" disabled={traceBusy} onClick={exportTrace}><Download size={15} />{traceBusy ? "Preparing trace…" : "Get debug trace"}</Button>
+          </div>
+          {panelError && <p className="error" role="alert">{panelError}</p>}
+          {!displayedActivity.length && <div className="panel-empty"><MessageSquare /><p>{panelLoading ? "Loading activity…" : session.status === "running" ? "Connecting to live activity…" : "Live steps appear here while Moyai works."}</p></div>}
+          {displayedActivity.map((item, index) => <ActivityRow key={index} item={item} />)}
+        </>
         if (tab.kind === "plan") return <>{panelError && <p className="error" role="alert">{panelError}</p>}{!plan.length && <div className="panel-empty"><Check /><p>{panelLoading ? "Loading plan…" : "Moyai’s task plan will appear here."}</p></div>}{plan.map(task => <div className="plan-row" key={task.id}><span className={`plan-mark ${task.status}`}>{task.status === "completed" ? "✓" : "○"}</span><div>{task.content}<small>{task.status.replaceAll("_", " ")}</small></div></div>)}</>
         if (tab.kind === "side-chat") return tab.sessionId
-          ? <Conversation key={`${me.user.id}:${tab.sessionId}`} id={tab.sessionId} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refreshList} workspaceRequest={null} pullRequests={[]} onPRUpdated={onPRUpdated} sideMode visible={activeTab} onOpenFile={openOutput} onTitle={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
+          ? <Conversation key={`${me.user.id}:${tab.sessionId}`} id={tab.sessionId} me={me} connections={connections} connectionVersion={connectionVersion} refreshList={refreshList} workspaceRequest={null} pullRequests={[]} onPRUpdated={onPRUpdated} sideMode visible={activeTab} onOpenFile={openOutput} onOpenAction={openAction} onTitle={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
           : <SideChatPicker parentId={id} defaultModel={me.default_model} individual={me.user.individual !== false} onCreated={refreshList} onSelect={selected => dispatchPanel({ type: "replace", id: tab.id, tab: { id: `side-chat:${selected.id}`, kind: "side-chat", sessionId: selected.id, title: selected.title } })} />
         return null
       }}</PanelTabs>

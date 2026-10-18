@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
+import { SkillMarkdown } from "./skill-markdown"
 import { Check, ChevronDown, ChevronRight, Circle, ExternalLink, Terminal, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -8,6 +7,7 @@ import type { Turn } from "./conversation-state"
 import type { LiveTranscript } from "./live-transcript"
 import { AgentAvatar } from "./workspace"
 import { workItems, type AgentProgress, type ToolProgress, type WorkEntry, type WorkSegment } from "./work-timeline"
+import type { ActionSelection } from "./workspace-types"
 import "./turn-progress.css"
 
 const activeStates = ["starting", "running", "saving", "stopping"]
@@ -22,7 +22,7 @@ const toolLabels: Record<string, string> = {
   browser_open: "Open browser", browser_read: "Inspect browser", browser_action: "Use browser",
   search_conversation_history: "Search conversation history",
 }
-const toolLabel = (name: string) => toolLabels[name] ?? name.replaceAll("_", " ")
+export const toolLabel = (name: string) => toolLabels[name] ?? name.replaceAll("_", " ")
 
 function duration(start?: string | number | null, end?: string | number | null): string {
   const from = typeof start === "number" ? start : Date.parse(start ?? "")
@@ -32,39 +32,47 @@ function duration(start?: string | number | null, end?: string | number | null):
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
-function ToolList({ tools }: { tools: ToolProgress[] }) {
+type ActionControls = {
+  onAction: (tool: ToolProgress, agent?: AgentProgress) => void
+  selectedAction?: ActionSelection
+  turnId: string
+  agent?: AgentProgress
+}
+
+function ToolList({ tools, onAction, selectedAction, turnId, agent }: { tools: ToolProgress[] } & ActionControls) {
   return <ol className="work-tool-list">{tools.map(tool => {
     const Status = tool.status === "completed" ? Check : tool.status === "failed" ? X : Circle
-    return <li key={tool.id}>
+    const selected = selectedAction?.turnId === turnId && selectedAction.toolId === tool.id && selectedAction.agentId === agent?.id
+    return <li key={tool.id}><Button type="button" variant="ghost" className="work-tool-action"
+      aria-label={`Open ${toolLabel(tool.name)} action`} aria-pressed={selected} onClick={() => onAction(tool, agent)}>
       <Status size={13} aria-hidden="true" />
       <span>{toolLabel(tool.name)}</span>
       <small className={tool.status === "failed" ? "error" : ""}>
         {tool.status === "running" ? "Running" : statusLabels[tool.status] ?? tool.status}
         {tool.finished_at && duration(tool.created_at, tool.finished_at) ? ` · ${duration(tool.created_at, tool.finished_at)}` : ""}
       </small>
-    </li>
+      <ChevronRight size={13} aria-hidden="true" />
+    </Button></li>
   })}</ol>
 }
 
-function ToolGroup({ tools }: { tools: ToolProgress[] }) {
+function ToolGroup({ tools, ...controls }: { tools: ToolProgress[] } & ActionControls) {
   const [open, setOpen] = useState(false)
-  const names = [...new Set(tools.map(tool => toolLabel(tool.name)))]
   const running = tools.some(tool => tool.status === "running")
   return <Collapsible open={open} onOpenChange={setOpen} className="work-tool-group">
     <CollapsibleTrigger asChild><Button type="button" variant="ghost" className="work-detail-toggle">
       <Terminal size={14} aria-hidden="true" />
-      <span>{names.slice(0, 3).join(" · ")}{names.length > 3 ? ` · +${names.length - 3}` : ""}</span>
-      <small>{tools.length} {tools.length === 1 ? "action" : "actions"}</small>
+      <span>{tools.length} {tools.length === 1 ? "action" : "actions"}</span>
       {running && <span className="running-dot" aria-hidden="true" />}
       {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
     </Button></CollapsibleTrigger>
-    <CollapsibleContent><ToolList tools={tools} /></CollapsibleContent>
+    <CollapsibleContent><ToolList tools={tools} {...controls} /></CollapsibleContent>
   </Collapsible>
 }
 
-function AgentWork({ agent, now, onOpen }: {
+function AgentWork({ agent, now, onOpen, ...controls }: {
   agent: AgentProgress; now: number; onOpen?: (agent: AgentProgress) => void
-}) {
+} & ActionControls) {
   const [open, setOpen] = useState(false)
   const latest = agent.messages.at(-1)
   const working = ["running", "starting", "stopping"].includes(agent.status)
@@ -84,27 +92,29 @@ function AgentWork({ agent, now, onOpen }: {
     </div>
     {agent.parent_name && <p className="work-agent-parent">Delegated by {agent.parent_name}</p>}
     {!open && latest && <div className="work-agent-preview message-content">
-      <Markdown remarkPlugins={[remarkGfm]}>{latest.text}</Markdown>
+      <SkillMarkdown>{latest.text}</SkillMarkdown>
     </div>}
     {!latest && <p className="muted work-agent-preview">{working ? "Waiting for the first update…" : "No public update was recorded."}</p>}
     {currentTool && <p className="work-agent-action" role="status">{toolLabel(currentTool.name)}…</p>}
     <CollapsibleContent className="work-agent-history">
       {agent.messages.map(message => <div key={message.id} className="turn-progress-entry message-content">
         {message.phase === "final_answer" && <small className="work-result-label">{agent.name} result</small>}
-        <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+        <SkillMarkdown>{message.text}</SkillMarkdown>
       </div>)}
-      {agent.tools.length > 0 && <ToolGroup tools={agent.tools} />}
+      {agent.tools.length > 0 && <ToolGroup tools={agent.tools} agent={agent} {...controls} />}
       {(agent.messages_limited || agent.tools_limited) && <p className="muted">Showing recent subagent activity.</p>}
     </CollapsibleContent>
   </Collapsible>
 }
 
 /** A real final answer collapses its segment; steering keeps earlier activity. */
-export function TurnProgress({ segment, entry, live, visible, request, onSubagent, onContentChange }: {
+export function TurnProgress({ segment, entry, live, visible, request, onSubagent, onContentChange, onAction, selectedAction }: {
   segment: WorkSegment; entry?: WorkEntry; live?: LiveTranscript; visible: boolean
   request: (turn: Turn) => Promise<void>
   onSubagent?: (agent: AgentProgress) => void
   onContentChange?: () => void
+  onAction: ActionControls["onAction"]
+  selectedAction?: ActionSelection
 }) {
   const { turn, earlier, hasFinalAnswer } = segment
   const running = !earlier && activeStates.includes(turn.status)
@@ -142,15 +152,15 @@ export function TurnProgress({ segment, entry, live, visible, request, onSubagen
         {running && <span className="running-dot" aria-hidden="true" />}
       </Button></CollapsibleTrigger>
       {!open && running && latest?.kind === "message" && <div className="turn-progress-latest message-content">
-        <Markdown remarkPlugins={[remarkGfm]}>{latest.message.text}</Markdown>
+        <SkillMarkdown>{latest.message.text}</SkillMarkdown>
       </div>}
       <CollapsibleContent className="turn-progress-history">
         {items.map(item => item.kind === "message"
           ? <div className="turn-progress-entry message-content" key={item.id}>
-            <Markdown remarkPlugins={[remarkGfm]}>{item.message.text}</Markdown>
+            <SkillMarkdown>{item.message.text}</SkillMarkdown>
           </div>
-          : item.kind === "tools" ? <ToolGroup key={item.id} tools={item.tools} />
-            : <AgentWork key={item.id} agent={item.agent} now={running ? now : Date.now()} onOpen={onSubagent} />)}
+          : item.kind === "tools" ? <ToolGroup key={item.id} tools={item.tools} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />
+            : <AgentWork key={item.id} agent={item.agent} now={running ? now : Date.now()} onOpen={onSubagent} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />)}
         {!items.length && !entry?.error && <p className="muted">{running ? "Waiting for the first update…" : entry?.loading ? "Loading saved activity…" : "No progress updates were recorded."}</p>}
         {entry?.error && <p className="error" role="alert">Could not refresh work details.
           <Button variant="ghost" size="sm" onClick={() => void request(turn)}>Retry</Button></p>}

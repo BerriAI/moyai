@@ -48,14 +48,15 @@ suppressed when the turn finishes, so it cannot overwrite a final answer.
 Approval requests reuse the primary reply while retaining their confirmed
 message timestamp and action checks. Control notices remain independent.
 
-Thread replies expose an **Open session** URL button during progress and at
-completion. Final answers that explicitly link GitHub PRs include up to five
-deduplicated cards with a LiteLLM violet (`#5B3FD1`) border, **View PR**,
-**Review changes**, and **Open session** buttons. Markdown link labels supply
-the heading; bare links show the PR number and repository. These are links
-from the answer, not claims of creation, approval, CI status, or merge. No
-GitHub lookup or personal credential is needed. Code examples do not make
-cards. Slack controls native button colors and fonts.
+Thread replies end with an ambient **[↗︎]** inline link to the Moyai session
+during progress and at completion when no PR cards are shown. Final answers
+that explicitly link GitHub PRs include up to five deduplicated cards with a
+LiteLLM violet (`#5B3FD1`) border, **View PR**, **Review changes**, and
+**Open session** buttons. PR cards keep their session button. Markdown link
+labels supply the heading; bare links show the PR number and repository. These
+are links from the answer, not claims of creation, approval, CI status, or
+merge. No GitHub lookup or personal credential is needed. Code examples do not
+make cards. Slack controls native button colors and fonts.
 Standalone PR-reference lines are replaced by the corresponding cards, including
 references at the end of a long answer. Links within explanatory sentences and
 code examples remain in the answer. References without a displayed card remain

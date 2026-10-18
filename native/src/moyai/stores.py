@@ -18,6 +18,7 @@ from pydantic_ai_harness.step_persistence import PostgresPool as StepPool
 from pydantic_ai_harness.step_persistence import PostgresStepStore, SqliteStepStore
 
 from .settings import Settings
+from .snapshot_store import SnapshotStepStore
 
 if TYPE_CHECKING:
     from .product_role_authority import OwnedHarnessPool, ProductRoleAuthority
@@ -50,7 +51,7 @@ class NativeStores:
             # Harness's structural pool protocols describe asyncpg at runtime;
             # asyncpg's stub leaves acquisition/transaction return types unspecified.
             self.memory = PostgresMemoryStore(cast(MemoryPool, self.pool))
-            self.steps = PostgresStepStore(cast(StepPool, self.pool), max_snapshots_per_run=None)
+            self.steps = SnapshotStepStore(cast(StepPool, self.pool))
             if provision:
                 # Public read operations initialize the SDK-owned schema without
                 # adding a run, conversation, memory file, plan item, or blob.
@@ -85,7 +86,7 @@ class NativeStores:
         from .product_role_authority import OwnedHarnessPool
         self.harness_pool = OwnedHarnessPool(self.pool, authority)
         self.memory = PostgresMemoryStore(cast(MemoryPool, self.harness_pool))
-        self.steps = PostgresStepStore(cast(StepPool, self.harness_pool), max_snapshots_per_run=None)
+        self.steps = SnapshotStepStore(cast(StepPool, self.harness_pool), owned=True)
         self.plans.clear()
 
     async def close(self) -> None:

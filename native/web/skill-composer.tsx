@@ -217,7 +217,7 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
               id={`${id}-${index}`} key={skill.reference} className="skill-option"
               title={`${skillDisplayName(skill.name)} · ${skillScopeName(skill.scope)}\n${skill.description}`}
               onMouseDown={event => event.preventDefault()} onClick={() => pick(skill)}>
-              <span className="skill-option-icon"><SkillIcon skill={skill} /></span>
+              <span className="skill-option-icon"><SkillIcon /></span>
               <span className="skill-option-copy"><span className="skill-option-title">{skillDisplayName(skill.name)}</span><span className="skill-option-description">{skill.description}</span></span>
               <span className="skill-option-scope">{skillScopeName(skill.scope)}</span>
             </button>)}</div>

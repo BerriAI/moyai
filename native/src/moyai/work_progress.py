@@ -8,20 +8,22 @@ never republishes a child's text as the parent's answer.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from pydantic_ai.messages import ModelResponse
+from fastapi import HTTPException
+from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
 from sqlalchemy import select
 
 from .commentary import public_text_parts
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .models import Session, Turn
-from .presentation import redact
+from .presentation import private_tool, redact
 from .progress import progress_secrets, turn_progress
 from .workspace import agent_labels, run_lineage
 
@@ -114,6 +116,68 @@ class WorkProgress:
 
     def clear(self) -> None:
         self._snapshots.clear()
+
+    async def action(self, turn: Turn, action_id: str, agent_id: str | None) -> tuple[dict, str]:
+        """Load one action on demand, entering through requester-scoped progress.
+
+        Never accept an arbitrary run ID or return the rest of a model snapshot.
+        Delegated action IDs refer only to turns generated for that assignment.
+        """
+        source, run_id, call_id = turn, turn.id, action_id
+        terminal = turn.status in {"completed", "failed", "stopped", "resumed"}
+        if agent_id:
+            progress = await self.read(turn)
+            agent = next((item for item in progress["subagents"] if item["id"] == agent_id), None)
+            if agent is None or not any(item["id"] == action_id for item in agent["tools"]):
+                raise HTTPException(404, "Action not found.")
+            run_id = agent["id"]
+            terminal = agent["status"] in {"completed", "failed", "stopped", "interrupted", "resumed"}
+            if agent["session_id"]:
+                child_id, _, call_id = action_id.partition(":")
+                async with self.runtime.database.sessions() as db:
+                    source = await db.get(Turn, child_id)
+                if source is None or source.session_id != agent["session_id"] or source.actor_id != turn.actor_id:
+                    raise HTTPException(404, "Action not found.")
+                run_id = source.id
+                terminal = source.status in {"completed", "failed", "stopped", "resumed"}
+        secrets = progress_secrets(self.runtime, source)
+        events = [event for event in await self.runtime.stores.steps.list_events(run_id=run_id)
+                  if event.tool_call_id == call_id]
+        activity, _ = tools(events, terminal=terminal, secrets=secrets)
+        if not activity:
+            raise HTTPException(404, "Action not found.")
+        item = activity[-1]
+        result = {**item, "id": action_id, "input": None, "output": None,
+                  "restricted": private_tool(item["name"]), "input_truncated": False, "output_truncated": False}
+        if result["restricted"]:
+            return result, source.session_id
+        snapshot = await self.runtime.stores.steps.latest_snapshot(run_id=run_id, include_interrupted=True)
+        own_response = False
+        matched_call = False
+        for message in snapshot.messages if snapshot else []:
+            if isinstance(message, ModelResponse):
+                own_response = message.run_id == run_id
+                matched_call = False
+                if own_response:
+                    for part in message.parts:
+                        if isinstance(part, ToolCallPart) and part.tool_call_id == call_id and part.tool_name == item["name"]:
+                            result["input"] = part.args
+                            matched_call = True
+            elif isinstance(message, ModelRequest) and own_response and matched_call:
+                for part in message.parts:
+                    if isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id == call_id and part.tool_name == item["name"]:
+                        result["output"] = part.content
+                        if isinstance(part, RetryPromptPart) or getattr(part, "outcome", None) == "failed":
+                            result["status"] = "failed"
+        for field in ("input", "output"):
+            value = result[field]
+            if value is None:
+                continue
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2, default=str)
+            text = str(redact(text, secrets))
+            result[f"{field}_truncated"] = len(text) > 100_000
+            result[field] = text[:100_000]
+        return result, source.session_id
 
     async def _delegated(self, turn: Turn, *, limit: int) -> tuple[list[AgentProgress], bool]:
         """Read only the assignment's generated turns, never later private chat."""

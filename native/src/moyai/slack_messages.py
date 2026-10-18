@@ -144,14 +144,24 @@ def thread_message(
     if len(text) > 32_000:
         text = text[:32_000] + "\n\nOpen the Moyai session for the full answer."
     visible = without_pr_references(text, cards)
-    parts = split_reply(visible, limit=2900) if visible.strip() or not cards else []
+    link = f"<{url}|[↗︎]>" if url and not cards else ""
+    if link:
+        fenced = visible.rstrip().endswith("```") or visible.count("```") % 2 == 1
+        suffix = ("\n" if fenced else " ") + link
+        parts = split_reply(visible, limit=2900 - len(suffix)) if visible.strip() else []
+    else:
+        suffix = ""
+        parts = split_reply(visible, limit=2900) if visible.strip() or not cards else []
+    if link:
+        if parts:
+            parts[-1] += suffix
+        else:
+            parts = [link]
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": part, "verbatim": True}}
         for part in parts
     ]
     actions = list(controls or [])
-    if url and not cards:
-        actions.append(button("Open session", url, "moyai_open_session"))
     if actions:
         blocks.append({"type": "actions", "elements": actions})
     fallback = text

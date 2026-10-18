@@ -19,6 +19,7 @@ from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
+from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from agentchat.channels.slack.rendering import message_request
 from agentchat.models import RichReply
 from app.db import database as source_database
@@ -54,6 +55,13 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
+
+
+class SlackInstallationUnavailable(HTTPException):
+    """The saved bot connection is absent or disabled, not a transient read failure."""
+
+    def __init__(self):
+        super().__init__(503, "The canonical Slack bot is unavailable.")
 
 
 class ProductSlackAuthority:
@@ -145,6 +153,22 @@ class ProductSlack:
         self.events = SlackEvents(self)
         self.inbox = HookInbox(self.store, self, list)
         self.delivery_task: asyncio.Task[None] | None = None
+        self.activity_task: asyncio.Task[None] | None = None
+
+    async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
+        host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
+
+        async def request(api_method: str, payload: dict[str, object]) -> dict[str, object]:
+            token = await self.connectors.slack_bot_token()
+            return await self.connectors.request(
+                "POST", "https://slack.com/api/" + api_method,
+                headers={"Authorization": "Bearer " + token},
+                json=payload,
+                allowed_errors=("already_reacted",),
+            )
+
+        if not await host.acknowledge(source, request):
+            logger.info("Slack acknowledgement reaction was not added.")
 
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""
@@ -152,10 +176,15 @@ class ProductSlack:
             raise RuntimeError("Product Slack background lifecycle already started.")
         self.inbox.start()
         self.delivery_task = asyncio.create_task(self.watch(), name="product-slack-delivery")
+        self.activity_task = asyncio.create_task(self.runtime.slack_activity.watch(), name="product-slack-activity")
 
     async def close(self) -> None:
         """Parent retains its coordinator lock until this drain returns."""
         await self.inbox.close()
+        if self.activity_task is not None:
+            self.activity_task.cancel()
+            await asyncio.gather(self.activity_task, return_exceptions=True)
+            self.activity_task = None
         if self.delivery_task is not None:
             self.delivery_task.cancel()
             await asyncio.gather(self.delivery_task, return_exceptions=True)
@@ -190,7 +219,7 @@ class ProductSlack:
         rows = self.store.rows("SELECT * FROM connections WHERE provider='slack'")
         bot = self.connectors.slack_installation()
         if not rows or not bot.get("installed") or not self.connectors.policy("slack")["enabled"]:
-            raise HTTPException(503, "The canonical Slack bot is unavailable.")
+            raise SlackInstallationUnavailable()
         value = json.loads(self.product.security.decrypt(rows[0]["encrypted"]))
         bot["authority"] = hashlib.sha256(json.dumps({
             "epoch": authority(value, rows[0]["encrypted"]),
