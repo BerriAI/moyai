@@ -140,6 +140,7 @@ class ProductConfig:
                 temporal_api_key=SecretStr(source.temporal_api_key),
                 temporal_tls=source.temporal_tls,
                 database_pool_size=source.moyai_database_pool_size,
+                database_connection_budget=source.moyai_database_connection_budget,
                 temporal_worker_activities=source.temporal_worker_activities,
                 temporal_workflow_cache_size=source.temporal_workflow_cache_size,
                 temporal_dispatch_concurrency=source.temporal_dispatch_concurrency,

@@ -9,6 +9,7 @@ import asyncpg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 from test_product_deployment import configured
 from test_product_deployment import environment as environment_fixture
 
@@ -24,6 +25,7 @@ environment = environment_fixture
 def test_product_capacity_settings_reach_native_runtime(environment):
     environment.update({
         "MOYAI_DATABASE_POOL_SIZE": "1",
+        "MOYAI_DATABASE_CONNECTION_BUDGET": "13",
         "TEMPORAL_WORKER_ACTIVITIES": "17",
         "TEMPORAL_WORKFLOW_CACHE_SIZE": "0",
         "TEMPORAL_DISPATCH_CONCURRENCY": "3",
@@ -31,10 +33,30 @@ def test_product_capacity_settings_reach_native_runtime(environment):
     })
     settings = Settings(_env_file=None, **configured(environment).native_overrides())
     assert settings.database_pool_size == 1
+    assert settings.database_connection_budget == 13
+    assert settings.postgres_budget.max_connections == 9
     assert settings.temporal_worker_activities == 17
     assert settings.temporal_workflow_cache_size == 0
     assert settings.temporal_dispatch_concurrency == 3
     assert settings.temporal_dispatch_batch_size == 31
+
+
+def test_product_engines_use_the_same_aggregate_allocation(environment):
+    settings = Settings(_env_file=None, **configured(environment).native_overrides())
+    database = Database(settings, Security(settings.master_key))
+    resources = ProductResources(configured(environment).legacy_settings(), database.engine)
+    assert settings.postgres_budget.pool_size == 3
+    assert isinstance(database.engine.pool, AsyncAdaptedQueuePool)
+    assert isinstance(resources.engine.pool, AsyncAdaptedQueuePool)
+    assert database.engine.pool.size() == 3
+    assert resources.engine.pool.size() == 3
+    assert resources.connection_budget == settings.postgres_budget
+
+
+def test_native_budget_validation_happens_before_runtime_startup():
+    with pytest.raises(ValueError, match="CONNECTION_BUDGET"):
+        Settings(_env_file=None, product_mode="existing", database_connection_budget=8)
+    assert Settings(_env_file=None).postgres_budget.pool_size == 8
 
 
 async def assert_one_connection(engine: AsyncEngine) -> None:

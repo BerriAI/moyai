@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr
+from app.database_budget import DEFAULT_CONNECTION_BUDGET, ConnectionBudget, connection_budget
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path(".data"), validation_alias="DATA_DIR")
     database_url: str = Field(default="", validation_alias="MOYAI_DATABASE_URL")
     database_pool_size: int = Field(default=8, ge=1, le=256, validation_alias="MOYAI_DATABASE_POOL_SIZE")
+    database_connection_budget: int = Field(
+        default=DEFAULT_CONNECTION_BUDGET, ge=3, le=1029, validation_alias="MOYAI_DATABASE_CONNECTION_BUDGET",
+    )
     product_mode: Literal["standalone", "existing"] = Field(
         default="standalone", validation_alias="MOYAI_PRODUCT_MODE",
     )
@@ -117,6 +121,17 @@ class Settings(BaseSettings):
     artifact_session_token: SecretStr = Field(
         default=SecretStr(""), validation_alias="OBJECT_STORAGE_SESSION_TOKEN",
     )
+
+    @property
+    def postgres_budget(self) -> ConnectionBudget:
+        return connection_budget(
+            self.database_pool_size, self.database_connection_budget, existing=self.product_mode == "existing",
+        )
+
+    @model_validator(mode="after")
+    def validate_connection_budget(self) -> Settings:
+        _ = self.postgres_budget
+        return self
 
     @property
     def models(self) -> list[str]:

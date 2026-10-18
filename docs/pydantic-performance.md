@@ -45,11 +45,27 @@ Existing-product configuration passes these settings into the native runtime:
 | `TEMPORAL_WORKFLOW_CACHE_SIZE` | 200 | Temporal worker workflow cache; zero disables caching |
 | `TEMPORAL_DISPATCH_BATCH_SIZE` | 200 | Maximum newly reserved turns and bounded dispatch page |
 | `TEMPORAL_DISPATCH_CONCURRENCY` | 10 | Concurrent workflow-start RPCs |
-| `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections in each native SQLAlchemy, canonical-reader SQLAlchemy, Harness, and canonical store pool |
+| `MOYAI_DATABASE_POOL_SIZE` | 8 | Per-pool ceiling, further limited by the process connection budget |
+| `MOYAI_DATABASE_CONNECTION_BUDGET` | 17 | Total process allowance for its pools and dedicated-connection reserves |
 
-SQLAlchemy overflow is disabled. The database setting is **per pool, per process**;
-it is not a cluster-wide connection limit. Budget the sum across all deployed
-roles and replicas, plus dedicated notification and ownership connections.
+SQLAlchemy overflow is disabled. Existing-product runtimes split the process
+allowance evenly across their four pools, after reserving five connections for
+ownership, dispatch notifications, model-slot ownership and the two bounded
+workspace-restoration locks. Every role reserves the full amount even when it
+does not use all of those paths. With the defaults, each pool is capped at three:
+`4 × 3 + 5 = 17`. A smaller explicit per-pool ceiling still takes precedence.
+An allowance too small to provide one connection per pool fails before startup.
+
+Native standalone uses two pools and reserves one notification connection, so
+its defaults retain eight connections per pool: `2 × 8 + 1 = 17`.
+
+The allowance is **per process**, not a distributed semaphore. Budget every
+role and replica, an overlapping replacement, and operational clients against
+the database's ordinary slots (excluding PostgreSQL reserved connections).
+For example, four existing-product processes plus one replacement require at
+most 85 connections under the default allowances; reserving another ten for
+operations requires 95 ordinary slots. Lower role/database connection limits
+also apply. Configuration changes take effect when a process restarts.
 The existing broker's `MAX_CONCURRENT_MODEL_REQUESTS` remains a separate shared
 model-admission limit.
 

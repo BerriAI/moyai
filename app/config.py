@@ -8,6 +8,7 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from .context_budget import ModelContextLimits
 from .model_selection import ASTRA, ASTRA_ULTRAFAST
+from .database_budget import DEFAULT_CONNECTION_BUDGET
 
 
 # Keep picker IDs and labels in code so a stale deployment environment cannot
@@ -45,6 +46,7 @@ class Settings(BaseSettings):
     moyai_schema_mode: Literal['auto', 'verify'] = 'auto'
     moyai_database_schema: str = Field(default='moyai', pattern=r'^moyai(?:_[a-z][a-z0-9_]{0,49})?$')
     moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
+    moyai_database_connection_budget: int = Field(default=DEFAULT_CONNECTION_BUDGET, ge=9, le=1029)
     moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker', 'api'] = 'standalone'
     moyai_separate_broker: bool = False
     moyai_coordinator_handoff: bool = False

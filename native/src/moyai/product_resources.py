@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from app.database_budget import connection_budget
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .postgres import create_engine
@@ -36,11 +37,14 @@ class ProductResources:
         if not settings.moyai_database_url:
             raise ValueError("Existing-product execution requires the canonical PostgreSQL database.")
         self.settings, self.native_engine = settings, native_engine
+        self.connection_budget = connection_budget(
+            settings.moyai_database_pool_size, settings.moyai_database_connection_budget, existing=True,
+        )
         url = settings.moyai_database_url
         self.engine = create_engine(
             "postgresql+asyncpg://" + url.split("://", 1)[1],
             pool_pre_ping=True,
-            pool_size=settings.moyai_database_pool_size, max_overflow=0, pool_timeout=10,
+            pool_size=self.connection_budget.pool_size, max_overflow=0, pool_timeout=10,
             connect_args={"server_settings": {"statement_timeout": "5000"}},
         )
         from app.blob_storage import ObjectStorage
@@ -79,7 +83,7 @@ class ProductResources:
                 settings.data_dir, settings.agent_model,
                 object_storage=self.objects, database_url=settings.moyai_database_url,
                 database_schema=settings.moyai_database_schema, schema_mode="verify",
-                database_pool_size=settings.moyai_database_pool_size,
+                database_pool_size=self.connection_budget.pool_size,
                 application_instance=settings.moyai_runtime_role != "standalone",
                 runtime_role=settings.moyai_runtime_role, runtime_settings=settings,
             )

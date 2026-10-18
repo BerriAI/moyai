@@ -106,7 +106,7 @@ class Database:
             connect_args = {"server_settings": {"search_path": f'"{self.execution_schema}",pg_catalog'}}
         self.engine = create_engine(
             settings.sqlalchemy_url, pool_pre_ping=True, connect_args=connect_args,
-            **({"pool_size": settings.database_pool_size, "max_overflow": 0, "pool_timeout": 10}
+            **({"pool_size": settings.postgres_budget.pool_size, "max_overflow": 0, "pool_timeout": 10}
                if settings.postgres_url else {}),
         )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
