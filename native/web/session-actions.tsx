@@ -10,7 +10,7 @@ import { downloadDebugTrace } from "./debug-trace"
 
 export type SidebarSession = {
   id: string; title: string; owner_id: string; status: string; archived: boolean; deleted?: boolean
-  pinned?: boolean; folder?: string; participated?: boolean; created_by_me?: boolean; unread?: boolean; updated_at?: string
+  can_manage?: boolean; pinned?: boolean; folder?: string; participated?: boolean; created_by_me?: boolean; unread?: boolean; updated_at?: string
   surface?: string
   parent_session_id?: string | null
   source?: "native" | "legacy"; key?: string; url?: string; read_only?: boolean; deleting?: boolean; folder_id?: string | null
@@ -64,7 +64,7 @@ export function SessionMenu({ session, header = false, onOpenSideChat }: {
   const row = actions.preferenceSession(session)
   const [traceBusy, setTraceBusy] = useState(false)
   const [traceError, setTraceError] = useState("")
-  const owner = row.owner_id === actions.userId
+  const owner = row.can_manage ?? row.owner_id === actions.userId
   const exportTrace = async (close: () => void) => {
     setTraceBusy(true)
     setTraceError("")

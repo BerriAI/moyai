@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from temporalio import activity, workflow
@@ -585,6 +585,7 @@ class ProductAutomationService:
         if actor is None or not actor.enabled or turn is None:
             raise PermissionError("The execution requester is no longer authorized.")
         await self.database._check_product_turn(db, turn, scope.product_grant)
+        cast(Any, actor).product_grant = scope.product_grant
         session = await self.database.allowed_session(db, scope.session_id, actor)
         if session.active_turn != turn.id or turn.status != "running" or turn.actor_id != actor.id:
             raise PermissionError("The execution was stopped or superseded.")

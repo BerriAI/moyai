@@ -208,7 +208,12 @@ async def dispatch_once(runtime: Runtime, state: DispatchState | None = None) ->
 async def dispatcher(runtime: Runtime, *, wakeups: DispatchWakeups | None = None) -> None:
     state = DispatchState()
     question_cursor = 0
-    async with wakeups or DispatchWakeups(runtime.settings) as listener:
+    slack = getattr(runtime, "product_slack", None)
+    # Answer settlement already commits a dispatch hint. Fan it out on the
+    # coordinator's existing listener; Slack retains its own durable scan/event.
+    async with wakeups or DispatchWakeups(
+        runtime.settings, observers=(slack.delivery_wakeup,) if slack is not None else (),
+    ) as listener:
         while True:
             # Clear before reading durable rows, so a commit during/after the
             # scan cannot be lost between deciding to wait and actually waiting.

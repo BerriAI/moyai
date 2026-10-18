@@ -214,22 +214,23 @@ class PullRequestService:
             ).where(SessionLink.session_id.in_(ids), SessionLink.kind == "pull_request").subquery()
             links = (await db.execute(select(links_ranked).where(links_ranked.c.position <= 100))).all()
             ranked = select(
-                Message.session_id, Message.content,
+                Message.id,
                 func.row_number().over(
                     partition_by=Message.session_id, order_by=Message.id.desc(),
                 ).label("position"),
             ).where(
                 Message.session_id.in_(ids), Message.role.in_(["user", "assistant"]),
             ).subquery()
-            messages = (await db.execute(select(ranked).where(ranked.c.position <= 100))).all()
+            messages = list(await db.scalars(select(Message).join(ranked, ranked.c.id == Message.id).where(ranked.c.position <= 100)))
+            from .message_sources import public_message
+            public_messages = [(row.session_id, (await public_message(self.runtime.database, db, row))[0]) for row in messages]
         for row in links:
             try:
                 pr = parse_pr_url(row.url)
                 discovered[row.session_id][pr.url] = {"url": pr.url, "origin": "attached"}
             except HTTPException:
                 continue
-        for row in messages:
-            content = self.runtime.security.unseal(row.content).decode()
+        for session_id, content in public_messages:
             for match in PR_MENTION.finditer(content):
                 # Do not treat a malicious longer path or identifier as a PR.
                 suffix = content[match.end():match.end() + 1]
@@ -239,7 +240,7 @@ class PullRequestService:
                     pr = parse_pr_url(match.group())
                 except HTTPException:
                     continue
-                found = discovered[row.session_id]
+                found = discovered[session_id]
                 if pr.url not in found and sum(x["origin"] == "mentioned" for x in found.values()) < 30:
                     found[pr.url] = {"url": pr.url, "origin": "mentioned"}
         return {sid: list(found.values()) for sid, found in discovered.items()}

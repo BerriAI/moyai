@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, ApiError } from "./api"
 import "./product-history.css"
+import slackLogo from "./assets/slack-logo.svg"
 
 export type HistorySessionRef = { source: "native" | "legacy"; id: string; url: string; source_session_id?: string }
 export type ProductHistoryProps = {
@@ -32,7 +33,7 @@ type Session = HistorySessionRef & {
   read_marker_key?: string; completion_marker?: string
 }
 type Message = {
-  id: number; role: string; author_id?: string; author_name?: string; status?: string; created_at: string
+  id: number; role: string; author_id?: string; author_name?: string; is_self?: boolean; source?: string; source_url?: string; status?: string; created_at: string
   content: string; content_truncated?: boolean; attachments?: Resource[]
 }
 type Resource = {
@@ -271,7 +272,7 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
             {messages.loading ? <p className="ph-muted" role="status">Loading messages…</p>
               : messages.error ? <Notice error>{messages.error.message}<Button variant="outline" size="sm" onClick={refresh}>Retry</Button></Notice>
               : messages.data?.messages.length ? messages.data.messages.map(message => <article className={`ph-message ph-${message.role}`} key={message.id}>
-                <div className="ph-message-meta"><strong>{message.role === "assistant" ? "Moyai" : message.author_name || message.author_id || "Participant"}</strong>
+                <div className="ph-message-meta">{message.source === "slack" && <img src={slackLogo} width={14} height={14} alt="Slack" />}<strong>{message.role === "assistant" ? "Moyai" : message.is_self ? `${message.author_name || ""}${message.author_name ? " · " : ""}You` : message.author_name || "Unknown sender"}</strong>
                   <time dateTime={message.created_at}>{timestamp(message.created_at)}</time>
                   {message.status && !["completed", "done"].includes(message.status) && <span>{message.status}</span>}
                 </div>

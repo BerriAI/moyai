@@ -8,12 +8,12 @@ export type Session = SidebarSession & {
   swarm_id?: string
 }
 export type Turn = {
-  id: string; actor_id: string; status: string; mode?: string; model?: string; connections: string[]; error?: string
+  id: string; actor_id: string; is_self?: boolean; status: string; mode?: string; model?: string; connections: string[]; error?: string
   parent_turn?: string | null; accepted_at?: string | null; guidance_at?: string | null
   created_at?: string; finished_at?: string | null
   usage: { requests?: number; input_tokens?: number; output_tokens?: number }
 }
-export type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; source?: "delegation" | null; created_at?: string; attachments?: UploadedFile[] }
+export type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; author_name?: string | null; is_self?: boolean; source?: "delegation" | "slack" | null; source_url?: string | null; source_timestamp?: string; legacy_review_required?: boolean; edited?: boolean; edited_in?: "web" | "slack"; deleted?: boolean; edited_after_start?: boolean; attachments_changed?: boolean; attachment_status?: { file_id?: string; name?: string; error?: string; preview_error?: string }[]; created_at?: string; attachments?: UploadedFile[] }
 export type NewConversation = { session: Session; turn: Turn; prompt: string; attachments: UploadedFile[] }
 
 /** Durable queued admission is normal startup, not necessarily a user queue. */

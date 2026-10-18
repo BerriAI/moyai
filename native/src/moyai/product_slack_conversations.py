@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.db import database as source_database
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from .contracts import NewMessage, NewSession
@@ -129,6 +129,35 @@ class SlackConversations:
             raise HTTPException(403, "Historical Slack delivery cannot use this session.")
         return session
 
+    async def bind_history(self, db, session, source_id: str, actor, provenance: dict) -> None:
+        """Bind the authorized source before first native admission, in its transaction."""
+        history = self.slack.runtime.product_history
+        assert history is not None
+        row = (await db.execute(text(f"""
+            SELECT s.team_id,s.channel,s.thread_ts,s.paused,r.owner_id,
+              (SELECT e.user_id FROM {history.table('slack_events')} e WHERE e.run_id=s.run_id
+               ORDER BY e.created_at LIMIT 1) AS sender
+            FROM {history.table('slack_threads')} s JOIN {history.table('runs')} r ON r.id=s.run_id
+            WHERE s.run_id=:id
+        """), {"id": source_id})).mappings().first()
+        installed = await source_database(self.slack.installation)
+        if row is None or installed["team_id"] != row["team_id"]:
+            raise HTTPException(403, "The original Slack destination is unavailable.")
+        thread = SlackThread(session_id=session.id, team_id=row["team_id"],
+                             channel_id=row["channel"], thread_ts=row["thread_ts"])
+        binding = ProductSlackBinding(
+            session_id=session.id, source_run_id=source_id,
+            requester_id=f"slack:{row['team_id']}:{row['sender']}" if row["sender"] else row["owner_id"],
+            team_id=row["team_id"], channel_id=row["channel"], thread_ts=row["thread_ts"],
+            started_ts=provenance.get("message_ts", row["thread_ts"]),
+            connection_authority=installed["authority"], paused=bool(row["paused"]),
+        )
+        from .slack_audience import can_read_binding
+        if not await can_read_binding(self.slack, db, binding, actor):
+            raise HTTPException(403, "Your Slack access could not be verified.")
+        db.add_all([thread, binding])
+        await db.flush()
+
     async def bind(
         self, conversation: SlackConversation, actor: User, principal: ProductPrincipal,
         origin: dict[str, str], installed: dict, prompt: str, body: NewMessage | None,
@@ -142,6 +171,9 @@ class SlackConversations:
                 await db.flush()
                 if uploads:
                     await self.slack.files.bind(db, actor.id, session.id, uploads)
+                existing = await db.scalar(select(SlackThread).where(SlackThread.session_id == session.id))
+                if existing is not None:
+                    return existing
                 thread = SlackThread(
                     id=new_id(), session_id=session.id, team_id=origin["team_id"],
                     channel_id=origin["channel_id"], thread_ts=origin["thread_ts"],
