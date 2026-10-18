@@ -15,8 +15,8 @@ through Fontshare's official stylesheet; the bundled Geist font is its offline
 fallback. Geist Mono is used for code. General Sans is not redistributed in this
 public repository; see https://www.fontshare.com/licenses/itf-ffl. CSP allows only
 the exact Fontshare stylesheet and font origins in their respective directives.
-Use 13px desktop text, 6–8px control corners and a 12px desktop workspace frame;
-mobile inputs retain 16px text and the mobile shell uses the full viewport.
+Use 13px desktop text and 6–8px control corners inside an edge-to-edge workspace,
+without an outer gutter or rounded frame. Mobile inputs retain 16px text.
 The retired escaped-template renderer is no longer used.
 
 Use direct React components for buttons, dialogs, forms, selects and menus.
@@ -39,11 +39,12 @@ are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
 The home screen places a left-aligned heading and a plain rounded composer over a
-faint 24px dot grid. Compact draft starters fill and focus the composer without
+48px dot grid with faint 192px guide lines. Chat shares that sparse backdrop and
+translucent glass composer treatment, with solid code and user-message surfaces.
+Compact draft starters fill and focus the composer without
 sending a message. Once a user
 starts drafting, the starters cannot replace their text. Home no longer loads the
-Three.js sculpture or runs the headline decode animation. Chat surfaces remain
-plain for reading; the full-width shell keeps navigation and independent panels
+Three.js sculpture or runs the headline decode animation. The full-width shell keeps navigation and independent panels
 compact across viewport sizes.
 
 The sidebar defaults to Needs you, In progress, In review and Backlog, derived

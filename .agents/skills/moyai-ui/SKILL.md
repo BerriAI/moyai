@@ -13,9 +13,9 @@ dark is the default. Keep messages and composer focus borders neutral. Use Gener
 from the official Fontshare stylesheet for the interface, local Geist as the
 fallback, and Geist Mono for code. Do not commit the restricted General Sans
 font binaries to this public repository.
-The home screen uses a faint static dot grid, a plain rounded composer and compact draft starters;
-chat and Settings stay quiet for sustained work. Use 6–8px rounded controls and
-a 12px desktop frame. The default sidebar groups current work by Needs you,
+Home and chat share a sparse static dot grid with faint guide lines and translucent glass composers.
+Home includes compact draft starters; code and message bubbles retain solid reading surfaces. Use 6–8px rounded controls within
+an edge-to-edge workspace without an outer gutter or rounded frame. The default sidebar groups current work by Needs you,
 In progress, In review and Backlog; preserve the alternate folder view and
 its existing actions. Keep chat entry compact, with attachment/model tools below. Use monospace for code,
 paths and technical metadata, with General Sans for prose. Keep review diffs prominent

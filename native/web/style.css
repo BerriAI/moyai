@@ -23,7 +23,7 @@ fieldset { border: 0; padding: 0; margin: 20px 0; min-width: 0; }
 legend { margin-bottom: 12px; font-weight: 500; }
 .muted { color: var(--ui-muted); }
 .center { min-height: 100dvh; display: grid; place-content: center; padding: 24px; }
-.app { height: calc(100dvh - 16px); margin: 8px; display: grid; grid-template-columns: 240px minmax(0, 1fr); border: 1px solid var(--ui-glass-line); border-radius: 12px; overflow: hidden; background: var(--ui-shell); box-shadow: var(--ui-window-shadow); }
+.app { height: 100dvh; display: grid; grid-template-columns: 240px minmax(0, 1fr); overflow: hidden; background: var(--ui-shell); }
 .app.settings-open { grid-template-columns: minmax(0, 1fr); }
 .panel-body:has(> .pr-view) { padding: 0; }
 .sidebar { background: var(--ui-glass-surface); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); border-right: 1px solid var(--ui-glass-line); display: flex; flex-direction: column; gap: 20px; padding: 24px 16px 12px; min-height: 0; }
@@ -328,7 +328,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .chat .composer-actions > [data-slot="select-trigger"] { margin-left: auto; width: auto; max-width: min(260px, 65%); }
 .chat .composer-actions [data-slot="select-trigger"] { border: 0; background: transparent; font: 10px/1.5 var(--ui-font-mono); color: var(--ui-muted); padding-inline: 8px; height: 30px; }
 @media (max-width: 600px) {
-  .app { margin: 0; height: 100dvh; border: 0; border-radius: 0; }
   .chat .composer-entry .skill-editor { min-height: 58px; font-size: 16px; padding-block: 15px; }
   .chat .composer-entry .skill-editor-placeholder { font-size: 16px; }
   .chat .composer-entry .send-actions { right: 5px; bottom: 6px; }
