@@ -1,0 +1,13 @@
+model_list:
+  - model_name: deepseek/deepseek-flash
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_base: https://api.deepseek.com/v1
+      api_key: os.environ/DEEPSEEK_API_KEY
+      max_retries: 0
+litellm_settings:
+  telemetry: false
+  callbacks: [route_receipt.receipt_logger]
+general_settings:
+  master_key: os.environ/LITELLM_FIXTURE_API_KEY
+  disable_spend_logs: true
