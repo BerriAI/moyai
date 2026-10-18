@@ -9,7 +9,7 @@ Set `LITELLM_API_BASE`, `LITELLM_API_KEY`, `MOYAI_EVAL_AGENT_MODEL`, `MOYAI_EVAL
 ```sh
 PYTHONPATH=.:evals:native/src:native/tests \
   uv run --project native --python 3.13 \
-  --with harbor==0.24.0 --with openai==3.29.0 \
+  --with harbor==0.24.0 --with 'moto[server]==5.1.4' --with openai==3.29.0 \
   harbor run -p evals/tasks/<task> \
   -a moyai_harbor.agent:MoyaiAgent -k 3 -n 1 -o evals/jobs -y
 ```

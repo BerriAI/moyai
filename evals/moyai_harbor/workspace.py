@@ -5,17 +5,15 @@ import shlex
 from collections.abc import Mapping, Sequence
 
 from harbor.environments.base import BaseEnvironment
+from moyai.contracts import RunScope
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.workspaces import (
     CommandResult,
     SupportsCommands,
     Workspace,
-    WorkspaceBackend,
     WorkspaceRef,
 )
-
-from moyai.contracts import RunScope
 
 
 class HarborCommandBackend(SupportsCommands):
@@ -71,10 +69,10 @@ class HarborWorkspace(AbstractCapability[RunScope]):
 
     def get_workspace(
         self,
-        _ctx: RunContext[RunScope],
+        ctx: RunContext[RunScope],
         *,
         ref: WorkspaceRef | None,
-    ) -> WorkspaceBackend | None:
+    ) -> Workspace | None:
         if ref is not None and ref != self.reference:
             return None
         # Eval-only: credentials_run requires the isolated Modal workspace provider.
