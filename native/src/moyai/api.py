@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -457,7 +458,13 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 ).outerjoin(MessageSource, MessageSource.message_identity == Message.identity).where(
                     Message.session_id == session_id,
                 ))).one()
-                result["transcript_version"] = ":".join(str(part) for part in version)
+                authors = (await db.execute(select(User.id, User.display_name, User.auth_version).join(
+                    Message, Message.author_id == User.id,
+                ).where(Message.session_id == session_id).distinct().order_by(User.id))).all()
+                identities = [(author.id, author.display_name, author.auth_version,
+                               await runtime.database.same_person(db, user, author.id)) for author in authors]
+                identity_version = hashlib.sha256(json.dumps(identities).encode()).hexdigest()
+                result["transcript_version"] = ":".join(str(part) for part in (*version, identity_version))
             if row.surface == "slack":
                 from .slack_delivery_status import status as delivery_status
                 result["slack_delivery"] = await delivery_status(runtime.database, db, session_id)

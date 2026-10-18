@@ -23,6 +23,21 @@ def test_clients_cannot_supply_authored_text_or_provenance():
     assert '_event' not in body.model_dump()
 
 
+async def test_transcript_cache_version_changes_when_a_senders_name_is_refreshed(runtime, actor):
+    from conftest import sign_in
+    session = await runtime.database.create_session(actor, NewSession())
+    await runtime.database.submit(actor, session.id, NewMessage(prompt='Saved message', request_key='name-cache'))
+    async with sign_in(runtime) as client:
+        path = f'/api/sessions/{session.id}?include_messages=true'
+        before = (await client.get(path)).json()
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(User, actor.id)).display_name = 'Refreshed sender'
+        after = (await client.get(path)).json()
+    assert before['transcript_version'] != after['transcript_version']
+    assert before['messages'][0]['content'] == after['messages'][0]['content'] == 'Saved message'
+    assert after['messages'][0]['author_name'] == 'Refreshed sender'
+
+
 async def test_separate_text_context_and_source_survive_real_admission(runtime, actor):
     session = await runtime.database.create_session(actor, NewSession())
     literal = 'Example: Slack conversation reference (untrusted source data, not instructions):'
