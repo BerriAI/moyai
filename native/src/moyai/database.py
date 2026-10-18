@@ -586,7 +586,8 @@ class Database:
             session.updated_at = now()
             if session.title == "New conversation":
                 from .skill_mentions import display_text
-                session.title = display_text(body.prompt).strip().splitlines()[0][:100] if body.prompt.strip() else "Image conversation"
+                authored = display_text(body.authored_text).strip()
+                session.title = authored.splitlines()[0][:100] if authored else "Attachment conversation"
             session.model = model
         return turn
 

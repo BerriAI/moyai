@@ -33,7 +33,7 @@ A future GitHub adapter can use this contract after verifying its webhook, mappi
 
 Run these commands in the release environment with its existing product/native database configuration and encryption keys. A local test database is not the deployed database.
 
-1. Use the [maintenance control contract](pydantic-deployment.md#native-maintenance-control-contract) to pause admission and park work. Check the persisted status and unresolved effects. Retire **all** previous API, coordinator and worker owners before schema provisioning. This is a coordinated cutover: older coordinators cannot decode the new `sealed:v1:` hook payloads.
+1. Use the [maintenance control contract](pydantic-deployment.md#native-maintenance-control-contract) to pause admission and park work. Check the persisted status and unresolved effects. Retire **all** previous API, coordinator, broker and worker owners before schema provisioning. Managed deployments must use the maintenance release path with the exact qualified source commit; API-only and rolling releases are incompatible with this schema change. Older coordinators cannot decode the new `sealed:v1:` hook payloads.
 2. Back up the databases and encrypted object storage through the deployment's existing backup procedure. Retain the matching keys. Do not reset receipts or regenerate keys.
 3. Provision and verify using the new release:
 

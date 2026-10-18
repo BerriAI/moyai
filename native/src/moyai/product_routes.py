@@ -219,6 +219,7 @@ class ProductReadService:
         await self.current(reader)
         mapped: dict[str, str] = {}
         async with self.runtime.database.sessions() as db:
+            await prepare_history_query(db)
             valid = set(await db.scalars(select(Session.id).where(self.visible(reader, deleted=deleted),
                                                                 Session.id.in_(ids))))
             for session_id in list(valid):
