@@ -4,10 +4,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # accessibility so native apps expose an AT-SPI tree. open-computer-use is installed in both
 # arms; the agent setup removes it for the baseline arm.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ripgrep curl jq ca-certificates xvfb openbox xterm xdotool x11-xserver-utils \
+    git ripgrep curl jq ca-certificates xvfb openbox xterm mousepad xdotool x11-xserver-utils chromium tint2 x11vnc \
     fonts-dejavu-core dbus dbus-x11 at-spi2-core python3 python3-gi python3-pil \
-    gir1.2-gtk-3.0 gir1.2-atspi-2.0 nodejs npm imagemagick \
+    gir1.2-gtk-3.0 gir1.2-atspi-2.0 nodejs npm imagemagick python3-venv \
     && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv --system-site-packages /opt/desktop-venv \
+    && /opt/desktop-venv/bin/pip install pillow==12.3.0 websockify==0.13.0 playwright==1.63.0
+ENV PATH=/opt/desktop-venv/bin:$PATH
 COPY package.json package-lock.json /opt/moyai/tools/
 RUN npm ci --ignore-scripts --prefix /opt/moyai/tools \
     && ln -sf /opt/moyai/tools/node_modules/.bin/ocu /usr/local/bin/ocu

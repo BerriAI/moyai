@@ -2,7 +2,31 @@
 
 This directory contains the Harbor 0.24.0 evaluations, one task per use case under `tasks/`. `deepseek_support_live` v2 checks a support answer against a real, pinned LiteLLM proxy with a deterministic local HTTPS provider fixture. It does not validate external DeepSeek availability. `answer_style` checks a plain explanation follows the Answer style rules in `native/instructions.md`. Harbor is installed as a temporary `uv` overlay so it does not change the native production dependency lock.
 
-`desktop_license` opens a GTK License Manager window on an Xvfb desktop, and Moyai must reply with its activation code. Run it with `-a moyai_harbor.desktop_agent:MoyaiDesktopAgent`; set `MOYAI_EVAL_OCU=0` to remove OCU for the baseline, and `MOYAI_EVAL_TURN_TIMEOUT` controls the turn timeout (default 300 seconds). On `bedrock_mantle/openai.gpt-5.6-luna`, it passed 5/5 trials with OCU and 0/5 without; the baseline replies that it cannot see or transcribe the code.
+The desktop tasks cover reading a license code, saving an unsaved Mousepad document,
+submitting an expense form, and changing preferences. Both OCU and baseline images
+include Chromium. Run them with `-a moyai_harbor.desktop_agent:MoyaiDesktopAgent`;
+set `MOYAI_EVAL_OCU=0` to remove OCU for the baseline. `MOYAI_EVAL_TURN_TIMEOUT`
+controls the turn timeout (default 300 seconds). Failed runs retain interrupted
+tool traces and mark usage as incomplete; timed-out workflows are stopped before
+their environment is removed.
+
+Earlier, before the desktop runtime adapter, `desktop_license` passed 5/5 trials
+with OCU and 0/5 without on `bedrock_mantle/openai.gpt-5.6-luna`. Those results do
+not qualify the current adapter or establish multi-step action reliability.
+
+For the deterministic Linux integration check (no API key or model required), run
+from the repository root:
+
+```sh
+docker build -t moyai-desktop-test evals/tasks/desktop_license/environment
+docker run --rm --network none -v "$PWD:/repo:ro" moyai-desktop-test python /repo/evals/desktop/smoke.py
+```
+
+It checks a real GTK form, screenshot delivery, stale observations, worker restart,
+and an unavailable local browser address. This is also a separate CI job, so absent
+model credentials cannot silently skip desktop integration coverage. For agent
+comparisons, keep the model, tasks, trial counts, and environments equivalent;
+report all-trial success, failures, end-to-end latency and usage separately.
 
 The DeepSeek v2 gate requires a successful LiteLLM SDK callback receipt matching
 the provider fixture's unique response ID, package version, route, model, and
