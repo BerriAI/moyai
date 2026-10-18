@@ -115,7 +115,7 @@ class DurableQuestions(AskUser[RunScope]):
         ) -> dict[str, list[str]] | str:
             """Ask a clarification with options; the user can also type their answer.
 
-            Ask only when the answer cannot be found in the conversation or workspace.
+            Ask only when the answer cannot be found in the conversation, the connected repositories, or the workspace. If the request has several readings that are each cheap to check, check them instead of asking.
             Use required=False for optional preferences with a reasonable fallback.
             Optional questions may time out with no answer; state your assumption then.
             Use required=True when missing information prevents correct work.
