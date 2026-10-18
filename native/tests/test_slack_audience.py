@@ -18,6 +18,7 @@ from moyai.models import Session, SlackThread, Turn, User
 from moyai.product_routes import ProductReadService, Reader
 from moyai.product_slack_models import ProductSlackBinding
 from moyai.slack_audience import can_read
+from moyai.slack_audience_reads import AUDIENCE_TTL, SlackAudienceReads
 
 pytestmark = pytest.mark.skipif(not os.getenv('MOYAI_TEST_POSTGRES'), reason='Requires local PostgreSQL')
 product_database = identities.product_database
@@ -28,7 +29,8 @@ slack_admission = identities.slack_admission
 @pytest_asyncio.fixture
 async def audience(slack_admission):
     product = slack_admission
-    state = {'members': ['UACTUAL01'], 'private': True, 'authority': 'a' * 64, 'failure': None, 'calls': []}
+    state = {'members': ['UACTUAL01'], 'private': True, 'authority': 'a' * 64,
+             'failure': None, 'calls': [], 'clock': 0}
     async def token():
         return 'synthetic-membership-token'
     async def request(method, url, **kwargs):
@@ -43,7 +45,8 @@ async def audience(slack_admission):
         return {'ok': True, 'members': state['members'], 'response_metadata': {'next_cursor': ''}}
     slack = SimpleNamespace(runtime=SimpleNamespace(database=product.database),
         installation=lambda: {'team_id': 'TLOCAL001', 'authority': state['authority']},
-        connectors=SimpleNamespace(slack_bot_token=token, request=request))
+        connectors=SimpleNamespace(slack_bot_token=token, request=request),
+        audience_reads=SlackAudienceReads(clock=lambda: state['clock']))
     product.database.slack_access = lambda db, session, actor: can_read(slack, db, session, actor)
     async with product.database.sessions.begin() as db:
         sender = await product.adapter.project_native_user(db, product.raw_principal)
@@ -89,6 +92,7 @@ async def test_revocation_blocks_transcript_inventory_search_and_history(audienc
     assert (await product.database.messages(product.actor, product.session_id))[0]['content'] == 'Private channel input'
     if change == 'membership':
         product.state['members'] = []
+        product.state['clock'] += AUDIENCE_TTL
     else:
         product.state['authority'] = 'b' * 64
     for operation in (
@@ -139,6 +143,7 @@ async def test_provider_failure_is_safe_distinct_and_does_not_cache_a_denial(aud
                 await operation()
             assert unavailable.value.status_code == 503
     product.state['failure'] = None
+    product.state['clock'] += AUDIENCE_TTL
     assert (await product.database.messages(product.actor, product.session_id))[0]['content'] == 'Private channel input'
 
 
@@ -182,6 +187,7 @@ async def test_revocation_blocks_file_export_and_live_endpoints(audience, runtim
             previews = FilePreviewService(runtime)
             assert (await previews.record(product.actor, product.session_id, 'upload', upload.id)).name == 'private.txt'
             product.state['members'] = []
+            product.state['clock'] += AUDIENCE_TTL
             with pytest.raises(HTTPException) as denied:
                 await previews.record(product.actor, product.session_id, 'upload', upload.id)
             assert denied.value.status_code == 404
@@ -208,6 +214,60 @@ async def test_worker_keeps_saved_authority_while_new_reads_and_inputs_require_m
     assert denied.value.status_code == 404
     with pytest.raises(HTTPException):
         await database.messages(audience.actor, audience.session_id)
+
+
+async def test_stream_and_browser_reads_share_provider_snapshot_but_keep_local_revocation(audience):
+    from moyai.live_stream import authorized_events
+
+    product = audience
+    async def authorize():
+        # The actual stream discards its request-local cache at each event.
+        product.actor.slack_read_cache = {}
+        await product.database.session(product.actor, product.session_id)
+
+    async def disconnected():
+        return False
+
+    async def events():
+        for i in range(80):
+            yield f'data: {i}\n\n'
+
+    items = [item async for item in authorized_events(events(), authorize, disconnected)]
+    assert len(items) == 80
+    assert product.state['calls'] == [
+        'https://slack.com/api/conversations.info', 'https://slack.com/api/conversations.members',
+    ]
+    for _ in range(5):
+        await authorize()
+        await product.database.list_sessions(product.actor)
+        await product.reads.messages(product.reader, product.session_id, 'native')
+    assert len(product.state['calls']) == 2
+
+    # A local installation revocation is immediate even with a fresh snapshot.
+    product.state['authority'] = 'b' * 64
+    with pytest.raises(HTTPException) as denied:
+        await authorize()
+    assert denied.value.status_code == 404
+    assert len(product.state['calls']) == 2
+
+
+async def test_membership_snapshot_expires_and_never_survives_provider_failure(audience):
+    product = audience
+    assert await product.database.messages(product.actor, product.session_id)
+    product.state['members'] = []
+    product.state['clock'] = AUDIENCE_TTL - 1
+    assert await product.database.messages(product.actor, product.session_id)
+    product.state['clock'] = AUDIENCE_TTL
+    product.state['failure'] = ConnectorError('limited', code='rate_limited', status_code=429,
+                                             retryable=True, retry_after=10)
+    with pytest.raises(HTTPException) as unavailable:
+        await product.database.messages(product.actor, product.session_id)
+    assert unavailable.value.status_code == 503
+    product.state['failure'] = None
+    product.state['clock'] += 10
+    with pytest.raises(HTTPException) as denied:
+        await product.database.messages(product.actor, product.session_id)
+    assert denied.value.status_code == 404
 
 
 @pytest_asyncio.fixture
@@ -412,6 +472,7 @@ async def test_historical_reads_use_native_controls_and_preserve_verified_attrib
         assert rows[0]['content'] == 'Only the authored text'
         assert rows[0]['source'] == 'slack' and rows[0]['is_self']
     product.state['members'] = []
+    product.state['clock'] += AUDIENCE_TTL
     async with product.source.connect() as db:
         assert await historical_access(product.slack, db, product.principal, [source_id]) == set()
 
@@ -425,3 +486,13 @@ async def test_linked_owner_can_find_delete_and_restore_their_slack_conversation
     assert (await product.reads.listing(product.reader, source='native', deleted=True))['sessions'][0]['can_manage']
     await product.database.restore_session(product.actor, product.session_id)
     assert (await product.database.messages(product.actor, product.session_id))[0]['is_self']
+
+
+async def test_rejected_refresh_token_explains_connection_recovery_without_exposing_provider_data(audience):
+    product = audience
+    product.state['failure'] = ConnectorError('private-provider-body', code='invalid_refresh_token')
+    with pytest.raises(HTTPException) as error:
+        await product.database.messages(product.actor, product.session_id)
+    assert error.value.status_code == 503
+    assert 'reconnect Slack' in error.value.detail and 'Settings → Connections' in error.value.detail
+    assert 'private-provider-body' not in error.value.detail
