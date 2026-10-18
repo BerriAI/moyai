@@ -741,9 +741,9 @@ for(const width of [1440,768,320])test(`home keeps the draft and controls reacha
   assert.equal(await page.locator('.home .account-selection, .home .suggestions, .home-mode-options').count(),0);
   assert.equal(await page.getByText('Drop files or paste images · Enter to send',{exact:true}).isVisible(),true);
   assert.equal(await page.locator('.home-composer').getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
-  assert.equal(await page.getByRole('button',{name:'Review code',exact:true}).isVisible(),false);
+  await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'hidden'});
   await input.fill('');
-  assert.equal(await page.getByRole('button',{name:'Review code',exact:true}).isVisible(),true);
+  await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'visible'});
 });
 
 for(const [label,prompt] of [

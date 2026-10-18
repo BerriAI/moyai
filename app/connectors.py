@@ -661,11 +661,11 @@ class Connectors:
         elif provider == "slack":
             params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history")
             if self.settings.slack_bot_enabled:
-                params["scope"] = "app_mentions:read,chat:write,im:write,im:history,im:read,mpim:read,channels:read,groups:read,reactions:read,reactions:write,assistant:write,files:write,files:read"
+                params["scope"] = "app_mentions:read,chat:write,im:write,im:history,reactions:read,reactions:write,assistant:write,files:write,files:read"
                 if self.settings.slack_identity_linking_enabled:
                     params["scope"] += ",users:read,users:read.email"
                 if self.settings.slack_thread_chat_enabled:
-                    params["scope"] += ",channels:history,groups:history"
+                    params["scope"] += ",channels:history,groups:history,channels:read,groups:read"
             base = "https://slack.com/oauth/v2/authorize"
         else:
             params["owner"] = "user"
