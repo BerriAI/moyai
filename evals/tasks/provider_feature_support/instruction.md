@@ -1,0 +1,1 @@
+<https://api-docs.deepseek.com/guides/search/|api-docs.deepseek.com/guides/search> do we support this ?

@@ -1,0 +1,42 @@
+{
+  "/v1/tools/search": {
+    "results": [
+      {
+        "rerank_score": 2.1,
+        "title": "Search & Fetch | DeepSeek API Docs",
+        "url": "https://api-docs.deepseek.com/guides/search/",
+        "snippet": "The Search API and the Fetch API give agents and RAG applications access to live web content.",
+        "summary": "DeepSeek's Search API finds web pages for a query and the Fetch API returns one page as Markdown.",
+        "content": "",
+        "site_name": "DeepSeek API Docs",
+        "site_icon": null,
+        "date": null,
+        "authority": 3
+      }
+    ]
+  },
+  "/v1/tools/fetch": {
+    "title": "Search & Fetch | DeepSeek API Docs",
+    "content": "# Search & Fetch\n\nThe Search API and the Fetch API give agents and RAG applications access to live web content."
+  },
+  "default": {
+    "id": "stub-1",
+    "object": "chat.completion",
+    "model": "deepseek-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 12,
+      "completion_tokens": 1,
+      "total_tokens": 13
+    }
+  }
+}
