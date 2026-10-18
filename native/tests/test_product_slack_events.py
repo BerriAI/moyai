@@ -125,6 +125,36 @@ async def test_missing_scope_acknowledgement_does_not_block_turn_admission(ingre
         assert len(list(await db.scalars(select(Turn)))) == 1
 
 
+async def test_unexpected_attachment_read_error_is_logged_and_does_not_drop_turn(
+    ingress, monkeypatch, caplog,
+):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def unexpected_error(*args):
+        raise RuntimeError("synthetic attachment reader failure")
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.files.reader, "read", unexpected_error)
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(context_tests.envelope({
+        **context_tests.mention_message(), "files": [{"id": "FTEST0001"}],
+    }))
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+
+    assert "file_unavailable" in prepared.prompt
+    assert any(
+        record.name == "moyai.product_slack_files" and record.exc_info
+        for record in caplog.records
+    )
+    async with runtime.database.sessions() as db:
+        assert len(list(await db.scalars(select(Turn)))) == 1
+
+
 @pytest.mark.parametrize("command,expected", [
     ("status", "This thread is listening."),
     ("stop", "Requested a stop"),

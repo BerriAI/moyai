@@ -88,7 +88,7 @@ async def test_first_reply_receives_parent_link_and_unfurl_in_prepared_input(ing
         assert method == "GET" and url == "https://slack.com/api/conversations.replies"
         assert kwargs["params"]["channel"] == CHANNEL
         assert kwargs["params"]["ts"] == ROOT_TS
-        assert kwargs["headers"]["Authorization"] == "Bearer synthetic-user-token"
+        assert kwargs["headers"]["Authorization"] == "Bearer synthetic-bot-token"
         calls.append(deepcopy(kwargs["params"]))
         return {"ok": True, "messages": [parent, mention_message()], "has_more": False}
 
@@ -228,6 +228,80 @@ async def test_thread_read_failure_preserves_request_origin_and_reports_the_caus
     assert all("do we support this?" not in record.getMessage() for record in records)
     if failure == "timeout":
         assert cancelled
+
+
+async def test_shared_thread_is_read_with_bot_without_a_requester_grant(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+    calls = []
+
+    async def no_connections(*args, **kwargs):
+        return []
+
+    async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
+        assert method == "GET" and url == "https://slack.com/api/conversations.replies"
+        calls.append((kwargs["headers"]["Authorization"], kwargs["params"]["channel"], kwargs["params"]["ts"]))
+        return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connections, "catalog", no_connections)
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(envelope(mention_message()))
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+
+    assert DEEPSEEK_URL in prepared.prompt
+    assert "DeepSeek-V4.1-Flash-1017" in prepared.prompt
+    assert calls == [("Bearer synthetic-bot-token", CHANNEL, ROOT_TS)]
+
+
+async def test_bot_thread_read_works_when_org_user_token_cannot_join_thread(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+    calls = []
+
+    async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
+        assert url == "https://slack.com/api/conversations.replies"
+        authorization = kwargs["headers"]["Authorization"]
+        calls.append(authorization)
+        if authorization != "Bearer synthetic-bot-token":
+            raise ConnectorError("The user token is not a member of this channel.", code="not_in_channel")
+        return {"ok": True, "messages": [root_message(), mention_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(envelope(mention_message()))
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+
+    assert DEEPSEEK_URL in prepared.prompt
+    assert "DeepSeek-V4.1-Flash-1017" in prepared.prompt
+    assert calls == ["Bearer synthetic-bot-token"]
+
+
+async def test_bot_missing_scope_without_grant_renders_unavailable_with_error_code(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+    calls = []
+
+    async def no_connections(*args, **kwargs):
+        return []
+
+    async def request(method, url, **kwargs):
+        if url == ACK_URL:
+            return {"ok": True}
+        calls.append((kwargs["headers"]["Authorization"], kwargs["params"]["channel"], kwargs["params"]["ts"]))
+        raise ConnectorError("Slack thread access is missing a required scope.", code="missing_scope")
+
+    monkeypatch.setattr(service.connections, "catalog", no_connections)
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(envelope(mention_message()))
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(turn.id)
+
+    assert "No Slack read connection is available" in prepared.prompt
+    assert "missing_scope" in prepared.prompt
+    assert '"status": "unavailable"' in prepared.prompt
+    assert calls == [("Bearer synthetic-bot-token", CHANNEL, ROOT_TS)]
 
 
 @pytest.mark.parametrize("readable", [True, False])
@@ -436,7 +510,6 @@ async def test_current_preview_survives_when_history_is_unavailable(ingress, mon
     async def request(method, url, **kwargs):
         if url == ACK_URL:
             return {"ok": True}
-        assert failure == "missing_scope", "No grant must mean no external Slack read."
         calls.append(url)
         raise ConnectorError("Slack thread access is missing a required scope.", code="missing_scope")
 
@@ -456,4 +529,4 @@ async def test_current_preview_survives_when_history_is_unavailable(ingress, mon
     assert prepared.prompt.count("do we support this?") == 1
     assert "untrusted" in prepared.prompt and "partial" in prepared.prompt
     assert ("missing_scope" if failure == "missing_scope" else "No Slack read connection") in prepared.prompt
-    assert len(calls) == int(failure == "missing_scope")
+    assert len(calls) == (2 if failure == "missing_scope" else 1)
