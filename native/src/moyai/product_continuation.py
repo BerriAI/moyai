@@ -341,6 +341,8 @@ class ProductContinuationService:
             FROM {self.table('messages')} WHERE run_id=:id AND role IN ('user','assistant') AND status!='deleted'
             ORDER BY COALESCE(NULLIF(started_at,''),created_at) DESC,id DESC LIMIT :limit
         """), {"id": source_id, "chars": MAX_HISTORY_BYTES, "limit": MAX_HISTORY_MESSAGES})).mappings()]
+        if self.history.decorate_messages is not None:
+            await self.history.decorate_messages(db, principal, source_id, rows)
         chosen, total = [], 0
         for row in rows:
             size = len(row["content"].encode())
@@ -533,6 +535,11 @@ class ProductContinuationService:
         )
         db.add(target)
         await db.flush()
+        if target_surface == "slack":
+            slack = self.runtime.product_slack
+            if slack is None:
+                raise HTTPException(503, "Slack must be connected before continuing this conversation.")
+            await slack.events.conversations.bind_history(db, target, source_id, actor, provenance)
         grants = await self.runtime.database.resolve_grants(
             db, actor.id, body.connections, shared_session=visibility == "shared", surface=target_surface,
         )

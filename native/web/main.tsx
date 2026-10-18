@@ -15,6 +15,7 @@ import "./product-shell.css"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
 import { downloadDebugTrace } from "./debug-trace"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
+import slackLogo from "./assets/slack-logo.svg"
 import { Home } from "./home"
 import type { GeneralPreferences } from "./general-preferences"
 import { MoyaiBrand, SidebarToggle } from "./brand"
@@ -59,7 +60,7 @@ type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, BrowserLoginMetadata & { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { session: Session; turns: Turn[]; goal?: Goal | null; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { transcript_version?: string; slack_delivery?: { pending: number; sending: number; rejected: number }; session: Session; turns: Turn[]; goal?: Goal | null; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 const settingsDestinations = [
   { page: "general", label: "General" },
@@ -369,7 +370,7 @@ function AppCommandPalette({ current, historicalId, productMode, ...props }: {
 }) {
   const actions = useSessionActions()
   const session: PaletteCurrentSession | undefined = current ? {
-    ...actions.preferenceSession(current), source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
+    ...actions.preferenceSession(current), source: "native", capabilities: { read: true, rename: current.can_manage ?? current.owner_id === actions.userId, pin: true, move: true },
   } : historicalId ? { id: historicalId, title: "Saved session", source: "legacy", read_only: true } : undefined
   return <CommandPalette {...props} scopeLabel="Your accessible sessions" currentSession={session} busy={actions.busy} search={searchSessions}
     destinations={settingsDestinations.filter(item => !item.productOnly || productMode === "existing")} onOpenSession={openSessionReference}
@@ -444,7 +445,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [model, setModel] = useState(view?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(() => {
     const latest = view?.turns[0]
-    return latest?.actor_id === me.user.id ? latest.connections ?? [] : []
+    return (latest?.is_self ?? latest?.actor_id === me.user.id) ? latest.connections ?? [] : []
   })
   const [accountRevision, setAccountRevision] = useState(0)
   const [accountNotice, setAccountNotice] = useState("")
@@ -491,6 +492,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
+  const completeHistory = useRef<{ version: string; messages: Message[] } | null>(null)
   const visibleNow = useRef(visible)
   visibleNow.current = visible
   function clearSensitive() {
@@ -500,6 +502,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     resolvedOnce.current = undefined
     composerInitialized.current = false
     readThrough.current = null
+    completeHistory.current = null
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
@@ -519,16 +522,25 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       resolvedOnce.current = undefined
       const next = cached ?? await api<View>(`/sessions/${id}?include_activity=false&include_messages=true`, "GET", undefined, signal)
       // Older servers can omit the transcript during a rolling deployment.
-      const history = next.messages ?? await api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal)
+      const unchanged = next.transcript_version && completeHistory.current?.version === next.transcript_version
+      const history = unchanged ? completeHistory.current!.messages : [...(next.messages ?? await api<Message[]>(`/sessions/${id}/messages`, "GET", undefined, signal))]
+      let pageSize = unchanged ? 0 : history.length
+      while (pageSize === 200 && !signal?.aborted && version === loadVersion.current) {
+        const after = history.at(-1)!.id
+        const page = await api<Message[]>(`/sessions/${id}/messages?after=${after}`, "GET", undefined, signal)
+        if (page.some(message => message.id <= after)) throw new Error("Conversation history changed while loading. Refresh to retry.")
+        history.push(...page); pageSize = page.length
+      }
       if (signal?.aborted || version !== loadVersion.current) return
       // Publish a complete composer with the transcript, before read bookkeeping.
       // Seed only once so polling and late receipts cannot overwrite user edits.
       if (!composerInitialized.current) {
         setModel(next.session.model)
         const latest = next.turns[0]
-        setSelectedAccounts(latest?.actor_id === me.user.id ? latest.connections ?? [] : [])
+        setSelectedAccounts((latest?.is_self ?? latest?.actor_id === me.user.id) ? latest.connections ?? [] : [])
         composerInitialized.current = true
       }
+      if (next.transcript_version) completeHistory.current = { version: next.transcript_version, messages: history }
       viewNow.current = next
       setView(next); setMessages(history)
       if (next.activity) setActivity(next.activity)
@@ -623,7 +635,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const active = view?.turns.find(turn => turn.id === view.session.active_turn)
   const work = useWorkProgress(
     id, `${authorityKey}:${connectionVersion}:${id}:${me.user.id}`,
-    active?.actor_id === me.user.id ? active : undefined, visible && !swarmSpace,
+    (active?.is_self ?? active?.actor_id === me.user.id) ? active : undefined, visible && !swarmSpace,
     () => clearSensitiveNow.current(),
   )
   const requestAnswered = Boolean(active && answeredRequest === active.id)
@@ -644,7 +656,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     return () => cancelAnimationFrame(frame)
   }, [id, active?.id, browserLoginIds, canResolveInput, visible, requestAnswered, sideMode])
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
-  const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
+  const activeId = visible && active && ["running", "saving"].includes(active.status) && (active.is_self ?? active.actor_id === me.user.id) ? active.id : null
   useEffect(() => {
     if (!activeId || endedStreams.current.has(activeId)) return
     if (liveNow.current.turnId !== activeId) {
@@ -776,7 +788,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     id: -2, turn_id: liveText.turnId, role: "assistant", author_id: null, content: finalText,
   } : null
   const displayedActivity = mergeActivity(activity, liveText.activity)
-  const queued = messages.filter(message => message.author_id === me.user.id && view.turns.some(turn =>
+  const queued = messages.filter(message => (message.is_self ?? message.author_id === me.user.id) && view.turns.some(turn =>
     turn.id === message.turn_id && waitsBehindActive(turn, active, sendingNow.has(turn.id))))
   const visibleMessages = orderedWorkMessages((liveMessage ? [...messages, liveMessage] : messages).filter(message =>
     (message.role !== "system" || message.source === "delegation") && !queued.some(item => item.id === message.id)), view.turns)
@@ -829,16 +841,24 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             const segment = segments.get(message.id)
             return <React.Fragment key={message.id}><article className={`message ${message.role}${message === liveMessage ? " live-message" : ""}`}
               data-turn-id={message.turn_id}>
-              <div className="message-author">{message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : message.author_id === me.user.id ? "You" : "Teammate"}
+              <div className="message-author">{message.source === "slack" && <img src={slackLogo} width={14} height={14} alt="Slack" />}
+                {message.source === "delegation" ? "Parent agent" : message.role === "assistant" ? "Moyai" : (message.is_self ?? message.author_id === me.user.id) ? (message.author_name ? `${message.author_name} · You` : "You") : message.author_name || "Unknown sender"}
+                {message.source_timestamp && <time className="message-source-time" dateTime={new Date(Number(message.source_timestamp) * 1000).toISOString()} title={new Date(Number(message.source_timestamp) * 1000).toLocaleString()}>{new Date(Number(message.source_timestamp) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>}
+                {message.source_url && <a className="message-source-link" href={message.source_url} target="_blank" rel="noreferrer" aria-label="Open message in Slack" title="Open message in Slack"><ExternalLink size={12} /></a>}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
                 {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
+                {message.deleted && <p className="muted">Deleted in Slack.{message.edited_after_start ? " Work that already started may continue." : ""}</p>}
+                {message.edited && <p className="muted">Edited in {message.edited_in === "web" ? "Moyai" : "Slack"}.{message.edited_after_start ? " This task received the original text. Send a follow-up to change the work." : ""}</p>}
+                {message.attachments_changed && <p className="muted">Attachments changed in Slack. This task keeps the original files; send a follow-up to use the updated files.</p>}
+                {message.legacy_review_required && <p className="muted">Open this older message in Slack to review its files and text.</p>}
+                {message.attachment_status?.filter(file => file.error || file.preview_error).map((file, index) => <p className="muted" role="status" key={file.file_id ?? index}>{file.name || "Slack attachment"}: {file.error ? "File unavailable. Open the message in Slack to retry or share it again." : "Preview unavailable. The original file is attached."}</p>)}
               </div>
 
-            </article>{segment?.turn.actor_id === me.user.id && <TurnProgress
+            </article>{(segment?.turn.is_self ?? segment?.turn.actor_id === me.user.id) && <TurnProgress
               key={`${authorityKey}:${connectionVersion}:${segment.id}`} segment={segment} visible={visible && !space}
               entry={work.entries[segment.turn.id]} request={work.load}
               live={liveText.turnId === segment.turn.id ? liveText : undefined}
@@ -855,7 +875,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           })}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
-          {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
+          {view.pending && active && (view.can_answer ?? (active.is_self ?? active.actor_id === me.user.id)) && <>
             {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
             <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} onOpenComputer={() => sideMode ? sessionActions.openComputer(id) : addTab("computer")} />
           </>}
@@ -867,6 +887,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {session.save_warning && <p className="notice" role="status">{session.save_warning}</p>}
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
+          {session.surface === "slack" && <p className="composer-hint"><img src={slackLogo} width={14} height={14} alt="Slack" /> Messages and replies appear in the linked Slack conversation.</p>}
           {error && <div className="error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button></div>}
           {answeringQuestion && <p className="question-reply-hint">Your reply will answer the pending question.</p>}
           {requestAnswered && <p className="question-reply-hint">Your answer was sent. You can send a follow-up.</p>}
@@ -891,6 +912,11 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             </div>
           </div>
           {accountNotice && !skipAccounts && <p className="notice" role="status">{accountNotice}<Button type="button" variant="ghost" size="sm" onClick={() => setAccountNotice("")}>Continue</Button><a href="#settings/general">Preferences</a></p>}
+          {session.surface === "slack" && view.slack_delivery && <div className="composer-hint" role="status">
+            {view.slack_delivery.rejected > 0 ? <><span>Slack could not deliver {view.slack_delivery.rejected} message(s). Check the Slack connection in Settings.</span>{session.can_manage && <Button variant="ghost" size="sm" onClick={async () => { try { await api(`/sessions/${id}/slack-delivery/retry`, "POST"); await load() } catch (reason) { setError(String(reason)) } }}>Retry delivery</Button>}</>
+              : view.slack_delivery.sending > 0 ? "Confirming Slack delivery. Your message will not be sent twice."
+              : view.slack_delivery.pending > 0 ? "Waiting to deliver to Slack…" : null}
+          </div>}
           {accountBlocked && !accountNotice && !accountCatalog.error && <p className="composer-hint" role="status">Loading connections…</p>}
           {accountBlocked && accountCatalog.error && <p className="error" role="alert">{accountCatalog.error}<Button type="button" variant="outline" size="sm" onClick={() => setAccountRevision(value => value + 1)}>Retry connections</Button><Button type="button" variant="ghost" size="sm" onClick={() => { setSkippedAccountScope(accountScope); setAccountNotice("") }}>Continue without connections</Button></p>}
           {pictures.uploading && <p className="composer-hint" role="status">Uploading files…</p>}

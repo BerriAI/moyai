@@ -53,7 +53,8 @@ GITHUB_WORKFLOW_SCHEMA_VERSION = "2026-10-16-product-github-workflows-v17"
 DELEGATION_SCHEMA_VERSION = "2026-10-16-interactive-delegation-v18"
 SLACK_ACTIVITY_SCHEMA_VERSION = "2026-10-17-slack-activity-v19"
 SLACK_TURN_SOURCE_SCHEMA_VERSION = "2026-10-17-slack-turn-source-v20"
-GOAL_SCHEMA_VERSION = "2026-10-17-goals-v21"
+MESSAGE_SOURCE_SCHEMA_VERSION = "2026-10-18-message-sources-v21"
+GOAL_SCHEMA_VERSION = "2026-10-17-goals-v22"
 PRODUCT_SCHEMA_VERSION = GOAL_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
@@ -132,6 +133,7 @@ MIGRATIONS = (
     (DELEGATION_SCHEMA_VERSION, frozenset({"moyai_delegated_sessions", "moyai_delegated_turns"})),
     (SLACK_ACTIVITY_SCHEMA_VERSION, frozenset({"moyai_slack_activity"})),
     (SLACK_TURN_SOURCE_SCHEMA_VERSION, SLACK_TURN_SOURCE_TABLES),
+    (MESSAGE_SOURCE_SCHEMA_VERSION, frozenset({"moyai_message_sources", "moyai_delivery_schedule"})),
     (GOAL_SCHEMA_VERSION, frozenset({"moyai_goals", "moyai_goal_turns", "moyai_goal_receipts"})),
 )
 

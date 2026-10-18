@@ -67,9 +67,11 @@ async def test_steering_freezes_previous_slot_and_final_replaces_new_slot(runtim
         }])
         await stage_progress(runtime, product=product)
         await pending(runtime, deliver, client)
+        replies = [message for message in messages.values() if "(from Moyai)" not in message["text"]]
+        assert len(replies) == 2
         assert len(messages) == 2
         assert messages[earlier_ts]["text"] == "Checking the file."
-        assert "Checking the requested word count." in list(messages.values())[-1]["text"]
+        assert "Checking the requested word count." in replies[-1]["text"]
         await finish(runtime, active[2], "Final result: three words.")
         async with runtime.database.sessions() as db:
             assert (await db.get(Turn, correction.id)).status == "included"
@@ -78,10 +80,12 @@ async def test_steering_freezes_previous_slot_and_final_replaces_new_slot(runtim
         else:
             await stage_deliveries(runtime)
         await pending(runtime, deliver, client)
-        assert len(messages) == 2
+        replies = [message for message in messages.values() if "(from Moyai)" not in message["text"]]
+        assert len(replies) == 2
+        assert len(messages) == (4 if product else 2)
         assert messages[earlier_ts]["text"] == "Checking the file."
-        assert list(messages.values())[-1]["text"].startswith("Final result: three words.")
-        assert sum(path == "/chat.postMessage" for path, _ in requests) == 2
+        assert replies[-1]["text"].startswith("Final result: three words.")
+        assert sum(path == "/chat.postMessage" for path, _ in requests) == (4 if product else 2)
     async with runtime.database.sessions() as db:
         assert (await db.get(Delivery, stale.id)).status == "suppressed"
         anchor = await db.scalar(select(Delivery).where(Delivery.identity == anchor_identity(correction.id, product)))
@@ -172,9 +176,11 @@ async def test_fast_final_after_steering_posts_once_without_touching_previous_sl
         else:
             await stage_deliveries(runtime)
         await pending(runtime, deliver, client)
-        assert len(messages) == 2
+        assert len(messages) == (4 if product else 2)
         assert next(iter(messages.values()))["text"] == "Preserved progress."
-        final = list(messages.values())[-1]
+        replies = [message for message in messages.values() if "(from Moyai)" not in message["text"]]
+        assert len(replies) == 2
+        final = replies[-1]
         assert "useful results" in final["text"]
         assert len([block for block in final["blocks"] if block["type"] == "section"]) > 1
-        assert sum(path == "/chat.postMessage" for path, _ in requests) == 2
+        assert sum(path == "/chat.postMessage" for path, _ in requests) == (4 if product else 2)

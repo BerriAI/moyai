@@ -36,7 +36,7 @@ type CredentialDraft = {
 type Memory = { namespace: string; path: string; content: string; version?: string; truncated?: boolean }
 type ProductMemoryNote = {
   id: string; key: string; title: string; content: string; kind: string; repo_url: string; repository_id?: number | null
-  revision: number; created_at?: string; updated_at?: string; expires_at?: string | null; truncated?: boolean
+  revision: number; created_at?: string; updated_at?: string; expires_at?: string | null; truncated?: boolean; review_required?: boolean
   source?: { type?: string; quote?: string; evidence?: string; scope?: string; run_id?: string; session_id?: string; engine?: string; url?: string }
 }
 type ProductMemoryData = {
@@ -459,6 +459,7 @@ export function ProductMemoryNotes({ notes, capabilities, onEdit, onRemove }: {
     return <article className="ns-record" key={note.id}><div className="ns-record-copy">
       <div className="ns-record-title"><h2>{note.title}</h2><span className="ns-badge">{productMemoryKinds.find(kind => kind.value === note.kind)?.label ?? note.kind}</span>
         {Number.isFinite(expires) && expires <= Date.now() && <span className="ns-badge">Expired</span>}</div>
+      {note.review_required && <p className="ns-notice">This note’s source needs review. It is excluded from automatic recall. Review and save it to confirm the content, or delete it.</p>}
       <details><summary>View memory</summary><pre>{note.content}</pre></details>
       <p>{note.repo_url || "Across your sessions"}</p><small>Updated {dateTime(note.updated_at)}{note.expires_at ? ` · Expires ${dateTime(note.expires_at)}` : ""}</small>
       {(note.source?.quote || note.source?.evidence || sourceLink) && <details><summary>Why this was saved</summary>{(note.source?.quote || note.source?.evidence) && <pre>{note.source.quote || note.source.evidence}</pre>}{note.source?.scope && <p>{note.source.scope}</p>}{sourceLink && <a className="ns-link" href={sourceLink}>Open original session</a>}</details>}

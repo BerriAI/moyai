@@ -243,9 +243,7 @@ async def run_runtime_turn(
             data_converter=encrypted_converter(runtime.security, runtime.objects),
         ) as temporal:
             runtime.client = temporal.client
-            skills = await workspace.environment.exec("mkdir -p skills", cwd="/workspace")
-            if skills.return_code != 0:
-                raise RuntimeError("Could not prepare the workspace skill directory.")
+            await workspace.environment.upload_dir(EVALS.parent / "native" / "skills", "/workspace/skills")
             await runtime.start(workspace=workspace, skills_directory="skills")
             assert runtime.product_connections is not None
             assert runtime.product_slack is not None

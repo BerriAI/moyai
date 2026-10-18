@@ -33,14 +33,20 @@ async def notify_dispatch(db: AsyncSession, settings: Settings) -> None:
 
 
 class DispatchWakeups:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, observers: tuple[asyncio.Event, ...] = ()):
         self.settings = settings
         self.event = asyncio.Event()
+        self.observers = observers
         self.ready = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
 
     def _notified(self, _connection: asyncpg.Connection, _pid: int, _channel: str, _payload: str) -> None:
+        self._wake()
+
+    def _wake(self) -> None:
         self.event.set()
+        for event in self.observers:
+            event.set()
 
     async def listen(self) -> None:
         url = self.settings.postgres_url
@@ -57,7 +63,7 @@ class DispatchWakeups:
                 connection.add_termination_listener(lambda _, signal=disconnected: signal.set())
                 await connection.add_listener(channel(self.settings), self._notified)
                 self.ready.set()
-                self.event.set()  # Reconcile anything committed before LISTEN became active.
+                self._wake()  # Reconcile anything committed before LISTEN became active.
                 await disconnected.wait()
             except asyncio.CancelledError:
                 raise

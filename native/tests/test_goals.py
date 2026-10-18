@@ -20,7 +20,7 @@ from moyai.goal_models import Goal, GoalTurn
 from moyai.goal_tools import GoalCapability
 from moyai.goals import is_goal_command, parse_command
 from moyai.models import Connection, Message, Turn, TurnImage, Upload, User
-from moyai.product_schema import GOAL_SCHEMA_VERSION, SLACK_TURN_SOURCE_SCHEMA_VERSION, application_metadata
+from moyai.product_schema import GOAL_SCHEMA_VERSION, MESSAGE_SOURCE_SCHEMA_VERSION, application_metadata
 
 
 async def command(runtime, actor, session_id, text, key=None, **kwargs):
@@ -74,7 +74,7 @@ def test_invalid_goal(text):
 
 
 def test_versioned_migration_preserves_previous_inventory():
-    old = application_metadata("native", version=SLACK_TURN_SOURCE_SCHEMA_VERSION)
+    old = application_metadata("native", version=MESSAGE_SOURCE_SCHEMA_VERSION)
     new = application_metadata("native", version=GOAL_SCHEMA_VERSION)
     assert set(new.tables) - set(old.tables) == {
         "native.moyai_goals", "native.moyai_goal_turns", "native.moyai_goal_receipts",

@@ -8,8 +8,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
+from .inbound_events import InboundEvent
 from .product_identity import ProductGrant
 
 
@@ -151,6 +152,43 @@ class NewSession(BaseModel):
 
 
 class NewMessage(BaseModel):
+    # Transport provenance is assigned only by verified server ingress. It is
+    # deliberately not a request field, even when a client submits these names.
+    _event: InboundEvent | None = PrivateAttr(default=None)
+
+    @property
+    def authored_text(self) -> str:
+        return self.prompt if self._event is None else self._event.text
+
+    @property
+    def source(self) -> dict[str, Any]:
+        return {"kind": "web"} if self._event is None else self._event.source_data()
+
+    @classmethod
+    def from_event(
+        cls, event: InboundEvent, *, connections: list[str] | None = None,
+        model: str | None = None, mode: Literal["asap", "when_idle"] = "asap",
+        reply_to: str | None = None,
+    ) -> NewMessage:
+        body = cls(prompt=event.prompt, request_key=event.request_key, attachments=list(event.attachments),
+                   connections=connections or [], model=model, mode=mode, reply_to=reply_to)
+        body._event = event.model_copy(deep=True)
+        return body
+
+    def validate_event(self, actor_id: str) -> None:
+        event = self._event
+        if event is not None and (
+            event.sender_id != actor_id or event.request_key != self.request_key
+            or event.prompt != self.prompt or event.attachments != tuple(self.attachments)
+        ):
+            raise ValueError("Inbound event does not match the admitted sender or message.")
+
+    def with_model_input(self, prompt: str, *, context_status: str | None = None) -> NewMessage:
+        body = self.model_copy(update={"prompt": prompt})
+        if self._event is not None:
+            body._event = self._event.with_model_input(prompt, context_status=context_status)
+        return body
+
     prompt: str = Field(default="", max_length=500_000)
     request_key: str = Field(min_length=1, max_length=200)
     model: str | None = None

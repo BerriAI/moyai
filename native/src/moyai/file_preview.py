@@ -184,15 +184,15 @@ class FilePreviewService:
         if current.auth_version != user.auth_version:
             raise HTTPException(401, "Your session expired.")
         async with self.runtime.database.sessions() as db:
-            await self.runtime.database.allowed_session(db, session_id, current)
+            await self.runtime.database.allowed_session(db, session_id, user)
             row = await db.get(Artifact if kind == "artifact" else Upload, resource_id)
             if row is None:
                 raise HTTPException(404, "File not found in this session.")
             if row.session_id != session_id and (
                 kind != "artifact"
                 or not (
-                    await self.runtime.database.swarms.shared_artifact(db, current, session_id, row.session_id)
-                    or await self.delegated_artifact(db, current, session_id, row.session_id)
+                    await self.runtime.database.swarms.shared_artifact(db, user, session_id, row.session_id)
+                    or await self.delegated_artifact(db, user, session_id, row.session_id)
                 )
             ):
                 # Ordinary allowed sessions and input uploads do not imply
