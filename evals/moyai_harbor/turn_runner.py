@@ -160,6 +160,8 @@ def moto_object_storage() -> Iterator[str]:
 
 
 def seed_credentials(runtime: Runtime, values: dict[str, str]) -> None:
+    if not values:
+        return
     store = runtime.product_store
     secrets = runtime.product_secrets
     assert store is not None and secrets is not None
@@ -314,6 +316,12 @@ def slack_transport(
                 "params": dict(request.url.params),
             })
             return httpx.Response(200, json={"ok": True, "messages": history, "has_more": False})
+        if path.endswith("/conversations.info"):
+            return httpx.Response(200, json={"ok": True, "channel": {
+                "id": CHANNEL, "is_channel": True, "is_private": False, "is_ext_shared": False,
+            }})
+        if path.endswith("/conversations.members"):
+            return httpx.Response(200, json={"ok": True, "members": [SLACK_USER, BOT_USER]})
         if path.endswith(("/chat.postMessage", "/chat.update")):
             return httpx.Response(200, json={
                 "ok": True, "channel": CHANNEL, "ts": "1792100000.001",
