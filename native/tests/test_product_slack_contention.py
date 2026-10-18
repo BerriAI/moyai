@@ -81,7 +81,7 @@ async def test_canonical_hook_offload_drains_cancellation_with_competing_poll(tm
         release.set()
         await holder
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-        assert isinstance(outcomes[0], asyncio.CancelledError) and outcomes[1] is None
+        assert isinstance(outcomes[0], asyncio.CancelledError) and outcomes[1] is False
         await health
         rows = await database(store.rows, "SELECT id,status FROM coordinator_hooks")
         assert rows == [{"id": "local-one", "status": "pending"}]

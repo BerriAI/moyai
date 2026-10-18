@@ -295,8 +295,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         origin_url = urlsplit(runtime.settings.public_url or str(request.base_url))
         stream_origin = f"{'wss' if origin_url.scheme == 'https' else 'ws'}://{origin_url.netloc}"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            f"img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' {stream_origin}; font-src 'self'; "
+            "default-src 'self'; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline' https://api.fontshare.com; "
+            f"img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' {stream_origin}; "
+            "font-src 'self' https://cdn.fontshare.com; "
             "frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
         )
         # Only content-addressed build assets are public/cacheable. HTML,

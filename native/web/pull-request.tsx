@@ -180,22 +180,28 @@ function Panel({ sessionId, url, onBack, onUpdated }: Props) {
         </div>
       </div>
       <div className="pr-identity">
-        {detail?.state === "merged" ? <GitMerge size={23} /> : <GitPullRequest size={23} />}
-        <div><p className="pr-muted">{detail ? `${detail.repository} #${detail.number}` : "Pull request"}</p>
-          <h1 ref={heading} tabIndex={-1}>{detail?.title || "Pull request details"}</h1>
-        </div>
+        {detail?.state === "merged" ? <GitMerge size={16} /> : <GitPullRequest size={16} />}
+        <h1 ref={heading} tabIndex={-1}>{detail?.title || "Pull request details"}</h1>
       </div>
-      {detail && <div className="pr-meta">
-        <Badge variant="outline" className={`pr-state pr-state-${detail.accessible ? detail.draft && detail.state === "open" ? "draft" : detail.state : "unknown"}`}>{state}</Badge>
-        {detail.author && <span>by {detail.author.login}</span>}
-        {detail.head && <span className="pr-branches"><code>{detail.head}</code><span aria-label="into"> → </span><code>{detail.base || "unknown base"}</code></span>}
-      </div>}
-      {detail?.accessible && <div className="pr-stats">
-        <span>{detail.changed_files ?? 0} files changed</span>
-        <span className="pr-added">+{detail.additions ?? 0}</span><span className="pr-removed">−{detail.deletions ?? 0}</span>
-        {detail.head_sha && <code title={detail.head_sha}>{detail.head_sha.slice(0, 7)}</code>}
-        {detail.updated_at && <span className="pr-muted">Updated {date(detail.updated_at)}</span>}
-      </div>}
+      {detail && <Collapsible className="pr-metadata">
+        <div className="pr-summary">
+          <Badge variant="outline" className={`pr-state pr-state-${detail.accessible ? detail.draft && detail.state === "open" ? "draft" : detail.state : "unknown"}`}>{state}</Badge>
+          {detail.accessible && <span className="pr-stats">
+            <span>{detail.changed_files ?? 0} {(detail.changed_files ?? 0) === 1 ? "file" : "files"}</span>
+            <span className="pr-added">+{detail.additions ?? 0}</span><span className="pr-removed">−{detail.deletions ?? 0}</span>
+          </span>}
+          <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="pr-details-trigger" aria-label="Review details"><ChevronRight className="pr-chevron" aria-hidden="true" />Details</Button></CollapsibleTrigger>
+        </div>
+        <CollapsibleContent className="pr-metadata-content">
+          <p className="pr-repository"><code>{detail.repository} #{detail.number}</code></p>
+          {detail.author && <p className="pr-muted">by {detail.author.login}</p>}
+          {detail.head && <p className="pr-branches"><code>{detail.head}</code><span aria-label="into"> → </span><code>{detail.base || "unknown base"}</code></p>}
+          {detail.accessible && <div className="pr-meta">
+            {detail.head_sha && <code title={detail.head_sha}>{detail.head_sha.slice(0, 7)}</code>}
+            {detail.updated_at && <span className="pr-muted">Updated {date(detail.updated_at)}</span>}
+          </div>}
+        </CollapsibleContent>
+      </Collapsible>}
     </header>
     {loading && <Notice role="status">Loading pull request…</Notice>}
     {(error || detail?.error) && <Notice error><p>{error || detail?.error}</p><Button variant="outline" size="sm" disabled={loading} onClick={refresh}>Retry</Button></Notice>}
@@ -227,7 +233,6 @@ type Expansion = { values: Record<string, boolean>; update: (key: string, open: 
 
 function Changes({ section, expansion }: { section: Section<FileChange>; expansion: Expansion }) {
   return <div className="pr-files">
-    {section.notice && <p className="pr-muted">{section.notice}</p>}
     {!section.items.length && !section.error && <p className="pr-muted">No changed files returned by GitHub.</p>}
     {section.items.map(file => <Collapsible className="pr-file" key={file.filename}
       open={expansion.values[`file:${file.filename}`] ?? section.items.length <= 3}
@@ -237,11 +242,12 @@ function Changes({ section, expansion }: { section: Section<FileChange>; expansi
       </CollapsibleTrigger>
       <CollapsibleContent className="pr-file-content">
       {file.patch_status !== "available" && <Notice>{file.patch_status === "partial" ? "Partial patch. Some changes are omitted." : "Patch unavailable. This may be a binary, empty, or large file."} Open in GitHub to inspect the full change.</Notice>}
-      {file.patch && <pre className="pr-diff" aria-label={`Diff for ${file.filename}`}><code>{file.patch.split("\n").map((line, index) =>
+      {file.patch && <pre className="pr-diff" tabIndex={0} aria-label={`Diff for ${file.filename}`}><code>{file.patch.split("\n").map((line, index) =>
         <span key={index} className={line.startsWith("@@") ? "pr-hunk" : line.startsWith("+") ? "pr-diff-added" : line.startsWith("-") ? "pr-diff-removed" : ""}>{line}{"\n"}</span>,
       )}</code></pre>}
       </CollapsibleContent>
     </Collapsible>)}
+    {section.notice && <p className="pr-muted pr-section-note">{section.notice}</p>}
   </div>
 }
 function DiscussionList({ section }: { section: Section<Discussion> }) {

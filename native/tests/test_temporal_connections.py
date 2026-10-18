@@ -201,3 +201,99 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         saved = await db.get(Turn, turn.id)
         assert saved.status == "completed"
         assert runtime.security.unseal(saved.result).decode() == "Repository read completed."
+
+
+async def test_large_connection_catalog_preserves_all_tools_selection_and_replay(runtime, actor, monkeypatch):
+    """The observed 19-account/712-tool shape stays discoverable and replayable."""
+    from temporalio.api.enums.v1 import EventType
+
+    counts = {"github": 43, "linear": 8, "slack": 5, "notion": 11}
+    accounts = ["github"] * 16 + ["linear", "slack", "notion"]
+    discoveries, calls, requests = [], [], []
+    replaying = False
+
+    def provider(kind):
+        class Provider:
+            def __init__(self, **kwargs):
+                assert activity.in_activity() and not replaying
+                self.identity = kwargs["id"].removeprefix("connection_")
+
+            def get_toolset(self):
+                if activity.info().activity_type.endswith("__get_tools"):
+                    discoveries.append((self.identity, counts[kind]))
+                tools = FunctionToolset(id=self.identity)
+
+                def invoke(number: int) -> str:
+                    assert activity.in_activity() and not replaying
+                    calls.append((self.identity, number))
+                    return f"Selected account {self.identity}, item {number}"
+
+                for index in range(counts[kind]):
+                    tools.add_function(
+                        invoke, name=f"read_item_{index}",
+                        description=(
+                            f"Read item {index} for account {self.identity}. "
+                            + "Full provider parameter and operation documentation. " * 46
+                        ),
+                        metadata={"annotations": {"readOnlyHint": True}},
+                    )
+                return tools
+        return Provider
+
+    for kind in counts:
+        monkeypatch.setitem(SERVICES, kind, provider(kind))
+    async with runtime.database.sessions.begin() as db:
+        connections = [Connection(
+            id=new_id(), owner_id=actor.id, kind=kind, name=f"Account {index}",
+            credential=runtime.security.seal("synthetic-account-token"), read_only=True,
+        ) for index, kind in enumerate(accounts)]
+        db.add_all(connections)
+
+    selected = connections[15]
+    name = f"github_{selected.id[:8]}_read_item_42"
+
+    async def stream(messages, info):
+        requests.append(1)
+        names = {tool.name for tool in info.function_tools}
+        if name not in names:
+            assert "search_tools" in names
+            yield {0: DeltaToolCall(name="search_tools", json_args=json.dumps({"queries": [name]}))}
+        elif not any(
+            isinstance(part, ToolReturnPart) and part.tool_name == name
+            for message in messages for part in message.parts
+        ):
+            yield {0: DeltaToolCall(name=name, json_args='{"number": 42}')}
+        else:
+            yield "Large catalog read completed."
+
+    runtime.models["test"].stream_function = stream
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    turn = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Read item 42 on the selected account.", request_key="large-catalog",
+        connections=[connection.id for connection in connections],
+    ))
+    await runtime.database.claim_next()
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    environment = await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    )
+    async with environment:
+        runtime.client = environment.client
+        async with make_worker(runtime):
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id,
+                task_queue=runtime.settings.temporal_queue,
+            )
+            result = await asyncio.wait_for(handle.result(), timeout=60)
+            history = await handle.fetch_history()
+        assert result["status"] == "completed"
+        assert len(discoveries) == 19 and sum(count for _, count in discoveries) == 712
+        assert calls == [(selected.id, 42)]
+        assert len(requests) == 3
+        assert not any(event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED for event in history.events)
+        replaying = True
+        await Replayer(
+            interceptors=[ActivityCapacity()],
+            workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+        ).replay_workflow(history)
+    assert len(discoveries) == 19 and calls == [(selected.id, 42)]

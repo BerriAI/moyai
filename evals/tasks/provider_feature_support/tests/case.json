@@ -1,0 +1,22 @@
+{
+  "id": "provider_feature_support",
+  "prompt": "<https://api-docs.deepseek.com/guides/search/|api-docs.deepseek.com/guides/search> do we support this ?",
+  "thread": [
+    {
+      "role": "human",
+      "display_name": "Ishaan Jaffer",
+      "text": "<https://api-docs.deepseek.com/guides/search/|api-docs.deepseek.com/guides/search> do we support this ?",
+      "files": []
+    }
+  ],
+  "case_notes": "The requester works on LiteLLM, so 'we' means LiteLLM, and 'this' is the linked DeepSeek page, which documents two APIs: Search (POST /v1/tools/search) and Fetch (POST /v1/tools/fetch). The workspace holds the LiteLLM code at main @ 4a8b475 (stated in the workspace AGENTS.md, which has no git history, so citing that commit is grounded) and a snapshot of the linked page. Ground truth from that code: LiteLLM has a unified search API (litellm.search() and the proxy's /v1/search routes) with 20 providers in SearchProviders, and deepseek is not one of them, so DeepSeek Search is not supported. LiteLLM has no unified fetch or scrape endpoint and no DeepSeek pass-through route, so Fetch is not supported either. Adding Search is small: one search transformation under litellm/llms/deepseek/search/ modeled on an existing provider such as tavily, plus a SearchProviders entry (and optionally a cost entry, since DeepSeek bills $0.75 per 1,000 requests). Fetch would need a new endpoint, not just a provider. A saved DeepSeek credential exists, but a live DeepSeek call proves only that DeepSeek works, not that LiteLLM supports it, so it is optional. Opening a PR was not requested, so the right move is to offer it, not to do it.",
+  "reference_reply": "TL;DR: no, we don't support either one today (checked litellm main @ 4a8b475).\n\nSearch: our unified `/v1/search` (`litellm.search()`) has 20 providers (tavily, exa, brave, perplexity, firecrawl, etc.) and `deepseek` isn't one of them. Adding it is small: one `litellm/llms/deepseek/search/transformation.py` modeled on the tavily one (~200 lines), plus an enum entry and a cost-map entry. It maps cleanly onto our shape: `query`, `count` -> `max_results`, `title`/`url`/`snippet`/`date`.\nFetch: we have no unified fetch/scrape endpoint at all, so `POST /v1/tools/fetch` would mean a new endpoint, not just a new provider. There's no DeepSeek pass-through route either.\nWant me to open a PR for DeepSeek search now and do fetch as a follow-up?",
+  "required": [
+    "grounded",
+    "correct",
+    "complete",
+    "sized",
+    "offer"
+  ],
+  "min_score": 12
+}

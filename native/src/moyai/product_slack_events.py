@@ -98,6 +98,36 @@ class SlackEvents:
         self.slack = slack
         self.conversations = SlackConversations(slack)
 
+    async def acknowledge_intake(self, payload: dict[str, Any]) -> None:
+        settings = self.slack.settings
+        if not settings.slack_bot_enabled or not settings.slack_session_users:
+            return
+        from .product_slack import SlackInstallationUnavailable
+
+        try:
+            installed = await source_database(self.slack.installation)
+        except SlackInstallationUnavailable:
+            return
+        if isinstance(payload.get("event"), dict) and payload["event"].get("subtype") in {
+            "message_changed", "message_deleted",
+        }:
+            return
+        try:
+            event = self._eligible_event(payload, installed)
+            if event is None:
+                return
+            message = SlackMessage.parse(payload, event, installed)
+        except HTTPException:
+            return
+        if message is None:
+            return
+        if message.origin["channel_id"].startswith("D") and (
+            not message.direct or not settings.slack_dm_enabled or not settings.slack_thread_chat_enabled
+        ):
+            return
+        if message.mentioned or message.direct:
+            await self.slack.acknowledge(message.source, installed)
+
     async def receive(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("type") == "native_interaction":
             await self.slack.interact(payload["payload"])
@@ -245,6 +275,8 @@ class SlackEvents:
             await self.slack.set_paused(binding.session_id, False)
         turn = await self._submit(actor, thread, submission.body, message, submission.uploads)
         await self.slack.queue(turn, thread, "accepted", {"text": "Moyai received your message."})
+        self.slack.runtime.slack_activity.wake.set()
+        self.slack.delivery_wakeup.set()
         return {"ok": True}
 
     async def _control(self, message: SlackMessage, conversation: SlackConversation, actor: User) -> None:

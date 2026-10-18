@@ -250,19 +250,34 @@ class Database:
             raise HTTPException(429, "Too many sign-in attempts. Wait one minute.")
 
     async def allowed_session(self, db: AsyncSession, session_id: str, actor: User) -> Session:
+        """Authorize a fresh reader or input, including its current source audience."""
+        session = await self.execution_session(db, session_id, actor)
+        await self.check_source_audience(db, session, actor)
+        member = await db.get(SwarmMember, session_id)
+        if member is not None and member.mission_id != session_id:
+            root = await db.get(Session, member.mission_id)
+            assert root is not None  # Checked by execution_session.
+            await self.check_source_audience(db, root, actor)
+        return session
+
+    async def execution_session(self, db: AsyncSession, session_id: str, actor: User) -> Session:
+        """Local session checks for work whose saved turn authority is revalidated by the caller.
+
+        Provider audience lookups belong at read/admission boundaries, not inside
+        every worker/tool authorization. The original product grant and selected
+        connection checks still fence execution, including Slack disconnection.
+        """
         session = await db.get(Session, session_id)
         if (
             session is None or session.deleted
             or (session.visibility == "private" and session.owner_id != actor.id)
         ):
             raise HTTPException(404, "Conversation not found.")
-        await self.check_source_audience(db, session, actor)
         member = await db.get(SwarmMember, session_id)
         if member is not None and member.mission_id != session_id:
             root = await db.get(Session, member.mission_id)
             if root is None or root.deleted or (root.visibility == "private" and root.owner_id != actor.id):
                 raise HTTPException(404, "Conversation not found.")
-            await self.check_source_audience(db, root, actor)
         return session
 
     async def check_source_audience(self, db: AsyncSession, session: Session, actor: User) -> None:
@@ -279,8 +294,7 @@ class Database:
             return
         if (session.surface == "slack" and self.product_authority_enabled
                 and (self.slack_access is None or not await self.slack_access(db, session, actor))):
-            raise HTTPException(404, "Conversation unavailable. For Slack chats, verify your linked Slack account "
-                                "and channel access. An administrator may need to reconnect Slack in Settings.")
+            raise HTTPException(404, "Conversation unavailable. Verify your linked Slack account and channel access.")
 
     @asynccontextmanager
     async def _admission_session(self, db: AsyncSession | None) -> AsyncIterator[AsyncSession]:
@@ -467,7 +481,8 @@ class Database:
             if authorized is None:
                 raise HTTPException(401, "Your access changed. Sign in again.")
             mission = await self.swarms.admit(transaction, actor, session_id, body, generated=swarm_generated)
-            session = await self.allowed_session(transaction, session_id, actor)
+            session = await (self.execution_session if swarm_generated or delegated_authority is not None
+                             else self.allowed_session)(transaction, session_id, actor)
             locked = await transaction.scalar(update(Session).where(
                 Session.id == session_id, Session.deleted.is_(False),
             ).values(revision=Session.revision + 1).returning(Session.id))
@@ -822,7 +837,7 @@ class Database:
                 if locked_actor is None:
                     raise PermissionError("The requester changed before preparation.")
                 cast(Any, actor).product_grant = product_grant
-            session = await self.allowed_session(db, turn.session_id, actor)
+            session = await self.execution_session(db, turn.session_id, actor)
             member = await self.swarms.authorize(db, turn)
             delegation = await db.get(DelegatedSession, session.id)
             generated_delegation = await db.get(DelegatedTurn, turn.id) if delegation else None
@@ -916,11 +931,11 @@ class Database:
 
     async def authorize_scope(
         self, scope: RunScope, *, input_id: str | None = None, db: AsyncSession | None = None,
-    ) -> None:
-        """Recheck live authority before a dispatched effect or resumed approval."""
+    ) -> list[Grant]:
+        """Recheck live authority and return the grants read by this check."""
         if db is None:
             async with self.sessions() as transaction:
-                await self.authorize_scope(scope, input_id=input_id, db=transaction)
+                return await self.authorize_scope(scope, input_id=input_id, db=transaction)
         else:
             actor = await db.get(User, scope.actor_id)
             turn = await db.get(Turn, scope.turn_id)
@@ -929,7 +944,7 @@ class Database:
             await self._check_product_turn(db, turn, scope.product_grant)
             cast(Any, actor).product_grant = scope.product_grant
             await self.swarms.authorize(db, turn, scope=scope)
-            session = await self.allowed_session(db, scope.session_id, actor)
+            session = await self.execution_session(db, scope.session_id, actor)
             if (
                 session.active_turn != turn.id or session.status != "running" or turn.status != "running"
                 or turn.actor_id != actor.id or turn.session_id != session.id
@@ -942,6 +957,7 @@ class Database:
                 pending = await self.latest_guidance(db, turn.id)
                 if pending and pending != input_id:
                     raise GuidanceChanged("New guidance arrived before this action was dispatched.")
+            return current
 
     @staticmethod
     def guidance_order():
