@@ -12,7 +12,7 @@ import re
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .contracts import NewMessage, RunScope
@@ -88,7 +88,7 @@ class Goals:
         goal.reason = self.database.security.seal(reason) if reason else ""
         goal.checked_at = now()
 
-    async def halt(self, db: AsyncSession, session: Session, goal: Goal) -> None:
+    async def halt(self, db: AsyncSession, session: Session, goal: Goal, *, keep_queued: bool = False) -> None:
         # Reuse native Stop's authority fence and cancellation reconciliation.
         # A saving answer keeps its settlement; it cannot schedule more work.
         bound = select(GoalTurn.turn_id).where(
@@ -100,9 +100,17 @@ class Goals:
             and session.status not in {"saving", "waiting"}
         ):
             session.status = "stopped"
-        await db.execute(update(Turn).where(
-            Turn.id.in_(bound), Turn.status.in_(tuple(s for s in BUSY if s not in {"saving", "waiting"})),
-        ).values(status="stopped", finished_at=now()))
+        stopped = list(await db.scalars(update(Turn).where(
+            Turn.id.in_(bound), Turn.status.in_(tuple(
+                s for s in BUSY if s not in {"saving", "waiting"} and (not keep_queued or s != "queued")
+            )),
+        ).values(status="stopped", finished_at=now()).returning(Turn.id)))
+        if keep_queued and stopped:
+            # An intentional pause is not an execution failure on Resume when
+            # retained user input requires keeping the current generation.
+            await db.execute(update(GoalTurn).where(
+                GoalTurn.turn_id.in_(stopped),
+            ).values(decision="paused"))
 
     async def pause_continuation(self, db: AsyncSession, goal: Goal, reason: str) -> None:
         """Hold future automatic work without revoking an already admitted turn."""
@@ -170,8 +178,8 @@ class Goals:
                 if goal is None or goal.status == "cleared":
                     raise HTTPException(409, "There is no goal in this conversation. " + HELP)
                 if action == "pause":
-                    self.change(goal, "paused", "Paused by you.")
-                    await self.halt(db, session, goal)
+                    await self.pause_continuation(db, goal, "Paused by you.")
+                    await self.halt(db, session, goal, keep_queued=True)
                 elif action == "clear":
                     self.change(goal, "cleared")
                     await self.halt(db, session, goal)
@@ -193,14 +201,16 @@ class Goals:
                     if goal.token_budget is not None and goal.tokens_used >= goal.token_budget:
                         raise HTTPException(409, "The token budget is exhausted. Edit the goal with a larger --budget.")
                     if goal.status != "active":
-                        active = await db.get(Turn, session.active_turn) if session.active_turn else None
-                        binding = await db.get(GoalTurn, active.id) if active else None
-                        # A context mismatch can pause just continuation. Resume
-                        # must not supersede the still-authorized current turn.
-                        if not (
-                            binding and binding.generation == goal.generation and active
-                            and active.status in {"starting", "running", "saving", "waiting"}
-                        ):
+                        # Admission can precede active_turn ownership. Preserve
+                        # every pending goal input, including queued objectives,
+                        # deferred replies and steering, until it has settled.
+                        pending = await db.scalar(select(GoalTurn.turn_id).join(
+                            Turn, Turn.id == GoalTurn.turn_id,
+                        ).where(
+                            GoalTurn.session_id == session_id, GoalTurn.generation == goal.generation,
+                            Turn.status.in_(BUSY),
+                        ).limit(1))
+                        if pending is None:
                             goal.generation += 1
                         goal.blocked_count, goal.blocker = 0, ""
                         self.change(goal, "active")
@@ -238,10 +248,16 @@ class Goals:
             raise HTTPException(403, "The goal's original computer account context changed. Clear it and set a new goal.")
         return actor
 
-    async def bind(self, db: AsyncSession, turn: Turn) -> None:
+    async def bind(self, db: AsyncSession, turn: Turn, *, resumed_from: str | None = None) -> None:
         goal = await db.get(Goal, turn.session_id, populate_existing=True)
-        if goal is None or goal.status != "active":
+        if goal is None:
             return
+        if goal.status != "active":
+            previous = await db.get(GoalTurn, resumed_from) if resumed_from and goal.status == "paused" else None
+            if previous is None or previous.generation != goal.generation:
+                return
+            # Accepting an answer preserves the paused goal's input; it does
+            # not authorize dispatch until the owner resumes the goal.
         if (
             turn.actor_id != goal.owner_id or turn.model != goal.model
             or set(json.loads(turn.connections)) != set(json.loads(goal.connections))
@@ -335,6 +351,8 @@ class Goals:
                     continue
                 if turn.status in {"included", "resumed"}:
                     continue
+                if turn.status == "stopped" and binding.decision == "paused":
+                    continue
                 goal.turns += 1
                 if turn.status != "completed" or not turn.result_accepted:
                     self.change(goal, "blocked", "The last execution stopped or failed. Inspect it before resuming.")
@@ -392,3 +410,12 @@ class Goals:
             ).order_by(Goal.checked_at, Goal.session_id).limit(limit)))
         for session_id in pending:
             await self.tick(session_id)
+
+
+def dispatchable():
+    """Keep paused user inputs queued; already admitted turns use native authority."""
+    return ~exists(select(GoalTurn.turn_id).where(GoalTurn.turn_id == Turn.id)) | exists(
+        select(GoalTurn.turn_id).join(Goal, Goal.session_id == GoalTurn.session_id).where(
+            GoalTurn.turn_id == Turn.id, GoalTurn.generation == Goal.generation, Goal.status == "active",
+        )
+    )

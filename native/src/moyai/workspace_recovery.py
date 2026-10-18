@@ -66,9 +66,15 @@ def pending_checkpoint(
 
 
 async def locked_scope(
-    database: Database, db: AsyncSession, scope: RunScope, *, status: str,
+    database: Database, db: AsyncSession, scope: RunScope, *, status: str | tuple[str, ...],
 ) -> tuple[Session, Turn]:
-    """Use the same source → actor → session lock order as turn admission."""
+    """Fence current authority and phases in source → actor → session lock order.
+
+    Operations valid across a lifecycle transition may admit multiple phases.
+    Check that set in the locking write, never against an earlier unlocked read.
+    Preparation and checkpoint publication still require their single phase.
+    """
+    statuses = (status,) if isinstance(status, str) else status
     turn = await db.get(Turn, scope.turn_id)
     if turn is None or turn.actor_id != scope.actor_id or turn.session_id != scope.session_id:
         raise PermissionError("The workspace task changed.")
@@ -80,7 +86,7 @@ async def locked_scope(
         raise PermissionError("The workspace requester no longer has access.")
     locked = await db.scalar(update(Session).where(
         Session.id == scope.session_id, Session.active_turn == scope.turn_id,
-        Session.status == status, Session.deleted.is_(False),
+        Session.status.in_(statuses), Session.deleted.is_(False),
     ).values(revision=Session.revision).returning(Session.id))
     if locked is None:
         raise PermissionError("The workspace task stopped or was superseded.")
@@ -88,7 +94,7 @@ async def locked_scope(
     await db.refresh(turn)
     assert session is not None
     if (
-        turn.status != status or session.visibility != scope.visibility
+        turn.status != session.status or session.visibility != scope.visibility
         or session.surface != scope.surface
         or (session.visibility == "private" and session.owner_id != scope.actor_id)
     ):

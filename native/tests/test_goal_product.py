@@ -59,3 +59,20 @@ async def test_idle_goal_inspection_does_not_wake_dispatcher_again(admitted_prod
         await database.goals.tick(session.id)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(listener.event.wait(), .1)
+
+
+async def test_pause_racing_dispatch_never_starts_work_after_pause_commits(admitted_product):
+    product = admitted_product
+    database = product.database
+    for index in range(5):
+        session, turn_id = await start(product)
+        await asyncio.gather(
+            database.claim_next(),
+            database.goals.command(product.actor, session.id, NewMessage(
+                prompt="/goal pause", request_key=f"pause-{index}",
+            )),
+        )
+        async with database.sessions() as db:
+            turn = await db.get(Turn, turn_id)
+            assert turn.status in {"queued", "stopped"}
+            assert (await db.get(Goal, session.id)).status == "paused"

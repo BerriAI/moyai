@@ -18,13 +18,15 @@ from pydantic_ai.messages import AgentStreamEvent, ToolCallPart
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.workspaces import WorkspaceRef
-from pydantic_ai_harness import Coder, RepoContext
+from pydantic_ai_harness import Coder, RepoContext, Shell
 from temporalio import workflow
 
 from .contracts import RunScope
+from .database import Database
 from .delegation import delegation_mode
 from .effects import EffectReceipts
 from .live_events import PUBLIC_STREAM_VERSION, public_workflow_event, publish_workflow_event
+from .shell_recovery import RecoveringShell
 
 STARTUP_VERSION = "moyai-on-demand-computer-v1"
 COMPUTER_TOOLS = frozenset({
@@ -189,12 +191,14 @@ class OnDemandRepository(WrapperCapability[RunScope]):
         return args
 
 
-def on_demand_coder(publish: PublishWorkspace) -> AbstractCapability[RunScope]:
+def on_demand_coder(publish: PublishWorkspace, database: Database) -> AbstractCapability[RunScope]:
     def replace(capability: AbstractCapability[RunScope]) -> AbstractCapability[RunScope]:
         if isinstance(capability, RepoContext):
             return OnDemandRepository(capability, publish)
         if capability.id == "coder_instructions":
             return OnDemandProjectInstructions(capability)
+        if isinstance(capability, Shell):
+            return RecoveringShell(capability, database)
         return capability
 
     result = Coder[RunScope]().visit_and_replace(replace)

@@ -40,6 +40,7 @@ from .delegation_models import DelegatedSession, DelegatedTurn
 from .dispatch_wakeups import notify_dispatch
 from .goal_models import Goal
 from .goals import Goals
+from .goals import dispatchable as goal_dispatchable
 from .models import (
     Base,
     ComputerOperation,
@@ -620,6 +621,7 @@ class Database:
                     or_(Session.active_turn.is_(None), Session.active_turn == Turn.id),
                     Session.deleted.is_(False),
                     dispatchable(),
+                    goal_dispatchable(),
                 ).order_by(Turn.created_at, Turn.id).limit(limit - len(claimed_turns))
                   .with_for_update(of=Session, skip_locked=True))).all()
                 if not candidates:
@@ -635,7 +637,7 @@ class Database:
                     if claimed is None:
                         continue
                     admitted = await db.scalar(update(Turn).where(
-                        Turn.id == turn.id, Turn.status == "queued",
+                        Turn.id == turn.id, Turn.status == "queued", goal_dispatchable(),
                     ).values(status="starting").returning(Turn.id))
                     if admitted is not None:
                         await db.execute(update(Session).where(Session.id == turn.session_id).values(
@@ -1183,7 +1185,7 @@ class Database:
                 ))
             if member is not None:
                 await self.swarms.bind(db, mission, turn, generated=True)
-            await self.goals.bind(db, turn)
+            await self.goals.bind(db, turn, resumed_from=previous.id)
             delegated = await db.get(DelegatedTurn, previous.id)
             if delegated is not None:
                 db.add(DelegatedTurn(turn_id=turn.id, session_id=delegated.session_id))

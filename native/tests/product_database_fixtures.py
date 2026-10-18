@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ from uuid import uuid4
 
 import asyncpg
 import pytest_asyncio
+from app.config import Settings as LegacySettings
+from cryptography.fernet import Fernet
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from test_product_identity import SCHEMA, settings_for
@@ -22,7 +25,7 @@ from moyai.settings import Settings
 
 
 @asynccontextmanager
-async def product_database_state(tmp_path, *, template="template0"):
+async def product_database_state(tmp_path, *, template="template0", initialize_legacy=False):
     base = urlsplit(os.environ["MOYAI_TEST_POSTGRES"])
     assert base.hostname in {"localhost", "127.0.0.1", "::1"}
     name = "moyai_authority_" + uuid4().hex
@@ -41,8 +44,25 @@ async def product_database_state(tmp_path, *, template="template0"):
         if template == "template0":
             async with source.begin() as connection:
                 await connection.execute(text("CREATE SCHEMA moyai"))
-                for statement in SCHEMA[:2]:
-                    await connection.execute(text(statement.replace("CREATE TABLE ", "CREATE TABLE moyai.", 1)))
+            if initialize_legacy:
+                from app.schema_migrations import migrate
+
+                source_settings = LegacySettings(
+                    _env_file=None,
+                    data_dir=tmp_path / "legacy-store",
+                    moyai_database_url=url,
+                    moyai_database_schema="moyai",
+                    moyai_database_initialize=True,
+                    session_secret="synthetic-product-session-secret-only",
+                    encryption_key=Fernet.generate_key().decode(),
+                )
+                await asyncio.to_thread(migrate, source_settings)
+            async with source.begin() as connection:
+                statements = SCHEMA if initialize_legacy else SCHEMA[:2]
+                for statement in statements:
+                    await connection.execute(text(
+                        statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS moyai.", 1)
+                    ))
                 await connection.execute(text(
                     "INSERT INTO moyai.users VALUES (:id,'google','admin@example.test','Product admin',NULL,'c','u')"
                 ), {"id": user_id})

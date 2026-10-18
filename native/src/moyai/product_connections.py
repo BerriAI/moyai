@@ -54,6 +54,7 @@ class ProductConnections:
         self.product, self.database = product, database
         self.store, self.security, self.settings = product.store_proxy, product.security, product.settings
         self.connectors = Connectors(cast(Any, self.store), self.security, self.settings)
+        self.github_mcp_url: str | None = None
         self.identities = SlackIdentities(
             self.store, self.connectors, self.settings, self.security, CommittedSourceWrites(),
             lambda owner, actor: same_requester(self.store, owner, actor),
@@ -462,10 +463,13 @@ class ProductGitHubToolset(AbstractToolset[RunScope]):
         from pydantic_ai_harness.github import GitHub
 
         value = await self.service.credentials(self.scope, self.grant, write=write)
-        return GitHub[RunScope](
+        github = GitHub[RunScope](
             id=self.id, auth=value["access_token"], read_only=self.grant.read_only,
             include_instructions=False,
-        ).get_toolset()
+        )
+        if self.service.github_mcp_url is not None:
+            github.url = self.service.github_mcp_url
+        return github.get_toolset()
 
     async def get_tools(self, ctx: RunContext[RunScope]) -> dict[str, ToolsetTool[RunScope]]:
         from .connections import PROHIBITED_TOOLS, read_only_tool

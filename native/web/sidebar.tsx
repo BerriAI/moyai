@@ -67,6 +67,19 @@ function age(value?: string) {
   return minutes < 1 ? "Just now" : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.floor(minutes / 60)} hr ago` : `${days} ${days === 1 ? "day" : "days"} ago`
 }
 
+function readExpansion(key: string, version: number, fallback: string[]): string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) ?? "null")
+    if (value && typeof value === "object" && "version" in value && value.version === version
+      && "expanded" in value && Array.isArray(value.expanded)) {
+      return [...new Set(value.expanded.filter((item): item is string => typeof item === "string"))]
+    }
+  } catch {}
+  // Old preferences recorded exclusions from an open-by-default tree. They
+  // cannot tell us which branches were deliberately opened.
+  return fallback
+}
+
 export function SessionSidebar({ sessions, folders, selected, userId, view, onViewChange, onOpenPullRequest, onOpenSideChat, hasMore, loading, notice, onLoadMore }: {
   sessions: SidebarSession[]; folders: SessionFolder[]; selected: string; userId: string
   view: SessionListView; onViewChange: (view: SessionListView) => void
@@ -113,45 +126,20 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
   useEffect(() => {
     if (dropTarget?.startsWith("folder:") && !folders.some(folder => `folder:${folder.id}` === dropTarget)) setDropTarget(null)
   }, [folders, dropTarget])
-  const [closed, setClosed] = useState<string[]>(() => {
-    try {
-      const value: unknown = JSON.parse(localStorage.getItem(`moyai-native-folders:${userId}`) ?? "null")
-      // Preserve existing folder choices while adopting the new Participated
-      // default once. Subsequent explicit expansion remains the user's choice.
-      if (Array.isArray(value)) return [...new Set([...value.filter(item => typeof item === "string"), "participated"])]
-      if (value && typeof value === "object" && "version" in value && value.version === 2 && "closed" in value && Array.isArray(value.closed)) {
-        return value.closed.filter(item => typeof item === "string")
-      }
-    } catch {}
-    return ["participated"]
-  })
-  const toggle = (key: string) => setClosed(previous => {
+  const [expandedGroups, setExpandedGroups] = useState(() =>
+    readExpansion(`moyai-native-folders:${userId}`, 3, ["recent"]))
+  const toggle = (key: string) => setExpandedGroups(previous => {
     const next = previous.includes(key) ? previous.filter(item => item !== key) : [...previous, key]
-    try { localStorage.setItem(`moyai-native-folders:${userId}`, JSON.stringify({ version: 2, closed: next })) } catch {}
+    try { localStorage.setItem(`moyai-native-folders:${userId}`, JSON.stringify({ version: 3, expanded: next })) } catch {}
     return next
   })
   const tree = useMemo(() => sessionTree(sessions), [sessions])
-  const [collapsedAgents, setCollapsedAgents] = useState<string[]>(() => {
-    try {
-      const saved: unknown = JSON.parse(localStorage.getItem(`moyai-subagents:${userId}`) ?? "[]")
-      if (Array.isArray(saved)) return saved.filter(value => typeof value === "string")
-    } catch {}
-    return []
-  })
-  const saveCollapsedAgents = (next: string[]) => {
-    try { localStorage.setItem(`moyai-subagents:${userId}`, JSON.stringify(next)) } catch {}
+  const [expandedAgents, setExpandedAgents] = useState(() =>
+    readExpansion(`moyai-subagents:${userId}`, 1, []))
+  const saveExpandedAgents = (next: string[]) => {
+    try { localStorage.setItem(`moyai-subagents:${userId}`, JSON.stringify({ version: 1, expanded: next })) } catch {}
     return next
   }
-  const ancestry: string[] = []
-  let selectedParent = tree.parents.get(`native:${selected}`)
-  while (selectedParent) {
-    ancestry.push(sessionKey(selectedParent)); selectedParent = tree.parents.get(sessionKey(selectedParent))
-  }
-  const ancestryKey = JSON.stringify(ancestry)
-  useEffect(() => {
-    const keys = JSON.parse(ancestryKey) as string[]
-    if (keys.length) setCollapsedAgents(previous => saveCollapsedAgents(previous.filter(key => !keys.includes(key))))
-  }, [selected, ancestryKey])
   const roots = view === "deleted" ? sessions : tree.roots
   const nativeRows = roots.filter(row => !sessionIsReadOnly(row))
   const placements = new Map(nativeRows.map(row => [row, sessionPlacement(row, folders, userId)]))
@@ -196,15 +184,14 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
     const move = sessionDrop(event.dataTransfer.getData(SESSION_DRAG_TYPE), activeDrag.current, current.current, target)
     clearDrag()
     if (!move) { setDropNotice("The session or folder changed. Try moving it again."); return }
-    setClosed(previous => {
-      const next = previous.filter(key => key !== move.expand)
-      try { localStorage.setItem(`moyai-native-folders:${userId}`, JSON.stringify({ version: 2, closed: next })) } catch {}
+    setExpandedGroups(previous => {
+      const next = previous.includes(move.expand) ? previous : [...previous, move.expand]
+      try { localStorage.setItem(`moyai-native-folders:${userId}`, JSON.stringify({ version: 3, expanded: next })) } catch {}
       return next
     })
     if (!move.changed) { setDropNotice(move.message); return }
     setDropNotice("")
-    // SessionActions owns the save, refresh and truthful success/error toast.
-    // Rows do not move optimistically, so a failed PATCH leaves their placement intact.
+    // SessionActions applies the move immediately and rolls it back if saving fails.
     void edit(move.row, move.body, move.message)
   }
   function onListBackground(event: React.DragEvent<HTMLElement>): boolean {
@@ -215,7 +202,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
       const readOnly = sessionIsReadOnly(row)
       const active = row.source === "legacy" ? selected === `run=${row.id}` || selected === sessionHash(row) : selected === row.id
       const key = sessionKey(row), descendants = view === "deleted" ? [] : tree.children.get(key) ?? []
-      const expanded = !collapsedAgents.includes(key)
+      const expanded = expandedAgents.includes(key)
       const openAside = !readOnly && !row.deleted && row.parent_session_id && onOpenSideChat
         ? () => onOpenSideChat(row) : undefined
       return <div key={key} className="session-branch">
@@ -225,7 +212,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
       {descendants.length > 0 && <Button type="button" variant="ghost" size="icon-sm" className="session-children-toggle"
         aria-label={`${expanded ? "Collapse" : "Expand"} subagents for ${row.title}`} aria-expanded={expanded}
         aria-controls={`subagents-${encodeURIComponent(key)}`}
-        onClick={() => setCollapsedAgents(previous => saveCollapsedAgents(expanded ? [...previous, key] : previous.filter(value => value !== key)))}>
+        onClick={() => setExpandedAgents(previous => saveExpandedAgents(expanded ? previous.filter(value => value !== key) : [...previous, key]))}>
         <ChevronDown className={expanded ? "" : "closed"} size={12} />
       </Button>}
       <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
@@ -253,7 +240,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
     </div>})
   }
   function section(key: string, label: string, icon: React.ReactNode, items: SidebarSession[], folder?: SessionFolder) {
-    const expanded = !closed.includes(key)
+    const expanded = expandedGroups.includes(key)
     const target: SessionDropTarget | null = folder ? { kind: "folder", folderId: folder.id }
       : ["recent", "participated"].includes(key) ? { kind: "unfiled" } : null
     const dropKey = folder ? `folder:${folder.id}` : key

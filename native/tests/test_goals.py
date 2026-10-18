@@ -20,7 +20,7 @@ from moyai.goal_models import Goal, GoalTurn
 from moyai.goal_tools import GoalCapability
 from moyai.goals import is_goal_command, parse_command
 from moyai.models import Connection, Message, Turn, TurnImage, Upload, User
-from moyai.product_schema import GOAL_SCHEMA_VERSION, SLACK_ACTIVITY_SCHEMA_VERSION, application_metadata
+from moyai.product_schema import GOAL_SCHEMA_VERSION, SLACK_TURN_SOURCE_SCHEMA_VERSION, application_metadata
 
 
 async def command(runtime, actor, session_id, text, key=None, **kwargs):
@@ -74,7 +74,7 @@ def test_invalid_goal(text):
 
 
 def test_versioned_migration_preserves_previous_inventory():
-    old = application_metadata("native", version=SLACK_ACTIVITY_SCHEMA_VERSION)
+    old = application_metadata("native", version=SLACK_TURN_SOURCE_SCHEMA_VERSION)
     new = application_metadata("native", version=GOAL_SCHEMA_VERSION)
     assert set(new.tables) - set(old.tables) == {
         "native.moyai_goals", "native.moyai_goal_turns", "native.moyai_goal_receipts",
@@ -345,6 +345,95 @@ async def test_resume_preserves_live_turn_generation_but_explicit_pause_revokes_
         await runtime.database.authorize_scope(prepared.scope)
     async with runtime.database.sessions() as db:
         assert (await db.get(Turn, followup.id)).status == "queued"
+
+
+@pytest.mark.parametrize("pause", ["context", "explicit"])
+async def test_resume_preserves_queued_initial_goal_and_its_attachments_behind_other_work(runtime, actor, active, pause):
+    session, ordinary, prepared = active
+    digest = await runtime.objects.put(b"queued goal input")
+    async with runtime.database.sessions.begin() as db:
+        upload = Upload(owner_id=actor.id, name="queued.txt", media_type="text/plain", size=17, digest=digest)
+        db.add(upload)
+    admitted = await command(
+        runtime, actor, session.id, "/goal Verify this specific attached input.", attachments=[upload.id],
+    )
+    if pause == "context":
+        await mismatched_followup(runtime, actor, session.id, "model")
+    else:
+        await command(runtime, actor, session.id, "/goal pause")
+    assert (await runtime.database.session(actor, session.id)).active_turn == ordinary.id
+    await runtime.database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output="Earlier work finished.", workspace=None, usage={},
+    )
+    await runtime.database.settle(ordinary.id)
+    # A paused goal cannot dispatch its retained input. Unrelated manual work
+    # may still be admitted in the shared queue.
+    claimed = await runtime.database.claim_next()
+    assert claimed is None or claimed.id != admitted["id"]
+    if claimed is not None:
+        await runtime.database.stopped(claimed.id)
+    resumed = await command(runtime, actor, session.id, "/goal resume")
+    assert resumed["goal"]["generation"] == admitted["goal"]["generation"]
+    queued = await runtime.database.claim_next()
+    assert queued.id == admitted["id"]
+    goal_input = await runtime.database.prepare(queued.id)
+    await runtime.database.authorize_scope(goal_input.scope)
+    assert goal_input.prompt == "Verify this specific attached input."
+    async with runtime.database.sessions() as db:
+        assert await db.get(TurnImage, (queued.id, upload.id)) is not None
+
+
+@pytest.mark.parametrize("pause", ["context", "explicit"])
+async def test_resume_preserves_queued_clarification_reply_already_owning_session(runtime, actor, pause):
+    session, _ = await start(runtime, actor)
+    original, _ = await finish(runtime, deferred=True)
+    results = {"calls": {"question-id": "Blue"}}
+    reply = await runtime.database.resume(actor, session.id, original.id, "answer", results)
+    assert reply.status == "queued"
+    assert (await runtime.database.session(actor, session.id)).active_turn == reply.id
+    if pause == "context":
+        await mismatched_followup(runtime, actor, session.id, "model")
+    else:
+        await command(runtime, actor, session.id, "/goal pause")
+    assert await runtime.database.claim_next() is None
+    resumed = await command(runtime, actor, session.id, "/goal resume")
+    assert resumed["goal"]["generation"] == 1
+    assert (await runtime.database.claim_next()).id == reply.id
+    prepared = await runtime.database.prepare(reply.id)
+    await runtime.database.authorize_scope(prepared.scope)
+    assert prepared.deferred_results == results
+
+
+async def test_resume_retains_queued_user_work_after_current_turn_was_explicitly_paused(runtime, actor):
+    session, original = await start(runtime, actor)
+    await runtime.database.claim_next()
+    await runtime.database.prepare(original)
+    queued = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Include the additional acceptance criterion.", request_key="queued-human",
+    ))
+    await command(runtime, actor, session.id, "/goal pause")
+    await runtime.database.stopped(original)
+    assert await runtime.database.claim_next() is None
+    await command(runtime, actor, session.id, "/goal resume")
+    await runtime.database.goals.reconcile()
+    assert (await goal(runtime, session.id))["status"] == "active"
+    assert (await runtime.database.claim_next()).id == queued.id
+    await runtime.database.authorize_scope((await runtime.database.prepare(queued.id)).scope)
+
+
+async def test_answering_a_paused_goal_preserves_the_reply_without_implicitly_resuming(runtime, actor):
+    session, _ = await start(runtime, actor)
+    original, _ = await finish(runtime, deferred=True)
+    await command(runtime, actor, session.id, "/goal pause")
+    results = {"calls": {"question-id": "Blue"}}
+    reply = await runtime.database.resume(actor, session.id, original.id, "answer-while-paused", results)
+    assert (await goal(runtime, session.id))["status"] == "paused"
+    assert await runtime.database.claim_next() is None
+    await command(runtime, actor, session.id, "/goal resume")
+    assert (await runtime.database.claim_next()).id == reply.id
+    prepared = await runtime.database.prepare(reply.id)
+    assert prepared.deferred_results == results
+    assert prepared.scope.goal_generation == 1
 
 
 async def test_context_hold_cancels_queued_automatic_work_and_resume_does_not_replay_it(runtime, actor):
