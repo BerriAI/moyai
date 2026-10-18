@@ -378,7 +378,7 @@ async def execute_turn(
     handle = await temporal.client.start_workflow(
         TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
     )
-    await asyncio.wait_for(handle.result(), timeout=300)
+    await asyncio.wait_for(handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")))
     posted: list[dict[str, Any]] = []
 
     def post_stub(request: httpx.Request) -> httpx.Response:
