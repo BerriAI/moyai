@@ -15,7 +15,7 @@ A future GitHub adapter can use this contract after verifying its webhook, mappi
 | Touch point | Behavior in this change |
 | --- | --- |
 | Signed intake | Stores authored text, encrypted source metadata and frozen model input separately. Browser JSON cannot set trusted provenance. |
-| Names and controls | Uses the current verified Slack-to-sign-in relationship for self labels, archive/rename, queued input controls, requester activity and effects. Execution retains its original authority. |
+| Names and controls | Uses the current verified Slack-to-sign-in relationship for self labels, archive/rename, queued input controls, requester activity and effects. The coordinator refreshes native Slack senders in bounded batches while chats are idle. Execution retains its original authority. |
 | Conversation audience | Checks the Slack installation and current caller. DMs require the verified requester; private channels and group conversations require current membership. Public channels still require a verified workspace identity. External shared channels fail closed. |
 | Other read surfaces | The same audience check covers session inventory, search, history, files, descendants, progress, streams and debug exports. Stream checks repeat while connected. Provider failures do not widen access. |
 | Model context | For shared channel mentions, the bot reads only the signed event’s channel and thread, with the authorized connection fallback from Ishaan’s #559. Thread context still reaches the actual prepared input. Shared follow-ups rebuild from authored messages. Retrying intake reuses its frozen input. |

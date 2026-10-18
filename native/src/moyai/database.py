@@ -263,19 +263,20 @@ class Database:
             if root is None or root.deleted or (root.visibility == "private" and root.owner_id != actor.id):
                 raise HTTPException(404, "Conversation not found.")
             await self.check_source_audience(db, root, actor)
-        delegated = await db.get(DelegatedSession, session_id)
-        if delegated is not None and delegated.parent_session_id != session_id:
-            await self.allowed_session(db, delegated.parent_session_id, actor)
         return session
 
     async def check_source_audience(self, db: AsyncSession, session: Session, actor: User) -> None:
-        if session.surface == "slack":
-            delegated = await db.get(DelegatedSession, session.id)
-            member = await db.get(SwarmMember, session.id)
-            parent_id = delegated.parent_session_id if delegated else member.mission_id if member else None
-            if parent_id and parent_id != session.id:
-                await self.allowed_session(db, parent_id, actor)
-                return
+        delegated = await db.get(DelegatedSession, session.id)
+        member = await db.get(SwarmMember, session.id) if session.surface == "slack" else None
+        parent_id = delegated.parent_session_id if delegated else member.mission_id if member else None
+        if parent_id and parent_id != session.id:
+            parent = await db.get(Session, parent_id)
+            if parent is None:
+                raise HTTPException(404, "Conversation not found.")
+            # Inherit provider audience, not the parent's navigation state. An
+            # archived/deleted web parent must not hide its owner's private child.
+            await self.check_source_audience(db, parent, actor)
+            return
         if (session.surface == "slack" and self.product_authority_enabled
                 and (self.slack_access is None or not await self.slack_access(db, session, actor))):
             raise HTTPException(404, "Conversation unavailable. For Slack chats, verify your linked Slack account "

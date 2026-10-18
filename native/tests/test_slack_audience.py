@@ -165,6 +165,55 @@ async def test_worker_reuses_admitted_grant_and_rechecks_channel_membership(audi
     assert denied.value.status_code == 404
 
 
+async def test_idle_native_sender_refresh_restores_verified_self_without_new_message(audience):
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from moyai.slack_profile_refresh import watch
+    product = audience
+    async with product.source.begin() as db:
+        await db.execute(text('ALTER TABLE moyai.users ADD COLUMN profile_next_check INTEGER NOT NULL DEFAULT 0'))
+        await db.execute(text("UPDATE moyai.users SET profile_checked_at=:stamp,profile_next_check=:future WHERE kind='slack'"), {
+            'stamp': (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            # Older releases used a daily timer; last successful verification
+            # must still trigger refresh before the one-hour trust window ends.
+            'future': int((datetime.now(UTC) + timedelta(hours=8)).timestamp()),
+        })
+        await db.execute(text("INSERT INTO moyai.users(id,kind,email,name,created_at,updated_at) "
+                              "VALUES('slack:TLOCAL001:UUNUSED01','slack','','Unrelated participant','c','u')"))
+    await product.source.dispose()
+    await product.database.engine.dispose()
+    with pytest.raises(HTTPException):
+        await product.database.messages(product.actor, product.session_id)
+    refreshed = asyncio.Event()
+    calls = []
+    async def refresh(team, user, *, refresh_profile=False):
+        calls.append((team, user, refresh_profile))
+        # Deterministic successful users.info boundary; the canonical resolver's
+        # invalid/changed/transient-profile behavior is tested independently.
+        async with product.source.begin() as db:
+            await db.execute(text("UPDATE moyai.users SET profile_checked_at=:stamp,name='Current sender' WHERE id=:id"),
+                             {'stamp': datetime.now(UTC).isoformat(), 'id': product.raw_principal.id})
+        current = await product.adapter.current(product.raw_principal.id)
+        async with product.database.sessions.begin() as db:
+            await product.adapter.project_native_user(db, current)
+        refreshed.set()
+    slack = SimpleNamespace(
+        settings=SimpleNamespace(slack_identity_linking_enabled=True),
+        installation=product.slack.installation, product=SimpleNamespace(identity=product.adapter),
+        runtime=SimpleNamespace(database=product.database), actor=refresh,
+    )
+    task = asyncio.create_task(watch(slack))
+    try:
+        await asyncio.wait_for(refreshed.wait(), 5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert calls == [('TLOCAL001', 'UACTUAL01', True)]
+    messages = await product.database.messages(product.actor, product.session_id)
+    assert len(messages) == 1 and messages[0]['is_self'] and messages[0]['author_name'] == 'Current sender'
+
+
 async def test_historical_reads_use_native_controls_and_preserve_verified_attribution(audience):
     from moyai.slack_audience import historical_access, historical_messages
     product = audience

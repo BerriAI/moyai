@@ -161,6 +161,7 @@ class ProductSlack:
         self.inbox = HookInbox(self.store, self, list, security=self.product.security)
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
+        self.profile_task: asyncio.Task[None] | None = None
 
     async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
         host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
@@ -184,10 +185,16 @@ class ProductSlack:
         self.inbox.start()
         self.delivery_task = asyncio.create_task(self.watch(), name="product-slack-delivery")
         self.activity_task = asyncio.create_task(self.runtime.slack_activity.watch(), name="product-slack-activity")
+        from .slack_profile_refresh import watch
+        self.profile_task = asyncio.create_task(watch(self), name="product-slack-profiles")
 
     async def close(self) -> None:
         """Parent retains its coordinator lock until this drain returns."""
         await self.inbox.close()
+        if self.profile_task is not None:
+            self.profile_task.cancel()
+            await asyncio.gather(self.profile_task, return_exceptions=True)
+            self.profile_task = None
         if self.activity_task is not None:
             self.activity_task.cancel()
             await asyncio.gather(self.activity_task, return_exceptions=True)
@@ -234,7 +241,7 @@ class ProductSlack:
         }, sort_keys=True).encode()).hexdigest()
         return bot
 
-    async def actor(self, team: str, user: str) -> tuple[User, ProductPrincipal]:
+    async def actor(self, team: str, user: str, *, refresh_profile: bool = False) -> tuple[User, ProductPrincipal]:
         def enroll():
             with self.store.connect() as conn:
                 conn.begin_write()
@@ -243,7 +250,7 @@ class ProductSlack:
         identity = await source_database(enroll)
         if self.settings.slack_identity_linking_enabled:
             rows = await source_database(self.store.rows, "SELECT * FROM users WHERE id=?", (identity,))
-            if rows and rows[0].get("profile_next_check", 0) <= time.time():
+            if rows and (refresh_profile or rows[0].get("profile_next_check", 0) <= time.time()):
                 await self.connections.identities.resolve(rows[0], team)
         principal = await self.product.identity.current(identity)
         async with self.runtime.database.sessions.begin() as db:
