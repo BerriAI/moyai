@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import ssl
 import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -14,11 +17,18 @@ from typing import Any
 
 
 def proxy_ready() -> bool:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=1) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError):
-        return False
+    # Both Harbor adapters retry immediately. Bound each readiness wait below
+    # their five-second exec timeout so a cold proxy gets time to initialize.
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=0.3) as response:
+                if response.status == 200:
+                    return True
+        except (OSError, urllib.error.URLError):
+            pass
+        time.sleep(0.1)
+    return False
 
 
 def serve(log_path: Path, response_path: Path, host: str, port: int, cert: Path, key: Path) -> None:
@@ -70,6 +80,7 @@ def main() -> None:
     parser.add_argument("--key", type=Path, required=True)
     args = parser.parse_args()
     args.log_path.parent.mkdir(parents=True, exist_ok=True)
+    signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
     credentials = json.loads(Path("/eval/credentials.json").read_text())
     environment = {
         **os.environ,

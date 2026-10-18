@@ -39,14 +39,15 @@ def main() -> None:
         "--key", "/etc/ssl/private/api.deepseek.com.key",
     ])
     try:
-        for _ in range(90):
-            try:
-                with urllib.request.urlopen("https://api.deepseek.com/healthz", timeout=1) as response:
-                    if response.status == 200:
-                        break
-            except (OSError, urllib.error.URLError):
-                pass
-            time.sleep(1)
+        # Match the public/private Harbor setup: 20 curl probes, no sleep,
+        # five seconds allowed per probe. This catches cold-proxy startup races.
+        for _ in range(20):
+            health = subprocess.run(
+                ["curl", "--noproxy", "*", "-fsS", "https://api.deepseek.com/healthz"],
+                capture_output=True, timeout=5, check=False,
+            )
+            if health.returncode == 0:
+                break
         else:
             raise RuntimeError("Local fixture proxy failed to become ready; inspect litellm_proxy.log")
         direct = post("https://api.deepseek.com/v1/chat/completions", "deepseek-flash", credentials["DEEPSEEK_API_KEY"])
