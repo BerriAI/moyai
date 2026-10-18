@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
+import { SkillMarkdown } from "./skill-markdown"
 import { Check, ChevronDown, ChevronRight, Circle, ExternalLink, Terminal, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -93,14 +92,14 @@ function AgentWork({ agent, now, onOpen, ...controls }: {
     </div>
     {agent.parent_name && <p className="work-agent-parent">Delegated by {agent.parent_name}</p>}
     {!open && latest && <div className="work-agent-preview message-content">
-      <Markdown remarkPlugins={[remarkGfm]}>{latest.text}</Markdown>
+      <SkillMarkdown>{latest.text}</SkillMarkdown>
     </div>}
     {!latest && <p className="muted work-agent-preview">{working ? "Waiting for the first update…" : "No public update was recorded."}</p>}
     {currentTool && <p className="work-agent-action" role="status">{toolLabel(currentTool.name)}…</p>}
     <CollapsibleContent className="work-agent-history">
       {agent.messages.map(message => <div key={message.id} className="turn-progress-entry message-content">
         {message.phase === "final_answer" && <small className="work-result-label">{agent.name} result</small>}
-        <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+        <SkillMarkdown>{message.text}</SkillMarkdown>
       </div>)}
       {agent.tools.length > 0 && <ToolGroup tools={agent.tools} agent={agent} {...controls} />}
       {(agent.messages_limited || agent.tools_limited) && <p className="muted">Showing recent subagent activity.</p>}
@@ -153,12 +152,12 @@ export function TurnProgress({ segment, entry, live, visible, request, onSubagen
         {running && <span className="running-dot" aria-hidden="true" />}
       </Button></CollapsibleTrigger>
       {!open && running && latest?.kind === "message" && <div className="turn-progress-latest message-content">
-        <Markdown remarkPlugins={[remarkGfm]}>{latest.message.text}</Markdown>
+        <SkillMarkdown>{latest.message.text}</SkillMarkdown>
       </div>}
       <CollapsibleContent className="turn-progress-history">
         {items.map(item => item.kind === "message"
           ? <div className="turn-progress-entry message-content" key={item.id}>
-            <Markdown remarkPlugins={[remarkGfm]}>{item.message.text}</Markdown>
+            <SkillMarkdown>{item.message.text}</SkillMarkdown>
           </div>
           : item.kind === "tools" ? <ToolGroup key={item.id} tools={item.tools} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />
             : <AgentWork key={item.id} agent={item.agent} now={running ? now : Date.now()} onOpen={onSubagent} turnId={turn.id} onAction={onAction} selectedAction={selectedAction} />)}

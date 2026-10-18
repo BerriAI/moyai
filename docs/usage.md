@@ -162,6 +162,13 @@ not the legacy application's database or APIs.
   changed or removed. Code examples and escaped references remain literal.
   A unique leading `/team` short name also works when sent directly; duplicate
   names require a scoped reference from the picker.
+  Assistant replies and work updates reuse the same icon and readable name for
+  skills selected in that conversation, including streamed text and saved updates
+  after reload. Plain references and standalone inline-code references such as
+  `/team` are supported; code blocks, command snippets, paths, links and escaped
+  examples stay literal. Unknown or ambiguous short names stay unchanged.
+  This display uses saved selection metadata and makes no additional library
+  request or skill invocation.
   Personal skills are limited to their owner's private web conversations.
   Existing-product installations load the original personal/organization
   instructions and supporting-file contents at execution, without converting or
