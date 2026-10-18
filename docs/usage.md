@@ -414,6 +414,12 @@ not implemented by this adapter.
   The requester can record inspected evidence using
   `GET /api/sessions/{id}/effects` and `POST /api/effects/{id}/resolve`.
   This is conservative uncertainty handling, not exactly-once external execution.
+- Before dispatching a shell command, Moyai checks the computer and retries a
+  transient readiness failure once. If that check fails, the command is recorded
+  as not executed and the agent receives the reason without an action-review
+  form. An expired computer does not erase uncertainty about a command that
+  already started, and a missing computer is never silently replaced with an
+  empty one.
 - The answer is committed before computer snapshot settlement. A snapshot failure
   produces a warning without replacing the received answer.
 - Deferred requests also checkpoint their computer before becoming ready for a

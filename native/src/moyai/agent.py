@@ -378,7 +378,7 @@ def make_agent(
             attachment_capability(database, objects),
             browser_capability(database),
             BrowserLogin(database),
-            on_demand_coder(authority.save_workspace),
+            on_demand_coder(authority.save_workspace, database),
             WorkflowPlanning(
                 store_resolver=lambda ctx: stores.plan(
                     ctx.deps.session_id if ctx.run_id == ctx.deps.root_run_id
