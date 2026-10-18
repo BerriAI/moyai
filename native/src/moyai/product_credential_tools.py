@@ -169,6 +169,7 @@ class CredentialTools(Toolset[RunScope]):
             """Discover authorized saved access and pending requests; metadata never verifies capability.
 
             List without filters before concluding access is missing. Reuse a matching saved credential.
+            Before answering whether a provider, model or integration works, check here for saved access; if it exists, verify with one small call (credentials_request, then credentials_run) instead of relying on docs or registries.
             """
             try:
                 return await service.inventory(ctx.deps, request)
