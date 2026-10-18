@@ -12,8 +12,15 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       - name: Build the single runtime image
-        run: docker build -t moyai-docker-smoke .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: moyai-docker-smoke
+          cache-from: type=gha,scope=moyai-docker-smoke
+          cache-to: type=gha,mode=max,scope=moyai-docker-smoke
       - name: Verify authentication, persistence, privileges and maintenance startup
         run: python scripts/docker_smoke.py moyai-docker-smoke --output /tmp/docker-evidence
       - uses: actions/upload-artifact@v4
