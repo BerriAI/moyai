@@ -868,6 +868,74 @@ for(const width of [1440,768,320])test(`inline skills share one icon and keep su
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });
 
+for(const width of [1440,768,320])test(`assistant skills match the composer in streaming, progress and reloaded replies at ${width}px`,async t=>{
+  const marker='[/team](moyai-skill:personal%3Ateam?icon=users)';
+  reset({skills:[{id:'team',name:'team',description:'Team procedure',scope:'personal',reference:'personal:team',icon:'users'}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:`Use ${marker} here.`}],
+    workProgress:{messages:[]}});
+  const page=await pageFor(t,'#'+sessionId,width),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('/team');await page.getByRole('listbox',{name:'Skills'}).waitFor();await input.press('Enter');
+  const composer=input.getByLabel('/team skill');await composer.waitFor();
+  const icon=await composer.locator('svg').innerHTML();
+  await waitFor(()=>clients.size>0,'SSE connected');
+  emit({type:'response_start',run_id:turnId,step:1},1);
+  emit({type:'text_start',index:0,text:'Using /te',phase:'commentary'},2);
+  await page.locator('.turn-progress-history').getByText('Using /te',{exact:true}).waitFor();
+  assert.equal(await page.locator('.turn-progress-history .skill-mention').count(),0);
+  emit({type:'text_delta',index:0,text:'am to inspect.'},3);
+  const progress=page.locator('.turn-progress-history').getByLabel('/team skill');
+  await progress.waitFor();assert.equal(await progress.locator('svg').innerHTML(),icon);
+  await page.locator('.turn-progress-toggle').click();
+  await page.locator('.turn-progress-latest').getByLabel('/team skill').waitFor();
+  emit({type:'response_start',run_id:turnId,step:2},4);
+  emit({type:'text_start',index:0,text:'Finished with **/team** and `/personal:team`.',phase:'final_answer'},5);
+  await page.locator('.live-message .skill-mention').nth(1).waitFor();
+  assert.deepEqual(await page.locator('.live-message .skill-mention svg').evaluateAll(nodes=>nodes.map(node=>node.innerHTML)),[icon,icon]);
+  state.messages.push({id:2,turn_id:turnId,role:'assistant',author_id:null,content:`Finished with **/team** and \`/personal:team\`.\n\n${marker}`});
+  state.workProgress={messages:[{id:'saved',phase:'commentary',text:'Using /team to inspect.'}]};
+  state.status='completed';emit({},undefined,'finished');
+  await page.locator('.message.assistant:not(.live-message) .skill-mention').nth(2).waitFor();
+  state.skills=[];await page.reload();
+  await page.locator('.message.assistant .skill-mention').nth(2).waitFor();
+  await page.locator('.turn-progress-toggle').click();
+  await page.locator('.turn-progress-history').getByLabel('/team skill').waitFor();
+  assert.deepEqual(await page.locator('.message.assistant .skill-mention svg').evaluateAll(nodes=>nodes.map(node=>node.innerHTML)),[icon,icon,icon]);
+  assert.equal(await page.locator('.message.assistant strong .skill-mention').innerText(),'Team');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(state.requests.filter(row=>row.path==='/api/skills').length,1,'transcript rendering needs no catalog request');
+});
+
+test('assistant skill rendering preserves literals, rejects ambiguous names and stays within the conversation',async t=>{
+  const marker=scope=>`[/team](moyai-skill:${scope}%3Ateam?icon=auto)`;
+  const literals=['/team/file.txt','https://example.test/team','--path=/team','/unknown','\\/team',
+    '`run /team`','```sh\n/team\n```','[link /team](https://example.test/team)','[reference /team][ref]','<span>/team</span>'];
+  reset({status:'completed',messages:[
+    {id:1,turn_id:turnId,role:'user',author_id:'viewer',content:`Use ${marker('personal')} and ${marker('org')}.`},
+    {id:2,turn_id:turnId,role:'assistant',author_id:null,content:
+      '/team stays ambiguous. /personal:team and /org:team are scoped.\n\n'+literals.join('\n\n')+'\n\n[ref]: https://example.test/team'},
+  ]});
+  const page=await pageFor(t),answer=page.locator('.message.assistant');
+  await answer.getByLabel('/team skill').nth(1).waitFor();
+  assert.equal(await answer.locator('.skill-mention').count(),2);
+  assert.equal(await answer.locator('pre code').innerText(),'/team\n');
+  assert.match(await answer.locator('code:not(pre code)').innerText(),/run \/team/);
+  assert.equal(await answer.locator('a .skill-mention').count(),0);
+  assert.equal(await answer.locator('a').first().getAttribute('href'),'https://example.test/team');
+  assert.match(await answer.innerText(),/\/team stays ambiguous/);
+  // Remove ambiguity to exercise literal protection when /team is resolvable.
+  state.messages[0].content=`Use ${marker('personal')}.`;
+  state.messages[1].content='/team. **/team**, and \\/team; /team &amp; more.\n\n'+literals.join('\n\n')+'\n\n[ref]: https://example.test/team';
+  await page.reload();await answer.locator('.skill-mention').nth(2).waitFor();
+  assert.equal(await answer.locator('.skill-mention').count(),3);
+  assert.match(await answer.innerText(),/Team\. Team, and \/team; Team & more/);
+  const child='d'.repeat(32);
+  state.sessionOverrides={[child]:{title:'Unrelated conversation'}};
+  state.messagesBySession={[child]:[{id:3,turn_id:turnId,role:'assistant',author_id:null,content:'No selected skill: /team.'}]};
+  await page.goto(base+'/#'+child);await page.getByRole('heading',{name:'Unrelated conversation',exact:true}).waitFor();
+  await page.getByText('No selected skill: /team.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.skill-mention').count(),0);
+});
+
 test('inline mention editing preserves middle-of-text insertion, undo, copy/paste and code literals',async t=>{
   reset({status:'completed',skills:[{id:'p',name:'team',description:'Team procedure',scope:'personal',reference:'personal:team',icon:'👥'}]});
   const page=await pageFor(t,'#'+sessionId),input=page.getByRole('textbox',{name:'Message Moyai'}),options=page.getByRole('listbox',{name:'Skills'});

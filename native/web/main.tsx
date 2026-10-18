@@ -1,13 +1,12 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import { ArrowUp, Bug, Download, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
 import { SkillMessage } from "./skill-content"
+import { SkillMarkdown, SkillMarkdownProvider } from "./skill-markdown"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "@/theme.css"
 import "./style.css"
@@ -730,7 +729,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   // Questions and effect reviews remain in the conversation where they can be answered.
   const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
     && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
-  const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
+  const chat = <SkillMarkdownProvider messages={visibleMessages}><section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
@@ -756,7 +755,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
-                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : <SkillMessage content={message.content} />}</div>}
+                {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
@@ -831,7 +830,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           onOutput={openOutput} />
       </WorkspaceOverlayContent>}
       </div>
-      </section>
+      </section></SkillMarkdownProvider>
   if (sideMode) return <div className="conversation side-conversation">
     <header className="side-chat-heading"><h2 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h2><a href={`#${id}`} title="Open as main conversation" aria-label="Open side chat as main conversation"><ExternalLink size={15} /></a></header>
     {chat}
