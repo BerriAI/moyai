@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 import modal
+
 from moyai.tools import WORKSPACE_TOOLS, OpenComputerUse
 
 
