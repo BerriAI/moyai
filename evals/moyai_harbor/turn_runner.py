@@ -358,10 +358,11 @@ async def execute_turn(
     slack_reads: list[dict[str, Any]] = []
     transport = slack_transport(history, slack_reads)
     original_client = httpx.AsyncClient
+    original_init = httpx.AsyncClient.__init__
 
-    def routed_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+    def routed_init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("transport", transport)
-        return original_client(*args, **kwargs)
+        original_init(self, *args, **kwargs)
 
     payload = {
         "type": "event_callback", "team_id": TEAM, "event_id": f"eval-{case['id']}-{trial}",
@@ -370,7 +371,7 @@ async def execute_turn(
             "channel_type": "channel", "ts": current, "thread_ts": thread_ts, "text": case["prompt"],
         },
     }
-    slack_routing = patch("httpx.AsyncClient", routed_client)
+    slack_routing = patch.object(httpx.AsyncClient, "__init__", routed_init)
     slack_routing.start()
     try:
         return await run_admitted_turn(
