@@ -43,6 +43,8 @@ and have the requester reconcile it before another external write. Never repeat 
 under a new tool call or bypass the receipt with shell/CDP. A human-control refusal
 that did not dispatch is recorded separately and does not block unrelated coding.
 Clipboard images attached to messages are native image input.
+Native desktop apps outside the browser are readable and operable: load the
+desktop-apps skill before saying you cannot see or control one.
 
 Delegate bounded research and review to native subagents. They share the coding
 computer: give them read-only tasks or explicit disjoint paths, and do not let
