@@ -21,6 +21,7 @@ from temporalio.contrib.workflow_streams import WorkflowStreamState
 from temporalio.exceptions import ApplicationError
 
 from .contracts import PreparedTurn, RunScope
+from .deployment_handoff import DeploymentHandoff
 from .models import Effect, Event
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ class AgentCheckpoint:
     run_step: int
     output_retries_used: int
     tool_retries: dict[str, int] = field(default_factory=dict)
+    deployment_handoff: DeploymentHandoff | None = None
 
 
 @dataclass
@@ -58,6 +60,7 @@ class HistoryHandoff:
     stream_state: WorkflowStreamState | None = None
     steered: list[str] = field(default_factory=list)
     pending_steering: list[str] = field(default_factory=list)
+    deployment_handoff: DeploymentHandoff | None = None
 
 
 def is_turn_run(run_id: str | None, turn_id: str) -> bool:
@@ -111,6 +114,24 @@ async def save_history_checkpoint(checkpoint: AgentCheckpoint) -> CheckpointSave
         ).limit(1))
     if pending is not None:
         return CheckpointSave()
+    if checkpoint.deployment_handoff is not None:
+        # A graph boundary alone does not establish that a gateway attempt or
+        # its billing receipt settled. Preserve the running agent if either
+        # ledger still has an unresolved external outcome.
+        from .inference_usage import InferenceUsage
+        from .product_drain import SETTLED_REQUESTS
+        from .product_inference import ProductInferenceRequest
+
+        ledgers: list[type[InferenceUsage | ProductInferenceRequest]] = [InferenceUsage]
+        if runtime.product_inference is not None:
+            ledgers.append(ProductInferenceRequest)
+        async with runtime.database.sessions() as db:
+            for ledger in ledgers:
+                if await db.scalar(select(ledger.id).where(
+                    ledger.turn_id == scope.turn_id,
+                    ledger.status.not_in(SETTLED_REQUESTS),
+                ).limit(1)) is not None:
+                    return CheckpointSave()
     # No plaintext checkpoint or credentials enter the history. The existing
     # immutable encrypted object store also makes activity redelivery idempotent.
     return CheckpointSave(await runtime.objects.put(TypeAdapter(AgentCheckpoint).dump_json(checkpoint)))

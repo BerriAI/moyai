@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     moyai_native_key_format: str = ""
     moyai_native_object_prefix: str = ""
     moyai_native_object_format: str = ""
+    moyai_worker_deployment: str = Field(default="", pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$")
+    moyai_worker_build_id: str = Field(default="", pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$")
     moyai_database_url: str = Field(default='', repr=False)
     moyai_database_initialize: bool = False
     moyai_schema_mode: Literal['auto', 'verify'] = 'auto'
@@ -56,6 +58,12 @@ class Settings(BaseSettings):
     sandbox_prepared_pool_size: int = Field(default=0, ge=0, le=20)
     sandbox_prepared_idle_seconds: int = Field(default=300, ge=30, le=3600)
     bundled_skills_enabled: bool = True
+
+    @model_validator(mode='after')
+    def worker_deployment_identity(self) -> "Settings":
+        if bool(self.moyai_worker_deployment) != bool(self.moyai_worker_build_id):
+            raise ValueError('Worker deployment name and build ID must be configured together.')
+        return self
 
     @model_validator(mode='after')
     def database_backend(self):
