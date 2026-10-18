@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · Turn timing</title>
+<style>
+:root{color-scheme:dark;font:14px/1.55 system-ui,sans-serif;background:#101316;color:#e6ebed}
+*{box-sizing:border-box}body{max-width:1480px;margin:0 auto;padding:36px 28px 80px}
+h1{font-size:30px;line-height:1.2;letter-spacing:-.7px;margin:8px 0 16px}h2{font-size:18px}
+p,li{max-width:1040px}a{color:#9cd8f3}code,pre,.numeric{font-family:ui-monospace,monospace}
+small,.muted{color:#a8b4bd}.intro{border-left:3px solid #7bc7e1;padding:4px 20px;margin:24px 0}
+.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:24px 0 12px;position:sticky;top:0;background:#101316;padding:14px 0;z-index:2}
+input,select{font:inherit;border:1px solid #3b4955;border-radius:6px;background:#1a2229;color:inherit;padding:8px}
+input{min-width:230px}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;color:#a8b4bd;font-weight:500;white-space:nowrap}td,th{padding:9px 10px;border-bottom:1px solid #283039;vertical-align:top}
+td:first-child{min-width:240px;max-width:430px;overflow-wrap:anywhere}td.numeric{text-align:right;white-space:nowrap}
+.barcell{width:34%;min-width:260px;vertical-align:middle}.track{position:relative;height:16px;background:#182127;border-radius:3px}
+.bar{position:absolute;height:100%;background:#65b8b0;min-width:2px;border-radius:2px}.workflow{background:#ad98da}.wait{background:#6f7d8c}.evidence{background:#62a9dc}.milestone{background:#edc87f}.failed{background:#f1908c}
+button{cursor:pointer;border:0;padding:0;background:none;color:#b9e5f5;text-align:left;font:inherit}button:hover{text-decoration:underline}button:focus-visible{outline:2px solid #9cd8f3;outline-offset:4px}
+dialog{color:inherit;background:#182027;border:1px solid #46535f;border-radius:12px;max-width:min(90vw,850px);width:850px;padding:24px}dialog::backdrop{background:#0009}dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}dialog button{float:right;padding:6px 12px;border:1px solid #546777;border-radius:5px}
+#hover{position:fixed;z-index:5;pointer-events:none;max-width:min(460px,90vw);padding:14px 18px;background:#24313c;color:#edf4f7;border:1px solid #687b8a;border-radius:8px;box-shadow:0 8px 32px #0006;white-space:pre-line;font-size:13px}
+details{margin:24px 0}summary{cursor:pointer;color:#b9e5f5}#raw{white-space:pre-wrap;max-height:600px;overflow:auto;font-size:11px}
+@media(max-width:700px){body{padding:24px 14px}h1{font-size:25px}.barcell{min-width:180px}}
+</style>
+<body>
+<small>MOYAI / RECORDED TURN TIMING</small>
+<h1>__TITLE__</h1>
+<p id="origin" class="muted"></p>
+<div class="intro" id="summary"></div>
+<p><a href="timing.csv" download>CSV</a> · <a href="timing.json" download>Timing JSON</a> · <a href="trace.json" download>Chrome / Perfetto trace</a> · <a href="history.json" download>Projected history</a></p>
+<p class="muted">Blue: measured intervals · Green: activities · Purple: workflow tasks · Gray: scheduled wait · Red: failed task. Click any row name for timestamps and evidence IDs. Bars overlap; do not add them.</p>
+<div class="controls">
+<label>Find <input id="search" type="search" placeholder="Connections, snapshot, dispatch…"></label>
+<label>Show <select id="category"><option value="main">Activities and evidence</option><option value="all">All timing rows</option><option value="workflow">Workflow tasks</option><option value="wait">Scheduled waits</option><option value="evidence">Evidence and milestones</option></select></label>
+<span id="count" class="muted" aria-live="polite"></span>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Recorded operation</th><th>Start (ms)</th><th>Duration (ms)</th><th>Position in turn</th><th>Status / source</th></tr></thead><tbody id="rows"></tbody></table></div>
+<h2>Coverage and precision</h2><ul id="limitations"></ul><ul id="warnings"></ul>
+<details><summary>All history events, ordered by timestamp</summary><pre id="raw"></pre></details>
+<dialog id="detail"><button id="close" aria-label="Close details">Close</button><h2 id="detail-title"></h2><pre id="detail-body"></pre></dialog>
+<div id="hover" role="tooltip" hidden></div>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+const report=JSON.parse(document.getElementById('data').textContent);
+const $=id=>document.getElementById(id);
+$('origin').textContent=`t = 0: ${report.origin} · Turn: ${report.turn_id}`;
+for(const item of report.summary){const p=document.createElement('p');p.textContent=item;$('summary').append(p)}
+for(const id of ['limitations','warnings'])for(const item of report[id]){const li=document.createElement('li');li.textContent=item;$(id).append(li)}
+$('raw').textContent=JSON.stringify(report.events,null,2);
+const min=Math.min(0,...report.rows.map(r=>r.start_ms)),max=Math.max(1,...report.rows.map(r=>r.end_ms??r.start_ms+(r.uncertainty_ms??0))),extent=max-min;
+const fmt=value=>value==null?'—':value.toLocaleString('en-US',{minimumFractionDigits:3,maximumFractionDigits:3});
+function render(){
+ const query=$('search').value.toLowerCase(),mode=$('category').value;
+ const rows=report.rows.filter(r=>[r.name,r.category,r.status,r.source,r.queue,...(r.event_ids??[])].join(' ').toLowerCase().includes(query)).filter(r=>mode==='all'||(mode==='main'&&['activity','evidence','milestone'].includes(r.category))||(mode==='workflow'&&r.category==='workflow')||(mode==='wait'&&r.category.endsWith('_wait'))||(mode==='evidence'&&['evidence','milestone'].includes(r.category)));
+ $('rows').replaceChildren();$('count').textContent=`${rows.length} of ${report.rows.length} rows`;
+ for(const row of rows){
+  const tr=document.createElement('tr'),name=document.createElement('td'),btn=document.createElement('button');btn.textContent=row.name;
+  btn.onclick=()=>{$('detail-title').textContent=row.name;$('detail-body').textContent=JSON.stringify(row,null,2);$('detail').showModal()};name.append(btn);tr.append(name);
+  for(const [index,value] of [row.start_ms,row.duration_ms].entries()){const td=document.createElement('td');td.className='numeric';td.textContent=(index===0&&row.uncertainty_ms?'≈ ':'')+fmt(value);tr.append(td)}
+  const cell=document.createElement('td');cell.className='barcell';const track=document.createElement('div');track.className='track';const bar=document.createElement('div');
+  bar.className='bar '+(row.status==='failed'?'failed':row.category.endsWith('_wait')?'wait':row.category);bar.style.left=`${100*(row.start_ms-min)/extent}%`;bar.style.width=`${100*(row.duration_ms??row.uncertainty_ms??0)/extent}%`;if(row.uncertainty_ms)bar.style.opacity='.45';bar.title=`${row.start} → ${row.end??'point / incomplete'}`;track.append(bar);cell.append(track);tr.append(cell);
+  const status=document.createElement('td');status.textContent=row.status??row.source;tr.append(status);$('rows').append(tr);
+  const hover=()=>{const target=row.target;$('hover').textContent=[row.name,`Observed: ${fmt(row.duration_ms)} ms · starts ${fmt(row.start_ms)} ms`,row.uncertainty_ms?`Timestamp precision: ${fmt(row.uncertainty_ms)} ms. Shaded bar shows the timestamp window.`:'',target?`Target / floor: ${target.label}`:'Floor: not measured for this individual boundary.',target?.basis,target?.change,target?.owner?`Related work: ${target.owner}`:'',row.note].filter(Boolean).join('\n');$('hover').hidden=false;const rect=tr.getBoundingClientRect();$('hover').style.left=`${Math.max(8,Math.min(rect.left+20,innerWidth-$('hover').offsetWidth-12))}px`;$('hover').style.top=`${Math.max(8,Math.min(rect.bottom+4,innerHeight-$('hover').offsetHeight-12))}px`};
+  tr.onmouseenter=hover;tr.onmouseleave=()=>$('hover').hidden=true;btn.onfocus=hover;btn.onblur=()=>$('hover').hidden=true;
+ }
+}
+$('search').addEventListener('input',render);$('category').addEventListener('change',render);$('close').onclick=()=>$('detail').close();render();
+</script>
+</body>
+</html>

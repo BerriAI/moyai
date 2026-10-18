@@ -77,12 +77,12 @@ async def test_admission_wakes_status_and_delivery_lanes(ingress, monkeypatch):
 
     monkeypatch.setattr(service.connectors, "request", request)
     runtime.slack_activity.wake.clear()
-    service.delivery_wake.clear()
+    service.delivery_wakeup.clear()
 
     await service.receive_payload(context_tests.envelope(context_tests.mention_message()))
 
     assert runtime.slack_activity.wake.is_set()
-    assert service.delivery_wake.is_set()
+    assert service.delivery_wakeup.is_set()
 
 
 async def test_bound_thread_followup_acknowledges_followup_timestamp(ingress, conversation, monkeypatch):

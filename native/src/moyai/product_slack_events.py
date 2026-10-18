@@ -276,7 +276,7 @@ class SlackEvents:
         turn = await self._submit(actor, thread, submission.body, message, submission.uploads)
         await self.slack.queue(turn, thread, "accepted", {"text": "Moyai received your message."})
         self.slack.runtime.slack_activity.wake.set()
-        self.slack.delivery_wake.set()
+        self.slack.delivery_wakeup.set()
         return {"ok": True}
 
     async def _control(self, message: SlackMessage, conversation: SlackConversation, actor: User) -> None:

@@ -1,5 +1,9 @@
 # Native runtime performance
 
+For a slow request, [export its recorded turn timeline](turn-timing.md) to compare
+admission, setup, inference, persistence, and delivery. The exporter preserves
+overlapping work and marks missing evidence rather than inventing durations.
+
 The Pydantic execution core retains separate API, coordinator, broker, and
 execution services. Within an execution process, Temporal keeps the original
 queue available for workflow tasks and historical activity commands, with
