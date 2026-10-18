@@ -5,7 +5,7 @@
   min-height: 0;
   width: 100%;
   color: var(--ui-foreground);
-  background: var(--ui-canvas);
+  background: transparent;
   font-size: 14px;
   line-height: 1.55;
 }
@@ -16,7 +16,9 @@
   min-height: 0;
   min-width: 0;
   padding: 12px 12px 8px;
-  background: var(--ui-subtle);
+  background: var(--ui-glass-sheen), var(--ui-glass);
+  -webkit-backdrop-filter: var(--ui-glass-filter);
+  backdrop-filter: var(--ui-glass-filter);
   border-inline-end: 1px solid var(--ui-border);
 }
 .native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 40px; }

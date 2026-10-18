@@ -5,8 +5,10 @@ description: Build or refine Moyai's native React frontend using its established
 
 # Moyai UI
 
-Preserve the space workspace: near-black neutral surfaces, lavender actions,
-near-white text, local Manrope interface typography and opaque composer panels.
+Preserve the space workspace: near-black smoked glass surfaces, lavender actions,
+near-white text and local Manrope interface typography. Use shared glass tokens
+for the sidebar, composer and floating menus; keep controls and content legible.
+Retain solid fallbacks for unsupported blur and reduced-transparency preferences.
 The wordmark, home headline and code retain Share Tech Mono. The home screen
 uses deterministic stars, the decode headline and interactive Moyai meteor.
 Chats reuse the static stars at lower brightness; Settings stay quiet for sustained

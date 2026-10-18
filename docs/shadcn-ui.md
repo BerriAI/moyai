@@ -2,8 +2,12 @@
 
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
-`frontend/theme.css`: The space workspace uses near-black neutral surfaces, lavender actions,
-local Manrope interface typography and semantic status colors. The wordmark,
+`frontend/theme.css`: The space workspace uses near-black smoked glass surfaces, lavender actions,
+local Manrope interface typography and semantic status colors. Shared glass tokens
+provide surface tint, subtle highlights and blur for the sidebar, composer and
+floating menus, with opaque fallbacks for unsupported blur or reduced transparency.
+Desktop panels sit inside a rounded inset frame; mobile keeps the full viewport.
+The wordmark,
 home headline and code retain Share Tech Mono. Both fonts are served locally.
 The retired escaped-template renderer is no longer used.
 

@@ -11,7 +11,7 @@
   gap: 0;
   overflow: hidden;
   border-radius: 16px;
-  background: var(--ui-background);
+  background: var(--ui-glass-sheen), var(--ui-glass-raised);
   border-color: var(--ui-control-border);
   box-shadow: var(--ui-shadow);
   color: var(--ui-foreground);

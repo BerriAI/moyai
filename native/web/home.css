@@ -19,7 +19,7 @@
 @keyframes decode-blink { 0%, 49.9% { opacity: 1; } 50%, 100% { opacity: 0; } }
 .home-form { text-align: left; }
 .home-connection-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; }
-.home-composer { background: var(--ui-background); border-radius: 16px; }
+.home-composer { border-radius: 20px; }
 .home-composer textarea { min-height: 160px; padding: 22px; font-size: 15px; resize: none; }
 .home-composer-tools { display: flex; align-items: center; gap: 6px; }
 .home-privacy-toggle { color: var(--ui-muted); font-size: 12px; }

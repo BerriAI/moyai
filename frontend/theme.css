@@ -31,16 +31,16 @@
 
 :root {
   color-scheme: dark;
-  --ui-canvas: #0b0b0f;
-  --ui-background: #151519;
-  --ui-subtle: #0e0e12;
-  --ui-foreground: #e9e8ed;
-  --ui-primary: #a48cf0;
+  --ui-canvas: #090b10;
+  --ui-background: #191b24;
+  --ui-subtle: #11141c;
+  --ui-foreground: #eeedf5;
+  --ui-primary: #baa5f5;
   --ui-primary-foreground: #171126;
-  --ui-secondary: #232228;
-  --ui-muted: #acabb2;
-  --ui-control-border: #706c7e;
-  --ui-border: #ffffff18;
+  --ui-secondary: #2a2938;
+  --ui-muted: #b0b1c2;
+  --ui-control-border: #77778e;
+  --ui-border: #dbddff21;
   --ui-font: "Manrope", ui-sans-serif, system-ui, sans-serif;
   --ui-font-mono: "Share Tech Mono", ui-monospace, monospace;
   --ui-headline-accent: #c1b1ee;
@@ -56,25 +56,60 @@
   --ui-warning-border: #655532;
   --ui-merged: #ddc6ff;
   --ui-merged-bg: #36234d;
-  --ui-overlay: #01050bc9;
-  --ui-shadow: 0 24px 80px #00000080, 0 0 0 1px #b8a8ff08;
+  --ui-overlay: #05070da6;
+  --ui-overlay-filter: blur(8px);
+  --ui-shadow: 0 24px 80px #00000066, inset 0 1px 0 #ffffff0a;
+  /* Solid materials remain legible without backdrop-filter support. */
+  --ui-glass: #171923;
+  --ui-glass-raised: #20222e;
+  --ui-glass-sheen: linear-gradient(145deg, #ffffff09, #ffffff00 55%);
+  --ui-glass-filter: none;
+  --ui-glass-edge: #e3dfff2b;
+  --ui-glass-shadow: 0 12px 40px #00000026, inset 0 1px 0 #ffffff0a;
+  --ui-ambient: radial-gradient(ellipse at 12% 0%, #77609826, transparent 52%),
+    radial-gradient(ellipse at 94% 92%, #3d7c8d1a, transparent 48%);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --ui-glass: #161923b8;
+    --ui-glass-raised: #20222ee8;
+    --ui-glass-filter: blur(24px) saturate(125%);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --ui-glass: #171923;
+    --ui-glass-raised: #20222e;
+    --ui-glass-filter: none;
+    --ui-glass-sheen: none;
+    --ui-ambient: none;
+    --ui-overlay: #05070de6;
+    --ui-overlay-filter: none;
+  }
 }
 
 /* Geometry remains in the workspace styles; these rules describe the shared
    component boundary and portalled surfaces. No Tailwind preflight reset. */
 [data-dialog-body]:not([hidden]), [data-popover-body]:not([hidden]) { display: contents; }
 [data-overlay-root] { display: contents; }
-[data-slot="dialog-overlay"] { position: fixed; inset: 0; z-index: 1000; background: var(--ui-overlay); backdrop-filter: blur(8px); }
+[data-slot="dialog-overlay"] { position: fixed; inset: 0; z-index: 1000; background: var(--ui-overlay); -webkit-backdrop-filter: var(--ui-overlay-filter); backdrop-filter: var(--ui-overlay-filter); }
 [data-slot="dialog-content"] {
   position: fixed; inset: auto; top: 50%; left: 50%;
   z-index: 1001; margin: 0; display: block; width: min(520px, calc(100vw - 32px));
   max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: auto;
-  background: var(--ui-background); color: var(--ui-foreground); padding: 24px;
-  border: 1px solid var(--ui-border); border-radius: 8px; box-shadow: var(--ui-shadow);
+  background: var(--ui-glass-sheen), var(--ui-glass-raised); color: var(--ui-foreground); padding: 24px;
+  border: 1px solid var(--ui-glass-edge); border-radius: 16px; box-shadow: var(--ui-shadow);
   animation: none;
   overscroll-behavior: contain;
 }
-[data-slot="popover-content"] { background: var(--ui-background); z-index: 1002; }
+[data-slot="popover-content"] { background: var(--ui-glass-sheen), var(--ui-glass-raised); border-color: var(--ui-glass-edge); border-radius: 12px; box-shadow: var(--ui-shadow); z-index: 1002; }
+[data-slot="dialog-content"], [data-slot="popover-content"], [data-slot="select-content"] {
+  -webkit-backdrop-filter: var(--ui-glass-filter);
+  backdrop-filter: var(--ui-glass-filter);
+}
+[data-slot="button"][data-variant="default"] { box-shadow: inset 0 1px 0 #ffffff30, 0 2px 10px #00000020; }
 [data-slot="tooltip-content"] { z-index: 1003; max-width: min(320px, calc(100vw - 24px)); }
 /* Closed tooltips must release their Escape-key layer before a dialog opens. */
 [data-slot="tooltip-content"][data-state="closed"] { animation: none; }
@@ -114,7 +149,7 @@
 [data-slot="select-content"] {
   z-index: 1010; min-width: var(--radix-select-trigger-width); max-width: calc(100vw - 16px);
   max-height: min(320px, var(--radix-select-content-available-height));
-  border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-background);
+  border: 1px solid var(--ui-glass-edge); border-radius: 12px; background: var(--ui-glass-sheen), var(--ui-glass-raised);
   color: var(--ui-foreground); box-shadow: var(--ui-shadow); animation: none;
   overscroll-behavior: contain;
 }
@@ -133,6 +168,16 @@
   [data-slot="select-item"] { min-height: 44px; }
 }
 @media (forced-colors: active) {
+  :root {
+    --ui-glass: Canvas;
+    --ui-glass-raised: Canvas;
+    --ui-glass-edge: ButtonBorder;
+    --ui-glass-filter: none;
+    --ui-glass-sheen: none;
+    --ui-ambient: none;
+    --ui-glass-shadow: none;
+    --ui-overlay-filter: none;
+  }
   [data-slot="select-trigger"]:focus-visible { outline-color: Highlight; }
   [data-slot="select-item"][data-highlighted] { outline: 2px solid Highlight; outline-offset: -2px; }
 }

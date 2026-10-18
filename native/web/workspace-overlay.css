@@ -46,11 +46,13 @@
   scrollbar-width: thin;
   scrollbar-color: var(--ui-control-border) transparent;
   padding: 10px 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 12px;
-  background: var(--ui-background);
+  border: 1px solid var(--ui-glass-edge, var(--ui-border));
+  border-radius: 16px;
+  background: var(--ui-glass-sheen, none), var(--ui-glass-raised, var(--ui-background));
+  -webkit-backdrop-filter: var(--ui-glass-filter, none);
+  backdrop-filter: var(--ui-glass-filter, none);
   color: var(--ui-foreground);
-  box-shadow: 0 12px 36px rgb(0 0 0 / 28%);
+  box-shadow: var(--ui-glass-shadow, 0 12px 36px rgb(0 0 0 / 28%));
   pointer-events: auto;
 }
 

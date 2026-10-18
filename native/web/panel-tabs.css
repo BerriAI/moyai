@@ -37,10 +37,10 @@
   overflow: hidden;
   border-top: 0;
   border-left: 0;
-  background: var(--ui-canvas);
+  background: var(--ui-glass-raised);
 }
 .tabbed-panel[hidden], .panel-tab-content[hidden], .panel-tab-content[data-state="inactive"] { display: none !important; }
-.panel-tabbar { display: flex; align-items: center; gap: 4px; height: 48px; min-height: 48px; padding: 5px 8px; border-bottom: 1px solid var(--ui-border); background: var(--ui-subtle); }
+.panel-tabbar { display: flex; align-items: center; gap: 4px; height: 48px; min-height: 48px; padding: 5px 8px; border-bottom: 1px solid var(--ui-border); background: var(--ui-glass-sheen); }
 .panel-tablist { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; flex: 1; align-items: center; }
 .panel-tab { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; max-width: 220px; border: 1px solid transparent; border-radius: 7px; }
 .panel-tab.selected { background: var(--ui-secondary); border-color: var(--ui-border); }
@@ -56,7 +56,7 @@
 .panel-tab-content.tab-activity, .panel-tab-content.tab-plan { padding: 12px 16px; }
 .panel-tab-content.tab-side-chat { overflow: hidden; }
 .panel-tab-content:focus-visible, .panel-tab [role="tab"]:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
-.panel-add-menu { padding: 8px; width: min(280px, calc(100vw - 24px)); background: var(--ui-subtle); color: var(--ui-foreground); border-color: var(--ui-border); }
+.panel-add-menu { padding: 8px; width: min(280px, calc(100vw - 24px)); color: var(--ui-foreground); }
 .panel-add-search { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--ui-border); padding: 0 8px 8px; margin-bottom: 5px; color: var(--ui-muted); }
 .panel-add-search input { min-width: 0; border: 0; background: transparent; box-shadow: none; padding-inline: 0; font-size: 13px; }
 .panel-add-menu [role="menuitem"] { display: flex; align-items: center; justify-content: flex-start; gap: 10px; width: 100%; min-height: 44px; height: auto; padding: 8px 10px; text-align: left; font-weight: 400; }
