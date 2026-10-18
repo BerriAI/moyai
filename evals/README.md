@@ -1,6 +1,15 @@
 # Moyai agent evaluations
 
-This directory contains the Harbor 0.24.0 evaluations, one task per real use case under `tasks/`. `deepseek_support_live` checks a support answer is proven live, and `answer_style` checks a plain explanation follows the Answer style rules in `native/instructions.md` (no em dashes, answer first, no filler). Harbor is installed as a temporary `uv` overlay so it does not change the native production dependency lock.
+This directory contains the Harbor 0.24.0 evaluations, one task per use case under `tasks/`. `deepseek_support_live` v2 checks a support answer against a real, pinned LiteLLM proxy with a deterministic local HTTPS provider fixture. It does not validate external DeepSeek availability. `answer_style` checks a plain explanation follows the Answer style rules in `native/instructions.md`. Harbor is installed as a temporary `uv` overlay so it does not change the native production dependency lock.
+
+The DeepSeek v2 gate requires a successful LiteLLM SDK callback receipt matching
+the provider fixture's unique response ID, package version, route, model, and
+result. Direct provider calls and catalog lookups cannot pass this gate, even if
+the language-model judge assigns a perfect score. The reply must scope any
+support claim to the tested local integration. Provider/model documentation and
+prices in this task are synthetic fixtures, not claims about current products.
+Version 1 accepted direct provider calls and could therefore report false
+positives for LiteLLM support; its history remains in Git and past run artifacts.
 
 ## Run
 
@@ -9,7 +18,7 @@ Set `LITELLM_API_BASE`, `LITELLM_API_KEY`, `MOYAI_EVAL_AGENT_MODEL`, `MOYAI_EVAL
 ```sh
 PYTHONPATH=.:evals:native/src:native/tests \
   uv run --project native --python 3.13 \
-  --with harbor==0.24.0 --with 'moto[server]==5.1.4' --with openai==3.29.0 \
+  --with harbor==0.24.0 --with 'moto[server]==5.1.4' --with openai==3.29.0 --with litellm==1.107.0.dev3 \
   harbor run -p evals/tasks/<task> \
   -a moyai_harbor.agent:MoyaiAgent -k 3 -n 1 -o evals/jobs -y
 ```

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from "react"
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import {
   $createLineBreakNode, $createParagraphNode, $createTextNode, $getNodeByKey, $getRoot, $getSelection,
   $isNodeSelection, $isRangeSelection, $isTextNode, COMMAND_PRIORITY_HIGH, COPY_COMMAND, CUT_COMMAND,
@@ -24,7 +24,7 @@ type Query = { key: string; start: number; end: number; text: string }
 type Props = {
   value: string; onChange: (value: string) => void; onSend: (value: string) => void
   onPaste?: React.ClipboardEventHandler<HTMLElement>
-  placeholder: string; shared?: boolean; disabled?: boolean; sessionId?: string
+  placeholder: string; shared?: boolean; disabled?: boolean; sessionId?: string; focusRequest?: number
 }
 const CLIPBOARD_TYPE = "application/x-moyai-message"
 const GOAL_COMMAND: ComposerSkill = {
@@ -70,7 +70,7 @@ export const SkillComposer = React.forwardRef<HTMLDivElement, Props>(function Sk
   }}><InlineComposer {...props} inputRef={ref} /><HistoryPlugin /></LexicalComposer>
 })
 
-function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared = false, disabled = false, sessionId, inputRef }: Props & { inputRef: React.ForwardedRef<HTMLDivElement> }) {
+function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared = false, disabled = false, sessionId, focusRequest = 0, inputRef }: Props & { inputRef: React.ForwardedRef<HTMLDivElement> }) {
   const [editor] = useLexicalComposerContext()
   const input = useRef<HTMLDivElement | null>(null), latest = useRef({ onChange, onSend })
   const bindInput = useCallback((node: HTMLDivElement | null) => {
@@ -83,7 +83,7 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
   const [focused, setFocused] = useState(false), [dismissed, setDismissed] = useState(false)
   const [query, setQuery] = useState<Query | null>(null), [version, setVersion] = useState(0), [active, setActive] = useState(0)
   const [empty, setEmpty] = useState(!value)
-  const emitted = useRef(value), loadedCatalog = useRef("")
+  const emitted = useRef(value), loadedCatalog = useRef(""), appliedFocus = useRef(focusRequest)
   const [state, setState] = useState<{ scope: string; rows: ComposerSkill[]; loading: boolean; error: string }>({ scope: "", rows: [], loading: false, error: "" })
   const wantsPicker = focused && query !== null && !disabled
 
@@ -99,11 +99,19 @@ function InlineComposer({ value, onChange, onSend, onPaste, placeholder, shared 
       }
     })
   }), [editor])
-  useEffect(() => {
-    if (value === emitted.current) return
+  useLayoutEffect(() => {
+    const focus = focusRequest !== appliedFocus.current
+    const changed = value !== emitted.current
+    if (!changed && !focus) return
     emitted.current = value
-    editor.update(() => $setContent(value), { tag: ["external-value", SKIP_DOM_SELECTION_TAG] })
-  }, [editor, value])
+    appliedFocus.current = focusRequest
+    // Commit the starter and its caret together before another input event can
+    // replace the selection. A later animation frame could interrupt typing.
+    editor.update(() => {
+      if (changed) $setContent(value)
+      if (focus) $getRoot().selectEnd()
+    }, { tag: focus ? ["external-value"] : ["external-value", SKIP_DOM_SELECTION_TAG], discrete: true })
+  }, [editor, value, focusRequest])
   useEffect(() => { editor.setEditable(!disabled) }, [editor, disabled])
   useEffect(() => {
     if (!wantsPicker) return

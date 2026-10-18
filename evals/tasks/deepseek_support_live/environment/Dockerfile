@@ -11,11 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
         -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign,cRLSign" \
         -addext "extendedKeyUsage=serverAuth" \
     && update-ca-certificates \
-    && pip install --no-cache-dir openai==3.29.0
+    && pip install --no-cache-dir openai==3.29.0 'litellm[proxy]==1.107.0.dev3'
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
-    NO_PROXY=api.deepseek.com \
-    no_proxy=api.deepseek.com
+    NO_PROXY=api.deepseek.com,127.0.0.1,localhost \
+    no_proxy=api.deepseek.com,127.0.0.1,localhost \
+    LITELLM_TELEMETRY=False \
+    LITELLM_LOCAL_MODEL_COST_MAP=True
 WORKDIR /workspace
 COPY workspace/ /workspace/
 COPY eval/ /eval/

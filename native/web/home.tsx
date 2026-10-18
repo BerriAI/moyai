@@ -1,19 +1,22 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUp, Globe, LockKeyhole } from "lucide-react"
+import { ArrowUpRight, Bug, Code2, FileCode2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { GoalDialog, goalCommandAction } from "./goal"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { DecodeHeadline } from "./decode-headline"
 import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
-import meteorPoster from "./assets/moyai-meteor-poster.webp"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { GeneralPreferences } from "./general-preferences"
 import type { NewConversation, Session, Turn } from "./conversation-state"
 
 type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
+const starters = [
+  { label: "Review code", detail: "Find the edge cases", prompt: "Review my changes for bugs and improvements.", Icon: Code2 },
+  { label: "Fix a bug", detail: "Trace it to the source", prompt: "Help me investigate and fix this bug: ", Icon: Bug },
+  { label: "Plan a feature", detail: "Make the next change clear", prompt: "Help me plan and implement this feature: ", Icon: ListChecks },
+]
 export function homeSubmission(prompt: string, model: string, privateSession: boolean, attachments: string[], selected: string[], available: HomeConnection[]) {
   const connections = [...new Set(selected)].sort()
   const allowed = new Set(available.filter(row => row.enabled && (privateSession || row.shared)).map(row => row.id))
@@ -44,20 +47,14 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   const needsAccounts = preferences?.connection_ids != null ? preferences.connection_ids.length > 0 : productMode === "existing"
   const selectedAccounts = skipAccounts || !needsAccounts ? [] : accounts.filter(row => preferences?.connection_ids == null || preferences.connection_ids.includes(row.id)).map(row => row.id)
   const accountsReady = !needsAccounts || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error)
-  const sculpture = useRef<HTMLDivElement>(null)
+  const [composerFocus, setComposerFocus] = useState(0)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
     document.title = "New session · Moyai"
-    let disposed = false
-    let cleanupSculpture = () => {}
-    // The composer is useful before the decorative WebGL module is downloaded.
-    void import("@/moyai-sculpture").then(({ mountSculpture }) => {
-      if (!disposed) cleanupSculpture = mountSculpture(sculpture.current)
-    }).catch(() => {}) // The static image remains a complete fallback.
-    return () => { disposed = true; mounted.current = false; cleanupSculpture() }
+    return () => { mounted.current = false }
   }, [])
   useEffect(() => {
     if (!needsAccounts) return
@@ -119,10 +116,13 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} onSubmit={async command => { setDraft(command); await submit(command) }} />
     {fileDrop.dragging && <FileDropOverlay />}
     <SpaceBackdrop />
-    <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
+    <div className="home-workbench-bar"><span><FileCode2 size={14} />Workspace<span className="home-path-separator">/</span><strong>New session</strong></span><span className="home-workbench-context"><Code2 size={13} />Moyai</span></div>
     <div className="home-content">
-      <p className="home-eyebrow">A space for your next big idea</p>
-      <DecodeHeadline paused={busy || Boolean(draft.trim())} />
+      <header className="home-header">
+        <p className="home-eyebrow">Workspace</p>
+        <h1>What are we <span>building?</span></h1>
+        <p className="home-subtitle">A feature. A stubborn bug. A better way to do it.</p>
+      </header>
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         {error && <p className="error" role="alert">{error}</p>}
         {needsAccounts && catalog.scope === accountScope && catalog.error && !skipAccounts && <div className="home-connection-error" role="alert">
@@ -131,11 +131,9 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
           <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setSkippedScope(accountScope)}>Continue without connections</Button>
         </div>}
         <div className="composer home-composer">
+          <div className="home-editor-heading"><span><FileCode2 size={14} />New session</span><span className="home-editor-mode">Draft</span></div>
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <SkillComposer value={draft} onChange={setDraft} onSend={prompt => {
-            if (prompt.trim() === "/goal") setGoalDialog(true)
-            else void send(prompt)
-          }} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
+          <div className="home-editor-input"><SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe a change, paste an error, or ask a question…" onPaste={pictures.paste} /></div>
           <div className="composer-actions">
             <div className="home-composer-tools">
               <AttachButton add={pictures.add} disabled={busy} compact />
@@ -146,7 +144,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
               </Button>
             </div>
             <div className="send-actions"><Select value={model} onValueChange={setModel}><SelectTrigger aria-label="Model"><SelectValue /></SelectTrigger><SelectContent>{models.map(value => <SelectItem value={value} key={value}>{value.replace(/^openai\//, "")}</SelectItem>)}</SelectContent></Select>
-              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><ArrowUp /></Button>
+              <Button type="submit" size="icon" aria-label="Send message" disabled={busy || pictures.uploading || pictures.hasErrors || !accountsReady || (!draft.trim() && !pictures.files.length)}><Send /></Button>
             </div>
           </div>
         </div>
@@ -156,6 +154,14 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
           <span>Drop files or paste images · Enter to send</span>
         </div>
       </form>
+      <div className="home-starters" role="group" aria-label="Start with a prompt" aria-hidden={Boolean(draft.trim())}>
+        <p className="home-starters-heading">Start with a prompt</p>
+        {starters.map(({ label, detail, prompt, Icon }) => <Button key={label} type="button" variant="ghost" aria-label={label} disabled={busy || Boolean(draft.trim())}
+          onClick={() => {
+            setDraft(prompt)
+            setComposerFocus(value => value + 1)
+          }}><Icon aria-hidden="true" /><span className="home-starter-label">{label}</span><span className="home-starter-detail" aria-hidden="true">{detail}</span><ArrowUpRight className="home-starter-arrow" aria-hidden="true" /></Button>)}
+      </div>
     </div>
   </section>
 }

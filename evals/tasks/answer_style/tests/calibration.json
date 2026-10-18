@@ -1,0 +1,52 @@
+{
+  "task_version": 2,
+  "cases": [
+    {
+      "id": "concrete_three_sentences",
+      "reply": "A virtual key is the secret an app sends to LiteLLM Proxy to authenticate requests. A team groups people and their keys under shared budgets and model permissions. Use separate keys for your apps, and put them in a team when a project or department needs shared ownership and limits.",
+      "expected_pass": true
+    },
+    {
+      "id": "alternate_wording_and_standalone_key",
+      "reply": "Virtual keys authenticate callers; teams manage members and keys together. Give an integration its own key for proxy API calls. If several apps and people share a project budget or model access rules, group their keys in a team; an isolated integration can use a standalone key.",
+      "expected_pass": true
+    },
+    {
+      "id": "short_but_vague",
+      "reply": "Keys are for apps; teams are for organization. Use keys for individual needs and teams for shared needs. You can use both.",
+      "expected_pass": false,
+      "must_fail_criteria": ["correct"]
+    },
+    {
+      "id": "short_but_wrong_credential",
+      "reply": "A virtual key is a label for an application, while a team ID is the credential you send to LiteLLM Proxy. Use the team ID for API requests and virtual keys to organize members and shared budgets.",
+      "expected_pass": false,
+      "must_fail_criteria": ["correct"]
+    },
+    {
+      "id": "incorrect_mandatory_membership",
+      "reply": "A virtual key is the credential an app sends to LiteLLM Proxy. Teams group members and keys under shared budgets and model access. Every key must belong to a team, so create a team even for a single isolated integration before issuing its key.",
+      "expected_pass": false,
+      "must_fail_criteria": ["correct"]
+    },
+    {
+      "id": "missing_people_and_keys_grouping",
+      "reply": "A virtual key is the credential your app sends to LiteLLM Proxy. A team is an account-wide budget setting. Give each app a key and use a team to cap spending.",
+      "expected_pass": false,
+      "must_fail_criteria": ["correct"]
+    },
+    {
+      "id": "padded_recap",
+      "reply": "A virtual key is the credential an app sends to LiteLLM Proxy; a team groups members and keys under shared budgets and model access. Use separate keys per app, and teams for shared project ownership and limits. In summary, keys authenticate apps, while teams organize members and keys. The key takeaway is that virtual keys are credentials and teams are management groups. To recap, use keys for apps and teams for groups of people and their keys.",
+      "expected_pass": false,
+      "must_fail_criteria": ["direct", "brief"]
+    },
+    {
+      "id": "unneeded_table",
+      "reply": "A virtual key authenticates an app to LiteLLM Proxy; a team manages people and keys together.\n\n| Item | Use |\n| --- | --- |\n| Virtual key | Each app sends its own credential |\n| Team | Members and keys share budgets and model access |\n\nUse teams for shared project ownership, with separate keys for each app.",
+      "expected_pass": false,
+      "must_fail_criteria": ["brief"],
+      "must_fail_gates": ["no_markdown_table"]
+    }
+  ]
+}
