@@ -79,6 +79,8 @@ For **Conversation unavailable**, check the signed-in user's verified Slack acco
 
 For **The Slack bot connection could not be renewed**, an administrator must reconnect Slack in **Settings → Connections**, then start a new Slack conversation. This applies when Slack rejects the stored refresh token; retrying a browser read cannot repair that credential. An ordinary deployment does not require reconnecting or adding OAuth scopes.
 
+Reconnecting clears the profile retry delay for that workspace. The next signed message verifies its sender immediately; it does not inherit a failed connection's five-minute delay. Credential, permission and database outages during profile lookup leave the last verified identity unchanged and keep incoming messages pending for retry. Actual profile conflicts, changed emails and ineligible Slack accounts still require successful identity verification before admission.
+
 Slack token renewal acquires its database write ownership before asking Slack to rotate the credential. User and bot renewals share a provider lock across processes, preserve each other's credentials and retain the existing installation authority. The save can proceed while a browser holds its admission read lock. Renewal finishes saving even if the requesting browser disconnects; database contention before renewal cannot consume the provider credential.
 
 For **Confirming Slack delivery**, inspect the original Slack thread and allow read reconciliation to settle it. Do not repost an uncertain send. For an explicit rejection, correct the connection/access problem and use **Retry delivery** if the original authority remains valid. A rate-limit rejection retries automatically.
