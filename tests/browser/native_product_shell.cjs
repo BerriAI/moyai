@@ -116,6 +116,7 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/messages')) {
       const messages=state.messagesBySession?.[url.pathname.split('/')[3]]||state.messages;
       if(req.method==='POST') {
+        if(state.afterWriteErrors)state.httpErrors={...state.httpErrors,...state.afterWriteErrors};
         if(state.steeringAt&&data.mode==='asap') {
           const turn={id:'turn-steer',actor_id:'viewer',parent_turn:turnId,status:'accepted',mode:'asap',
             created_at:state.steeringAt,accepted_at:state.steeringAt,connections:[],usage:{}};
@@ -145,6 +146,7 @@ async function handle(req,res,next) {
       if(state.renameError)return json({detail:'Could not save the session name.'},503);
       const id=url.pathname.split('/')[3];
       if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
+      if(state.afterWriteErrors)state.httpErrors={...state.httpErrors,...state.afterWriteErrors};
       return json({updated:true});
     }
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
@@ -730,7 +732,7 @@ test('revoked composer clears protected state and reinitializes on an authorized
   await page.getByRole('textbox',{name:'Message Moyai'}).fill('Private draft');
   await waitFor(()=>state.requests.some(req=>req.path.endsWith('/read')));
   state.denied=true;release();
-  await page.getByRole('status').getByText(/Session access revoked/).waitFor();
+  await page.getByRole('alert').getByText(/Session access revoked/).waitFor();
   assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).count(),0);
   assert.equal(await page.getByText('Inspect this repository.',{exact:true}).count(),0);
   state.denied=false;state.sessionOverrides[sessionId].model='edited-model';state.turns[0].connections=[];
@@ -938,6 +940,114 @@ for(const width of [1440,768,320])test(`transient global and conversation errors
   assert.equal(await page.getByRole('textbox',{name:'Message Moyai'}).innerText(),'Keep this draft.');
   assert.equal(await page.getByText(/SyntaxError|Unexpected token/).count(),0);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+for(const entry of ['conversation','answer','home'])test(`accepted ${entry} keeps a catalog failure in the global refresh banner`,async t=>{
+  reset(entry==='answer'?{status:'waiting',pending:colorQuestion(),canAnswer:true,canReply:true}:{});
+  const page=await pageFor(t,entry==='home'?'':'#'+sessionId);
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Accepted once.');
+  state.afterWriteErrors={'GET:/api/connections':{status:503,type:'application/json',body:JSON.stringify({detail:'Catalog unavailable.'})}};
+  await page.getByRole('button',{name:entry==='answer'?'Answer question':'Send message',exact:true}).click();
+  await input.fill('New draft after acceptance.');
+  const globalError=page.locator('.global-error'),localError=page.locator('.composer-wrap [role="alert"]');
+  assert.match(await globalError.innerText(),/Catalog unavailable/);
+  assert.equal(await localError.count(),0,'catalog errors are not conversation errors');
+  const reads=state.requests.filter(req=>req.path.startsWith('/api/sessions/')&&req.method==='GET').length;
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await waitFor(()=>state.requests.filter(req=>req.path.startsWith('/api/sessions/')&&req.method==='GET').length>reads);
+  assert.match(await globalError.innerText(),/Catalog unavailable/);
+  assert.equal(await localError.count(),0);
+  assert.equal(await input.innerText(),'New draft after acceptance.');
+  assert.equal(state.requests.filter(req=>req.path.endsWith('/messages')&&req.method==='POST').length,1);
+  delete state.httpErrors['GET:/api/connections'];
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await globalError.waitFor({state:'hidden'});
+});
+
+test('accepted send refreshes both owners even when conversation and catalog reads fail',async t=>{
+  reset();
+  const page=await pageFor(t),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Accepted once.');
+  state.afterWriteErrors={
+    [`GET:/api/sessions/${sessionId}`]:{status:500},
+    'GET:/api/connections':{status:503,type:'application/json',body:JSON.stringify({detail:'Catalog unavailable.'})},
+  };
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await input.fill('Preserved subsequent draft.');
+  await page.locator('.composer-wrap [role="alert"]').getByText(/Your message was sent/).waitFor();
+  assert.match(await page.locator('.global-error').innerText(),/Catalog unavailable/);
+  delete state.httpErrors[`GET:/api/sessions/${sessionId}`];
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.locator('.composer-wrap [role="alert"]').waitFor({state:'hidden'});
+  assert.match(await page.locator('.global-error').innerText(),/Catalog unavailable/);
+  assert.equal(await input.innerText(),'Preserved subsequent draft.');
+  assert.equal(state.requests.filter(req=>req.path.endsWith('/messages')&&req.method==='POST').length,1);
+});
+
+test('a saved rename succeeds while its catalog refresh failure stays globally owned',async t=>{
+  reset();const page=await pageFor(t);
+  const title=await editTitle(page);
+  await title.fill('Saved despite catalog outage');
+  state.afterWriteErrors={'GET:/api/connections':{status:503,type:'application/json',body:JSON.stringify({detail:'Catalog unavailable.'})}};
+  await title.press('Enter');
+  await title.waitFor({state:'hidden'});
+  await page.getByRole('heading',{name:'Saved despite catalog outage',exact:true}).waitFor();
+  assert.match(await page.locator('.global-error').innerText(),/Catalog unavailable/);
+  assert.equal(await page.locator('.action-toast[role="alert"]').count(),0,'the successful rename is not a failed action');
+  assert.equal(state.requests.filter(req=>req.method==='PATCH'&&req.body?.title==='Saved despite catalog outage').length,1);
+});
+
+for(const status of [403,404])for(const action of ['send','attachment'])test(`access ${status} replaces an obsolete ${action} error`,async t=>{
+  reset();const page=await pageFor(t),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Private unsent draft.');
+  await waitFor(()=>clients.size>0,'SSE connected');
+  if(action==='send'){
+    state.httpErrors={[`POST:/api/sessions/${sessionId}/messages`]:{
+      status:503,type:'application/json',body:JSON.stringify({detail:'Old send failure.'}),
+    }};
+    await page.getByRole('button',{name:'Send message',exact:true}).click();
+    await page.getByText(/Old send failure/).waitFor();
+  }else{
+    await page.getByLabel('Attach files',{exact:true}).setInputFiles(Array.from({length:9},(_,i)=>({
+      name:`file-${i}.txt`,mimeType:'text/plain',buffer:Buffer.from('safe test data'),
+    })));
+    await page.getByText(/Attach up to 8 files/).waitFor();
+  }
+  state.httpErrors={...state.httpErrors,[`GET:/api/sessions/${sessionId}`]:{
+    status,type:'application/json',body:JSON.stringify({detail:'Access to this conversation was revoked.'}),
+  }};
+  emit({},undefined,'refresh');
+  await page.getByRole('alert').getByText(/Access to this conversation was revoked/).waitFor();
+  assert.equal(await page.getByText(/Old send failure|Attach up to 8 files/).count(),0);
+  assert.equal(await input.count(),0);
+  assert.equal(await page.getByText('Inspect this repository.',{exact:true}).count(),0);
+});
+
+for(const action of ['send','stop'])for(const failed of [false,true])test(`late ${action} ${failed?'failure':'success'} cannot affect a recovered authority scope`,async t=>{
+  reset();const page=await pageFor(t),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Old draft.');
+  await waitFor(()=>clients.size>0,'SSE connected');
+  const path=`/api/sessions/${sessionId}/${action==='send'?'messages':'stop'}`;
+  let release;state.holds={[path]:new Promise(resolve=>{release=resolve;})};t.after(()=>release());
+  if(failed)state.httpErrors={[`POST:${path}`]:{status:503,type:'application/json',body:JSON.stringify({detail:'Old action failed late.'})}};
+  await page.getByRole('button',{name:action==='send'?'Send message':'Stop task',exact:true}).click();
+  await waitFor(()=>state.requests.some(req=>req.path===path&&req.method==='POST'));
+  state.httpErrors={...state.httpErrors,[`GET:/api/sessions/${sessionId}`]:{
+    status:403,type:'application/json',body:JSON.stringify({detail:'Access was revoked.'}),
+  }};
+  emit({},undefined,'refresh');
+  await page.getByText('Error: Access was revoked.',{exact:true}).waitFor();
+  assert.equal(await input.count(),0);
+  delete state.httpErrors[`GET:/api/sessions/${sessionId}`];
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await input.fill('New authority draft.');
+  const completed=page.waitForResponse(response=>new URL(response.url()).pathname===path&&response.request().method()==='POST');
+  release();await (await completed).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await input.innerText(),'New authority draft.');
+  assert.equal(await page.getByText(/Old action failed late|Your message was sent/).count(),0);
+  assert.equal(state.requests.filter(req=>req.path===path&&req.method==='POST').length,1);
 });
 
 test('successful background refresh cannot clear a failed global user action',async t=>{

@@ -173,7 +173,7 @@ function App() {
     const authorized = continuationReference(reference, originalId)
     if (!authorized) { setError("The saved continuation reference is invalid. Refresh this history."); return }
     setContinued({ scope: routeScope, original: originalId, id: authorized.id })
-    void refresh().catch(reason => setError(String(reason)))
+    void refresh()
   }
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -224,9 +224,11 @@ function App() {
       if (failure?.status === "rejected") throw failure.reason
       setRefreshError("")
     } catch (reason) {
-      if (version !== refreshVersion.current) return
+      if (signal?.aborted || version !== refreshVersion.current) return
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
-      throw reason
+      // Every caller shares this catalog. A successful send, rename or new
+      // conversation must not inherit its refresh failure as an action error.
+      setRefreshError(String(reason))
     } finally {
       if (version === refreshVersion.current) setInventoryState(previous => ({ ...previous, loading: false }))
     }
@@ -474,23 +476,25 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const loadVersion = useRef(0)
   const visibleNow = useRef(visible)
   visibleNow.current = visible
-  function clearSensitive() {
+  function clearSensitive(message = "Access to this conversation changed. Please reopen it.") {
     ++loadVersion.current
     ++sensitiveVersion.current
     resolvedOnce.current = undefined
     composerInitialized.current = false
     readThrough.current = null
+    lastRequest.current = null
+    viewNow.current = null
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
-    setLoadError("")
+    setError(""); setLoadError(message); setBusy(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
     sessionCallback.current?.(null)
   }
   const clearSensitiveNow = useRef(clearSensitive)
   clearSensitiveNow.current = clearSensitive
-  useEffect(() => () => { ++loadVersion.current }, [])
+  useEffect(() => () => { ++loadVersion.current; ++sensitiveVersion.current }, [])
   const load = useCallback(async (signal?: AbortSignal) => {
     const version = ++loadVersion.current
     try {
@@ -526,14 +530,28 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     } catch (reason) {
       if (signal?.aborted || version !== loadVersion.current) return
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) {
-        clearSensitiveNow.current()
+        clearSensitiveNow.current(String(reason))
       }
       throw reason
     }
   }, [id, me.user.id, sideMode])
-  async function reloadAfterAction() {
+  async function reloadAfterAction(message?: string) {
     try { await load() }
-    catch (reason) { setLoadError(String(reason)) }
+    catch (reason) {
+      const denied = reason instanceof ApiError && [401, 403, 404].includes(reason.status)
+      setLoadError(denied ? String(reason) : message ?? String(reason))
+    }
+  }
+  async function runConversationAction(action: () => Promise<unknown>, onAccepted?: () => void) {
+    const version = sensitiveVersion.current
+    try {
+      await action()
+      if (version !== sensitiveVersion.current) return
+      onAccepted?.()
+      await reloadAfterAction()
+    } catch (reason) {
+      if (version === sensitiveVersion.current) setError(String(reason))
+    }
   }
   useEffect(() => {
     if (sideMode && !visible) return
@@ -556,7 +574,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       setPanelLoading(false); setPanelError("")
     }, () => activeSession(viewNow.current?.session.status) ? 1500 : 10000, reason => {
       if (version !== sensitiveVersion.current) return
-      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) { clearSensitiveNow.current(); setError(String(reason)) }
+      if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) clearSensitiveNow.current(String(reason))
       else { setPanelLoading(false); setPanelError(String(reason)) }
     })
   }, [id, auxiliaryPanel, Boolean(view)])
@@ -658,11 +676,19 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
 
   async function send(promptOverride?: string) {
     const prompt = promptOverride ?? (editing ? editText : draft)
+    const version = sensitiveVersion.current
     if (editing) {
       if (busy || !prompt.trim()) return
       setBusy(true); setError("")
-      try { await api(`/turns/${editing.turn_id}`, "PATCH", { prompt }); setEditing(null); await reloadAfterAction() }
-      catch (error) { setError(String(error)) } finally { setBusy(false) }
+      try {
+        await api(`/turns/${editing.turn_id}`, "PATCH", { prompt })
+        if (version !== sensitiveVersion.current) return
+        setEditing(null); await reloadAfterAction()
+      } catch (error) {
+        if (version === sensitiveVersion.current) setError(String(error))
+      } finally {
+        if (version === sensitiveVersion.current) setBusy(false)
+      }
       return
     }
     if ((!prompt.trim() && !pictures.files.length) || busy || pictures.uploading || pictures.hasErrors || accountBlocked) return
@@ -675,31 +701,40 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
-    let accepted = false
     try {
       await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: lastRequest.current.key })
-      accepted = true
+      if (version !== sensitiveVersion.current) return
       if (body.reply_to) setAnsweredRequest(body.reply_to)
-      setDraft(""); pictures.clear(); lastRequest.current = null; await load(); await refreshList()
+      setDraft(""); pictures.clear(); lastRequest.current = null
+      await reloadAfterAction(body.reply_to
+        ? "Your response was sent, but the conversation could not be refreshed."
+        : "Your message was sent, but the conversation could not be refreshed.")
+      if (version === sensitiveVersion.current) await refreshList()
     } catch (e) {
-      if (accepted) setLoadError(body.reply_to ? "Your response was sent, but the conversation could not be refreshed." : "Your message was sent, but the conversation could not be refreshed.")
-      else setError(String(e))
-    } finally { setBusy(false) }
+      if (version === sensitiveVersion.current) setError(String(e))
+    } finally {
+      if (version === sensitiveVersion.current) setBusy(false)
+    }
   }
   async function sendNow(turnId: string) {
     if (busy) return
+    const version = sensitiveVersion.current
     setBusy(true); setError("")
     setSendingNow(previous => new Set(previous).add(turnId))
     try {
       const turn = await api<Turn>(`/turns/${turnId}/steer`, "POST")
+      if (version !== sensitiveVersion.current) return
       setView(previous => previous ? { ...previous, turns: previous.turns.map(item => item.id === turn.id ? turn : item) } : previous)
       await reloadAfterAction()
     } catch (reason) {
+      if (version !== sensitiveVersion.current) return
       setSendingNow(previous => { const next = new Set(previous); next.delete(turnId); return next })
       setError(String(reason))
-    } finally { setBusy(false) }
+    } finally {
+      if (version === sensitiveVersion.current) setBusy(false)
+    }
   }
-  if (!view) return <div className="center" role="status">{error || loadError || "Opening conversation…"}</div>
+  if (!view) return <div className="center" role={loadError || error ? "alert" : "status"}>{loadError || error || "Opening conversation…"}</div>
   const session = originalSessionId ? { ...view.session, url: `/#run=${originalSessionId}` } : view.session
   const savedAssistant = messages.some(message => message.role === "assistant" && message.turn_id === liveText.turnId)
   const finalText = liveFinalAnswer(liveText)
@@ -800,7 +835,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
-            <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={async () => { try { await api(`/turns/${message.turn_id}`, "DELETE"); if (editing?.id === message.id) setEditing(null); await reloadAfterAction() } catch (error) { setError(String(error)) } }}><X size={14} /></Button>
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={() => void runConversationAction(
+              () => api(`/turns/${message.turn_id}`, "DELETE"),
+              () => { if (editing?.id === message.id) setEditing(null) },
+            )}><X size={14} /></Button>
           </div>)}</div>}
           {editing && <div className="editing-message" role="status"><span>Editing queued message · attachments are kept</span><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>Cancel edit</Button></div>}
           <div className="composer">
@@ -810,7 +848,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
               <AttachButton add={pictures.add} disabled={Boolean(editing) || busy} />
               <Choice value={model} onChange={setModel} label="Model" options={me.models.map(item => ({ value: item, label: item }))} />
               <div className="send-actions">
-                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={async () => { try { await api(`/sessions/${id}/stop`, "POST"); await reloadAfterAction() } catch (e) { setError(String(e)) } }}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
+                {session.active_turn && <Button type="button" variant="outline" aria-label="Stop task" onClick={() => void runConversationAction(() => api(`/sessions/${id}/stop`, "POST"))}><Square size={13} /><span className="composer-optional-label">Stop</span></Button>}
                 <Button type="submit" size={editing ? "sm" : "icon"} aria-label={editing ? "Save queued message" : answeringQuestion ? "Answer question" : "Send message"} disabled={(editing ? !editText.trim() : !draft.trim() && !pictures.files.length) || busy || (!editing && (pictures.uploading || pictures.hasErrors || accountBlocked))}>{editing ? <><Check className="composer-save-icon" /><span className="composer-optional-label">Save message</span></> : <ArrowUp />}</Button>
               </div>
             </div>
