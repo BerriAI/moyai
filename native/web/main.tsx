@@ -478,6 +478,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
     openedBrowserLogin.current = ""
+    panelReturnFocus.current = null
     sessionCallback.current?.(null)
   }
   const clearSensitiveNow = useRef(clearSensitive)
@@ -610,6 +611,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     openedBrowserLogin.current = identity
     setWorkspaceOpen(false)
     dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+    const frame = requestAnimationFrame(() =>
+      transcript.current?.querySelector(".browser-login-request")?.scrollIntoView({ block: "end" }))
+    return () => cancelAnimationFrame(frame)
   }, [id, active?.id, browserLoginIds, canResolveInput, visible, requestAnswered, sideMode])
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
