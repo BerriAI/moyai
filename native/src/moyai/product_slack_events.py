@@ -13,12 +13,14 @@ from app.db import database as source_database
 from app.slack_format import ASIDE_PREFIXES
 from fastapi import HTTPException
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 
 from .contracts import NewMessage
-from .models import Session, User
+from .models import Session, SlackThread, Turn, User
 from .product_identity import ProductPrincipal
 from .product_slack_controls import answer
 from .product_slack_conversations import SlackConversation, SlackConversations
+from .product_slack_models import SlackTurnSource
 
 if TYPE_CHECKING:
     from .product_slack import ProductSlack
@@ -160,7 +162,7 @@ class SlackEvents:
             await automation.receive_verified(payload)
 
     async def _prepare(
-        self, message: SlackMessage, actor: User, principal: ProductPrincipal, installed: dict,
+        self, message: SlackMessage, actor: User, principal: ProductPrincipal,
     ) -> SlackSubmission:
         attachments = {"uploads": [], "images": [], "context": ""}
         if message.event.get("files"):
@@ -172,14 +174,41 @@ class SlackEvents:
             prompt=message.prompt + attachments["context"], request_key="slack-message:" + message.key,
             mode="asap", connections=selections, attachments=attachments["images"],
         )
-        body = await self.slack.context.prepare(actor, principal, message.origin, installed, body, source=message.source)
         return SlackSubmission(body, attachments["uploads"])
+
+    async def _submit(
+        self, actor: User, thread: SlackThread, body: NewMessage, message: SlackMessage,
+        uploads: list[str],
+    ) -> Turn:
+        async def admit() -> Turn:
+            async with self.slack.runtime.database.sessions.begin() as db:
+                turn = await self.slack.runtime.database.submit(
+                    actor, thread.session_id, body, db=db,
+                )
+                source = await db.get(SlackTurnSource, turn.id)
+                if source is None:
+                    db.add(SlackTurnSource(
+                        turn_id=turn.id,
+                        team_id=message.origin["team_id"],
+                        channel_id=message.origin["channel_id"],
+                        thread_ts=message.origin["thread_ts"],
+                        message_ts=message.origin["message_ts"],
+                        user_id=message.origin["user_id"],
+                    ))
+                if uploads:
+                    await self.slack.files.bind(db, actor.id, thread.session_id, uploads)
+                return turn
+
+        try:
+            return await admit()
+        except IntegrityError:
+            return await admit()
 
     async def _admit(
         self, message: SlackMessage, conversation: SlackConversation, actor: User,
         principal: ProductPrincipal, installed: dict,
     ) -> dict[str, Any]:
-        submission = None if message.command else await self._prepare(message, actor, principal, installed)
+        submission = None if message.command else await self._prepare(message, actor, principal)
         thread = conversation.thread
         if thread is None:
             thread = await self.conversations.bind(
@@ -205,12 +234,7 @@ class SlackEvents:
         assert submission is not None
         if binding.paused:
             await self.slack.set_paused(binding.session_id, False)
-        if submission.uploads:
-            async with self.slack.runtime.database.sessions.begin() as db:
-                turn = await self.slack.runtime.database.submit(actor, thread.session_id, submission.body, db=db)
-                await self.slack.files.bind(db, actor.id, thread.session_id, submission.uploads)
-        else:
-            turn = await self.slack.runtime.database.submit(actor, thread.session_id, submission.body)
+        turn = await self._submit(actor, thread, submission.body, message, submission.uploads)
         await self.slack.queue(turn, thread, "accepted", {"text": "Moyai received your message."})
         return {"ok": True}
 
