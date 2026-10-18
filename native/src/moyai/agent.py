@@ -64,6 +64,8 @@ from .settings_runtime import settings_capability
 from .storage import ObjectStore
 from .stores import NativeStores
 from .swarm_tools import SwarmCapability
+from .tools import WORKSPACE_TOOLS
+from .tools.desktop import desktop_capability
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / "resources"
 if not PACKAGE_ROOT.is_dir():
@@ -302,16 +304,22 @@ def inference_models(settings: Settings) -> dict[str, Model]:
 
 def workspace_image() -> modal.Image:
     """The same image definition for lazy startup and deployment prewarming."""
-    return (
+    image = (
         modal.Image.debian_slim(python_version="3.13")
         .apt_install("git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm",
                      "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
                      "x11-xserver-utils", "fonts-dejavu-core")
         .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
+    )
+    for tool in WORKSPACE_TOOLS:
+        image = tool.install(image)
+    return (
+        image
         .add_local_dir(PACKAGE_ROOT / "skills", "/opt/moyai/skills", copy=True)
         .add_local_file(PACKAGE_ROOT / "desktop.py", "/opt/moyai/desktop.py", copy=True)
         .add_local_file(PACKAGE_ROOT / "browser_guest.py", "/opt/moyai/browser_guest.py", copy=True)
         .add_local_file(PACKAGE_ROOT / "browser_driver.py", "/opt/moyai/browser_driver.py", copy=True)
+        .add_local_file(PACKAGE_ROOT / "ocu_guest.py", "/opt/moyai/ocu_guest.py", copy=True)
     )
 
 
@@ -377,6 +385,7 @@ def make_agent(
             artifact_capability(database, objects),
             attachment_capability(database, objects),
             browser_capability(database),
+            desktop_capability(database),
             BrowserLogin(database),
             on_demand_coder(authority.save_workspace, database),
             WorkflowPlanning(
@@ -408,4 +417,3 @@ def make_agent(
         ],
     )
     return agent, durability
-

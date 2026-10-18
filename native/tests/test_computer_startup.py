@@ -220,8 +220,78 @@ async def test_prefixed_github_checkout_acquires_and_persists_first_workspace(ru
     assert allocations == [str(directory)]
 
 
+@pytest.mark.parametrize("tool_name", ["desktop_read", "desktop_action"])
+async def test_cold_desktop_tool_acquires_workspace_after_loading_repository_instructions(
+    runtime, active, actor, monkeypatch, tool_name,
+):
+    session, turn, _ = active
+    directory = runtime.settings.data_dir.parent / "computer"
+    instructions = "DESKTOP_REPOSITORY_CONTEXT: observe the desktop before reporting success."
+    (directory / "AGENTS.md").write_text(instructions)
+    allocations, dispatched = [], []
+
+    async def request(database, scope, workspace, command, *, writing, surface,
+                      before_dispatch=None, after_dispatch=None):
+        assert workspace.ref is not None
+        assert surface == "desktop"
+        if before_dispatch:
+            await before_dispatch()
+        dispatched.append(command)
+        if after_dispatch:
+            await after_dispatch()
+        return {"text": "Desktop ready", "images": []}
+
+    monkeypatch.setattr("moyai.tools.desktop.agent_request", request)
+
+    def respond(messages, info):
+        returned = [part for message in messages for part in message.parts
+                    if isinstance(part, ToolReturnPart) and part.tool_name == tool_name]
+        if not returned:
+            assert not allocations and not dispatched
+        elif len(returned) == 1:
+            assert instructions in str(returned[0].content)
+            assert not dispatched
+        else:
+            assert len(dispatched) == 1
+            assert "Desktop ready" in str(returned[-1].content)
+            return ModelResponse(parts=[TextPart("Desktop observed.")])
+        return ModelResponse(parts=[ToolCallPart(
+            tool_name, {"command": {"action": "start"}} if tool_name == "desktop_action" else {},
+            tool_call_id=f"desktop-{len(returned)}",
+        )])
+
+    runtime.models = {"test": scripted_model(respond)}
+    runtime.agent, runtime.durability = make_agent(
+        runtime.settings, runtime.database, runtime.stores, runtime.objects, models=runtime.models,
+        workspace=lazy_local_workspace(directory, allocations),
+    )
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        async with make_worker(runtime):
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            assert (await asyncio.wait_for(handle.result(), 30))["status"] == "completed"
+            history = await handle.fetch_history()
+        await Replayer(
+            workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            interceptors=[ActivityCapacity()],
+        ).replay_workflow(history)
+    saved = await runtime.database.session(actor, session.id)
+    assert json.loads(saved.workspace) == {"provider": "local", "id": str(directory)}
+    assert allocations == [str(directory)]
+    async with runtime.database.sessions() as db:
+        effects = list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
+    assert len(effects) == (1 if tool_name == "desktop_action" else 0)
+    assert all(effect.state == "confirmed" for effect in effects)
+
+
 @pytest.mark.parametrize("revocation", ["stop", "disable"])
-async def test_revoked_turn_cannot_allocate_its_first_computer(runtime, active, actor, revocation):
+@pytest.mark.parametrize("tool_name", ["shell", "desktop_action"])
+async def test_revoked_turn_cannot_allocate_its_first_computer(runtime, active, actor, revocation, tool_name):
     session, turn, _ = active
     allocations = []
     entered, release = asyncio.Event(), asyncio.Event()
@@ -230,7 +300,9 @@ async def test_revoked_turn_cannot_allocate_its_first_computer(runtime, active, 
         entered.set()
         await release.wait()
         yield {0: DeltaToolCall(
-            name="shell", json_args=json.dumps({"command": "printf forbidden > forbidden.txt"}),
+            name=tool_name, json_args=json.dumps({"command": {"action": "start"}}
+                                               if tool_name == "desktop_action"
+                                               else {"command": "printf forbidden > forbidden.txt"}),
             tool_call_id="revoked-shell",
         )}
 

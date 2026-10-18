@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from importlib import import_module
 from pathlib import Path
 from socket import socket
@@ -14,9 +16,18 @@ from uuid import uuid4
 import boto3
 import httpx
 import sqlalchemy
+from app.credentials import SaveSecret
 from botocore.config import Config
 from cryptography.fernet import Fernet
 from moto.server import ThreadedMotoServer
+from pydantic import SecretStr
+from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
+from pydantic_ai.capabilities.abstract import leaf_capabilities
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
+from temporalio.client import WorkflowFailureError
+from temporalio.testing import WorkflowEnvironment
+
 from moyai.models import SlackThread, Turn
 from moyai.product_config import (
     NATIVE_KEY_FORMAT,
@@ -34,14 +45,6 @@ from moyai.storage import encrypted_converter
 from moyai.stores import NativeStores
 from moyai.worker import make_worker
 from moyai.workflow import TurnWorkflow
-from pydantic import SecretStr
-from pydantic_ai import ConversationTypeAdapter, RunContext, RunUsage
-from pydantic_ai.capabilities.abstract import leaf_capabilities
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from temporalio.testing import WorkflowEnvironment
-
-from app.credentials import SaveSecret
 
 from .slack_fixture import route_slack_clients
 from .workspace import HarborWorkspace
@@ -65,19 +68,23 @@ def conversation_trace(conversation_json: str | None, security: Any) -> list[dic
     if not conversation_json:
         return []
     conversation = ConversationTypeAdapter.validate_json(security.unseal(conversation_json))
+    return message_trace(conversation.messages)
+
+
+def message_trace(messages: Any) -> list[dict[str, Any]]:
     calls: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    for message in conversation.messages:
+    for message in messages:
         for part in message.parts:
             if isinstance(part, ToolCallPart):
                 calls[part.tool_call_id] = {
                     "name": part.tool_name, "args": part.args_as_dict(), "result": "",
                 }
                 order.append(part.tool_call_id)
-            elif isinstance(part, ToolReturnPart):
+            elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
                 record = calls.get(part.tool_call_id)
                 if record is not None:
-                    record["result"] = json.dumps(part.content, ensure_ascii=False, default=str)[:4000]
+                    record["result"] = json.dumps(part.content, ensure_ascii=False, default=str)
     return [calls[identity] for identity in order if identity in calls]
 
 
@@ -161,6 +168,8 @@ def moto_object_storage() -> Iterator[str]:
 
 
 def seed_credentials(runtime: Runtime, values: dict[str, str]) -> None:
+    if not values:
+        return
     store = runtime.product_store
     secrets = runtime.product_secrets
     assert store is not None and secrets is not None
@@ -255,7 +264,7 @@ async def run_runtime_turn(
                     "access_token": SLACK_BOT_TOKEN,
                     "bot_user_id": BOT_USER,
                     "team": {"id": TEAM},
-                    "scope": "channels:read,channels:history,groups:history,chat:write",
+                    "scope": "channels:read,channels:history,groups:history,chat:write,users:read,users:read.email",
                 },
             }
             runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
@@ -304,6 +313,15 @@ def slack_transport(
 ) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/api/users.info":
+            if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
+            if request.url.params.get("user") != SLACK_USER:
+                return httpx.Response(200, json={"ok": False, "error": "user_not_found"})
+            return httpx.Response(200, json={"ok": True, "user": {
+                "id": SLACK_USER, "team_id": TEAM, "real_name": "Ishaan",
+                "profile": {"email": "ishaan@example.test", "real_name": "Ishaan"},
+            }})
         if path == "/api/conversations.info":
             if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
                 return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
@@ -359,7 +377,6 @@ async def execute_turn(
     slack_reads: list[dict[str, Any]] = []
     transport = slack_transport(history, slack_reads)
     original_client = httpx.AsyncClient
-
     payload = {
         "type": "event_callback", "team_id": TEAM, "event_id": f"eval-{case['id']}-{trial}",
         "event": {
@@ -398,13 +415,50 @@ async def execute_turn(
             handle = await temporal.client.start_workflow(
                 TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
             )
-            await asyncio.wait_for(handle.result(), timeout=300)
+            execution_error = ""
+            execution_traceback = ""
+            try:
+                await asyncio.wait_for(handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")))
+            except TimeoutError:
+                execution_error = "TimeoutError: The eval turn exceeded its execution deadline."
+                # Only stop this trial's owned workflow, before the surrounding
+                # worker/database are torn down. Never repeat its pending actions.
+                await handle.cancel()
+                try:
+                    await asyncio.wait_for(handle.result(), timeout=30)
+                except WorkflowFailureError:
+                    pass  # A terminal cancelled/failed workflow is settled.
+                except TimeoutError:
+                    await handle.terminate(reason="Harbor eval cancellation did not settle within 30 seconds.")
+            except WorkflowFailureError as error:
+                # A failed workflow is terminal; its saved tool evidence is
+                # still useful. Transport errors must not imply completion.
+                execution_error = f"{type(error).__name__}: {error}"
+                execution_traceback = traceback.format_exc()
+                for key in ("LITELLM_API_KEY", "LITELLM_GATEWAY_ADMIN_KEY"):
+                    if value := os.getenv(key):
+                        execution_error = execution_error.replace(value, "[redacted]")
+                        execution_traceback = execution_traceback.replace(value, "[redacted]")
             for _ in range(4):
                 await service.pump(delivery)
             async with runtime.database.sessions() as db:
                 completed = await db.get(Turn, turn.id)
             if completed is None:
                 raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
+            trace = conversation_trace(completed.conversation, runtime.security)
+            failure_evidence: dict[str, Any] = {}
+            if execution_error or completed.status == "failed":
+                snapshot = await runtime.stores.steps.latest_snapshot(run_id=turn.id, include_interrupted=True)
+                if snapshot is not None:
+                    trace = message_trace(snapshot.messages)
+                failure_evidence = {
+                    "execution_error": execution_error or completed.error,
+                    "execution_traceback": execution_traceback,
+                    "step_events": json.loads(json.dumps([
+                        asdict(event) for event in await runtime.stores.steps.list_events(run_id=turn.id)
+                    ], default=str)),
+                    "usage_incomplete": True,
+                }
             reply = next((
                 "\n\n".join(
                     block["text"]["text"] for block in item.get("blocks", [])
@@ -429,6 +483,7 @@ async def execute_turn(
                 ],
                 "attached_image_names": [],
                 "posted_reply": reply,
-                "tool_trace": conversation_trace(completed.conversation, runtime.security),
+                "tool_trace": trace,
                 "tokens_cost": json.loads(completed.usage or "{}"),
+                **failure_evidence,
             }
