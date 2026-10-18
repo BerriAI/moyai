@@ -87,9 +87,9 @@ async def admit_mention(ingress, monkeypatch, request):
 async def test_non_slack_surface_does_not_call_reader() -> None:
     calls = []
 
-    async def reader(scope: RunScope) -> str:
+    async def reader(scope: RunScope) -> tuple[str, bool]:
         calls.append(scope)
-        return "unexpected"
+        return "unexpected", True
 
     rendered = await SlackThread(reader).render(RunScope(
         session_id="session", turn_id="turn", actor_id="actor", model="test", surface="web",
@@ -97,6 +97,51 @@ async def test_non_slack_surface_does_not_call_reader() -> None:
 
     assert rendered == ""
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("cacheable", "expected_calls"),
+    [(True, 1), (False, 2)],
+    ids=["complete", "unavailable"],
+)
+async def test_slack_render_caches_only_cacheable_context(cacheable, expected_calls):
+    calls = []
+
+    async def reader(scope: RunScope) -> tuple[str, bool]:
+        calls.append(scope.turn_id)
+        return "context", cacheable
+
+    source = SlackThread(reader)
+    scope = RunScope(
+        session_id="session", turn_id="turn", actor_id="actor", model="test", surface="slack",
+    )
+
+    assert await source.render(scope) == "context"
+    assert await source.render(scope) == "context"
+    assert calls == ["turn"] * expected_calls
+
+
+async def test_slack_render_cache_evicts_oldest_entry():
+    calls = []
+
+    async def reader(scope: RunScope) -> tuple[str, bool]:
+        calls.append(scope.turn_id)
+        return scope.turn_id, True
+
+    source = SlackThread(reader)
+    for turn_id in range(256):
+        await source.render(RunScope(
+            session_id="session", turn_id=str(turn_id), actor_id="actor", model="test", surface="slack",
+        ))
+    await source.render(RunScope(
+        session_id="session", turn_id="256", actor_id="actor", model="test", surface="slack",
+    ))
+    await source.render(RunScope(
+        session_id="session", turn_id="0", actor_id="actor", model="test", surface="slack",
+    ))
+
+    assert len(calls) == 258
+    assert calls[-1] == "0"
 
 
 async def test_shared_channel_reads_with_bot_without_requester_grant(ingress, monkeypatch):
@@ -196,8 +241,8 @@ async def test_dm_and_missing_rows_render_empty(ingress, monkeypatch):
 
 
 async def test_slack_source_appears_in_session_context() -> None:
-    async def reader(scope: RunScope) -> str:
-        return f"Slack context for {scope.turn_id}"
+    async def reader(scope: RunScope) -> tuple[str, bool]:
+        return f"Slack context for {scope.turn_id}", True
 
     context = SessionContext([SlackThread(reader)])
     rendered = await context.render_sources(RunContext(

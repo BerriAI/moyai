@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -26,15 +27,16 @@ MAX_PAGES = 5
 MAX_CONTEXT_CHARS = 40_000
 MAX_MESSAGE_CHARS = 8_000
 READ_TIMEOUT_SECONDS = 8
+MAX_CACHE_ENTRIES = 256
 logger = logging.getLogger(__name__)
 
 
 class SlackThreadReader(Protocol):
-    async def __call__(self, scope: RunScope) -> str: ...
+    async def __call__(self, scope: RunScope) -> tuple[str, bool]: ...
 
 
 def make_slack_thread_reader(slack: ProductSlack) -> SlackThreadReader:
-    async def read(scope: RunScope) -> str:
+    async def read(scope: RunScope) -> tuple[str, bool]:
         database = slack.runtime.database
         async with database.sessions() as db:
             thread = await db.scalar(select(SlackThreadRecord).where(
@@ -51,7 +53,7 @@ def make_slack_thread_reader(slack: ProductSlack) -> SlackThreadReader:
             ) != (thread.team_id, thread.channel_id, thread.thread_ts)
             or source.channel_id.startswith("D")
         ):
-            return ""
+            return "", False
         installed = await source_database(slack.installation)
         host = SlackHost(
             bot_user_id=installed["user_id"],
@@ -94,7 +96,7 @@ def make_slack_thread_reader(slack: ProductSlack) -> SlackThreadReader:
                     recheck=True,
                 )
         await _authorize(slack, scope, binding, installed, grant)
-        return _render(context)
+        return _render(context), context["status"] in {"complete", "partial"}
 
     return read
 
@@ -104,11 +106,23 @@ class SlackThread(ContextSource):
 
     def __init__(self, reader: SlackThreadReader):
         self.reader = reader
+        self._cache: OrderedDict[str, str] = OrderedDict()
 
     async def render(self, scope: RunScope) -> str:
         if scope.surface != "slack":
             return ""
-        return await self.reader(scope)
+        cached = self._cache.get(scope.turn_id)
+        if cached is not None:
+            self._cache.move_to_end(scope.turn_id)
+            return cached
+        rendered, cacheable = await self.reader(scope)
+        if not cacheable:
+            return rendered
+        self._cache[scope.turn_id] = rendered
+        self._cache.move_to_end(scope.turn_id)
+        if len(self._cache) > MAX_CACHE_ENTRIES:
+            self._cache.popitem(last=False)
+        return rendered
 
 
 async def _authorize(
