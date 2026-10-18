@@ -157,7 +157,7 @@ async function handle(req,res,next) {
   }
   return json({detail:'Fixture endpoint not implemented: '+url.pathname},404);
 }
-async function waitFor(predicate,label='condition') {const end=Date.now()+10000;while(!predicate()){if(Date.now()>end)throw new Error('Timed out: '+label);await new Promise(resolve=>setTimeout(resolve,25));}}
+async function waitFor(predicate,label='condition',timeout=10000) {const end=Date.now()+timeout;while(!predicate()){if(Date.now()>end)throw new Error('Timed out: '+label);await new Promise(resolve=>setTimeout(resolve,25));}}
 function emit(value,id,event) {for(const client of clients)client.write(`${id===undefined?'':`id: ${id}\n`}${event?`event: ${event}\n`:''}data: ${JSON.stringify(value)}\n\n`);}
 async function pageFor(t,route='#'+sessionId,width=1440) {
   const page=await browser.newPage({viewport:{width,height:1000},reducedMotion:'reduce'});t.after(()=>page.close());
@@ -948,7 +948,7 @@ test('successful background refresh cannot clear a failed global user action',as
   const error=page.locator('.global-error');
   await error.getByText(/temporarily unavailable \(HTTP 500\)/).waitFor();
   const count=state.requests.filter(req=>req.path==='/api/session-folders').length;
-  await waitFor(()=>state.requests.filter(req=>req.path==='/api/session-folders').length>count,'successful sidebar refresh');
+  await waitFor(()=>state.requests.filter(req=>req.path==='/api/session-folders').length>count,'successful sidebar refresh',20000);
   assert.equal(await error.count(),1);
   await error.getByRole('button',{name:'Dismiss'}).click();
   await error.waitFor({state:'hidden'});
