@@ -46,7 +46,6 @@ from .models import (
 )
 from .product_connections import ProductConnections
 from .product_identity import ProductGrant, ProductPrincipal
-from .product_slack_context import SlackThreadContext
 from .product_slack_events import SlackEvents
 from .product_slack_files import ProductSlackFiles
 from .product_slack_models import ProductSlackBinding
@@ -151,7 +150,6 @@ class ProductSlack:
         self.connections: ProductConnections = connections
         self.connectors = self.connections.connectors
         self.files = ProductSlackFiles(self)
-        self.context = SlackThreadContext(self)
         self.events = SlackEvents(self)
         from .slack_audience import can_read, historical_access, historical_messages
         runtime.database.slack_access = lambda db, session, actor: can_read(self, db, session, actor)

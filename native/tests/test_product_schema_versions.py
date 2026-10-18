@@ -28,6 +28,7 @@ from moyai.product_schema import (
     MEMORY_REVIEW_SCHEMA_VERSION,
     MESSAGE_SOURCE_SCHEMA_VERSION,
     SLACK_ACTIVITY_SCHEMA_VERSION,
+    SLACK_TURN_SOURCE_SCHEMA_VERSION,
     SWARM_SCHEMA_VERSION,
     ProductSchemaError,
     migrate_product_schema,
@@ -165,7 +166,8 @@ async def test_additive_versions_preserve_every_earlier_receipt(product_database
         CREDENTIAL_REQUEST_SCHEMA_VERSION, MEMORY_REVIEW_SCHEMA_VERSION, DRAIN_SCHEMA_VERSION,
         GIT_OPERATION_SCHEMA_VERSION, EXECUTION_COMPATIBILITY_SCHEMA_VERSION,
         BILLING_STORAGE_SCHEMA_VERSION, SWARM_SCHEMA_VERSION, GITHUB_WORKFLOW_SCHEMA_VERSION,
-        DELEGATION_SCHEMA_VERSION, SLACK_ACTIVITY_SCHEMA_VERSION, MESSAGE_SOURCE_SCHEMA_VERSION,
+        DELEGATION_SCHEMA_VERSION, SLACK_ACTIVITY_SCHEMA_VERSION, SLACK_TURN_SOURCE_SCHEMA_VERSION,
+        MESSAGE_SOURCE_SCHEMA_VERSION,
     ):
         await migrate_product_schema(product.source, schema=product.schema, source_schema="moyai", version=version)
         current = await receipts(product)
@@ -207,7 +209,7 @@ async def test_drain_verifier_rejects_missing_singleton_constraint_without_repai
 async def test_message_sources_are_additive_and_do_not_rewrite_old_receipts(product_database):
     product = product_database
     await migrate_product_schema(product.source, schema=product.schema, source_schema='moyai',
-                                 version=SLACK_ACTIVITY_SCHEMA_VERSION)
+                                 version=SLACK_TURN_SOURCE_SCHEMA_VERSION)
     old = await receipts(product)
     await migrate_product_schema(product.source, schema=product.schema, source_schema='moyai')
     current = await receipts(product)

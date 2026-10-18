@@ -1,6 +1,6 @@
 # Slack messages in Moyai
 
-This change requires native application schema **v20** (`2026-10-18-message-sources-v20`). It has not been validated on the production deployment. Use the coordinated upgrade procedure below before enabling it there.
+This change requires native application schema **v21** (`2026-10-18-message-sources-v21`). It has not been validated on the production deployment. Use the coordinated upgrade procedure below before enabling it there.
 
 A Slack message displays its Slack icon, sender name, verified **You** label, timestamp and source link above the authored text. Slack thread references and file inspection text remain encrypted execution input. They do not become the visible message, search snippet or personal-memory evidence. A matching email or an analytics identity alone never establishes **You** or authorizes an action.
 
@@ -18,7 +18,7 @@ A future GitHub adapter can use this contract after verifying its webhook, mappi
 | Names and controls | Uses the current verified Slack-to-sign-in relationship for self labels, archive/rename, queued input controls, requester activity and effects. The coordinator refreshes native Slack senders in bounded batches while chats are idle. Execution retains its original authority. |
 | Conversation audience | Checks the Slack installation and current caller. DMs require the verified requester; private channels and group conversations require current membership. Public channels still require a verified workspace identity. External shared channels fail closed. |
 | Other read surfaces | The same audience check covers session inventory, search, history, files, descendants, progress, streams and debug exports. Stream checks repeat while connected. Provider failures do not widen access. |
-| Model context | For shared channel mentions, the bot reads only the signed event’s channel and thread, with the authorized connection fallback from Ishaan’s #559. Thread context still reaches the actual prepared input. Shared follow-ups rebuild from authored messages. Retrying intake reuses its frozen input. |
+| Model context | Ishaan’s #559 supplies thread history through the shared `SessionContext` pipeline at execution time, with bot-first reads and an authorized connection fallback. A regression verifies the actual model request receives this reference in its instructions. Authored text and retained file context remain separate at admission; shared follow-ups rebuild from authored messages. The context capability uses the existing durable-operation mechanism for execution replay. |
 | Personal memory | Quoted context cannot become requester evidence. Existing native chat-backed notes with invalid quotes are excluded from recall and marked for owner review in Memory settings. Review & edit saves a manual note; Delete remains available. |
 | Attachments | Shows retained originals, with generic failure notices. Preview text and internal diagnostics stay out of public message metadata. An edit to Slack attachments requires a follow-up to give the task new files. |
 | Web follow-ups | Newly admitted web messages in Slack chats are mirrored with author attribution and durable per-message/revision identities. Slack-originated inputs are not mirrored back. Older web messages are not backfilled. |
@@ -42,7 +42,7 @@ Run these commands in the release environment with its existing product/native d
    .venv/bin/python -m moyai.product_start verify
    ```
 
-   Provisioning should return the v20 application revision. Verification should return `app_schema="verified"` and `harness_schema="verified"`. Those receipts do not assert runtime readiness or authorize resume.
+   Provisioning should return the v21 application revision. Verification should return `app_schema="verified"` and `harness_schema="verified"`. Those receipts do not assert runtime readiness or authorize resume.
 
 4. Review the bounded repair report while maintenance remains paused:
 
@@ -62,7 +62,7 @@ Run these commands in the release environment with its existing product/native d
 5. Start only new-release roles. Verify their registered version/policy and health using the existing deployment runbook. Resume through the maintenance control contract after safe-boundary checks pass.
 6. Perform the live checks below. Keep the rollout marked unverified until they pass on the actual deployment.
 
-Do not roll back an old coordinator onto encrypted pending hooks or remove the v20 tables while new roles are active. If a rollback is needed, pause and retire the new roles, preserve the data, and use a reviewed compatible release or restore procedure. This change supplies no automatic downgrade.
+Do not roll back an old coordinator onto encrypted pending hooks or remove the v21 tables while new roles are active. If a rollback is needed, pause and retire the new roles, preserve the data, and use a reviewed compatible release or restore procedure. This change supplies no automatic downgrade.
 
 ## Slack permissions and recovery
 

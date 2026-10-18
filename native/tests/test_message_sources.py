@@ -5,11 +5,11 @@ import json
 
 from sqlalchemy import delete, select
 
+from moyai.context.slack import _render
 from moyai.contracts import NewMessage, NewSession
 from moyai.inbound_events import InboundEvent
 from moyai.message_sources import memory_text
 from moyai.models import Message, MessageSource, SlackThread, User
-from moyai.product_slack_context import SlackThreadContext
 
 
 def test_clients_cannot_supply_authored_text_or_provenance():
@@ -55,7 +55,7 @@ async def test_legacy_cleanup_requires_matching_receipt_and_preserves_frozen_pro
     origin = {'team_id': 'TTEST001', 'channel_id': 'CTEST001', 'thread_ts': '1792255740.000',
               'message_ts': '1792255741.001', 'messages': [], 'status': 'complete'}
     key = hashlib.sha256(json.dumps([origin[k] for k in ('team_id', 'channel_id', 'message_ts')]).encode()).hexdigest()
-    prompt = 'test' + SlackThreadContext._render(origin)
+    prompt = 'test' + _render(origin)
     turn = await runtime.database.submit(actor, session.id, NewMessage(prompt=prompt, request_key='slack-message:' + key))
     async with runtime.database.sessions.begin() as db:
         db.add(SlackThread(session_id=session.id, team_id=origin['team_id'], channel_id=origin['channel_id'], thread_ts=origin['thread_ts']))
