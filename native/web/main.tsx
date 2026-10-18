@@ -216,7 +216,7 @@ function App() {
       const results = await Promise.allSettled([
         inventory().then(result => {
           if (result && current()) {
-            preferences.acceptRead(preferenceCheckpoint)
+            preferences.acceptRead(preferenceCheckpoint, result.rows)
             setSessions(result.rows)
             setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
           }

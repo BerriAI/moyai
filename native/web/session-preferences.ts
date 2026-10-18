@@ -32,9 +32,10 @@ export class SessionPreferenceUpdates {
     return entry ? Object.assign({}, row, entry.saved, ...entry.pending.map(item => item.patch)) : row
   }
 
-  acceptRead(checkpoint: number) {
+  acceptRead(checkpoint: number, rows: readonly SidebarSession[]) {
+    const confirmed = new Set(rows.filter(row => row.source !== "legacy" && !row.read_only).map(row => row.id))
     for (const [id, entry] of this.entries) {
-      if (!entry.pending.length && entry.settledAt <= checkpoint) this.entries.delete(id)
+      if (confirmed.has(id) && !entry.pending.length && entry.settledAt <= checkpoint) this.entries.delete(id)
     }
   }
 

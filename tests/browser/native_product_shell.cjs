@@ -1464,6 +1464,19 @@ test('answer controls are disabled while submission is in progress',async t=>{
   release();
 });
 
+test('a filtered sidebar refresh preserves the selected conversation pin when its row is absent',async t=>{
+  reset({status:'idle'});
+  const page=await pageFor(t);
+  await clickSidebarPin(page,'Pin Current native work');
+  await page.getByText('Session pinned.',{exact:true}).waitFor();
+  state.inventoryRows=[];
+  await page.getByRole('button',{name:'Show archived conversations',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path==='/api/history/sessions'&&row.query.includes('archived=true')));
+  await page.getByText('No sessions here yet.',{exact:true}).first().waitFor();
+  await page.getByRole('button',{name:'Session actions',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Unpin',exact:true}).waitFor({timeout:500});
+});
+
 test('the last answer submits a complete multi-question snapshot',async t=>{
   const pending=colorQuestion();
   pending.calls[0].args.questions.push({header:'Format',question:'Which format?',options:[{label:'Text'},{label:'JSON'}]});

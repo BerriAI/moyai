@@ -29,12 +29,24 @@ test("preference edits render before saving and ignore reads begun before or dur
   requests[0].resolve()
   await result
   for (const checkpoint of [before, during]) {
-    updates.acceptRead(checkpoint)
+    updates.acceptRead(checkpoint, [row])
     assert.equal(updates.apply(row).pinned, true)
   }
-  updates.acceptRead(updates.checkpoint())
+  updates.acceptRead(updates.checkpoint(), [{ ...row, pinned: true }])
   assert.equal(updates.apply({ ...row, pinned: true }).pinned, true)
   assert.equal(updates.apply(row).pinned, false, "later authoritative changes remain visible")
+})
+
+test("filtered reads and legacy ID collisions do not retire a native session's saved preference", async () => {
+  const { updates, requests } = harness()
+  const result = updates.update(row.id, { pinned: true })
+  await tick(); requests[0].resolve(); await result
+  for (const rows of [[], [{ ...row, id: "another-session" }], [{ ...row, source: "legacy" }], [{ ...row, read_only: true }]]) {
+    updates.acceptRead(updates.checkpoint(), rows)
+    assert.equal(updates.apply(row).pinned, true)
+  }
+  updates.acceptRead(updates.checkpoint(), [{ ...row, pinned: true }])
+  assert.equal(updates.apply(row).pinned, false, "a fresh read of this native session can retire its overlay")
 })
 
 test("rapid changes serialize per session while other sessions can save independently", async () => {
