@@ -8,6 +8,7 @@ import ipaddress
 import json
 import signal
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from pydantic_settings import BaseSettings
@@ -49,7 +50,9 @@ def _check_listener(config: ProductConfig, host: str) -> None:
         raise ProductDeploymentError("Local product rehearsal must bind a loopback listener.")
 
 
-def create_application(config: ProductConfig, *, host: str = "127.0.0.1") -> FastAPI:
+def create_application(
+    config: ProductConfig, *, host: str = "127.0.0.1", control_socket: Path | None = None,
+) -> FastAPI:
     """Return the real native API, with the selected lifecycle and role flags."""
     plan = require_startable(config)  # Must precede constructing any resources.
     _check_listener(config, host)
@@ -80,6 +83,11 @@ def create_application(config: ProductConfig, *, host: str = "127.0.0.1") -> Fas
             async with AsyncExitStack() as stack:
                 if lifecycle is not None:
                     await stack.enter_async_context(lifecycle.lifespan())
+                    if control_socket is not None:
+                        from .product_role_control import RoleControl
+                        await stack.enter_async_context(RoleControl(control_socket, lifecycle.quiescence))
+                elif control_socket is not None:
+                    raise ProductConfigurationError("Role control requires a distributed product role.")
                 elif plan.run_worker:
                     runtime.settings.validate_worker(
                         brokered=bool(runtime.product_inference and runtime.product_inference.remote),
@@ -186,6 +194,7 @@ def main(argv: list[str] | None = None) -> None:
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
+    serve.add_argument("--control-socket", type=Path)
     commands.add_parser("check")
     commands.add_parser("verify")
     provision = commands.add_parser("provision")
@@ -211,7 +220,7 @@ def main(argv: list[str] | None = None) -> None:
             asyncio.run(serve_worker(config))
             return
         import uvicorn
-        app = create_application(config, host=args.host)
+        app = create_application(config, host=args.host, control_socket=args.control_socket)
         server = uvicorn.Server(uvicorn.Config(
             app, host=args.host, port=args.port, workers=1,
             proxy_headers=False, timeout_graceful_shutdown=_settings(config).http_shutdown_seconds,

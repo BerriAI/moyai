@@ -30,6 +30,7 @@ from pydantic_ai_harness.ask_user import AskUserRequest
 from sqlalchemy import String, cast, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from .background_stop import finish, pause
 from .models import (
     Artifact,
     Delivery,
@@ -160,6 +161,7 @@ class ProductSlack:
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
         self.profile_task: asyncio.Task[None] | None = None
+        self.stopping = asyncio.Event()
 
     async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
         host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
@@ -178,16 +180,37 @@ class ProductSlack:
 
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""
-        if self.delivery_task is not None:
+        if self.delivery_task is not None or self.stopping.is_set():
             raise RuntimeError("Product Slack background lifecycle already started.")
         self.inbox.start()
         self.delivery_task = asyncio.create_task(self.watch(), name="product-slack-delivery")
-        self.activity_task = asyncio.create_task(self.runtime.slack_activity.watch(), name="product-slack-activity")
+        self.activity_task = asyncio.create_task(
+            self.runtime.slack_activity.watch(stop=self.stopping), name="product-slack-activity",
+        )
         from .slack_profile_refresh import watch
-        self.profile_task = asyncio.create_task(watch(self), name="product-slack-profiles")
+        self.profile_task = asyncio.create_task(watch(self, stop=self.stopping), name="product-slack-profiles")
+
+    def stop_admitting(self) -> None:
+        """Keep accepted sends and their receipts inside the existing leader fence."""
+        self.stopping.set()
+        self.inbox.stop_admitting()
 
     async def close(self) -> None:
         """Parent retains its coordinator lock until this drain returns."""
+        if self.stopping.is_set():
+            tasks = [task for task in (
+                self.inbox.task, self.profile_task, self.activity_task, self.delivery_task,
+            ) if task is not None]
+
+            async def drain():
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
+
+            await finish(asyncio.create_task(drain(), name="product-slack-drain"))
+            self.profile_task = self.activity_task = self.delivery_task = None
+            return
         await self.inbox.close()
         if self.profile_task is not None:
             self.profile_task.cancel()
@@ -203,14 +226,14 @@ class ProductSlack:
             self.delivery_task = None
 
     async def watch(self) -> None:
-        while True:
+        while not self.stopping.is_set():
             try:
                 await self.pump()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - preserve the durable queue across provider/store outages
                 logger.warning("Product Slack delivery remains saved (%s).", type(error).__name__)
-            await asyncio.sleep(3)
+            await pause(3, self.stopping)
 
     def verify_signature(self, body: bytes, headers: Any) -> None:
         stamp = headers.get("x-slack-request-timestamp", "")
@@ -603,6 +626,8 @@ class ProductSlack:
         return True
 
     async def deliver(self, client: httpx.AsyncClient, delivery: Delivery):
+        if self.stopping.is_set():
+            return
         if not await self.delivery_allowed(delivery):
             async with self.runtime.database.sessions.begin() as db:
                 await db.execute(update(Delivery).where(
@@ -627,6 +652,8 @@ class ProductSlack:
         # Refresh only the installation bot. Never use personal/shared user OAuth.
         token = await self.connectors.slack_bot_token()
         if not await self.delivery_allowed(delivery):
+            return
+        if self.stopping.is_set():
             return
         if not await claim_delivery(self.runtime, delivery, product=True):
             return
@@ -733,6 +760,8 @@ class ProductSlack:
 
         channels: set[str] = set()
         for delivery in deliveries:
+            if self.stopping.is_set():
+                break
             # Rotate even entries blocked behind another message in the same
             # channel. Unknown sends never occupy the entire pending-send lane.
             await self._schedule(delivery.id, 30 if delivery.status == "sending" else 3)
@@ -763,6 +792,8 @@ class ProductSlack:
                ORDER BY o.id LIMIT 10""",
         )
         for row in rows:
+            if self.stopping.is_set():
+                break
             if row["channel"] in channels:
                 continue
             channels.add(row["channel"])
@@ -800,6 +831,8 @@ class ProductSlack:
                     (row["id"],),
                 ))
 
+            if self.stopping.is_set():
+                return
             try:
                 await source_database(reserve)
             except asyncio.CancelledError:

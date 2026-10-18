@@ -241,12 +241,14 @@ class SlackActivityService:
         else:
             await asyncio.gather(*(send(client, identity) for identity in threads))
 
-    async def watch(self) -> None:
-        while True:
+    async def watch(self, *, stop: asyncio.Event | None = None) -> None:
+        from .background_stop import pause
+
+        while stop is None or not stop.is_set():
             try:
                 await self.sync()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - recover transient store/provider failures
                 logger.warning("Slack working status is unavailable (%s).", type(error).__name__)
-            await asyncio.sleep(3)
+            await pause(3, stop)

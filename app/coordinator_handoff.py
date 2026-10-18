@@ -40,6 +40,7 @@ class HookInbox:
         self.wake = asyncio.Event()
         self.task = None
         self.last_prune = 0
+        self.stopping = asyncio.Event()
 
     def prune_in(self, conn):
         cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
@@ -147,6 +148,8 @@ class HookInbox:
             (time.time(),))
         if not rows:
             return False
+        if self.stopping.is_set():
+            return False
         row = rows[0]
         try:
             # Only the lock holder calls this private path. The HTTP route has
@@ -186,7 +189,7 @@ class HookInbox:
         self.task = asyncio.create_task(self.watch(), name='coordinator-hook-inbox')
 
     async def watch(self):
-        while True:
+        while not self.stopping.is_set():
             self.wake.clear()
             try:
                 if await self.drain_one():
@@ -199,6 +202,10 @@ class HookInbox:
                 await asyncio.wait_for(self.wake.wait(), timeout=1)
             except TimeoutError:
                 pass
+
+    def stop_admitting(self):
+        self.stopping.set()
+        self.wake.set()
 
     async def close(self):
         if self.task:

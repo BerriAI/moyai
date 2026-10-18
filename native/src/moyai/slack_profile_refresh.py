@@ -45,11 +45,13 @@ async def refresh_due(slack, *, after: str = "") -> str:
     return ids[-1] if len(ids) == 10 else ""
 
 
-async def watch(slack) -> None:
+async def watch(slack, *, stop: asyncio.Event | None = None) -> None:
+    from .background_stop import pause
+
     after = ""
-    while True:
+    while stop is None or not stop.is_set():
         try:
             after = await refresh_due(slack, after=after)
         except Exception as error:  # noqa: BLE001 - retry reads without exposing provider data
             logger.warning("Slack sender refresh will retry (%s)", type(error).__name__)
-        await asyncio.sleep(30)
+        await pause(30, stop)
