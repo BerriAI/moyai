@@ -113,7 +113,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .message-content p { margin-bottom: 12px; }
 .message-content h2 { font-size: 19px; line-height: 1.4; letter-spacing: -.02em; margin-bottom: 8px; }
 .message-content h3 { font-size: 14px; line-height: 1.5; margin-bottom: 6px; }
-.message-content :not(pre) > code:not([class]) { padding: 1px 4px; border: 1px solid var(--ui-border); border-radius: 4px; background: var(--ui-secondary); color: #c9b5ff; font-size: 11px; }
+.message-content :not(pre) > code:not([class]) { padding: 1px 4px; border: 1px solid var(--ui-border); border-radius: 4px; background: var(--ui-secondary); font-size: 11px; }
 .message-content a { color: var(--ui-primary); text-decoration: underline; text-underline-offset: 3px; }
 .message-content pre { background: var(--ui-subtle); border: 1px solid var(--ui-border); border-radius: 8px; padding: 16px; }
 .message-content :not(pre) > code { color: var(--ui-foreground); }
@@ -265,6 +265,7 @@ legend { margin-bottom: 12px; font-weight: 500; }
   .empty-chat h2 { font-size: 18px; }
   .user-bubble { max-width: 100%; }
   [data-slot="button"] { min-height: 40px; }
+  [data-slot="button"][data-size^="icon"] { min-width: 40px; }
   .details-panel { max-height: 150px; }
   .panel-tabs button { min-height: 32px; }
 }
