@@ -65,6 +65,12 @@ packages = ["src/moyai"]
 "desktop.py" = "moyai/resources/desktop.py"
 "browser_guest.py" = "moyai/resources/browser_guest.py"
 "browser_driver.py" = "moyai/resources/browser_driver.py"
+"src/moyai/tools/package.json" = "moyai/tools/package.json"
+"src/moyai/tools/package-lock.json" = "moyai/tools/package-lock.json"
+
+[tool.hatch.build.targets.sdist.force-include]
+"src/moyai/tools/package.json" = "src/moyai/tools/package.json"
+"src/moyai/tools/package-lock.json" = "src/moyai/tools/package-lock.json"
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"

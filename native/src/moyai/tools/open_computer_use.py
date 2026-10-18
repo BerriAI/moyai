@@ -1,21 +1,23 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import modal
 
 from .base import WorkspaceTool
 
 
 class OpenComputerUse(WorkspaceTool):
-    VERSION = "1.1.2"
     APT_PACKAGES = ("dbus-x11", "at-spi2-core", "python3-gi", "gir1.2-atspi-2.0")
-    TARBALL_URL = "https://registry.npmjs.org/open-computer-use/-/open-computer-use-1.1.2.tgz"
-    TARBALL_SHA256 = "393d83a04c7f34edf4cb1d5b00ffee400fa20bf6725457493cda479420c5703e"
 
     def install(self, image: modal.Image) -> modal.Image:
-        command = (
-            f"curl -fsSL -o /tmp/ocu.tgz {self.TARBALL_URL} && "
-            f'echo "{self.TARBALL_SHA256}  /tmp/ocu.tgz" | sha256sum -c - && '
-            "npm install -g --ignore-scripts /tmp/ocu.tgz && "
-            "rm /tmp/ocu.tgz"
+        tools_directory = Path(__file__).parent
+        return (
+            image.apt_install(*self.APT_PACKAGES)
+            .add_local_file(tools_directory / "package.json", "/opt/moyai/tools/package.json", copy=True)
+            .add_local_file(tools_directory / "package-lock.json", "/opt/moyai/tools/package-lock.json", copy=True)
+            .run_commands(
+                "npm ci --ignore-scripts --prefix /opt/moyai/tools && "
+                "ln -sf /opt/moyai/tools/node_modules/.bin/ocu /usr/local/bin/ocu",
+            )
         )
-        return image.apt_install(*self.APT_PACKAGES).run_commands(command)

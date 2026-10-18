@@ -18,7 +18,7 @@ class MoyaiDesktopAgent(MoyaiAgent):
         await environment.exec(f"mkdir -p {self.environment_logs_dir}", cwd="/workspace")
         if os.environ.get("MOYAI_EVAL_OCU", "1") != "1":
             removed = await environment.exec(
-                "npm rm -g open-computer-use >/dev/null 2>&1; "
+                "rm -rf /opt/moyai/tools/node_modules; "
                 "rm -f /usr/local/bin/ocu /usr/local/bin/open-computer-use; "
                 "! command -v ocu && ! command -v open-computer-use",
                 cwd="/workspace",

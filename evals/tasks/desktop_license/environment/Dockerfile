@@ -7,11 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git ripgrep curl jq ca-certificates xvfb openbox xterm xdotool x11-xserver-utils \
     fonts-dejavu-core dbus dbus-x11 at-spi2-core python3 python3-gi python3-pil \
     gir1.2-gtk-3.0 gir1.2-atspi-2.0 nodejs npm imagemagick \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL -o /tmp/ocu.tgz https://registry.npmjs.org/open-computer-use/-/open-computer-use-1.1.2.tgz \
-    && echo "393d83a04c7f34edf4cb1d5b00ffee400fa20bf6725457493cda479420c5703e  /tmp/ocu.tgz" | sha256sum -c - \
-    && npm install -g --ignore-scripts /tmp/ocu.tgz \
-    && rm /tmp/ocu.tgz
+    && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json /opt/moyai/tools/
+RUN npm ci --ignore-scripts --prefix /opt/moyai/tools \
+    && ln -sf /opt/moyai/tools/node_modules/.bin/ocu /usr/local/bin/ocu
 ENV DISPLAY=:99 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/moyai-dbus \
     XDG_RUNTIME_DIR=/tmp/xdg \

@@ -7,6 +7,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TASKS = HERE.parent / "tasks"
+TOOLS_PACKAGE = HERE.parents[1] / "native" / "src" / "moyai" / "tools"
 LAUNCH = {
     "license": "nohup python3 /eval/apps.py license >/tmp/app.log 2>&1 &\n",
 }
@@ -39,6 +40,8 @@ def main() -> None:
         (task / "task.toml").write_text(TASK_TOML)
         (task / "instruction.md").write_text(prompt + "\n")
         shutil.copy(HERE / "Dockerfile", env / "Dockerfile")
+        for file in ("package.json", "package-lock.json"):
+            shutil.copy(TOOLS_PACKAGE / file, env / file)
         for file in ("apps.py", "start_desktop.sh"):
             shutil.copy(HERE / file, env / "eval" / file)
         (env / "eval" / "launch_apps.sh").write_text("#!/bin/sh\n" + LAUNCH[name])
