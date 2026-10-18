@@ -22,7 +22,9 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from .contracts import NewMessage
+from .failure_report import FailureReport
 from .models import Delivery, Session, SlackInbox, SlackThread, Turn, User, new_id, now
+from .slack_file_delivery import SlackFileDelivery
 from .slack_messages import navigation_action, pr_cards, saved_message, session_url, thread_message
 
 if TYPE_CHECKING:
@@ -206,11 +208,14 @@ async def stage_deliveries(runtime: Runtime) -> None:
         async with runtime.database.sessions() as db:
             if await db.scalar(select(Delivery.id).where(Delivery.identity == identity)):
                 continue
+        failure_report = (
+            await FailureReport.for_turn(runtime, turn) if turn.status == "failed" else None
+        )
         text = runtime.security.unseal(turn.result).decode() if turn.result else ""
         if turn.status == "waiting":
             text = "Moyai needs your response before continuing."
         elif turn.status == "failed":
-            text = turn.error or "This task stopped before it completed."
+            text = failure_report.text if failure_report is not None else ""
         if not text:
             text = "This task completed without a text answer."
         link = session_url(runtime.settings.public_url, turn.session_id)
@@ -221,21 +226,46 @@ async def stage_deliveries(runtime: Runtime) -> None:
             async with runtime.database.sessions.begin() as db:
                 from .slack_progress import latest_segment
                 segment = await latest_segment(db, turn)
+                destination = json.dumps({
+                    "channel": thread.channel_id, "thread_ts": thread.thread_ts, "rich_reply": True,
+                    "segment_id": segment.id,
+                })
                 db.add(Delivery(
                     id=new_id(), identity=identity, session_id=turn.session_id, turn_id=turn.id,
-                    destination=json.dumps({
-                        "channel": thread.channel_id, "thread_ts": thread.thread_ts, "rich_reply": True,
-                        "segment_id": segment.id,
-                    }),
+                    destination=destination,
                     content=runtime.security.seal(content),
                 ))
+                if failure_report is not None:
+                    db.add(Delivery(
+                        id=new_id(), identity=f"slack-answer:{turn.id}:debug",
+                        session_id=turn.session_id, turn_id=turn.id,
+                        destination=destination,
+                        content=runtime.security.seal(SlackFileDelivery.content(
+                            failure_report.debug_log,
+                            after=identity,
+                        )),
+                    ))
         except IntegrityError:
             pass
+
+
+async def _settle_delivery(
+    runtime: Runtime, delivery: Delivery, status: str, receipt: dict[str, object],
+) -> None:
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(Delivery).where(
+            Delivery.id == delivery.id, Delivery.status == "sending",
+        ).values(status=status, receipt=runtime.security.seal(receipt)))
 
 
 async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Delivery) -> None:
     from .slack_progress import claim_delivery, reply_target, skip_obsolete
     if await skip_obsolete(runtime, delivery, product=False):
+        return
+    destination = json.loads(delivery.destination)
+    content = saved_message(runtime.security.unseal(delivery.content), destination)
+    is_upload = SlackFileDelivery.is_content(content)
+    if is_upload and not await SlackFileDelivery.ready(runtime, content):
         return
     ready, reply_ts = await reply_target(runtime, delivery, product=False)
     if not ready:
@@ -249,8 +279,28 @@ async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Del
             return
     if not await claim_delivery(runtime, delivery, product=False):
         return
-    destination = json.loads(delivery.destination)
-    content = saved_message(runtime.security.unseal(delivery.content), destination)
+    if is_upload:
+        async def before_send():
+            async with runtime.database.sessions() as db:
+                turn = await db.get(Turn, delivery.turn_id)
+                actor = await db.get(User, turn.actor_id) if turn else None
+                session = await db.get(Session, delivery.session_id)
+            if actor is None or not actor.enabled or session is None or session.deleted:
+                raise PermissionError("Slack file delivery is no longer authorized.")
+
+        try:
+            receipt = await SlackFileDelivery.send(
+                client, content, destination, headers=None, before_send=before_send,
+            )
+        except asyncio.CancelledError as exc:
+            await _settle_delivery(runtime, delivery, "rejected", {"error": str(exc)})
+            raise
+        except Exception as exc:  # noqa: BLE001  # [BLE001] Failed uploads must settle rejected.
+            await _settle_delivery(runtime, delivery, "rejected", {"error": str(exc)})
+            return
+        await _settle_delivery(runtime, delivery, "sent", receipt)
+        return
+
     try:
         response = await client.post("chat.update" if reply_ts else "chat.postMessage", json={
             "channel": destination["channel"],

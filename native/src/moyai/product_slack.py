@@ -21,7 +21,7 @@ from uuid import NAMESPACE_URL, uuid5
 import httpx
 from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from agentchat.channels.slack.rendering import message_request
-from agentchat.models import RichReply, UploadFile
+from agentchat.models import RichReply
 from app.db import database as source_database
 from app.slack_format import ID, STAMP
 from fastapi import APIRouter, HTTPException, Request
@@ -30,6 +30,7 @@ from pydantic_ai_harness.ask_user import AskUserRequest
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from .failure_report import FailureReport
 from .models import (
     Artifact,
     Delivery,
@@ -48,6 +49,7 @@ from .product_slack_context import SlackThreadContext
 from .product_slack_events import SlackEvents
 from .product_slack_files import ProductSlackFiles
 from .product_slack_models import ProductSlackBinding
+from .slack_file_delivery import SlackFileDelivery
 from .slack_messages import navigation_action, pr_cards, session_url, thread_message
 
 if TYPE_CHECKING:
@@ -411,13 +413,13 @@ class ProductSlack:
             # Admission and delivery can run concurrently. Reserve the same
             # primary reply before any later state is queued.
             await self.queue(turn, thread, "accepted", {"text": "Moyai received your message."})
+            failure_report = (
+                await FailureReport.for_turn(self.runtime, turn) if turn.status == "failed" else None
+            )
             text_value = {
                 "queued": "Moyai is getting ready.", "running": "Moyai is working.",
                 "saving": "Moyai is saving the work.", "waiting": "Moyai needs your response.",
-                "failed": (
-                    f"This task stopped before it completed: {turn.error}\nDebug log attached."
-                    if turn.error else "This task stopped before it completed.\nDebug log attached."
-                ),
+                "failed": failure_report.text if failure_report is not None else "",
                 "stopped": "The task stopped.",
             }.get(turn.status, "")
             if turn.status == "completed":
@@ -462,30 +464,11 @@ class ProductSlack:
                 f"{turn.status}:0",
                 thread_message(content["text"], url, cards=cards, controls=controls),
             )]
-            if turn.status == "failed":
-                try:
-                    async with self.runtime.database.sessions() as db:
-                        actor = await db.get(User, turn.actor_id)
-                    if actor is None:
-                        raise ValueError("The task requester no longer exists.")
-                    from .debug_trace import debug_trace
-
-                    trace = await debug_trace(self.runtime, actor, turn.session_id)
-                    trace_content = json.dumps(trace)
-                except Exception as exc:  # noqa: BLE001  # [BLE001] Export failures need fallback JSON.
-                    trace_content = json.dumps({
-                        "session_id": turn.session_id,
-                        "turn_id": turn.id,
-                        "error": turn.error,
-                        "trace_export_error": str(exc),
-                    })
-                parts.append(("failed:debug", {
-                    "upload": {
-                        "filename": f"moyai-debug-{turn.id}.json",
-                        "title": "Moyai debug log",
-                        "content": trace_content,
-                    },
-                }))
+            if failure_report is not None:
+                parts.append(("failed:debug", SlackFileDelivery.content(
+                    failure_report.debug_log,
+                    after=f"product-slack:{turn.id}:failed:0",
+                )))
             await self.queue_batch(turn, thread, parts)
 
     async def interact(self, payload: dict[str, Any]):
@@ -576,6 +559,24 @@ class ProductSlack:
             return False
         return True
 
+    async def _claim(self, delivery: Delivery) -> str | None:
+        from .slack_progress import claim_delivery
+
+        token = await self.connectors.slack_bot_token()
+        if not await self.delivery_allowed(delivery):
+            return None
+        if not await claim_delivery(self.runtime, delivery, product=True):
+            return None
+        try:
+            still_allowed = await self.delivery_allowed(delivery)
+        except BaseException:
+            await self._settle(delivery.id, "pending")
+            raise
+        if not still_allowed:
+            await self._settle(delivery.id, "suppressed")
+            return None
+        return token
+
     async def deliver(self, client: httpx.AsyncClient, delivery: Delivery):
         if not await self.delivery_allowed(delivery):
             async with self.runtime.database.sessions.begin() as db:
@@ -583,58 +584,26 @@ class ProductSlack:
                     Delivery.id == delivery.id, Delivery.status == "pending",
                 ).values(status="suppressed"))
             return
-        from .slack_progress import claim_delivery
 
         destination = json.loads(delivery.destination)
         content = json.loads(self.runtime.security.unseal(delivery.content))
-        if "upload" in content:
-            async with self.runtime.database.sessions() as db:
-                message_status = await db.scalar(select(Delivery.status).where(
-                    Delivery.identity == f"product-slack:{delivery.turn_id}:failed:0",
-                ))
-            if message_status != "sent":
+        if SlackFileDelivery.is_content(content):
+            if not await SlackFileDelivery.ready(self.runtime, content):
                 return
-            token = await self.connectors.slack_bot_token()
-            if not await self.delivery_allowed(delivery):
+            token = await self._claim(delivery)
+            if token is None:
                 return
-            if not await claim_delivery(self.runtime, delivery, product=True):
-                return
-            try:
-                still_allowed = await self.delivery_allowed(delivery)
-            except BaseException:
-                await self._settle(delivery.id, "pending")
-                raise
-            if not still_allowed:
-                await self._settle(delivery.id, "suppressed")
-                return
-
-            from agentchat.channels.slack import files as slack_files
-
-            async def request(api_method: str, payload: dict[str, object]) -> dict[str, object]:
-                response = await client.post(
-                    api_method, headers={"Authorization": "Bearer " + token}, json=payload,
-                )
-                response.raise_for_status()
-                result = response.json()
-                if not isinstance(result, dict):
-                    raise TypeError("Slack file upload API returned a non-object response.")
-                return result
 
             async def before_send():
                 if not await self.delivery_allowed(delivery):
                     raise PermissionError("Slack debug log delivery is no longer authorized.")
 
             try:
-                upload = content["upload"]
-                uploaded = await slack_files.upload_slack_files(
-                    (UploadFile(
-                        filename=upload["filename"],
-                        content=upload["content"].encode(),
-                        title=upload["title"],
-                    ),),
-                    request=request,
-                    channel_id=destination["channel"],
-                    thread_ts=destination["thread_ts"],
+                receipt = await SlackFileDelivery.send(
+                    client,
+                    content,
+                    destination,
+                    headers={"Authorization": "Bearer " + token},
                     before_send=before_send,
                 )
             except asyncio.CancelledError as exc:
@@ -643,9 +612,7 @@ class ProductSlack:
             except Exception as exc:  # noqa: BLE001  # [BLE001] Failed uploads must settle rejected.
                 await self._settle(delivery.id, "rejected", {"error": str(exc)})
                 return
-            await self._settle(delivery.id, "sent", {
-                "files": [{"id": file.id, "permalink": file.permalink} for file in uploaded],
-            })
+            await self._settle(delivery.id, "sent", receipt)
             return
 
         from .slack_progress import reply_target
@@ -662,20 +629,8 @@ class ProductSlack:
             fallback_blocks=False,
         )
         # Refresh only the installation bot. Never use personal/shared user OAuth.
-        token = await self.connectors.slack_bot_token()
-        if not await self.delivery_allowed(delivery):
-            return
-        if not await claim_delivery(self.runtime, delivery, product=True):
-            return
-        try:
-            still_allowed = await self.delivery_allowed(delivery)
-        except BaseException:
-            # No external send has begun. Restore only this known-unsent claim;
-            # the sending handler below never performs this transition.
-            await self._settle(delivery.id, "pending")
-            raise
-        if not still_allowed:
-            await self._settle(delivery.id, "suppressed")
+        token = await self._claim(delivery)
+        if token is None:
             return
         try:
             # AgentChat owns provider rendering/routing; this durable host owns

@@ -4,6 +4,7 @@ These protocol tests supplement the parent's integrated product deployment proof
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import itertools
@@ -291,13 +292,15 @@ async def test_failed_turn_stages_error_and_requester_debug_trace(slack, active)
     _, deliveries = await stage_failed_turn(slack, active, error)
 
     message = json.loads(slack.runtime.security.unseal(deliveries["0"].content))
-    upload = json.loads(slack.runtime.security.unseal(deliveries["debug"].content))["upload"]
-    trace = json.loads(upload["content"])
+    debug_delivery = json.loads(slack.runtime.security.unseal(deliveries["debug"].content))
+    upload = debug_delivery["upload"]
+    trace = json.loads(base64.b64decode(upload["content"]))
 
     assert error in message["text"]
     assert "Debug log attached." in message["text"]
     assert deliveries["0"].identity == f"product-slack:{active[1].id}:failed:0"
     assert deliveries["debug"].identity == f"product-slack:{active[1].id}:failed:debug"
+    assert debug_delivery["after"] == deliveries["0"].identity
     assert upload["filename"] == f"moyai-debug-{active[1].id}.json"
     assert upload["title"] == "Moyai debug log"
     assert trace["schema_version"] == "ATIF-v1.8"
@@ -346,9 +349,9 @@ async def test_failed_debug_upload_waits_for_message_then_uses_slack_file_helper
     assert [event[0] for event in events] == [
         "chat.postMessage", "files.getUploadURLExternal", "upload_bytes", "files.completeUploadExternal",
     ]
-    upload_content = json.loads(
+    upload_content = base64.b64decode(json.loads(
         slack.runtime.security.unseal(deliveries["debug"].content),
-    )["upload"]["content"].encode()
+    )["upload"]["content"])
     assert events[1][1] == {
         "filename": f"moyai-debug-{active[1].id}.json",
         "length": len(upload_content),
@@ -382,24 +385,6 @@ async def test_failed_debug_upload_waits_until_failure_message_is_sent(slack, ac
     async with slack.runtime.database.sessions() as db:
         saved = await db.get(Delivery, deliveries["debug"].id)
     assert saved.status == "pending"
-
-
-async def test_failed_debug_trace_export_error_is_attached(slack, active, monkeypatch):
-    error = "Codex stopped (usageLimitExceeded)"
-
-    async def fail_export(*_args):
-        raise RuntimeError("trace store unavailable")
-
-    monkeypatch.setattr("moyai.debug_trace.debug_trace", fail_export)
-    _, deliveries = await stage_failed_turn(slack, active, error)
-    upload = json.loads(slack.runtime.security.unseal(deliveries["debug"].content))["upload"]
-
-    assert json.loads(upload["content"]) == {
-        "session_id": active[0].id,
-        "turn_id": active[1].id,
-        "error": error,
-        "trace_export_error": "trace store unavailable",
-    }
 
 
 async def test_approval_actions_are_scoped_to_original_requester_and_native_pending_call(slack, active, actor, monkeypatch):

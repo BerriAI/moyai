@@ -1,6 +1,7 @@
 """Slack protocol tests with a transport double; these are not live Slack proof."""
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import itertools
@@ -149,6 +150,82 @@ async def test_delivery_ownership_survives_network_await(runtime, active):
     async with runtime.database.sessions() as db:
         saved = await db.get(Delivery, delivery.id)
         assert saved.status == "sent" and "123.999" in runtime.security.unseal(saved.receipt).decode()
+
+
+async def test_failed_turn_posts_error_then_uploads_debug_file(runtime, active, monkeypatch):
+    session, turn, _ = active
+    error = "Codex stopped (usageLimitExceeded)"
+    async with runtime.database.sessions.begin() as db:
+        saved = await db.get(Turn, turn.id)
+        saved.status = "failed"
+        saved.error = error
+        saved.finished_at = datetime.now(UTC).isoformat()
+        db.add(SlackThread(
+            id=new_id(), team_id="TTEST", channel_id="CTEST", thread_ts="123.456", session_id=session.id,
+        ))
+    await stage_deliveries(runtime)
+    async with runtime.database.sessions() as db:
+        rows = list(await db.scalars(select(Delivery).where(Delivery.turn_id == turn.id)))
+    deliveries = {row.identity: row for row in rows}
+    message = deliveries[f"slack-answer:{turn.id}"]
+    debug = deliveries[f"slack-answer:{turn.id}:debug"]
+    message_content = json.loads(runtime.security.unseal(message.content))
+    file_content = json.loads(runtime.security.unseal(debug.content))
+    debug_bytes = base64.b64decode(file_content["upload"]["content"])
+
+    assert error in message_content["text"]
+    assert "Debug log attached." in message_content["text"]
+    assert file_content["after"] == message.identity
+
+    from agentchat.channels.slack import files
+
+    events = []
+
+    async def upload_bytes(url, raw):
+        events.append(("upload_bytes", url, raw))
+
+    monkeypatch.setattr(files, "upload_bytes", upload_bytes)
+
+    async def handle(request):
+        method = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content)
+        events.append((method, payload))
+        if method == "chat.postMessage":
+            return httpx.Response(200, json={"ok": True, "channel": "CTEST", "ts": "123.457"})
+        if method == "files.getUploadURLExternal":
+            return httpx.Response(200, json={
+                "ok": True, "file_id": "FDEBUG001",
+                "upload_url": "https://files.slack.com/upload/FDEBUG001",
+            })
+        if method == "files.completeUploadExternal":
+            return httpx.Response(200, json={
+                "ok": True, "files": [{
+                    "id": "FDEBUG001", "permalink": "https://slack.test/files/FDEBUG001",
+                }],
+            })
+        raise AssertionError(f"Unexpected Slack API method: {method}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="https://slack.test/",
+    ) as client:
+        await deliver_one(runtime, client, message)
+        await deliver_one(runtime, client, debug)
+
+    assert [event[0] for event in events] == [
+        "chat.postMessage", "files.getUploadURLExternal", "upload_bytes", "files.completeUploadExternal",
+    ]
+    assert events[0][1]["thread_ts"] == "123.456"
+    assert events[1][1] == {"filename": f"moyai-debug-{turn.id}.json", "length": len(debug_bytes)}
+    assert events[2][2] == debug_bytes
+    assert events[3][1]["channel_id"] == "CTEST"
+    assert events[3][1]["thread_ts"] == "123.456"
+    async with runtime.database.sessions() as db:
+        sent = await db.get(Delivery, debug.id)
+        receipt = json.loads(runtime.security.unseal(sent.receipt))
+    assert sent.status == "sent"
+    assert receipt["files"] == [{
+        "id": "FDEBUG001", "permalink": "https://slack.test/files/FDEBUG001",
+    }]
 
 
 async def test_lost_send_ack_is_reconciled_without_reposting(runtime, active):
