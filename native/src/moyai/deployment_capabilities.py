@@ -56,6 +56,7 @@ def capabilities(config: ProductConfig) -> dict:
         "role_control": {"protocol": ROLE_CONTROL_PROTOCOL, "render_entrypoint": True},
         "generation_admission": {
             "protocol": ADMISSION_PROTOCOL, "durable_role_seals": True, "image_revision_fence": True,
+            "durable_drain_receipts": True,
         },
         "worker": {
             "deployment": settings.worker_deployment, "build": settings.worker_build_id,

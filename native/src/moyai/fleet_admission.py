@@ -154,3 +154,23 @@ class FleetAdmission:
             not self.registered or not self.sealed or request_id != self.request_id
         ):
             raise FleetAdmissionError("fleet_admission_requires_durable_role_seal")
+
+    async def finish_drain(self, request_id: str) -> None:
+        if self.current is None:
+            return
+        self.require_drain(request_id)
+        product = self.life.runtime.product
+        assert product is not None
+
+        def save():
+            assert self.current is not None
+            with product.store.connect() as connection:
+                connection.begin_write()
+                FleetRegistry(connection.raw, schema=self.schema).record_drained(
+                    fleet=self.current["fleet"], generation=self.current["generation"], role=self.life.role,
+                    service_id=self.service_id, instance_id=self.instance_id,
+                    identity=self.life.quiescence.identity(), request_id=request_id,
+                )
+                connection.check_owner(lock_compatibility=True)
+
+        await database(save)

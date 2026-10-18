@@ -77,6 +77,10 @@ service/build; normal recovery does not need a continuously running deployment
 controller. Registration checks both the canonical PostgreSQL owner PID and
 backend start time. A new process has a fresh nonce and cannot reuse an earlier
 drain receipt. The runtime cannot redirect its registry to an arbitrary schema.
+After accepted work and background cleanup finish, the process commits a drain
+completion receipt for its exact captured owner before reporting `drained`.
+The controller can recover that receipt even if its SSH reply was lost or the
+process later exits. Owner disappearance alone never substitutes for completion.
 On Render, the image's baked `/app/build-revision` must match the declared build
 before role polling starts. A platform Git SHA, when present, must match too.
 Image-backed services do not need a Git SHA; their controller must qualify the

@@ -104,6 +104,7 @@ class FleetRegistry:
                     process_nonce char(32) NOT NULL, owner_pid integer NOT NULL,
                     owner_started timestamptz NOT NULL, identity_digest char(64) NOT NULL,
                     drain_request text NOT NULL DEFAULT '',
+                    drained_request text NOT NULL DEFAULT '', drained_at timestamptz,
                     registered_at timestamptz NOT NULL DEFAULT now(),
                     PRIMARY KEY(fleet,generation,role,instance_id,process_nonce),
                     FOREIGN KEY(fleet,generation,role) REFERENCES {schema}.roles(fleet,generation,role)
@@ -234,6 +235,46 @@ class FleetRegistry:
             value["owner_started"] = value["owner_started"].isoformat()
             result.append(value)
         return result
+
+    def record_drained(self, *, fleet: str, generation: str, role: str, service_id: str,
+                       instance_id: str, identity: dict, request_id: str) -> None:
+        """Persist completion only after the caller has closed its accepted work."""
+        with self.connection.transaction():
+            selected = self.connection.execute(self.query("""
+                SELECT state,drain_request FROM {schema}.roles
+                WHERE fleet=%s AND generation=%s AND role=%s AND service_id=%s FOR SHARE
+            """), (fleet, generation, role, service_id)).fetchone()
+            if selected is None or tuple(selected) != ("draining", request_id):
+                raise FleetAdmissionError("fleet_drain_receipt_role_changed")
+            changed = self.connection.execute(self.query("""
+                UPDATE {schema}.members SET drained_request=%s,drained_at=COALESCE(drained_at,now())
+                WHERE fleet=%s AND generation=%s AND role=%s AND service_id=%s
+                    AND instance_id=%s AND process_nonce=%s
+                    AND owner_pid=%s AND owner_started=%s::timestamptz
+                    AND identity_digest=%s AND drain_request=%s
+                    AND drained_request IN ('',%s)
+            """), (
+                request_id, fleet, generation, role, service_id, instance_id, identity["instance"],
+                identity["owner_pid"], identity["owner_started"], fingerprint(identity), request_id, request_id,
+            ))
+            if changed.rowcount != 1:
+                raise FleetAdmissionError("fleet_drain_receipt_member_changed")
+
+    def drain_receipts(self, *, fleet: str, generation: str, role: str) -> list[dict]:
+        rows = self.connection.execute(self.query("""
+            SELECT m.instance_id,m.process_nonce,m.owner_pid,m.owner_started,
+                m.identity_digest,m.drained_request,m.drained_at
+            FROM {schema}.members m JOIN {schema}.roles r
+                ON (r.fleet,r.generation,r.role)=(m.fleet,m.generation,m.role)
+            WHERE m.fleet=%s AND m.generation=%s AND m.role=%s
+                AND m.drain_request=r.drain_request AND m.drain_request!=''
+            ORDER BY m.instance_id,m.process_nonce
+        """), (fleet, generation, role)).fetchall()
+        return [{
+            "instance_id": row[0], "process_nonce": row[1], "owner_pid": row[2],
+            "owner_started": row[3].isoformat(), "identity_digest": row[4],
+            "request_id": row[5], "drained_at": row[6].isoformat() if row[6] else None,
+        } for row in rows]
 
     def seal(self, *, fleet: str, generation: str, role: str, service_id: str,
              request_id: str, proof: dict) -> list[dict]:

@@ -114,6 +114,8 @@ class ProductQuiescence:
             if self.life.worker is not None:
                 await self.life.worker.shutdown()
             await self.check_owner()
+            if self.life.admission is not None:
+                await self.life.admission.finish_drain(self.request_id)
         except BaseException:
             # A failed drain is not permission to retire or start it again.
             self.state = "failed"

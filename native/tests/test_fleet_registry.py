@@ -177,6 +177,34 @@ def test_seal_refreshes_stats_after_a_new_owner_registers(registry):
             assert len(seal(store, arguments)) == 2
 
 
+def test_drain_completion_receipt_is_durable_and_bound_to_the_exact_capture(registry):
+    store, dsn, schema, arguments = registry
+    store.register(**arguments)
+    with pytest.raises(FleetAdmissionError, match="role_changed"):
+        store.record_drained(
+            fleet="production", generation="blue", role="coordinator",
+            service_id=arguments["service_id"], instance_id=arguments["instance_id"],
+            identity=arguments["identity"], request_id="release-one:coordinator",
+        )
+    seal(store, arguments)
+    values = {
+        "fleet": "production", "generation": "blue", "role": "coordinator",
+        "service_id": arguments["service_id"], "instance_id": arguments["instance_id"],
+        "identity": arguments["identity"], "request_id": "release-one:coordinator",
+    }
+    store.record_drained(**values)
+    store.record_drained(**values)
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        recovered = FleetRegistry(connection, schema=schema)
+        rows = recovered.drain_receipts(fleet="production", generation="blue", role="coordinator")
+        assert len(rows) == 1 and rows[0]["drained_at"] is not None
+        assert rows[0]["request_id"] == values["request_id"]
+        with pytest.raises(FleetAdmissionError, match="member_changed"):
+            recovered.record_drained(**{
+                **values, "identity": {**arguments["identity"], "instance": uuid4().hex},
+            })
+
+
 @pytest.mark.parametrize("field,value", [
     ("build", "different-build"), ("deployment", "different-fleet"),
     ("native_schema", "different_schema"), ("queue", "different-queue"),
