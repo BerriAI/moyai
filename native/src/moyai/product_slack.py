@@ -21,7 +21,7 @@ from uuid import NAMESPACE_URL, uuid5
 import httpx
 from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from agentchat.channels.slack.rendering import message_request
-from agentchat.models import RichReply
+from agentchat.models import RichReply, UploadFile
 from app.db import database as source_database
 from app.slack_format import ID, STAMP
 from fastapi import APIRouter, HTTPException, Request
@@ -414,7 +414,10 @@ class ProductSlack:
             text_value = {
                 "queued": "Moyai is getting ready.", "running": "Moyai is working.",
                 "saving": "Moyai is saving the work.", "waiting": "Moyai needs your response.",
-                "failed": "This task stopped before it completed. Open Moyai for details.",
+                "failed": (
+                    f"This task stopped before it completed: {turn.error}\nDebug log attached."
+                    if turn.error else "This task stopped before it completed.\nDebug log attached."
+                ),
                 "stopped": "The task stopped.",
             }.get(turn.status, "")
             if turn.status == "completed":
@@ -455,10 +458,35 @@ class ProductSlack:
                         "\n<" + self.settings.public_url.rstrip("/") + "/api/files/" + artifact.id
                         + "|" + html.escape(artifact.name, quote=False).replace("|", "¦") + ">"
                     )
-            await self.queue(
-                turn, thread, f"{turn.status}:0",
+            parts = [(
+                f"{turn.status}:0",
                 thread_message(content["text"], url, cards=cards, controls=controls),
-            )
+            )]
+            if turn.status == "failed":
+                try:
+                    async with self.runtime.database.sessions() as db:
+                        actor = await db.get(User, turn.actor_id)
+                    if actor is None:
+                        raise ValueError("The task requester no longer exists.")
+                    from .debug_trace import debug_trace
+
+                    trace = await debug_trace(self.runtime, actor, turn.session_id)
+                    trace_content = json.dumps(trace)
+                except Exception as exc:  # noqa: BLE001  # [BLE001] Export failures need fallback JSON.
+                    trace_content = json.dumps({
+                        "session_id": turn.session_id,
+                        "turn_id": turn.id,
+                        "error": turn.error,
+                        "trace_export_error": str(exc),
+                    })
+                parts.append(("failed:debug", {
+                    "upload": {
+                        "filename": f"moyai-debug-{turn.id}.json",
+                        "title": "Moyai debug log",
+                        "content": trace_content,
+                    },
+                }))
+            await self.queue_batch(turn, thread, parts)
 
     async def interact(self, payload: dict[str, Any]):
         bot = await source_database(self.installation)
@@ -555,12 +583,75 @@ class ProductSlack:
                     Delivery.id == delivery.id, Delivery.status == "pending",
                 ).values(status="suppressed"))
             return
-        from .slack_progress import claim_delivery, reply_target
+        from .slack_progress import claim_delivery
+
+        destination = json.loads(delivery.destination)
+        content = json.loads(self.runtime.security.unseal(delivery.content))
+        if "upload" in content:
+            async with self.runtime.database.sessions() as db:
+                message_status = await db.scalar(select(Delivery.status).where(
+                    Delivery.identity == f"product-slack:{delivery.turn_id}:failed:0",
+                ))
+            if message_status != "sent":
+                return
+            token = await self.connectors.slack_bot_token()
+            if not await self.delivery_allowed(delivery):
+                return
+            if not await claim_delivery(self.runtime, delivery, product=True):
+                return
+            try:
+                still_allowed = await self.delivery_allowed(delivery)
+            except BaseException:
+                await self._settle(delivery.id, "pending")
+                raise
+            if not still_allowed:
+                await self._settle(delivery.id, "suppressed")
+                return
+
+            from agentchat.channels.slack import files as slack_files
+
+            async def request(api_method: str, payload: dict[str, object]) -> dict[str, object]:
+                response = await client.post(
+                    api_method, headers={"Authorization": "Bearer " + token}, json=payload,
+                )
+                response.raise_for_status()
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise TypeError("Slack file upload API returned a non-object response.")
+                return result
+
+            async def before_send():
+                if not await self.delivery_allowed(delivery):
+                    raise PermissionError("Slack debug log delivery is no longer authorized.")
+
+            try:
+                upload = content["upload"]
+                uploaded = await slack_files.upload_slack_files(
+                    (UploadFile(
+                        filename=upload["filename"],
+                        content=upload["content"].encode(),
+                        title=upload["title"],
+                    ),),
+                    request=request,
+                    channel_id=destination["channel"],
+                    thread_ts=destination["thread_ts"],
+                    before_send=before_send,
+                )
+            except asyncio.CancelledError as exc:
+                await self._settle(delivery.id, "rejected", {"error": str(exc)})
+                raise
+            except Exception as exc:  # noqa: BLE001  # [BLE001] Failed uploads must settle rejected.
+                await self._settle(delivery.id, "rejected", {"error": str(exc)})
+                return
+            await self._settle(delivery.id, "sent", {
+                "files": [{"id": file.id, "permalink": file.permalink} for file in uploaded],
+            })
+            return
+
+        from .slack_progress import reply_target
         ready, reply_ts = await reply_target(self.runtime, delivery, product=True)
         if not ready:
             return
-        destination = json.loads(delivery.destination)
-        content = json.loads(self.runtime.security.unseal(delivery.content))
         request = message_request(
             RichReply(
                 text=content["text"], blocks=tuple(content.get("blocks") or ()),

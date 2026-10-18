@@ -150,6 +150,21 @@ async def queued(slack, active):
         return await db.scalar(select(Delivery))
 
 
+async def stage_failed_turn(slack, active, error):
+    thread = await bind(slack, active)
+    async with slack.runtime.database.sessions.begin() as db:
+        turn = await db.get(Turn, active[1].id)
+        turn.status = "failed"
+        turn.error = error
+        turn.finished_at = datetime.now(UTC).isoformat()
+        binding = await db.get(ProductSlackBinding, turn.session_id)
+        binding.delivery_after = "2020-01-01T00:00:00+00:00"
+    await slack.service.stage()
+    async with slack.runtime.database.sessions() as db:
+        rows = list(await db.scalars(select(Delivery).where(Delivery.turn_id == active[1].id)))
+    return thread, {row.identity.rsplit(":", 1)[-1]: row for row in rows}
+
+
 async def test_real_canonical_hook_inbox_signature_dedupe_and_no_api_side_effect(slack):
     service = slack.service
     app = FastAPI()
@@ -269,6 +284,122 @@ async def test_long_answers_and_artifacts_are_staged_atomically_without_broadcas
     assert all("<!channel>" not in value for value in values)
     assert any("/api/files/" in value and "report.txt" in value for value in values)
     assert len({row.identity for row in rows}) == len(rows)
+
+
+async def test_failed_turn_stages_error_and_requester_debug_trace(slack, active):
+    error = "Codex stopped (usageLimitExceeded)"
+    _, deliveries = await stage_failed_turn(slack, active, error)
+
+    message = json.loads(slack.runtime.security.unseal(deliveries["0"].content))
+    upload = json.loads(slack.runtime.security.unseal(deliveries["debug"].content))["upload"]
+    trace = json.loads(upload["content"])
+
+    assert error in message["text"]
+    assert "Debug log attached." in message["text"]
+    assert deliveries["0"].identity == f"product-slack:{active[1].id}:failed:0"
+    assert deliveries["debug"].identity == f"product-slack:{active[1].id}:failed:debug"
+    assert upload["filename"] == f"moyai-debug-{active[1].id}.json"
+    assert upload["title"] == "Moyai debug log"
+    assert trace["schema_version"] == "ATIF-v1.8"
+    assert any(step["source"] == "system" and step["message"] == error for step in trace["steps"])
+
+
+async def test_failed_debug_upload_waits_for_message_then_uses_slack_file_helper(slack, active, monkeypatch):
+    thread, deliveries = await stage_failed_turn(slack, active, "Codex stopped (usageLimitExceeded)")
+    events = []
+
+    async def upload_bytes(url, raw):
+        events.append(("upload_bytes", url, raw))
+
+    from agentchat.channels.slack import files
+
+    monkeypatch.setattr(files, "upload_bytes", upload_bytes)
+
+    async def handle(request):
+        method = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content)
+        events.append((method, payload))
+        assert request.headers["authorization"] == "Bearer synthetic-bot-token"
+        if method in {"chat.postMessage", "chat.update"}:
+            return httpx.Response(200, json={
+                "ok": True, "channel": thread.channel_id, "ts": "1792100000.001",
+            })
+        if method == "files.getUploadURLExternal":
+            return httpx.Response(200, json={
+                "ok": True, "file_id": "FDEBUG001",
+                "upload_url": "https://files.slack.com/upload/FDEBUG001",
+            })
+        if method == "files.completeUploadExternal":
+            return httpx.Response(200, json={
+                "ok": True,
+                "files": [{"id": "FDEBUG001", "permalink": "https://slack.test/files/FDEBUG001"}],
+            })
+        raise AssertionError(f"Unexpected Slack API method: {method}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="https://slack.test/api/",
+    ) as client:
+        await slack.service.pump(client)
+        assert [event[0] for event in events] == ["chat.postMessage"]
+        await slack.service.pump(client)
+
+    assert [event[0] for event in events] == [
+        "chat.postMessage", "files.getUploadURLExternal", "upload_bytes", "files.completeUploadExternal",
+    ]
+    upload_content = json.loads(
+        slack.runtime.security.unseal(deliveries["debug"].content),
+    )["upload"]["content"].encode()
+    assert events[1][1] == {
+        "filename": f"moyai-debug-{active[1].id}.json",
+        "length": len(upload_content),
+    }
+    assert events[2][2] == upload_content
+    assert events[3][1]["channel_id"] == thread.channel_id
+    assert events[3][1]["thread_ts"] == thread.thread_ts
+    async with slack.runtime.database.sessions() as db:
+        sent = await db.get(Delivery, deliveries["debug"].id)
+        receipt = json.loads(slack.runtime.security.unseal(sent.receipt))
+    assert sent.status == "sent"
+    assert receipt["files"] == [{
+        "id": "FDEBUG001", "permalink": "https://slack.test/files/FDEBUG001",
+    }]
+
+
+async def test_failed_debug_upload_waits_until_failure_message_is_sent(slack, active):
+    _, deliveries = await stage_failed_turn(slack, active, "Codex stopped (usageLimitExceeded)")
+    requests = []
+
+    async def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="https://slack.test/api/",
+    ) as client:
+        await slack.service.deliver(client, deliveries["debug"])
+
+    assert not requests
+    async with slack.runtime.database.sessions() as db:
+        saved = await db.get(Delivery, deliveries["debug"].id)
+    assert saved.status == "pending"
+
+
+async def test_failed_debug_trace_export_error_is_attached(slack, active, monkeypatch):
+    error = "Codex stopped (usageLimitExceeded)"
+
+    async def fail_export(*_args):
+        raise RuntimeError("trace store unavailable")
+
+    monkeypatch.setattr("moyai.debug_trace.debug_trace", fail_export)
+    _, deliveries = await stage_failed_turn(slack, active, error)
+    upload = json.loads(slack.runtime.security.unseal(deliveries["debug"].content))["upload"]
+
+    assert json.loads(upload["content"]) == {
+        "session_id": active[0].id,
+        "turn_id": active[1].id,
+        "error": error,
+        "trace_export_error": "trace store unavailable",
+    }
 
 
 async def test_approval_actions_are_scoped_to_original_requester_and_native_pending_call(slack, active, actor, monkeypatch):
