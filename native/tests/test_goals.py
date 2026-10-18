@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
@@ -257,6 +258,19 @@ async def test_clearing_completed_goal_leaves_later_ordinary_work_running(runtim
     await command(runtime, actor, session.id, "/goal clear")
     await runtime.database.authorize_scope(prepared.scope)
     assert (await runtime.database.session(actor, session.id)).status == "running"
+
+
+async def test_dispatch_inspects_only_idle_goal_sessions(runtime, actor, monkeypatch):
+    session, _ = await start(runtime, actor)
+    turn = await runtime.database.claim_next()
+    await runtime.database.prepare(turn.id)
+    tick = AsyncMock()
+    monkeypatch.setattr(runtime.database.goals, "tick", tick)
+    await runtime.database.goals.reconcile()
+    tick.assert_not_awaited()
+    await runtime.database.fail(turn.id, "A failure leaves an idle conversation for inspection.")
+    await runtime.database.goals.reconcile()
+    tick.assert_awaited_once_with(session.id)
 
 
 async def test_goal_tools_are_builtin_and_complete_via_native_agent(runtime, actor):

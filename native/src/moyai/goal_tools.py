@@ -56,14 +56,15 @@ class GoalCapability(AbstractCapability[RunScope]):
             database = service.database
             input_id = (ctx.metadata or {}).get("moyai_input_id") or input_identity(ctx)
             await database.authorize_scope(scope, input_id=input_id)
-            async with database._admission_session(None) as db:
+            async with database.sessions.begin() as db:
                 actor = await db.get(User, scope.actor_id)
                 if actor is None:
                     raise ToolFailed("The goal requester is unavailable.")
                 if scope.product_grant is not None:
                     from typing import cast
                     cast(Any, actor).product_grant = scope.product_grant
-                await service.lock(db, actor, scope.session_id)
+                if status is not None:
+                    await service.lock(db, actor, scope.session_id)
                 await database.authorize_scope(scope, input_id=input_id, db=db)
                 goal = await db.get(Goal, scope.session_id, populate_existing=True)
                 binding = await db.get(GoalTurn, scope.turn_id)

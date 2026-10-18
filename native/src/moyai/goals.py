@@ -350,8 +350,10 @@ class Goals:
 
     async def reconcile(self, limit: int = 20) -> None:
         async with self.database.sessions() as db:
-            pending = list(await db.scalars(select(Goal.session_id).where(
-                Goal.status == "active",
+            pending = list(await db.scalars(select(Goal.session_id).join(
+                Session, Session.id == Goal.session_id,
+            ).where(
+                Goal.status == "active", Session.active_turn.is_(None),
             ).order_by(Goal.checked_at, Goal.session_id).limit(limit)))
         for session_id in pending:
             await self.tick(session_id)
