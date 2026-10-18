@@ -57,12 +57,13 @@ class HookInbox:
         with self.store.connect() as conn:
             conn.begin_write()
             if conn.execute('SELECT 1 FROM coordinator_hooks WHERE id=?', (key,)).fetchone():
-                return
+                return False
             self.prune_in(conn)
             if conn.execute("SELECT COUNT(*) FROM coordinator_hooks WHERE status='pending'").fetchone()[0] >= MAX_PENDING_EVENTS:
                 raise HTTPException(503, 'The event inbox is full. Retry later.', headers={'Retry-After': '1'})
             conn.execute("INSERT INTO coordinator_hooks VALUES(?,'event',?,'pending','','',?,0)",
                          (key, self.encode(payload), now()))
+            return True
 
     def encode(self, payload):
         value = json.dumps(payload, separators=(',', ':'))
@@ -75,7 +76,7 @@ class HookInbox:
             value = self.security.decrypt(value.removeprefix('sealed:v1:'))
         return json.loads(value)
 
-    async def receive_event(self, request):
+    async def receive_event(self, request, *, on_enqueued=None):
         body = await bounded_body(request, MAX_EVENT_BYTES)
         self.slack.verify_signature(body, request.headers)
         try:
@@ -94,8 +95,10 @@ class HookInbox:
             raise HTTPException(400, 'Invalid Slack event identifier.')
         # Signature freshness is checked only at intake. A saved, authenticated
         # event may wait through a deploy or provider outage longer than 5 min.
-        await database(self.enqueue, f'event:{team}:{event_id}', payload)
+        inserted = await database(self.enqueue, f'event:{team}:{event_id}', payload)
         self.wake.set()
+        if inserted and on_enqueued is not None:
+            on_enqueued(payload)
         return {'ok': True}
 
     def claim_interaction(self, key):

@@ -51,6 +51,7 @@ class Target:
 class SlackActivityService:
     def __init__(self, runtime: Runtime):
         self.runtime = runtime
+        self.wake = asyncio.Event()
 
     async def target(self, thread_id: str) -> Target | None:
         """Recheck current work and the original destination; never expose focus text."""
@@ -243,10 +244,14 @@ class SlackActivityService:
 
     async def watch(self) -> None:
         while True:
+            self.wake.clear()
             try:
                 await self.sync()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - recover transient store/provider failures
                 logger.warning("Slack working status is unavailable (%s).", type(error).__name__)
-            await asyncio.sleep(3)
+            try:
+                await asyncio.wait_for(self.wake.wait(), timeout=3)
+            except TimeoutError:
+                pass

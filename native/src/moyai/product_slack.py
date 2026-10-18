@@ -157,9 +157,11 @@ class ProductSlack:
             runtime.product_history.slack_access = lambda conn, principal, ids: historical_access(self, conn, principal, ids)
             runtime.product_history.decorate_messages = lambda conn, principal, run, rows: historical_messages(self, conn, principal, run, rows)
         self.inbox = HookInbox(self.store, self, list, security=self.product.security)
+        self.intake_tasks: set[asyncio.Task[None]] = set()
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
         self.profile_task: asyncio.Task[None] | None = None
+        self.delivery_wake = asyncio.Event()
 
     async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
         host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
@@ -176,6 +178,18 @@ class ProductSlack:
         if not await host.acknowledge(source, request):
             logger.info("Slack acknowledgement reaction was not added.")
 
+    def acknowledge_soon(self, payload: dict[str, Any]) -> None:
+        async def acknowledge() -> None:
+            try:
+                async with asyncio.timeout(3):
+                    await self.events.acknowledge_intake(payload)
+            except Exception as error:  # noqa: BLE001 - intake acknowledgement never blocks durable receipt
+                logger.warning("Slack intake acknowledgement failed (%s).", type(error).__name__)
+
+        task = asyncio.create_task(acknowledge(), name="product-slack-intake-ack")
+        self.intake_tasks.add(task)
+        task.add_done_callback(self.intake_tasks.discard)
+
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""
         if self.delivery_task is not None:
@@ -188,6 +202,12 @@ class ProductSlack:
 
     async def close(self) -> None:
         """Parent retains its coordinator lock until this drain returns."""
+        intake_tasks = tuple(self.intake_tasks)
+        for task in intake_tasks:
+            task.cancel()
+        if intake_tasks:
+            await asyncio.gather(*intake_tasks, return_exceptions=True)
+        self.intake_tasks.difference_update(intake_tasks)
         await self.inbox.close()
         if self.profile_task is not None:
             self.profile_task.cancel()
@@ -204,13 +224,17 @@ class ProductSlack:
 
     async def watch(self) -> None:
         while True:
+            self.delivery_wake.clear()
             try:
                 await self.pump()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - preserve the durable queue across provider/store outages
                 logger.warning("Product Slack delivery remains saved (%s).", type(error).__name__)
-            await asyncio.sleep(3)
+            try:
+                await asyncio.wait_for(self.delivery_wake.wait(), timeout=3)
+            except TimeoutError:
+                pass
 
     def verify_signature(self, body: bytes, headers: Any) -> None:
         stamp = headers.get("x-slack-request-timestamp", "")
@@ -845,7 +869,7 @@ class ProductSlack:
         @router.post("/hooks/slack")
         @router.post("/hooks/slack/events")
         async def event(request: Request):
-            return await self.inbox.receive_event(request)
+            return await self.inbox.receive_event(request, on_enqueued=self.acknowledge_soon)
 
         @router.post("/hooks/slack/interactions")
         async def interaction(request: Request):
