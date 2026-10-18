@@ -6,10 +6,15 @@ description: Build or refine Moyai's native React frontend using its established
 # Moyai UI
 
 Preserve the compact workspace: matte charcoal surfaces, purple actions, fine
-neutral borders, near-white text and opaque composer panels. Use local Geist
-for interface typography and Geist Mono for code and small operational labels.
+neutral borders, near-white text and opaque composer panels. Use General Sans
+from the official Fontshare stylesheet for the interface, local Geist as the
+fallback, and Geist Mono for code. Do not commit the restricted General Sans
+font binaries to this public repository.
 The home screen uses a static fine grid, a centered heading and draft starters;
-chat and Settings stay quiet for sustained work. Controls have restrained corners.
+chat and Settings stay quiet for sustained work. Use 6–8px rounded controls and
+a 12px desktop frame. The default sidebar groups current work by Needs you,
+In progress, In review and Backlog; preserve the alternate folder view and
+its existing actions. Keep chat entry compact, with attachment/model tools below.
 The workspace menu floats without reflowing chat; only the independent side
 panel changes chat proportions. Inspect current screens before changing them.
 

@@ -7,14 +7,14 @@
   gap: 8px;
   padding-inline: 6px;
   font-family: var(--ui-font);
-  font-size: 17px;
+  font-size: 15px;
   line-height: 1.25;
-  font-weight: 400;
-  letter-spacing: -.025em;
+  font-weight: 550;
+  letter-spacing: -.02em;
 }
 .moyai-brand-name { display: inline-flex; align-items: center; gap: 9px; white-space: nowrap; }
 .moyai-brand-mark { display: block; width: 12px; height: 14px; background: var(--ui-primary); clip-path: polygon(0 0, 100% 0, 100% 65%, 65% 100%, 0 100%); }
-.moyai-brand small { margin-top: 0; font: 10px/16px var(--ui-font-mono); letter-spacing: .05em; text-transform: uppercase; }
+.moyai-brand small { margin-top: 0; font: 9px/16px var(--ui-font-mono); letter-spacing: .05em; text-transform: uppercase; }
 .moyai-brand:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; border-radius: 2px; }
 .sidebar-brand-row { display: flex; align-items: center; gap: 4px; min-height: 40px; }
 .sidebar-brand-row > .moyai-brand { flex: 1; }

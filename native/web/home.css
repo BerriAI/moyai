@@ -7,7 +7,7 @@
 .home-subtitle { max-width: 500px; margin: 20px auto 0; color: var(--ui-muted); font-size: 14px; line-height: 1.7; text-wrap: balance; }
 .home-form { text-align: left; }
 .home-connection-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; }
-.home-composer { background: var(--ui-background); border-radius: 4px; }
+.home-composer { background: var(--ui-background); border-radius: 10px; }
 .home .home-composer .skill-editor { min-height: 136px; padding: 22px; font-size: 15px; }
 .home .home-composer .skill-editor-placeholder { top: 22px; left: 22px; right: 22px; font-size: 15px; }
 .home-composer textarea { min-height: 136px; padding: 22px; font-size: 15px; resize: none; }
@@ -20,7 +20,7 @@
 .home-composer-hint [role="status"] { margin-right: auto; }
 .home-starters { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
 .home-starters[aria-hidden="true"] { visibility: hidden; }
-.home-starters > button { min-height: 38px; padding: 8px 12px; gap: 8px; border: 1px solid var(--ui-border); border-radius: 2px; background: var(--ui-canvas); color: var(--ui-muted); font-size: 12px; font-weight: 400; }
+.home-starters > button { min-height: 38px; padding: 8px 12px; gap: 8px; border: 1px solid var(--ui-border); border-radius: 6px; background: var(--ui-canvas); color: var(--ui-muted); font-size: 12px; font-weight: 500; }
 .home-starters > button:hover { background: var(--ui-secondary); color: var(--ui-foreground); border-color: var(--ui-control-border); }
 .home-starters > button:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 3px; }
 .home-starters > button > svg { width: 14px; height: 14px; }

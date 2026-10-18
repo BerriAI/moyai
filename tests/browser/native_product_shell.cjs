@@ -304,6 +304,48 @@ async function clickSidebarPin(page, name) {
   await page.getByRole('button',{name,exact:true}).click({timeout:5000});
 }
 
+async function groupSidebarByFolder(page) {
+  await page.getByRole('combobox',{name:'Group conversations',exact:true}).click();
+  await page.getByRole('option',{name:'By folder',exact:true}).click();
+}
+
+test('status groups reflect current work and keep filed, pinned and participated sessions reachable once',async t=>{
+  reset({status:'idle',folders:[{id:'today',name:'Today'}]});
+  const waiting='waiting',working='working',review='review',draft='draft',shared='shared',hidden='hidden',child='child';
+  state.inventoryRows=[
+    {...session(),source:'native',folder:'Today'},
+    {...session(waiting),source:'native',status:'waiting'},
+    {...session(working),source:'native',status:'queued'},
+    {...session(review),source:'native',pinned:true},
+    {...session(draft),source:'native'},
+    {...session(shared),source:'native',owner_id:'teammate',participated:true},
+    {...session(hidden),source:'native',owner_id:'teammate'},
+    {...session(child),source:'native',status:'failed',parent_session_id:sessionId},
+  ];
+  const pr=(draft=false)=>({url:'https://github.com/example/project/pull/1',repository:'example/project',number:1,title:'Review the change',state:'open',draft,accessible:true});
+  state.prStatuses={[review]:[pr()],[draft]:[pr(true)]};
+  const page=await pageFor(t,'#');
+  const group=key=>page.locator(`[data-status-group="${key}"]`);
+  const row=id=>page.locator(`[data-session-key="native:${id}"]`);
+  await group('in-review').locator(`[data-session-key="native:${review}"]`).waitFor();
+  assert.equal(await group('needs-you').locator(`[data-session-key="native:${waiting}"]`).isVisible(),true);
+  assert.equal(await group('needs-you').locator(`[data-session-key="native:${sessionId}"]`).isVisible(),true);
+  assert.equal(await group('in-progress').locator(`[data-session-key="native:${working}"]`).isVisible(),true);
+  for(const id of [draft,shared])assert.equal(await group('backlog').locator(`[data-session-key="native:${id}"]`).isVisible(),true);
+  assert.equal(await row(hidden).count(),0);
+  for(const id of [sessionId,waiting,working,review,draft,shared,child])assert.equal(await row(id).count(),1);
+  await groupSidebarByFolder(page);
+  await page.getByRole('button',{name:/^Today /}).click();
+  assert.equal(await page.locator('#sessions-today').locator(`[data-session-key="native:${sessionId}"]`).isVisible(),true);
+  assert.equal(await row(sessionId).count(),1);
+  await page.getByRole('combobox',{name:'Group conversations',exact:true}).click();
+  await page.getByRole('option',{name:'By status',exact:true}).click();
+  state.inventoryRows.find(item=>item.id===waiting).status='running';
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await group('in-progress').locator(`[data-session-key="native:${waiting}"]`).waitFor();
+  assert.equal(await row(waiting).count(),1);
+});
+
 function sidebarDefaultsFixture() {
   const child='d'.repeat(32),pinned='e'.repeat(32),filed='f'.repeat(32),shared='1'.repeat(32);
   reset({status:'idle',folders:[{id:'today',name:'Today'}],sessionOverrides:{
@@ -319,15 +361,16 @@ function sidebarDefaultsFixture() {
   return child;
 }
 
-for(const width of [1440,768,320])test(`sidebar starts with only Recent open and keeps child routes collapsed at ${width}px`,async t=>{
+for(const width of [1440,768,320])test(`sidebar starts with status groups open and keeps child routes collapsed at ${width}px`,async t=>{
   const child=sidebarDefaultsFixture();
   const page=await pageFor(t,'#',width);
   if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
-  const recent=page.getByRole('button',{name:/^Recent /});
-  await page.getByRole('button',{name:/^Pinned /}).waitFor();
-  assert.equal(await recent.getAttribute('aria-expanded'),'true');
-  for(const name of [/^Pinned /,/^Participated /,/^Today /])
-    assert.equal(await page.getByRole('button',{name}).getAttribute('aria-expanded'),'false');
+  for(const name of [/^Needs you /,/^In progress /,/^In review /,/^Backlog /]) {
+    const group=page.getByRole('button',{name});await group.waitFor();
+    assert.equal(await group.getAttribute('aria-expanded'),'true');
+  }
+  assert.equal(await page.getByRole('button',{name:/^Recent /}).count(),0);
+  assert.equal(await page.locator('[data-session-key]').count(),5);
   const expand=page.getByRole('button',{name:'Expand subagents for Current native work',exact:true});
   await expand.waitFor();
   assert.equal(await page.locator(`[data-session-key="native:${child}"]`).isVisible(),false);
@@ -347,6 +390,7 @@ for(const width of [1440,768,320])test(`sidebar starts with only Recent open and
 test('explicit sidebar expansion survives reload and polling without opening new branches',async t=>{
   sidebarDefaultsFixture();
   const page=await pageFor(t,'#');
+  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
   await page.getByRole('button',{name:/^Participated /}).click();
   await page.getByRole('button',{name:/^Today /}).click();
@@ -379,6 +423,7 @@ for(const stored of ['legacy','malformed','unavailable'])test(`sidebar safely ad
       localStorage.setItem('moyai-subagents:another-user',JSON.stringify({version:1,expanded:['native:'+'a'.repeat(32)]}));
     }
   },stored));
+  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
   await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:/^Recent /}).getAttribute('aria-expanded'),'true');
@@ -416,7 +461,7 @@ test('an empty sidebar shows initial loading but remains settled during later ba
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',inventoryRows:[],holds:{'/api/history/sessions':held}});
   const page=await pageFor(t,'#');
-  await page.locator('#sessions-recent').getByText('Loading sessions…',{exact:true}).waitFor();
+  await page.locator('.session-list').getByText('Loading sessions…',{exact:true}).waitFor();
   release();state.holds={};
   await page.getByText('No sessions here yet.',{exact:true}).waitFor();
   let releaseRefresh;const refreshHeld=new Promise(resolve=>{releaseRefresh=resolve;});t.after(()=>releaseRefresh());
@@ -432,6 +477,7 @@ test('sidebar pin and unpin render before a held save without blocking other act
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',holdPreference:held});
   const page=await pageFor(t);
+  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
   const catalogReads=()=>state.requests.filter(row=>['/api/connections','/api/session-folders','/api/history/sessions'].includes(row.path)).length;
   const reads=catalogReads();
@@ -459,6 +505,7 @@ test('sidebar drag into and out of a folder renders while saves are held and pre
   reset({status:'idle',holdPreference:held,folders:[{id:'today',name:'Today'}],
     inventoryRows:[{...session(id),title:'Folder latency test',pinned:true,folder:'',source:'native'}]});
   const page=await pageFor(t,'#');
+  await groupSidebarByFolder(page);
   await page.getByRole('button',{name:/^Pinned /}).click();
   const row=page.locator(`[data-session-key="native:${id}"]`);
   await row.waitFor();
@@ -481,6 +528,7 @@ test('a rejected sidebar save restores placement and shows an error',async t=>{
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',holdPreference:held,preferenceError:true});
   const page=await pageFor(t);
+  await groupSidebarByFolder(page);
   await clickSidebarPin(page,'Pin Current native work');
   await page.getByRole('button',{name:/^Pinned /}).click();
   await page.getByRole('button',{name:'Unpin Current native work',exact:true}).waitFor({timeout:500});
@@ -754,6 +802,7 @@ test('sidebar PR icons retain multi-PR selection without numeric badges',async t
     number,title:`Review change ${number}`,state,draft:false,accessible:true});
   reset({status:'waiting',prStatuses:{[sessionId]:[pr(12,'open'),pr(13,'open'),pr(14,'merged')]}});
   const page=await pageFor(t,'');
+  await page.locator(`[data-session-key="native:${sessionId}"]`).hover();
   await page.locator('.session-pr-ready').waitFor();
   assert.equal(await page.locator('.session-pr-ready').innerText(),'PRs ready');
   assert.equal(await page.locator('.session-pr-merged').innerText(),'PR merged');
@@ -1494,7 +1543,7 @@ test('source collisions and identically named legacy folders survive paged inven
     [{...session(collision),source:'legacy',key:'legacy:'+collision,title:'Legacy collision',read_only:true,folder:'Original folder',folder_id:'old-folder',pinned:false}],
     [{...session(collision),source:'native',key:'native:'+collision,title:'Native collision',folder:'',pinned:false}],
   ];
-  const page=await pageFor(t,'#run='+legacyId);const history=page.locator(`[data-session-key="legacy:${collision}"]`);
+  const page=await pageFor(t,'#run='+legacyId);await groupSidebarByFolder(page);const history=page.locator(`[data-session-key="legacy:${collision}"]`);
   await page.getByRole('button',{name:/^Original folder/}).click();
   await history.waitFor();assert.equal(await page.getByRole('button',{name:'Folder actions for Original folder'}).count(),0);
   assert.equal(await page.getByRole('button',{name:/Original folder/}).count(),1);
@@ -1909,6 +1958,86 @@ test('chat links remain accented and underlined while plain inline code stays ne
   assert.notEqual(await code.evaluate(el=>getComputedStyle(el).color),linkColor);
   assert.equal(await linkedCode.evaluate(el=>getComputedStyle(el).color),linkColor);
   assert.equal(await link.evaluate(el=>getComputedStyle(el).textDecorationLine),'underline');
+});
+
+test('highlighted code preserves literal markup and copies the original text',async t=>{
+  const source=[
+    `const markup = '<img src=x onerror="window.__codeExecuted=true">';`,
+    'const entity = "&lt;literal&gt;";',
+    '\tconsole.log(markup, entity);',
+    '',
+  ].join('\n');
+  reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:'```javascript\n'+source+'```'}]});
+  const page=await pageFor(t,'#'+sessionId,1440,page=>page.addInitScript(()=>{
+    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copiedCode=text;}}});
+  }));
+  const block=page.getByRole('group',{name:'javascript code block',exact:true});await block.waitFor();
+  assert.ok(await block.locator('.hljs-keyword').count()>0);
+  assert.equal(await block.locator('code').textContent(),source);
+  assert.equal(await block.locator('img, script, iframe').count(),0);
+  assert.equal(await page.evaluate(()=>window.__codeExecuted),undefined);
+  await block.getByRole('button',{name:'Copy code',exact:true}).click();
+  await block.getByRole('button',{name:'Code copied',exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>window.__copiedCode),source);
+  assert.equal(await block.locator('.code-line-numbers').getAttribute('aria-hidden'),'true');
+});
+
+test('unsupported code language remains literal plaintext and exposes copy failures',async t=>{
+  const source='<script>window.__codeExecuted=true</script>\n  &literal;\n';
+  reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:'```moyai-unknown\n'+source+'```'}]});
+  const page=await pageFor(t,'#'+sessionId,1440,page=>page.addInitScript(()=>{
+    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async()=>{throw new Error('Clipboard unavailable');}}});
+  }));
+  const block=page.getByRole('group',{name:'moyai-unknown code block',exact:true});await block.waitFor();
+  assert.equal(await block.locator('code').textContent(),source);
+  assert.equal(await block.locator('code span, code script').count(),0);
+  await block.getByRole('button',{name:'Copy code',exact:true}).click();
+  await block.getByRole('status').filter({hasText:'Couldn’t copy.'}).waitFor();
+  assert.equal(await block.getByRole('button',{name:'Code copied',exact:true}).count(),0);
+});
+
+for(const width of [1440,320])for(const surface of ['chat','output'])test(`long code lines scroll by keyboard inside ${surface} at ${width}px`,async t=>{
+  const source='console.log("'+('long_value_'.repeat(140))+'");\n';
+  const markdown='```javascript\n'+source+'```';
+  reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:surface==='chat'?markdown:'[Code note](/api/files/code-note)'}]});
+  const page=await pageFor(t,'#'+sessionId,width,async page=>{
+    if(surface==='output')await page.route('**/api/sessions/'+sessionId+'/file-preview/artifact/code-note',route=>route.fulfill({
+      json:{id:'code-note',kind:'artifact',name:'Code note.md',size:markdown.length,media_type:'text/markdown',preview_kind:'markdown',
+        text:markdown,language:null,truncated:false,notice:null,text_byte_limit:100000,text_line_limit:1000,download_url:'/api/files/code-note',content_url:null},
+    }));
+  });
+  if(surface==='output')await page.getByRole('link',{name:'Code note',exact:true}).click();
+  const block=page.getByRole('group',{name:'javascript code block',exact:true});await block.waitFor();
+  assert.equal(await block.locator('code').textContent(),source);
+  const pre=block.locator('pre');
+  assert.equal(await pre.evaluate(el=>el.scrollWidth>el.clientWidth),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await block.getByRole('button',{name:'Copy code',exact:true}).focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await pre.evaluate(el=>el===document.activeElement),true);
+  assert.notEqual(await pre.evaluate(el=>getComputedStyle(el).outlineWidth),'0px');
+  await page.keyboard.press('ArrowRight');
+  await page.waitForFunction(()=>document.activeElement?.tagName==='PRE'&&document.activeElement.scrollLeft>0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+});
+
+test('a pending copy does not mark newer streaming code as copied',async t=>{
+  reset();const page=await pageFor(t,'#'+sessionId,1440,page=>page.addInitScript(()=>{
+    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:text=>new Promise(resolve=>{
+      window.__copiedCode=text;window.__finishCodeCopy=resolve;
+    })}});
+  }));
+  await waitFor(()=>clients.size>0,'SSE connected');
+  emit({type:'response_start',run_id:turnId,step:1},0);
+  emit({type:'text_start',index:0,text:'```javascript\nconst first = 1;\n',phase:'final_answer'},1);
+  const block=page.getByRole('group',{name:'javascript code block',exact:true});await block.waitFor();
+  await block.getByRole('button',{name:'Copy code',exact:true}).click();
+  emit({type:'text_delta',index:0,text:'const second = 2;\n```'},2);
+  await page.waitForFunction(()=>document.querySelector('.code-block code')?.textContent.includes('const second'));
+  await page.evaluate(()=>window.__finishCodeCopy());
+  assert.equal(await block.getByRole('button',{name:'Code copied',exact:true}).count(),0);
+  assert.equal(await block.getByRole('button',{name:'Copy code',exact:true}).isVisible(),true);
+  assert.equal(await page.evaluate(()=>window.__copiedCode),'const first = 1;\n');
 });
 
 function actionFixture() {

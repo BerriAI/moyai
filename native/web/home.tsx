@@ -45,7 +45,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   const needsAccounts = preferences?.connection_ids != null ? preferences.connection_ids.length > 0 : productMode === "existing"
   const selectedAccounts = skipAccounts || !needsAccounts ? [] : accounts.filter(row => preferences?.connection_ids == null || preferences.connection_ids.includes(row.id)).map(row => row.id)
   const accountsReady = !needsAccounts || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error)
-  const composer = useRef<HTMLDivElement>(null)
+  const [composerFocus, setComposerFocus] = useState(0)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
   const mounted = useRef(true)
@@ -106,7 +106,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         </div>}
         <div className="composer home-composer">
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <SkillComposer ref={composer} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={pictures.paste} />
+          <SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={pictures.paste} />
           <div className="composer-actions">
             <div className="home-composer-tools">
               <AttachButton add={pictures.add} disabled={busy} compact />
@@ -131,14 +131,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         {starters.map(({ label, prompt, Icon }) => <Button key={label} type="button" variant="outline" disabled={busy || Boolean(draft.trim())}
           onClick={() => {
             setDraft(prompt)
-            requestAnimationFrame(() => {
-              const input = composer.current
-              if (!input) return
-              input.focus()
-              const selection = window.getSelection()
-              selection?.selectAllChildren(input)
-              selection?.collapseToEnd()
-            })
+            setComposerFocus(value => value + 1)
           }}><Icon aria-hidden="true" />{label}</Button>)}
       </div>
     </div>

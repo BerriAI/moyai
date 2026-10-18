@@ -15,7 +15,7 @@
   gap: 8px;
   min-height: 0;
   min-width: 0;
-  padding: 12px 12px 8px;
+  padding: 8px 10px 8px;
   background: var(--ui-background);
   border-inline-end: 1px solid var(--ui-border);
 }
@@ -129,7 +129,7 @@
 }
 @media (max-width: 850px) {
   .native-settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .native-settings .ns-rail { padding: 12px; border-inline-end: 0; border-bottom: 1px solid var(--ui-border); gap: 8px; }
+  .native-settings .ns-rail { padding: 8px 10px 8px; border-inline-end: 0; border-bottom: 1px solid var(--ui-border); gap: 8px; }
   .native-settings .ns-nav-toggle { display: inline-flex; }
   .native-settings .ns-brand-row > .sidebar-toggle { display: none; }
   .native-settings .ns-back { align-self: flex-start; }

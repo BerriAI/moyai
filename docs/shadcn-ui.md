@@ -3,9 +3,13 @@
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
 `frontend/theme.css`: The workspace uses matte charcoal surfaces, purple actions,
-fine neutral borders and semantic status colors. Geist supplies the interface
-typography; Geist Mono is used for code and small operational labels. Both fonts
-are served locally under the bundled SIL Open Font License.
+fine neutral borders and semantic status colors. General Sans supplies the interface
+through Fontshare's official stylesheet; the bundled Geist font is its offline
+fallback. Geist Mono is used for code. General Sans is not redistributed in this
+public repository; see https://www.fontshare.com/licenses/itf-ffl. CSP allows only
+the exact Fontshare stylesheet and font origins in their respective directives.
+Use 13px desktop text, 6–8px control corners and a 12px desktop workspace frame;
+mobile inputs retain 16px text and the mobile shell uses the full viewport.
 The retired escaped-template renderer is no longer used.
 
 Use direct React components for buttons, dialogs, forms, selects and menus.
@@ -33,6 +37,15 @@ starts drafting, the starters cannot replace their text. Home no longer loads th
 Three.js sculpture or runs the headline decode animation. Chat surfaces remain
 plain for reading; the full-width shell keeps navigation and independent panels
 compact across viewport sizes.
+
+The sidebar defaults to Needs you, In progress, In review and Backlog, derived
+from current session/child states and accessible, non-draft open pull requests.
+Each conversation family appears once. The grouping control retains the folder
+view with its pins, participation, archive and drag/drop behavior; moving a task
+between status groups is not an action. The chat composer uses a compact rounded
+entry above its attachment/model toolbar. Fenced Markdown code has a language
+header, local syntax coloring and plain-text copy; unknown languages remain
+readable plain text, and long lines scroll within a focusable region.
 
 ```sh
 npm ci
