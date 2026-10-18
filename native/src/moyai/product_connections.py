@@ -61,6 +61,7 @@ class ProductConnections:
         )
         cast(Any, self.connectors).slack_identities = self.identities
         self.execution = CanonicalConnectorExecution(self)
+        self._github_credential_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
         self._public_repositories: dict[int, tuple[float, dict[str, Any]]] = {}
         self._public_repository_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
         if getattr(database, "execution_schema", None):
@@ -209,6 +210,10 @@ class ProductConnections:
             scope.actor_id, [g.id for g in scope.grants],
             shared_session=scope.authority.visibility == "shared", surface=scope.authority.surface,
         )
+        self._check_grants(scope, current)
+
+    @staticmethod
+    def _check_grants(scope: RunScope, current: list[Grant]) -> None:
         if [(g.id, g.policy) for g in current] != [
             (g.id, g.policy) for g in sorted(scope.grants, key=lambda item: item.id)
         ]:
@@ -217,14 +222,25 @@ class ProductConnections:
     async def check(self, scope: RunScope, grant: Grant) -> None:
         if grant not in scope.grants or not grant.policy.get("product"):
             raise PermissionError("This product account was not selected.")
-        await self.database.authorize_scope(scope)
-        await self.require_scope(scope)
+        # Native authorization already resolves live canonical grants under the
+        # persisted execution context. Compare full policy against that same
+        # snapshot instead of opening another source connection to read it again.
+        current = await self.database.authorize_scope(scope)
+        self._check_grants(scope, current)
 
     async def credentials(self, scope: RunScope, grant: Grant, *, write: bool = False) -> dict[str, Any]:
         await self.check(scope, grant)
         if write and grant.read_only:
             raise PermissionError("This product account is read only.")
-        async with self.connectors.locks[grant.kind]:
+        lock = self.connectors.locks[grant.kind]
+        if grant.kind == "github":
+            # Installation tokens are independently minted/cached per repository.
+            # Retain single-flight for the same repository without serializing
+            # every selected repository behind one provider-wide OAuth lock.
+            # Other providers still serialize refresh of their shared credentials.
+            repository = grant.policy["product"]["repository_id"]
+            lock = self._github_credential_locks.setdefault(repository, asyncio.Lock())
+        async with lock:
             value = await self._credentials(grant, write=write)
         await self.check(scope, grant)
         return value

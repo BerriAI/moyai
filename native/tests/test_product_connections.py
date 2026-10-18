@@ -33,6 +33,10 @@ def bridge(tmp_path):
 
     async def authorize(scope):
         assert scope.actor_id == "google:owner"
+        return await service.resolve_grants(
+            scope.actor_id, [g.id for g in scope.grants],
+            shared_session=scope.authority.visibility == "shared", surface=scope.authority.surface,
+        )
 
     service = ProductConnections(
         SimpleNamespace(store_proxy=store, security=security, settings=settings),
@@ -49,6 +53,30 @@ def save(service, provider, **extra):
 async def scope_for(bridge, kind):
     grants = await bridge.resolve_grants("google:owner", [kind])
     return RunScope("native-session", "native-turn", "google:owner", "test", grants)
+
+
+async def test_connector_check_reuses_current_native_grants_and_compares_full_policy(bridge, monkeypatch):
+    import copy
+    from dataclasses import replace
+
+    save(bridge, "linear")
+    scope = await scope_for(bridge, "linear")
+    resolve = bridge.resolve_grants
+    reads = []
+
+    async def counted(*args, **kwargs):
+        reads.append(1)
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(bridge, "resolve_grants", counted)
+    await bridge.check(scope, scope.grants[0])
+    assert len(reads) == 1
+    # IDs/revisions alone do not permit a changed policy. This is the extra
+    # canonical comparison previously performed by a second source-store read.
+    changed = copy.deepcopy(scope.grants[0])
+    changed.policy["product"]["access"] = "different-access"
+    with pytest.raises(PermissionError, match="authority changed"):
+        await bridge.check(replace(scope, grants=[changed]), changed)
 
 
 async def test_reference_only_grants_follow_live_disconnect_reconnect_and_policy(bridge):
@@ -97,6 +125,120 @@ async def test_refresh_preserves_authority_and_revocation_wins_while_awaiting(br
     with pytest.raises(ConnectorError, match="changed"):
         await bridge.credentials(scope, scope.grants[0])
     assert not bridge.store.rows("SELECT 1 FROM connections WHERE provider='linear'")
+
+
+def github_accounts(bridge, count=16):
+    credentials = {
+        "kind": "github_app", "installation_id": 1, "account_id": 1,
+        "repository_ids": list(range(1, count + 1)),
+    }
+    bridge.connectors.save("github", credentials, "Selected repositories")
+    bridge.connectors.github.save_app({"id": 1})
+    return credentials
+
+
+async def test_github_token_requests_overlap_across_repositories_but_share_same_repository(bridge, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    github_accounts(bridge)
+    scope = await scope_for(bridge, "github")
+    github = bridge.connectors.github
+    monkeypatch.setattr(github, "app_jwt", lambda config: "synthetic-jwt")
+    active = peak = 0
+    requests = []
+    lock = threading.Lock()
+
+    async def request(method, path, **kwargs):
+        nonlocal active, peak
+        assert method == "POST" and path == "/app/installations/1/access_tokens"
+        assert kwargs["json"]["permissions"] == {"contents": "read", "pull_requests": "read"}
+        repositories = kwargs["json"]["repository_ids"]
+        assert len(repositories) == 1  # Never broaden the credential to all repositories.
+        with lock:
+            requests.append(repositories[0])
+            active += 1
+            peak = max(active, peak)
+        try:
+            await asyncio.sleep(.08)
+            return {
+                "token": f"repository-{repositories[0]}",
+                "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(github, "request", request)
+    # Two concurrent callers for every repository exercise single-flight reuse
+    # through the real invocation-local helpers and shared token cache.
+    values = await asyncio.gather(*(
+        bridge.credentials(scope, grant) for grant in scope.grants for _ in range(2)
+    ))
+    assert peak > 1
+    assert sorted(requests) == list(range(1, 17))
+    assert [value["access_token"] for value in values] == [
+        f"repository-{grant.policy['product']['repository_id']}" for grant in scope.grants for _ in range(2)
+    ]
+
+
+@pytest.mark.parametrize("revoke", ["connection", "native", "policy"])
+async def test_github_credentials_recheck_authority_after_parallel_requests(bridge, monkeypatch, revoke):
+    github_accounts(bridge, 2)
+    scope = await scope_for(bridge, "github")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def credentials(grant, *, write):
+        calls.append(grant.id)
+        entered.set()
+        await release.wait()
+        return {"access_token": "must-not-escape-after-revocation"}
+
+    monkeypatch.setattr(bridge, "_credentials", credentials)
+    pending = [asyncio.create_task(bridge.credentials(scope, grant)) for grant in scope.grants]
+    await asyncio.wait_for(entered.wait(), 2)
+    if revoke == "connection":
+        bridge.store.execute("DELETE FROM connections WHERE provider='github'")
+    elif revoke == "policy":
+        bridge.store.execute(
+            "INSERT INTO connection_policies(provider,enabled,read_only) VALUES('github',0,0) "
+            "ON CONFLICT(provider) DO UPDATE SET enabled=0",
+        )
+    else:
+        async def denied(scope):
+            raise PermissionError("Native turn revoked")
+        monkeypatch.setattr(bridge.database, "authorize_scope", denied)
+    release.set()
+    results = await asyncio.gather(*pending, return_exceptions=True)
+    assert all(isinstance(result, (HTTPException, PermissionError)) for result in results)
+
+
+async def test_cancelled_github_credential_request_releases_only_its_repository_lock(bridge, monkeypatch):
+    github_accounts(bridge, 2)
+    scope = await scope_for(bridge, "github")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def credentials(grant, *, write):
+        if grant == scope.grants[0]:
+            entered.set()
+            await release.wait()
+        return {"access_token": grant.id}
+
+    monkeypatch.setattr(bridge, "_credentials", credentials)
+    first = asyncio.create_task(bridge.credentials(scope, scope.grants[0]))
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        assert await asyncio.wait_for(bridge.credentials(scope, scope.grants[1]), 1) == {
+            "access_token": scope.grants[1].id,
+        }
+    finally:
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+    release.set()
+    assert await asyncio.wait_for(bridge.credentials(scope, scope.grants[0]), 1) == {
+        "access_token": scope.grants[0].id,
+    }
 
 
 async def test_personal_slack_is_private_and_never_falls_back(bridge):
