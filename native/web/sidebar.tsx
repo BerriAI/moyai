@@ -200,6 +200,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
   function rows(items: SidebarSession[], depth = 0): React.ReactNode {
     return items.map(row => {
       const readOnly = sessionIsReadOnly(row)
+      const statusLabel = readOnly ? "Read-only history" : row.unread ? "Unread" : row.status
       const active = row.source === "legacy" ? selected === `run=${row.id}` || selected === sessionHash(row) : selected === row.id
       const key = sessionKey(row), descendants = view === "deleted" ? [] : tree.children.get(key) ?? []
       const expanded = expandedAgents.includes(key)
@@ -215,7 +216,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         onClick={() => setExpandedAgents(previous => saveExpandedAgents(expanded ? previous.filter(value => value !== key) : [...previous, key]))}>
         <ChevronDown className={expanded ? "" : "closed"} size={12} />
       </Button>}
-      <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
+      <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-label={`${statusLabel} ${row.title}`} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
         <span className="session-leading" aria-hidden="true">
           {descendants.length === 0 && <span className="session-bullet">·</span>}
         </span>
@@ -231,7 +232,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         </>}
         <SessionMenu session={row} onOpenSideChat={openAside} />
       </div>
-      <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : !readOnly && row.status === "failed" ? "failed" : ""}`} aria-label={readOnly ? "Read-only history" : row.unread ? "Unread" : row.status} />
+      <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : !readOnly && row.status === "failed" ? "failed" : ""}`} aria-label={statusLabel} />
       <div className="session-row-meta">
         {!readOnly && row.pinned && placements.get(row)?.kind === "folder" && <Pin size={12} aria-label="Pinned session" />}
         <span className={`session-meta-status ${!readOnly && !row.deleted && row.status === "waiting" ? "needs-input" : !readOnly && !row.deleted && row.status === "failed" ? "failed" : ""}`}>{row.deleted ? "Deleted" : readOnly ? "Read-only history" : row.status === "waiting" ? "Needs input" : row.status === "failed" ? "Failed" : ["running", "queued", "saving"].includes(row.status) ? row.status : age(row.updated_at)}</span>
