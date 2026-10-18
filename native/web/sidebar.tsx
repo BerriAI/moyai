@@ -216,7 +216,9 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         <ChevronDown className={expanded ? "" : "closed"} size={12} />
       </Button>}
       <a draggable={false} href={row.deleted || row.deleting ? undefined : `#${sessionHash(row)}`} title={row.title} aria-current={active && !row.deleted && !row.deleting ? "page" : undefined}>
-        <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : !readOnly && row.status === "failed" ? "failed" : ""}`} aria-label={readOnly ? "Read-only history" : row.unread ? "Unread" : row.status} />
+        <span className="session-leading" aria-hidden="true">
+          {descendants.length === 0 && <span className="session-bullet">·</span>}
+        </span>
         <span className="session-title">{row.title}</span>
       </a>
       <div className="session-row-actions">
@@ -229,6 +231,7 @@ export function SessionSidebar({ sessions, folders, selected, userId, view, onVi
         </>}
         <SessionMenu session={row} onOpenSideChat={openAside} />
       </div>
+      <span className={`session-indicator ${!readOnly && ["running", "queued", "saving"].includes(row.status) ? "working" : !readOnly && row.status === "waiting" ? "waiting" : !readOnly && row.status === "failed" ? "failed" : ""}`} aria-label={readOnly ? "Read-only history" : row.unread ? "Unread" : row.status} />
       <div className="session-row-meta">
         {!readOnly && row.pinned && placements.get(row)?.kind === "folder" && <Pin size={12} aria-label="Pinned session" />}
         <span className={`session-meta-status ${!readOnly && !row.deleted && row.status === "waiting" ? "needs-input" : !readOnly && !row.deleted && row.status === "failed" ? "failed" : ""}`}>{row.deleted ? "Deleted" : readOnly ? "Read-only history" : row.status === "waiting" ? "Needs input" : row.status === "failed" ? "Failed" : ["running", "queued", "saving"].includes(row.status) ? row.status : age(row.updated_at)}</span>
