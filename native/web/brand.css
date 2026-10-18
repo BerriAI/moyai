@@ -1,11 +1,11 @@
 .moyai-brand {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  min-height: 40px;
+  justify-content: flex-start;
+  min-height: 28px;
   min-width: 0;
-  gap: 8px;
-  padding-inline: 6px;
+  gap: 12px;
+  padding-inline: 10px 6px;
   font-family: var(--ui-font);
   font-size: 15px;
   line-height: 1.25;
@@ -13,10 +13,10 @@
   letter-spacing: -.02em;
 }
 .moyai-brand-name { display: inline-flex; align-items: center; gap: 9px; white-space: nowrap; }
-.moyai-brand-mark { display: block; width: 12px; height: 14px; background: var(--ui-primary); clip-path: polygon(0 0, 100% 0, 100% 65%, 65% 100%, 0 100%); }
+.moyai-brand-mark { display: block; width: 12px; height: 14px; margin-inline-end: 3px; background: var(--ui-primary); clip-path: polygon(0 0, 100% 0, 100% 65%, 65% 100%, 0 100%); }
 .moyai-brand small { margin-top: 0; font: 9px/16px var(--ui-font-mono); letter-spacing: .05em; text-transform: uppercase; }
 .moyai-brand:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; border-radius: 2px; }
-.sidebar-brand-row { display: flex; align-items: center; gap: 4px; min-height: 40px; }
+.sidebar-brand-row { display: flex; align-items: center; gap: 4px; min-height: 28px; }
 .sidebar-brand-row > .moyai-brand { flex: 1; }
 .sidebar-toggle { flex: none; color: var(--ui-muted); }
 @media (max-width: 600px) { .sidebar > .sidebar-brand-row > .sidebar-toggle { display: none; } }

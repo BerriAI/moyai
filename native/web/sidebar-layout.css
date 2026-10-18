@@ -1,13 +1,13 @@
 /* Keep a readable two-line rail while giving the session list more room. */
 .app > .sidebar {
-  gap: 4px;
+  gap: 2px;
   padding: 8px 10px 8px;
 }
 
-.sidebar > .new-chat { border: 0; border-radius: 6px; background: transparent; font-weight: 400; }
+.sidebar > .new-chat { border: 0; border-radius: 6px; background: transparent; font-size: 13px; font-weight: 400; }
 .sidebar > .new-chat:hover { background: var(--ui-secondary); }
 .sidebar .rail-section-label { margin: 12px 10px 0; color: var(--ui-muted); font: 11px/1.6 var(--ui-font); letter-spacing: .04em; text-transform: uppercase; }
-.sidebar .rail-palette-trigger { flex: none; border: 0; border-radius: 6px; width: 28px; height: 28px; min-height: 28px; padding: 0; color: var(--ui-muted); }
+.sidebar .rail-palette-trigger { justify-content: center; flex: none; border: 0; border-radius: 6px; width: 28px; height: 28px; min-height: 28px; padding: 0; color: var(--ui-muted); }
 .sidebar .rail-button { font-family: var(--ui-font); font-weight: 400; font-size: 13px; border-radius: 6px; }
 .sidebar .session-title { font-size: 13px; }
 
@@ -15,7 +15,7 @@
 .sidebar > .rail-button {
   height: 32px;
   min-height: 32px;
-  gap: 8px;
+  gap: 9px;
   padding: 0 10px;
 }
 
@@ -295,7 +295,7 @@
   .sidebar .session-row-actions { width: auto; overflow: visible; opacity: 1; pointer-events: auto; }
 }
 
-.sidebar .rail-destinations { gap: 0; margin-bottom: 4px; }
+.sidebar .rail-destinations { gap: 2px; margin-bottom: 6px; }
 .sidebar .rail-destinations .rail-button { min-height: 32px; height: 32px; padding-inline: 10px; gap: 9px; color: var(--ui-muted); }
 .sidebar .rail-destinations .rail-button svg, .sidebar > .new-chat svg { width: 15px; height: 15px; }
 .sidebar .rail-destinations .rail-button:hover { color: var(--ui-foreground); }

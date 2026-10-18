@@ -20,7 +20,7 @@
   background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur);
   border-inline-end: 1px solid var(--ui-glass-line);
 }
-.native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 40px; }
+.native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 28px; }
 .native-settings .ns-brand-row > .moyai-brand { flex: 1; }
 .native-settings .ns-back { justify-content: flex-start; padding-inline: 8px; color: var(--ui-muted); }
 .native-settings .ns-navigation { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding-bottom: 12px; }
