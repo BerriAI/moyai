@@ -31,4 +31,4 @@ for _ in range(100):
 window = found.stdout.split()[-1]
 time.sleep(1)
 subprocess.run(["xdotool", "windowactivate", "--sync", window], check=False)
-subprocess.run(["xdotool", "type", "--delay", "5", "--window", window, text], check=True)
+subprocess.run(["xdotool", "type", "--delay", "5", text], check=True)
