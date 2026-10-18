@@ -1,0 +1,19 @@
+schema_version = "1.4"
+
+[metadata]
+
+[verifier]
+timeout_sec = 900.0
+
+[verifier.env]
+LITELLM_API_BASE = "${LITELLM_API_BASE:-}"
+LITELLM_API_KEY = "${LITELLM_API_KEY:-}"
+LITELLM_GATEWAY_BASE_URL = "${LITELLM_GATEWAY_BASE_URL:-}"
+LITELLM_GATEWAY_ADMIN_KEY = "${LITELLM_GATEWAY_ADMIN_KEY:-}"
+MOYAI_EVAL_JUDGE_MODEL = "${MOYAI_EVAL_JUDGE_MODEL}"
+
+[agent]
+timeout_sec = 900.0
+
+[environment]
+build_timeout_sec = 600.0
