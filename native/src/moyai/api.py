@@ -675,12 +675,29 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def messages(session_id: str, after: int = 0, user: User = Depends(actor)):
         return await runtime.database.messages(user, session_id, after=after)
 
+    async def cancel_stopped_workflow(workflow_id: str) -> None:
+        # Stop intent has committed. The dispatcher keeps ownership until
+        # cancellation/terminal state is acknowledged, including lost RPCs.
+        try:
+            async with asyncio.timeout(2):
+                client = await runtime.connect()
+                await client.get_workflow_handle(workflow_id).cancel()
+        except (RPCError, TimeoutError, RuntimeError, OSError):
+            logging.getLogger(__name__).warning("Stop cancellation remains pending for dispatcher reconciliation.")
+
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send(session_id: str, body: NewMessage, request: Request, user: User = Depends(actor)):
         from .goals import is_goal_command
         from .skill_invocations import has_invocations
         if is_goal_command(body.prompt):
-            return await runtime.database.goals.command(user, session_id, body)
+            result = await runtime.database.goals.command(user, session_id, body)
+            async with runtime.database.sessions() as db:
+                stopped_workflow = await db.scalar(select(Turn.workflow_id).join(
+                    Session, Session.active_turn == Turn.id,
+                ).where(Session.id == session_id, Turn.status == "stopped"))
+            if stopped_workflow:
+                await cancel_stopped_workflow(stopped_workflow)
+            return result
         if body.reply_to is not None:
             async with runtime.database.sessions() as db:
                 await runtime.database.allowed_session(db, session_id, user)
@@ -765,12 +782,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
     async def stop(session_id: str, user: User = Depends(actor)):
         workflow_id = await runtime.database.stop(user, session_id)
         if workflow_id:
-            try:
-                client = await runtime.connect()
-                await client.get_workflow_handle(workflow_id).cancel()
-            except RPCError:
-                # The persisted Stop already revoked authority. Dispatcher reconciliation follows.
-                pass
+            await cancel_stopped_workflow(workflow_id)
         return {"status": "stopping"}
 
     @app.post("/api/sessions/{session_id}/answers", status_code=202)

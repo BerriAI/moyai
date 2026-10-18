@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import httpx
@@ -13,6 +14,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy import func, select, update
+from temporalio.client import WorkflowExecutionStatus
 
 from moyai.api import COOKIE, create_app
 from moyai.contracts import NewMessage, NewSession
@@ -21,6 +23,7 @@ from moyai.goal_tools import GoalCapability
 from moyai.goals import is_goal_command, parse_command
 from moyai.models import Connection, Message, Session, Turn, TurnImage, Upload, User
 from moyai.product_schema import GOAL_SCHEMA_VERSION, MESSAGE_SOURCE_SCHEMA_VERSION, application_metadata
+from moyai.worker import dispatch_once
 
 
 async def command(runtime, actor, session_id, text, key=None, **kwargs):
@@ -572,6 +575,47 @@ async def test_archived_goal_is_ineligible_even_before_legacy_state_is_reconcile
         await db.execute(update(Session).where(Session.id == session.id).values(archived=True))
     assert (await goal(runtime, session.id))["status"] == "active"
     assert await runtime.database.claim_next() is None
+
+
+@pytest.mark.parametrize("action", ["pause", "clear", "edit Revised objective.", "stop"])
+@pytest.mark.parametrize("unavailable", [False, True])
+async def test_goal_controls_cancel_immediately_and_durable_stop_releases_ownership(
+    runtime, actor, monkeypatch, action, unavailable,
+):
+    session, original = await start(runtime, actor)
+    await runtime.database.claim_next()
+    await runtime.database.prepare(original)
+    handle = SimpleNamespace(
+        cancel=AsyncMock(side_effect=RuntimeError("Temporal unavailable.") if unavailable else None),
+        describe=AsyncMock(return_value=SimpleNamespace(status=WorkflowExecutionStatus.COMPLETED)),
+    )
+    client = SimpleNamespace(get_workflow_handle=Mock(return_value=handle), start_workflow=AsyncMock())
+    monkeypatch.setattr(runtime, "connect", AsyncMock(return_value=client))
+    token, csrf = runtime.security.issue_session(actor.id, actor.auth_version)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(runtime, run_dispatcher=False)), base_url="http://test",
+        cookies={COOKIE: token}, headers={"x-moyai-csrf": csrf, "origin": "http://test"},
+    ) as api:
+        response = await api.post(
+            f"/api/sessions/{session.id}/stop" if action == "stop" else f"/api/sessions/{session.id}/messages",
+            json={} if action == "stop" else {"prompt": "/goal " + action, "request_key": "control"},
+        )
+        assert response.status_code == 202, response.text
+    handle.cancel.assert_awaited_once()
+    client.get_workflow_handle.assert_called_with(f"moyai-turn-{original}")
+    assert (await runtime.database.session(actor, session.id)).active_turn == original
+    assert [turn.id for turn in await runtime.database.pending_stops()] == [original]
+    # A late fail activity intentionally leaves Stop unchanged; the ordinary
+    # dispatcher's terminal-workflow reconciliation must still release ownership.
+    await runtime.database.fail(original, "The stopped workflow reached an authority check.")
+    await dispatch_once(runtime)
+    assert (await runtime.database.session(actor, session.id)).active_turn is None
+    assert await runtime.database.pending_stops() == []
+    if action == "pause":
+        await command(runtime, actor, session.id, "/goal resume")
+        await dispatch_once(runtime)
+        assert (await runtime.database.session(actor, session.id)).active_turn not in {None, original}
+        client.start_workflow.assert_awaited_once()
 
 
 async def test_goal_tools_are_builtin_and_complete_via_native_agent(runtime, actor):
