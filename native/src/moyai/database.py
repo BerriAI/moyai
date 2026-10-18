@@ -38,6 +38,8 @@ from .contracts import (
 from .delegation_authority import DelegatedAuthority, saved_authority, session_context
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .dispatch_wakeups import notify_dispatch
+from .goal_models import Goal
+from .goals import Goals
 from .models import (
     Base,
     ComputerOperation,
@@ -112,6 +114,7 @@ class Database:
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.answers = AnswerSettlement(self)
         self.swarms = SwarmService(self)
+        self.goals = Goals(self)
         if settings.sqlalchemy_url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
             def configure_sqlite(connection, _record):
@@ -492,6 +495,7 @@ class Database:
             )
             self._bind_product_grant(transaction, turn, product_grant)
             await self.swarms.bind(transaction, mission, turn, generated=swarm_generated)
+            await self.goals.bind(transaction, turn)
             for position, image_id in enumerate(body.attachments):
                 # Reserve the upload's destination atomically before publishing
                 # it into a conversation, including concurrent first attachment.
@@ -771,6 +775,9 @@ class Database:
                 delegation_generated=generated_delegation is not None,
                 execution_context=context if delegation else None,
             )
+            goal = await self.goals.authorize(db, turn)
+            if goal is not None:
+                scope.goal_generation = goal.generation
             if scope.delegation_generated and delegation is not None:
                 inherited = (await saved_authority(self, db, delegation)).grants
                 if inherited != grants:
@@ -848,6 +855,7 @@ class Database:
                 raise PermissionError("This execution no longer has an authorized requester.")
             await self._check_product_turn(db, turn, scope.product_grant)
             await self.swarms.authorize(db, turn, scope=scope)
+            await self.goals.authorize(db, turn)
             session = await self.allowed_session(db, scope.session_id, actor)
             if (
                 session.active_turn != turn.id or session.status != "running" or turn.status != "running"
@@ -929,6 +937,9 @@ class Database:
             await db.execute(update(Session).where(
                 Session.id == session_id
             ).values(status="stopped"))
+            goal = await db.get(Goal, session_id, populate_existing=True)
+            if goal is not None and goal.status == "active":
+                self.goals.change(goal, "paused", "Paused by Stop.")
             await db.execute(update(Turn).where(
                 Turn.session_id == session_id,
                 Turn.status.in_(["queued", "starting", "running", "waiting", "steering",
@@ -958,6 +969,9 @@ class Database:
                     db, mission, "attention", "A team conversation was deleted. Restore it before resuming.",
                 )
             session.deleted = True
+            goal = await db.get(Goal, session_id, populate_existing=True)
+            if goal is not None and goal.status == "active":
+                self.goals.change(goal, "paused", "The conversation was deleted.")
             session.updated_at = now()
             # An answer already being saved retains its confirmed outcome.
             if session.status != "saving":
@@ -1169,6 +1183,7 @@ class Database:
                 ))
             if member is not None:
                 await self.swarms.bind(db, mission, turn, generated=True)
+            await self.goals.bind(db, turn)
             delegated = await db.get(DelegatedTurn, previous.id)
             if delegated is not None:
                 db.add(DelegatedTurn(turn_id=turn.id, session_id=delegated.session_id))

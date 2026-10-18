@@ -1,0 +1,22 @@
+.goal-panel {
+  margin: 12px 20px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-background);
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+}
+.goal-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+.goal-heading svg { color: var(--ui-primary); }
+.goal-usage, .goal-reason { color: var(--ui-muted); font-size: 12px; }
+.goal-usage { margin-left: auto; }
+.goal-objective { margin: 8px 0; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 120px; overflow: auto; }
+.goal-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.goal-dialog form { display: grid; gap: 12px; }
+@media (max-width: 600px) {
+  .goal-panel { margin: 8px 8px 0; padding: 12px; }
+  .goal-usage { margin-left: 0; flex-basis: 100%; }
+  .goal-dialog input, .goal-dialog textarea { font-size: 16px; }
+}

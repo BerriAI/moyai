@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
+import { GoalDialog, GoalPanel, type Goal } from "./goal"
 import { SkillMessage } from "./skill-content"
 import { SkillMarkdown, SkillMarkdownProvider } from "./skill-markdown"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -58,7 +59,7 @@ type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
 type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, BrowserLoginMetadata & { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
-type View = { session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
+type View = { session: Session; turns: Turn[]; goal?: Goal | null; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
 const settingsDestinations = [
   { page: "general", label: "General" },
@@ -432,6 +433,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [draft, setDraft] = useState("")
   const [answeredRequest, setAnsweredRequest] = useState<string | null>(null)
   const [swarmSpace, setSwarmSpace] = useState<boolean | null>(null)
+  const [goalDialog, setGoalDialog] = useState(false)
   const [model, setModel] = useState(view?.session.model ?? me.default_model)
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>(() => {
     const latest = view?.turns[0]
@@ -678,6 +680,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
 
   async function send(promptOverride?: string) {
     const prompt = promptOverride ?? (editing ? editText : draft)
+    if (!editing && ["/goal", "/goal edit"].includes(prompt.trim())) {
+      if (prompt.trim() === "/goal" && view?.goal) { setDraft(""); return }
+      setGoalDialog(true); setDraft(""); return
+    }
     if (editing) {
       if (busy || !prompt.trim()) return
       setBusy(true); setError("")
@@ -691,7 +697,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       prompt, model: answeringQuestion ? active?.model ?? model : model, mode,
       connections: answeringQuestion ? active?.connections ?? sendAccounts : sendAccounts,
       attachments: pictures.readyFiles.map(file => file.id),
-      ...(answeringQuestion ? { reply_to: active?.id } : {}),
+      ...(answeringQuestion && !/^\/goal(?:\s|$)/.test(prompt.trim()) ? { reply_to: active?.id } : {}),
     }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
@@ -754,6 +760,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
+        {view.goal && <GoalPanel goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy}
+          onCommand={command => {
+            setBusy(true); setError("")
+            void api(`/sessions/${id}/messages`, "POST", { prompt: command, request_key: crypto.randomUUID() })
+              .then(() => load()).catch(reason => setError(String(reason))).finally(() => setBusy(false))
+          }} onEdit={() => setGoalDialog(true)} />}
+        <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} goal={view.goal} onSubmit={async command => {
+          await api(`/sessions/${id}/messages`, "POST", { prompt: command, request_key: crypto.randomUUID(), model, connections: sendAccounts })
+          await load(); await refreshList()
+        }} />
         {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
           space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
         {originalSessionId && !space && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>

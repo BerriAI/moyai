@@ -2,6 +2,46 @@
 
 [Install Moyai](../README.md#run-locally) · [Documentation](README.md)
 
+## Goals
+
+`/goal` is a native Moyai command available out of the box in ordinary web chats.
+No personal skill, connector, or installation is required. Select **Goal** from
+the `/` picker, or send `/goal <objective>`. Moyai saves the objective with the
+conversation and continues across turns until it verifies completion.
+
+| Command | Action |
+| --- | --- |
+| `/goal <objective>` | Start a goal, or replace a completed goal. |
+| `/goal` | View the goal; open the setup dialog if none exists. |
+| `/goal edit <objective>` | Revise the objective; active goals continue with the revision. |
+| `/goal pause` | Pause work and automatic continuation. |
+| `/goal resume` | Resume the saved goal with its original model and accounts. |
+| `/goal clear` | Stop goal work and remove the goal; retain the conversation. |
+
+The goal panel shows its status, completed turns, token usage, and controls.
+Objectives accept up to 4,000 characters. Follow-up messages steer the work
+without replacing the objective. Questions and approval requests still require
+their normal answers; goal mode never grants additional permissions.
+**Stop**, archiving, and deleting the conversation also suspend continuation.
+Only the conversation owner can change its goal.
+
+An optional `/goal --budget 100000 <objective>` limits automatic continuation
+using the input and output tokens reported by settled turns. This is checked
+between turns; it does not cap an individual in-flight model request. To
+increase it, use `/goal edit --budget 200000 <objective>` and resume.
+
+The native agent uses `get_goal` and `update_goal` to inspect progress and report
+verified completion. A completion report takes effect only after its answer is
+saved. The same reported blocker must recur on three consecutive turns before
+the goal becomes blocked; resuming starts a fresh audit. Failed or interrupted
+execution, changed account access, and uncertain external actions require
+attention rather than automatic retries. Goals survive app and worker restarts.
+
+The command lifecycle follows the
+[Codex goal commands](https://developers.openai.com/codex/cli/slash-commands/#set-or-view-a-task-goal-with-goal).
+Moyai owns persistence and admission; its existing Pydantic AI agent and Temporal
+turn workflow execute every continuation.
+
 ## Answering questions
 
 Question cards use the chat's compact typography and numbered vertical options.
