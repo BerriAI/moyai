@@ -5,12 +5,22 @@ description: Build or refine Moyai's native React frontend using its established
 
 # Moyai UI
 
-Preserve the space workspace: near-black neutral surfaces, lavender actions,
-near-white text, local Manrope interface typography and opaque composer panels.
-The wordmark, home headline and code retain Share Tech Mono. The home screen
-uses deterministic stars, the decode headline and interactive Moyai meteor.
-Chats reuse the static stars at lower brightness; Settings stay quiet for sustained
-work. The workspace menu floats without reflowing chat; only the independent side
+Preserve the compact workspace: neutral charcoal and white themes, fine borders,
+restrained purple actions and frosted glass navigation, toolbars and composers.
+Keep code and reading surfaces quiet. Use solid fallback surfaces when blur is
+unavailable or reduced transparency is requested; avoid blur on layout ancestors. Theme choice persists locally;
+dark is the default. Keep messages and composer focus borders neutral. Use General Sans
+from the official Fontshare stylesheet for the interface, local Geist as the
+fallback, and Geist Mono for code. Do not commit the restricted General Sans
+font binaries to this public repository.
+Home and chat share a sparse static dot grid with faint guide lines and translucent glass composers.
+Home includes compact draft starters; code and message bubbles retain solid reading surfaces. Use 6–8px rounded controls within
+an edge-to-edge workspace without an outer gutter or rounded frame. The default sidebar groups current work by Needs you,
+In progress, In review and Backlog; preserve the alternate folder view and
+its existing actions. Keep chat entry compact, with attachment/model tools below. Use monospace for code,
+paths and technical metadata, with General Sans for prose. Keep review diffs prominent
+and expose repository/commit metadata through the Review details disclosure.
+The workspace menu floats without reflowing chat; only the independent side
 panel changes chat proportions. Inspect current screens before changing them.
 
 ## Sources and controls

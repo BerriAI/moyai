@@ -85,7 +85,7 @@ class SwarmService:
             or current is None or not current.enabled or current.auth_version != mission.auth_version
         ):
             raise HTTPException(403, "The swarm's original requester authority changed.")
-        root = await self.database.allowed_session(db, mission.id, actor)
+        root = await self.database.execution_session(db, mission.id, actor)
         source = await db.get(Turn, mission.source_turn_id)
         if source is None:
             raise HTTPException(403, "The swarm's original admission is unavailable.")

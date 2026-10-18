@@ -9,7 +9,6 @@ from importlib import import_module
 from pathlib import Path
 from socket import socket
 from typing import Any
-from unittest.mock import patch
 from uuid import uuid4
 
 import boto3
@@ -44,6 +43,7 @@ from temporalio.testing import WorkflowEnvironment
 
 from app.credentials import SaveSecret
 
+from .slack_fixture import route_slack_clients
 from .workspace import HarborWorkspace
 
 EVALS = Path(__file__).resolve().parents[1]
@@ -51,6 +51,7 @@ database_fixtures = import_module("product_database_fixtures")
 product_database_state = database_fixtures.product_database_state
 CREDENTIAL_TOOLS = ("credentials_list", "credentials_request", "credentials_run")
 BOT_USER = "UBOT00001"
+SLACK_BOT_TOKEN = "synthetic-slack-bot-token"
 SLACK_USER = "UTEST0001"
 TEAM = "TTEST0001"
 CHANNEL = "CTEST0001"
@@ -253,10 +254,10 @@ async def run_runtime_turn(
             bot_credentials = {
                 "access_token": "synthetic-slack-user-token",
                 "bot": {
-                    "access_token": "synthetic-slack-bot-token",
+                    "access_token": SLACK_BOT_TOKEN,
                     "bot_user_id": BOT_USER,
                     "team": {"id": TEAM},
-                    "scope": "channels:history,groups:history,chat:write",
+                    "scope": "channels:read,channels:history,groups:history,chat:write",
                 },
             }
             runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
@@ -303,12 +304,20 @@ async def offered_tool_names(
 def slack_transport(
     history: list[dict[str, Any]], reads: list[dict[str, Any]],
 ) -> httpx.MockTransport:
-    upstream = httpx.AsyncHTTPTransport()
-
-    async def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.host != "slack.com":
-            return await upstream.handle_async_request(request)
+    def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/api/conversations.info":
+            if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
+            if request.url.params.get("channel") != CHANNEL:
+                return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+            # The synthetic event belongs to this public, unshared channel. Let
+            # the real audience checker verify its caller and current binding.
+            return httpx.Response(200, json={"ok": True, "channel": {
+                "id": CHANNEL, "name": "harbor-eval", "is_channel": True,
+                "is_private": False, "is_ext_shared": False, "is_member": True,
+                "is_im": False, "is_mpim": False, "is_group": False,
+            }})
         if path.endswith("/conversations.replies"):
             reads.append({
                 "method": request.method,
@@ -316,17 +325,11 @@ def slack_transport(
                 "params": dict(request.url.params),
             })
             return httpx.Response(200, json={"ok": True, "messages": history, "has_more": False})
-        if path.endswith("/conversations.info"):
-            return httpx.Response(200, json={"ok": True, "channel": {
-                "id": CHANNEL, "is_channel": True, "is_private": False, "is_ext_shared": False,
-            }})
-        if path.endswith("/conversations.members"):
-            return httpx.Response(200, json={"ok": True, "members": [SLACK_USER, BOT_USER]})
         if path.endswith(("/chat.postMessage", "/chat.update")):
             return httpx.Response(200, json={
                 "ok": True, "channel": CHANNEL, "ts": "1792100000.001",
             })
-        return httpx.Response(200, json={"ok": True})
+        return httpx.Response(404, json={"ok": False, "error": "unsupported_slack_fixture_method"})
 
     return httpx.MockTransport(handle)
 
@@ -358,12 +361,6 @@ async def execute_turn(
     slack_reads: list[dict[str, Any]] = []
     transport = slack_transport(history, slack_reads)
     original_client = httpx.AsyncClient
-    original_init = httpx.AsyncClient.__init__
-
-    def routed_init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("transport", transport)
-        original_init(self, *args, **kwargs)
-
     payload = {
         "type": "event_callback", "team_id": TEAM, "event_id": f"eval-{case['id']}-{trial}",
         "event": {
@@ -371,55 +368,6 @@ async def execute_turn(
             "channel_type": "channel", "ts": current, "thread_ts": thread_ts, "text": case["prompt"],
         },
     }
-    slack_routing = patch.object(httpx.AsyncClient, "__init__", routed_init)
-    slack_routing.start()
-    try:
-        return await run_admitted_turn(
-            case, trial=trial, thread=thread, runtime=runtime, temporal=temporal,
-            workspace=workspace, payload=payload, thread_ts=thread_ts, slack_reads=slack_reads,
-            original_client=original_client,
-        )
-    finally:
-        slack_routing.stop()
-
-
-async def run_admitted_turn(
-    case: dict[str, Any],
-    *,
-    trial: int,
-    thread: list[dict[str, Any]],
-    runtime: Runtime,
-    temporal: Any,
-    workspace: HarborWorkspace,
-    payload: dict[str, Any],
-    thread_ts: str,
-    slack_reads: list[dict[str, Any]],
-    original_client: Any,
-) -> dict[str, Any]:
-    # Slack membership is checked again when the turn is prepared, so the stub stays routed
-    # for the whole turn, not only for intake.
-    service = runtime.product_slack
-    assert service is not None
-    await service.receive_payload(payload)
-    async with runtime.database.sessions() as db:
-        slack_thread = await db.scalar(sqlalchemy.select(SlackThread).where(
-            SlackThread.team_id == TEAM,
-            SlackThread.channel_id == CHANNEL,
-            SlackThread.thread_ts == thread_ts,
-        ))
-        if slack_thread is None:
-            raise RuntimeError(f"ProductSlack did not bind {case['id']}.")
-        turn = await db.scalar(sqlalchemy.select(Turn).where(
-            Turn.session_id == slack_thread.session_id,
-        ).order_by(Turn.created_at.desc()))
-    if turn is None:
-        raise RuntimeError(f"ProductSlack did not submit a turn for {case['id']}.")
-    await runtime.database.claim_next()
-    available_tools = await offered_tool_names(runtime, turn.id, workspace)
-    handle = await temporal.client.start_workflow(
-        TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
-    )
-    await asyncio.wait_for(handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")))
     posted: list[dict[str, Any]] = []
 
     def post_stub(request: httpx.Request) -> httpx.Response:
@@ -427,39 +375,63 @@ async def run_admitted_turn(
         posted.append(body)
         return httpx.Response(200, json={"ok": True, "channel": body["channel"], "ts": "1792100000.001"})
 
+    # Construct the explicit outbox fixture before mounting context-read clients.
     async with original_client(
         base_url="https://slack.com/api/", transport=httpx.MockTransport(post_stub), timeout=20,
     ) as delivery:
-        for _ in range(4):
-            await service.pump(delivery)
-    async with runtime.database.sessions() as db:
-        completed = await db.get(Turn, turn.id)
-    if completed is None:
-        raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
-    reply = next((
-        "\n\n".join(
-            block["text"]["text"] for block in item.get("blocks", [])
-            if block.get("type") == "section" and isinstance(block.get("text"), dict)
-        )
-        for item in reversed(posted)
-        if any(block.get("type") == "section" for block in item.get("blocks", []))
-    ), "")
-    prompt = runtime.security.unseal(completed.prompt).decode()
-    return {
-        "case": case["id"],
-        "trial": trial,
-        "turn_id": turn.id,
-        "agent_model": runtime.settings.default_model,
-        "offered_tool_names": available_tools,
-        "slack_event_input": payload,
-        "slack_thread_input": thread,
-        "slack_thread_reads": slack_reads,
-        "prompt_received": prompt,
-        "thread_messages_in_prompt": [
-            message["text"] for message in case["thread"] if message["text"] in prompt
-        ],
-        "attached_image_names": [],
-        "posted_reply": reply,
-        "tool_trace": conversation_trace(completed.conversation, runtime.security),
-        "tokens_cost": json.loads(completed.usage or "{}"),
-    }
+        with route_slack_clients(transport):
+            await service.receive_payload(payload)
+            async with runtime.database.sessions() as db:
+                slack_thread = await db.scalar(sqlalchemy.select(SlackThread).where(
+                    SlackThread.team_id == TEAM,
+                    SlackThread.channel_id == CHANNEL,
+                    SlackThread.thread_ts == thread_ts,
+                ))
+                if slack_thread is None:
+                    raise RuntimeError(f"ProductSlack did not bind {case['id']}.")
+                turn = await db.scalar(sqlalchemy.select(Turn).where(
+                    Turn.session_id == slack_thread.session_id,
+                ).order_by(Turn.created_at.desc()))
+            if turn is None:
+                raise RuntimeError(f"ProductSlack did not submit a turn for {case['id']}.")
+            await runtime.database.claim_next()
+            available_tools = await offered_tool_names(runtime, turn.id, workspace)
+            handle = await temporal.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            await asyncio.wait_for(
+                handle.result(), timeout=float(os.getenv("MOYAI_EVAL_TURN_TIMEOUT", "300")),
+            )
+            for _ in range(4):
+                await service.pump(delivery)
+            async with runtime.database.sessions() as db:
+                completed = await db.get(Turn, turn.id)
+            if completed is None:
+                raise RuntimeError(f"Turn {turn.id} disappeared after completion.")
+            reply = next((
+                "\n\n".join(
+                    block["text"]["text"] for block in item.get("blocks", [])
+                    if block.get("type") == "section" and isinstance(block.get("text"), dict)
+                )
+                for item in reversed(posted)
+                if any(block.get("type") == "section" for block in item.get("blocks", []))
+            ), "")
+            prompt = runtime.security.unseal(completed.prompt).decode()
+            return {
+                "case": case["id"],
+                "trial": trial,
+                "turn_id": turn.id,
+                "agent_model": runtime.settings.default_model,
+                "offered_tool_names": available_tools,
+                "slack_event_input": payload,
+                "slack_thread_input": thread,
+                "slack_thread_reads": slack_reads,
+                "prompt_received": prompt,
+                "thread_messages_in_prompt": [
+                    message["text"] for message in case["thread"] if message["text"] in prompt
+                ],
+                "attached_image_names": [],
+                "posted_reply": reply,
+                "tool_trace": conversation_trace(completed.conversation, runtime.security),
+                "tokens_cost": json.loads(completed.usage or "{}"),
+            }

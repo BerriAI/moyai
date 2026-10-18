@@ -1,6 +1,8 @@
 schema_version = "1.4"
 
 [metadata]
+task_version = "2"
+evaluation_target = "LiteLLM proxy Chat Completions integration with a deterministic provider fixture"
 
 [verifier]
 timeout_sec = 900.0

@@ -1,5 +1,6 @@
 import React, { forwardRef, useEffect, useSyncExternalStore } from "react"
 import { Dialog as DialogPrimitive } from "radix-ui"
+import { FolderCode } from "lucide-react"
 import { Dialog, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -56,7 +57,7 @@ export const WorkspaceKey = forwardRef<HTMLButtonElement, React.ComponentProps<t
       className={cn("workspace-toggle workspace-orbit-key", className)} data-open={open}
       title={alert ? "Workspace · failed work · ⌘." : "Workspace · ⌘."}
       aria-description={alert ? "Workspace contains failed work" : undefined} aria-keyshortcuts="Meta+. Control+.">
-      <span className="workspace-orbit-glyph" aria-hidden="true"><i /><i /><i /></span>
+      <FolderCode size={16} aria-hidden="true" />
       {alert && <span className="workspace-orbit-alert" aria-hidden="true" />}
     </Button>
   },

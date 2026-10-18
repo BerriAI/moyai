@@ -14,6 +14,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 
 from .db import database, now
+from .database import DatabaseError
 from .connector_errors import ConnectorError
 
 PROFILE_SCOPES = {'users:read', 'users:read.email'}
@@ -188,6 +189,8 @@ class SlackIdentities:
                 return  # Connection/policy changed while the request was in flight.
             if result.get('error') == 'ratelimited':
                 raise ConnectorError('Slack profile lookup is rate limited.', code='ratelimited', retryable=True)
+            if result.get('error') == 'missing_scope':
+                raise ConnectorError('The Slack connection cannot read profiles.', code='missing_scope')
             if not result.get('ok'):
                 raise ValueError('Profile unavailable')
             profile = result.get('user')
@@ -201,9 +204,11 @@ class SlackIdentities:
             name = data.get('real_name') or data.get('display_name') or profile.get('real_name') or row['name']
             name = str(name)[:160]
         except Exception as error:
-            if isinstance(error, (TimeoutError, OSError, httpx.TransportError)) or (isinstance(error, ConnectorError) and error.retryable):
+            if isinstance(error, (TimeoutError, OSError, httpx.TransportError, ConnectorError, DatabaseError)):
                 # Keep the last verified observation unchanged, but do not admit
-                # this message using it. The durable inbox retries the lookup.
+                # this message using it. Connection/refresh failures are not
+                # evidence that the sender's identity changed. The durable
+                # inbox retries verification after the connection recovers.
                 raise ConnectorError('Slack profile lookup is temporarily unavailable.',
                                      code='profile_unavailable', retryable=True) from error
             await database(self.store.execute, "UPDATE users SET link_status=CASE WHEN link_method='manual' THEN 'manual' WHEN linked_user_id IS NOT NULL THEN 'review' ELSE 'unavailable' END,profile_eligible=0,profile_next_check=? WHERE id=?", (int(time.time()) + 300, row['id']))

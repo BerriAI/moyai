@@ -7,6 +7,7 @@ Only a compare-and-set refresh may retain it.
 
 import hashlib
 import json
+import re
 import secrets
 
 from .connector_errors import ConnectorError
@@ -23,14 +24,14 @@ def new_credentials(credentials):
     return {**credentials, AUTHORITY: secrets.token_hex(32)}
 
 
-def refresh_connection(store, security, provider, original, credentials):
+def refresh_connection(store, security, provider, original, credentials, *, connection=None):
     previous = json.loads(security.decrypt(original["encrypted"]))
     fresh = {**credentials, AUTHORITY: authority(previous, original["encrypted"])}
-    changed = store.execute(
-        """UPDATE connections SET encrypted=?,updated_at=?
-           WHERE provider=? AND encrypted=?""",
-        (security.encrypt(json.dumps(fresh)), now(), provider, original["encrypted"]),
-    )
+    query = """UPDATE connections SET encrypted=?,updated_at=?
+               WHERE provider=? AND encrypted=?"""
+    values = (security.encrypt(json.dumps(fresh)), now(), provider, original["encrypted"])
+    changed = (connection.execute(query, values).rowcount if connection is not None
+               else store.execute(query, values))
     if not changed:
         raise ConnectorError(
             "The connection changed while refreshing. No action was sent.",
@@ -42,18 +43,27 @@ def refresh_connection(store, security, provider, original, credentials):
 def save_if_unchanged(store, security, provider, credentials, label, expected):
     """A verified onboarding result cannot overwrite a concurrent revocation."""
     encrypted = security.encrypt(json.dumps(new_credentials(credentials)))
-    if expected is None:
-        changed = store.execute(
-            "INSERT INTO connections VALUES(?,?,?,?) ON CONFLICT(provider) DO NOTHING",
-            (provider, encrypted, label, now()),
-        )
-    else:
-        changed = store.execute(
-            "UPDATE connections SET encrypted=?,label=?,updated_at=? WHERE provider=? AND encrypted=?",
-            (encrypted, label, now(), provider, expected),
-        )
-    if not changed:
-        raise ConnectorError("The connection changed. Start again from Connections.", dispatched=False)
+    with store.connect() as conn:
+        conn.begin_write()
+        if expected is None:
+            changed = conn.execute(
+                "INSERT INTO connections VALUES(?,?,?,?) ON CONFLICT(provider) DO NOTHING",
+                (provider, encrypted, label, now()),
+            ).rowcount
+        else:
+            changed = conn.execute(
+                "UPDATE connections SET encrypted=?,label=?,updated_at=? WHERE provider=? AND encrypted=?",
+                (encrypted, label, now(), provider, expected),
+            ).rowcount
+        if not changed:
+            raise ConnectorError("The connection changed. Start again from Connections.", dispatched=False)
+        team = ((credentials.get('bot') or {}).get('team') or {}).get('id') if provider == 'slack' else None
+        if isinstance(team, str) and re.fullmatch(r'T[A-Z0-9]{7,30}', team):
+            # Reconnect repairs the connection, not the sender's identity.
+            # Remove only the retry delay so the next signed message verifies
+            # its profile immediately; keep every existing identity fence.
+            conn.execute("UPDATE users SET profile_next_check=0 WHERE kind='slack' AND id LIKE ?",
+                         (f'slack:{team}:%',))
 
 
 def set_policy(store, security, provider, enabled, read_only):

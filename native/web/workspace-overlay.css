@@ -47,10 +47,11 @@
   scrollbar-color: var(--ui-control-border) transparent;
   padding: 10px 12px;
   border: 1px solid var(--ui-border);
-  border-radius: 12px;
-  background: var(--ui-background);
+  border-radius: 6px;
+  background: var(--ui-glass-elevated);
+  background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur);
   color: var(--ui-foreground);
-  box-shadow: 0 12px 36px rgb(0 0 0 / 28%);
+  box-shadow: var(--ui-elevated-shadow);
   pointer-events: auto;
 }
 
@@ -100,24 +101,17 @@
   position: relative;
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
   background: transparent;
   transition: background .15s, box-shadow .2s;
 }
-.conversation .header-controls > .workspace-orbit-key:hover { background: #ffffff19; box-shadow: inset 0 0 0 1px #ffffff24; }
+.conversation .header-controls > .workspace-orbit-key:hover { background: var(--ui-secondary); }
 .conversation .header-controls > .workspace-orbit-key[data-open="true"] {
-  background: color-mix(in srgb, var(--ui-primary) 16%, var(--ui-canvas));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-primary) 60%, transparent), 0 0 16px #a48cf033;
+  background: var(--ui-secondary);
+  color: var(--ui-foreground);
 }
-.workspace-orbit-glyph { display: block; position: relative; width: 16px; height: 16px; border: 1.2px solid currentColor; border-radius: 50%; }
-.workspace-orbit-glyph > i { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-.workspace-orbit-glyph > i:nth-child(1) { left: -2.5px; top: 5.5px; }
-.workspace-orbit-glyph > i:nth-child(2) { right: -1px; top: 0; }
-.workspace-orbit-glyph > i:nth-child(3) { left: 6px; bottom: -2.5px; }
-[data-open="true"] > .workspace-orbit-glyph { border-color: var(--ui-headline-accent); box-shadow: 0 0 10px #a48cf080, inset 0 0 6px #a48cf055; }
-[data-open="true"] > .workspace-orbit-glyph > i { background: white; }
 .workspace-orbit-alert { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--ui-danger); box-shadow: 0 0 0 2px var(--ui-canvas); }
 
 @keyframes workspace-overlay-enter {
