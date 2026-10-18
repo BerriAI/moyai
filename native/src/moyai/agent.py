@@ -44,6 +44,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 from .artifacts import artifact_capability
 from .browser import browser_capability
+from .browser_login import BrowserLogin
 from .bundled_skills import bundled_skill_catalog
 from .commentary import Commentary
 from .computer_startup import OnDemandDurability, on_demand_coder
@@ -114,7 +115,7 @@ class DurableQuestions(AskUser[RunScope]):
         ) -> dict[str, list[str]] | str:
             """Ask a clarification with options; the user can also type their answer.
 
-            Ask only when the answer cannot be found in the conversation or workspace.
+            Ask only when the answer cannot be found in the conversation, the connected repositories, or the workspace. If the request has several readings that are each cheap to check, check them instead of asking.
             Use required=False for optional preferences with a reasonable fallback.
             Optional questions may time out with no answer; state your assumption then.
             Use required=True when missing information prevents correct work.
@@ -376,6 +377,7 @@ def make_agent(
             artifact_capability(database, objects),
             attachment_capability(database, objects),
             browser_capability(database),
+            BrowserLogin(database),
             on_demand_coder(authority.save_workspace),
             WorkflowPlanning(
                 store_resolver=lambda ctx: stores.plan(

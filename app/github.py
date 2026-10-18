@@ -230,6 +230,7 @@ TOOLS = {
 class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
     def __init__(self, store, security, settings, connectors):
         self.store, self.security, self.settings, self.connectors = store, security, settings, connectors
+        self.api_url = API
         self.write_lock = asyncio.Lock()
         self.token_lock = asyncio.Lock()
         self.setup_lock = asyncio.Lock()
@@ -267,10 +268,10 @@ class GitHub(GitHubCoding, GitHubCI, GitHubWriteAccess, GitHubRepositories):
             headers['Authorization'] = 'Bearer ' + token
         try:
             async with httpx.AsyncClient(timeout=45, follow_redirects=False) as client:
-                response = await client.request(method, API + path, headers=headers, **kwargs)
+                response = await client.request(method, self.api_url + path, headers=headers, **kwargs)
                 if repository_redirect and method == 'GET' and response.status_code in (301, 302, 307, 308):
                     location = response.headers.get('location', '')
-                    if not re.fullmatch(re.escape(API) + r'/repositories/[1-9][0-9]*', location):
+                    if not re.fullmatch(re.escape(self.api_url) + r'/repositories/[1-9][0-9]*', location):
                         raise ConnectorError('GitHub returned an unexpected repository redirect.')
                     response = await client.get(location, headers=headers)
                 if missing and response.status_code == 404:

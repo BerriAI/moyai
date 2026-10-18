@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,6 +12,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurability
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.models import Model
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
 from temporalio import workflow
@@ -19,12 +21,20 @@ from temporalio.worker import Replayer
 
 from moyai.agent import PACKAGE_ROOT, Authority, HarnessActivityContext, StartupSkills, make_agent
 from moyai.bundled_skills import bundled_skill_catalog
+from moyai.context import ContextSource, SessionContext
 from moyai.contracts import RunScope
 from moyai.settings_runtime import settings_capability
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
+
+
+class TeamContextSource(ContextSource):
+    name: ClassVar[str] = "test"
+
+    async def render(self, scope: RunScope) -> str:
+        return await asyncio.to_thread(lambda: "Connected team context is available.")
 
 
 def scripted_model(respond):
@@ -54,6 +64,7 @@ async def test_default_agent_reaches_temporal_model_without_computer(runtime, ac
         allocations.assert_not_awaited()
         attachments.assert_not_awaited()
         requests.append(messages)
+        assert "Connected team context is available." in info.instructions
         loaded = any(
             isinstance(part, ToolReturnPart) and part.tool_name == "load_capability"
             for message in messages for part in message.parts
@@ -74,9 +85,11 @@ async def test_default_agent_reaches_temporal_model_without_computer(runtime, ac
             )
         return ModelResponse(parts=[TextPart("Ready without a computer.")])
 
-    runtime.models = {"test": scripted_model(respond)}
+    models: dict[str, Model[Any]] = {"test": scripted_model(respond)}
+    runtime.models = models
     runtime.agent, runtime.durability = make_agent(
         runtime.settings, runtime.database, runtime.stores, runtime.objects, models=runtime.models,
+        product_capabilities=[SessionContext(sources=[TeamContextSource()])],
     )
     converter = encrypted_converter(runtime.security, runtime.objects)
     async with await WorkflowEnvironment.start_local(
@@ -103,6 +116,31 @@ async def test_default_agent_reaches_temporal_model_without_computer(runtime, ac
     ]
     assert not any("__workspace__" in name for name in scheduled)
     assert (await runtime.database.session(await runtime.database.user(turn.actor_id), turn.session_id)).workspace is None
+
+
+async def test_make_agent_includes_session_context_in_model_request(runtime, active, tmp_path):
+    _, turn, prepared = active
+    requests: list[str] = []
+
+    def respond(messages, info):
+        requests.append(info.instructions)
+        return ModelResponse(parts=[TextPart("Used the team context.")])
+
+    models: dict[str, Model[Any]] = {"test": scripted_model(respond)}
+    agent, _ = make_agent(
+        runtime.settings,
+        runtime.database,
+        runtime.stores,
+        runtime.objects,
+        models=models,
+        workspace=LocalWorkspace(tmp_path),
+        product_capabilities=[SessionContext(sources=[TeamContextSource()])],
+    )
+    result = await agent.run(prepared.prompt, deps=prepared.scope, run_id=turn.id)
+
+    assert result.output == "Used the team context."
+    assert len(requests) == 1
+    assert "Connected team context is available." in requests[0]
 
 
 async def test_bundled_catalog_does_not_replace_skill_files_in_execution_workspace(runtime, active):
@@ -140,7 +178,7 @@ async def test_bundled_catalog_does_not_replace_skill_files_in_execution_workspa
         assert "Use the native file and shell tools" in str(results["read_file"].content)
         return ModelResponse(parts=[TextPart("Bundled instructions and computer files agree.")])
 
-    models = {"test": scripted_model(respond)}
+    models: dict[str, Model[Any]] = {"test": scripted_model(respond)}
     agent, _ = make_agent(
         runtime.settings, runtime.database, runtime.stores, runtime.objects,
         models=models, workspace=TrackedWorkspace(computer),
@@ -177,12 +215,15 @@ async def test_bundled_catalog_version_preserves_old_workspace_reads(tmp_path, m
 
     agent = Agent(
         FunctionModel(respond),
+        deps_type=RunScope,
         capabilities=[
             LocalWorkspace(tmp_path),
             StartupSkills(str(source.parent), catalog=catalog),
         ],
     )
-    result = await agent.run("Inspect the skill directory.")
+    result = await agent.run("Inspect the skill directory.", deps=RunScope(
+        session_id="session", turn_id="turn", actor_id="actor", model="test",
+    ))
     assert result.output == "Selected the compatible catalog."
     assert marker == ["moyai-bundled-skill-catalog-v1"]
 

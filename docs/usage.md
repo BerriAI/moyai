@@ -42,6 +42,15 @@ queue; **Send now** moves saved input into the transcript while admission settle
 Session search is available through Command/Ctrl+K rather than a second sidebar
 filter.
 
+The sidebar initially opens **Recent** and closes **Pinned**, **Participated**,
+folders and subagent branches. Expand a section or branch with its toggle;
+explicit choices are remembered per account in this browser. Opening a child
+conversation or refreshing the list does not expand its ancestors. Older
+open-by-default preferences adopt these defaults once. Dropping a session into
+a folder still reveals its destination. Background refreshes keep the list
+steady; loading feedback appears on the first load and when **Show more sessions**
+is clicked.
+
 Saved-file links in the transcript, subagent results and side chats open the
 right-panel preview. Text and Markdown render in the panel; supported images,
 videos and audio use its media viewer. **Download original** remains available
@@ -61,6 +70,17 @@ without overwriting that preference.
 After a task creates its Modal workspace, add **Computer** and choose **Open
 computer**, or use the session menu. Background coding and sandbox creation do
 not open the panel automatically.
+
+When a website requires human sign-in, Moyai can call `request_browser_login`
+after opening its sign-in page. The requester sees **Browser sign-in needed**,
+the website and reason, and Computer opens once for that request. Closing the
+panel keeps it closed until **Open Computer** is selected; reloading a waiting
+conversation restores the request. Take control, sign in inside Chromium, then
+release control and select **I've signed in**. Moyai resumes and must inspect
+the page to verify access. Confirmation is not an authentication-success check.
+**Cancel sign-in** resumes with a cancellation so Moyai can explain or continue
+independent work. These requests do not time out and only the original requester
+can answer. A changed computer requires cancelling and making a fresh request.
 
 Opening the computer starts a real X desktop in the same sandbox, with Chromium open and a taskbar.
 The panel shows the desktop itself. Click **Take control** on the screen to
@@ -162,6 +182,13 @@ not the legacy application's database or APIs.
   changed or removed. Code examples and escaped references remain literal.
   A unique leading `/team` short name also works when sent directly; duplicate
   names require a scoped reference from the picker.
+  Assistant replies and work updates reuse the same icon and readable name for
+  skills selected in that conversation, including streamed text and saved updates
+  after reload. Plain references and standalone inline-code references such as
+  `/team` are supported; code blocks, command snippets, paths, links and escaped
+  examples stay literal. Unknown or ambiguous short names stay unchanged.
+  This display uses saved selection metadata and makes no additional library
+  request or skill invocation.
   Personal skills are limited to their owner's private web conversations.
   Existing-product installations load the original personal/organization
   instructions and supporting-file contents at execution, without converting or

@@ -33,9 +33,10 @@ async function handle(req,res,next) {
     if(state.connectionError && (url.searchParams.has('shared') || url.searchParams.has('session_id')))return json({detail:'Connections temporarily unavailable.'},503);
     return json(state.connectionsBySession?.[url.searchParams.get('session_id')]||state.connections||[]);
   }
-  if(url.pathname==='/api/session-folders')return json([]);
+  if(url.pathname==='/api/session-folders')return json(state.folders||[]);
   if(url.pathname==='/api/pull-requests/statuses')return json(state.prStatuses||{});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
+    if(url.pathname==='/api/history/sessions'&&state.inventoryError)return json({detail:'Inventory temporarily unavailable.'},503);
     if(url.pathname==='/api/history/sessions'&&state.inventoryRows)return json({sessions:state.inventoryRows,ancestors:state.inventoryAncestors||[],has_more:false});
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
       {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId}];
@@ -92,6 +93,7 @@ async function handle(req,res,next) {
       return json({id:'resumed-turn',status:'queued'},202);
     }
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
+    if(url.pathname.endsWith('/computer'))return json({available:false,has_workspace:true,controlled:false,busy:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
     if(url.pathname.includes('/actions/')) {
       const key=decodeURIComponent(url.pathname.split('/actions/')[1]);
@@ -135,10 +137,17 @@ async function handle(req,res,next) {
       return json({status:'stopping'});
     }
     if(req.method==='PATCH') {
+      if(state.holdPreference&&(data.pinned!==undefined||data.folder!==undefined))await state.holdPreference;
+      if(state.preferenceError&&(data.pinned!==undefined||data.folder!==undefined))return json({detail:'Could not save sidebar preference.'},503);
       if(state.holdRename)await state.holdRename;
       if(state.renameError)return json({detail:'Could not save the session name.'},503);
       const id=url.pathname.split('/')[3];
       if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
+      if(data.pinned!==undefined||data.folder!==undefined) {
+        const patch={...(data.pinned===undefined?{}:{pinned:data.pinned}),...(data.folder===undefined?{}:{folder:data.folder})};
+        state.sessionOverrides={...state.sessionOverrides,[id]:{...state.sessionOverrides?.[id],...patch}};
+        if(state.inventoryRows)state.inventoryRows=state.inventoryRows.map(row=>row.id===id&&row.source!=='legacy'?{...row,...patch}:row);
+      }
       return json({updated:true});
     }
     if(state.answerAccepted&&state.answerRefreshError)return json({detail:'Could not refresh the conversation.'},503);
@@ -153,9 +162,10 @@ async function handle(req,res,next) {
 }
 async function waitFor(predicate,label='condition') {const end=Date.now()+10000;while(!predicate()){if(Date.now()>end)throw new Error('Timed out: '+label);await new Promise(resolve=>setTimeout(resolve,25));}}
 function emit(value,id,event) {for(const client of clients)client.write(`${id===undefined?'':`id: ${id}\n`}${event?`event: ${event}\n`:''}data: ${JSON.stringify(value)}\n\n`);}
-async function pageFor(t,route='#'+sessionId,width=1440) {
+async function pageFor(t,route='#'+sessionId,width=1440,initialize) {
   const page=await browser.newPage({viewport:{width,height:1000},reducedMotion:'reduce'});t.after(()=>page.close());
   const errors=[];page.on('pageerror',error=>errors.push(error.message));t.after(()=>assert.deepEqual(errors,[]));
+  if(initialize)await initialize(page);
   await page.goto(base+'/'+route);return page;
 }
 for(const width of [1440,768,320])test(`ordinary question accepts a composer answer at ${width}px`,async t=>{
@@ -185,6 +195,62 @@ test('another participant can queue a message without answering the requester qu
   const sent=state.requests.find(row=>row.path.endsWith('/messages')&&row.method==='POST');
   assert.equal(sent.body.reply_to,undefined);
   assert.equal(state.requests.some(row=>row.path.endsWith('/answers')),false);
+});
+function loginRequest() {
+  return {calls:[{tool_call_id:'login-call',tool_name:'request_browser_login',args:{url:'https://portal.example.test',reason:'Inspect the protected report.'}}],
+    approvals:[],metadata:{'login-call':{kind:'browser_login',site:'https://portal.example.test',reason:'Inspect the protected report.',workspace_id:'test-computer'}}};
+}
+for(const width of [1440,768,320])test(`browser sign-in opens Computer and submits an explicit acknowledgement at ${width}px`,async t=>{
+  reset({status:'waiting',canAnswer:true,canReply:false,pending:loginRequest()});
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  if(width<1000) {
+    await page.getByRole('region',{name:'Browser sign-in instructions',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Back to sign-in request',exact:true}).click();
+    await page.waitForFunction(()=>document.activeElement?.textContent==='I’ve signed in');
+  }
+  await page.getByRole('heading',{name:'Browser sign-in needed',exact:true}).waitFor();
+  assert.equal(await page.locator('.browser-login-request').getByText('Inspect the protected report.',{exact:true}).count(),1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await page.getByRole('button',{name:'I’ve signed in',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/answers')));
+  assert.deepEqual(state.requests.find(row=>row.path.endsWith('/answers')).body.browser_logins,{'login-call':'signed_in'});
+});
+test('browser sign-in respects panel dismissal, can reopen, and restores after reload',async t=>{
+  reset({status:'waiting',canAnswer:true,pending:loginRequest()});
+  const page=await pageFor(t);
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Close Computer tab',exact:true}).click();
+  const readCount=()=>state.requests.filter(row=>row.path===`/api/sessions/${sessionId}`&&row.method==='GET').length;
+  const previous=readCount();await waitFor(()=>readCount()>previous,'session poll after dismissal');
+  assert.equal(await page.getByRole('tab',{name:'Computer',exact:true}).count(),0);
+  await page.getByRole('button',{name:'Open Computer',exact:true}).click();
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  await page.reload();
+  await page.getByRole('tab',{name:'Computer',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Cancel sign-in',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/answers')));
+  assert.deepEqual(state.requests.find(row=>row.path.endsWith('/answers')).body.browser_logins,{'login-call':'cancelled'});
+});
+test('another viewer cannot open or complete the requester browser handoff',async t=>{
+  reset({status:'waiting',canAnswer:false,pending:loginRequest()});
+  const page=await pageFor(t);
+  await page.getByRole('textbox',{name:'Message Moyai',exact:true}).waitFor();
+  assert.equal(await page.getByRole('tab',{name:'Computer',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'I’ve signed in',exact:true}).count(),0);
+});
+test('browser sign-in retry keeps its identity and accepted responses cannot be resubmitted',async t=>{
+  reset({status:'waiting',canAnswer:true,pending:loginRequest(),answerError:true});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'I’ve signed in',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'The answer could not be saved'}).waitFor();
+  const sent=()=>state.requests.filter(row=>row.path.endsWith('/answers'));
+  state.answerError=false;state.answerRefreshError=true;
+  await page.getByRole('button',{name:'I’ve signed in',exact:true}).click();
+  await page.getByText('Your response was sent, but the conversation could not be refreshed.',{exact:true}).waitFor();
+  assert.equal(sent().length,2);
+  assert.equal(sent()[0].body.request_key,sent()[1].body.request_key);
+  assert.equal(await page.getByRole('button',{name:'I’ve signed in',exact:true}).isEnabled(),false);
 });
 for(const width of [1440,768,320])test(`Activity downloads the session debug trace at ${width}px`,async t=>{
   reset({status:'idle'});
@@ -231,6 +297,210 @@ before(async()=>{
 after(async()=>{for(const client of clients)client.end();await browser?.close();await server?.close();});
 
 const renameRequests=()=>state.requests.filter(row=>row.method==='PATCH'&&row.body?.title!==undefined);
+const preferenceRequests=()=>state.requests.filter(row=>row.method==='PATCH'&&(row.body?.pinned!==undefined||row.body?.folder!==undefined));
+async function clickSidebarPin(page, name) {
+  await page.locator('.session-row').filter({has:page.getByRole('button',{name,exact:true})}).hover();
+  await page.getByRole('button',{name,exact:true}).click({timeout:5000});
+}
+
+function sidebarDefaultsFixture() {
+  const child='d'.repeat(32),pinned='e'.repeat(32),filed='f'.repeat(32),shared='1'.repeat(32);
+  reset({status:'idle',folders:[{id:'today',name:'Today'}],sessionOverrides:{
+    [child]:{title:'Curie',parent_session_id:sessionId},
+  }});
+  state.inventoryRows=[
+    {...session(),source:'native'},
+    {...session(child),source:'native'},
+    {...session(pinned),title:'Pinned work',pinned:true,source:'native'},
+    {...session(filed),title:'Filed work',folder:'Today',source:'native'},
+    {...session(shared),title:'Shared work',owner_id:'teammate',participated:true,source:'native'},
+  ];
+  return child;
+}
+
+for(const width of [1440,768,320])test(`sidebar starts with only Recent open and keeps child routes collapsed at ${width}px`,async t=>{
+  const child=sidebarDefaultsFixture();
+  const page=await pageFor(t,'#',width);
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  const recent=page.getByRole('button',{name:/^Recent /});
+  await page.getByRole('button',{name:/^Pinned /}).waitFor();
+  assert.equal(await recent.getAttribute('aria-expanded'),'true');
+  for(const name of [/^Pinned /,/^Participated /,/^Today /])
+    assert.equal(await page.getByRole('button',{name}).getAttribute('aria-expanded'),'false');
+  const expand=page.getByRole('button',{name:'Expand subagents for Current native work',exact:true});
+  await expand.waitFor();
+  assert.equal(await page.locator(`[data-session-key="native:${child}"]`).isVisible(),false);
+  await expand.press('Enter');
+  assert.equal(await page.locator(`[data-session-key="native:${child}"]`).isVisible(),true);
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).press('Space');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.goto(base+'/#'+child);
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
+  await expand.waitFor();
+  assert.equal(await page.locator(`[data-session-key="native:${child}"]`).isVisible(),false);
+  const sidebar=await page.getByRole('navigation',{name:'Conversations',exact:true}).boundingBox();
+  assert.ok(sidebar&&sidebar.x>=0&&sidebar.x+sidebar.width<=width);
+});
+
+test('explicit sidebar expansion survives reload and polling without opening new branches',async t=>{
+  sidebarDefaultsFixture();
+  const page=await pageFor(t,'#');
+  await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
+  await page.getByRole('button',{name:/^Participated /}).click();
+  await page.getByRole('button',{name:/^Today /}).click();
+  await page.getByRole('button',{name:/^Recent /}).click();
+  await page.reload();
+  await page.getByRole('button',{name:/^Today /}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/^Recent /}).getAttribute('aria-expanded'),'false');
+  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'true');
+  assert.equal(await page.getByRole('button',{name:/^Today /}).getAttribute('aria-expanded'),'true');
+  await page.getByRole('button',{name:/^Recent /}).click();
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
+  const newParent='2'.repeat(32),newChild='3'.repeat(32);
+  state.inventoryRows.push({...session(newParent),source:'native',title:'New parent'},
+    {...session(newChild),source:'native',title:'New child',parent_session_id:newParent});
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.getByRole('button',{name:'Expand subagents for New parent',exact:true}).waitFor();
+  assert.equal(await page.locator(`[data-session-key="native:${newChild}"]`).isVisible(),false);
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
+});
+
+for(const stored of ['legacy','malformed','unavailable'])test(`sidebar safely adopts collapsed defaults with ${stored} storage`,async t=>{
+  sidebarDefaultsFixture();
+  const page=await pageFor(t,'#',1440,async page=>page.addInitScript(kind=>{
+    if(kind==='unavailable'){
+      Storage.prototype.getItem=()=>{throw new Error('Storage unavailable');};
+      Storage.prototype.setItem=()=>{throw new Error('Storage unavailable');};
+    }else{
+      localStorage.setItem('moyai-native-folders:viewer',kind==='legacy'?JSON.stringify({version:2,closed:[]}):'{bad json');
+      localStorage.setItem('moyai-subagents:viewer',kind==='legacy'?JSON.stringify(['native:'+'a'.repeat(32)]):JSON.stringify({version:1,expanded:{}}));
+      localStorage.setItem('moyai-subagents:another-user',JSON.stringify({version:1,expanded:['native:'+'a'.repeat(32)]}));
+    }
+  },stored));
+  await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/^Recent /}).getAttribute('aria-expanded'),'true');
+  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'false');
+});
+
+test('background inventory refresh stays quiet while explicit pagination shows loading and recovers from failure',async t=>{
+  reset();
+  state.inventoryPages=[[{...session(),source:'native'}],[{...session('4'.repeat(32)),source:'native',title:'Older work'}]];
+  const page=await pageFor(t,'#');
+  const more=page.getByRole('button',{name:'Show more sessions',exact:true});
+  await more.waitFor();
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  state.holds={'/api/history/sessions':held};
+  const reads=()=>state.requests.filter(r=>r.path==='/api/history/sessions').length;
+  let count=reads();
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await waitFor(()=>reads()>count,'held background inventory read');
+  assert.equal(await more.isVisible(),true);
+  assert.equal(await more.isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Loading…',exact:true}).count(),0);
+  count=reads();await more.click();
+  await waitFor(()=>reads()>count,'manual pagination replaces background read');
+  const loading=page.getByRole('button',{name:'Loading…',exact:true});
+  await loading.waitFor();assert.equal(await loading.isEnabled(),false);
+  state.inventoryError=true;release();
+  await more.waitFor();assert.equal(await more.isEnabled(),true);
+  state.inventoryError=false;state.holds={};
+  await more.click();
+  await page.getByRole('link',{name:/Older work/}).waitFor();
+  assert.equal(await loading.count(),0);
+});
+
+test('an empty sidebar shows initial loading but remains settled during later background reads',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',inventoryRows:[],holds:{'/api/history/sessions':held}});
+  const page=await pageFor(t,'#');
+  await page.locator('#sessions-recent').getByText('Loading sessions…',{exact:true}).waitFor();
+  release();state.holds={};
+  await page.getByText('No sessions here yet.',{exact:true}).waitFor();
+  let releaseRefresh;const refreshHeld=new Promise(resolve=>{releaseRefresh=resolve;});t.after(()=>releaseRefresh());
+  state.holds={'/api/history/sessions':refreshHeld};
+  const count=state.requests.filter(r=>r.path==='/api/history/sessions').length;
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await waitFor(()=>state.requests.filter(r=>r.path==='/api/history/sessions').length>count);
+  assert.equal(await page.getByText('Loading sessions…',{exact:true}).count(),0);
+  assert.equal(await page.getByText('No sessions here yet.',{exact:true}).isVisible(),true);
+});
+
+test('sidebar pin and unpin render before a held save without blocking other actions or refreshing catalogs',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holdPreference:held});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
+  const catalogReads=()=>state.requests.filter(row=>['/api/connections','/api/session-folders','/api/history/sessions'].includes(row.path)).length;
+  const reads=catalogReads();
+  await clickSidebarPin(page,'Pin Current native work');
+  await page.getByRole('button',{name:/^Pinned /}).click();
+  const unpin=page.getByRole('button',{name:'Unpin Current native work',exact:true});
+  await unpin.waitFor({timeout:500});
+  assert.equal(await unpin.isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'New folder',exact:true}).isEnabled(),true);
+  await clickSidebarPin(page,'Unpin Current native work');
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor({timeout:500});
+  assert.equal(preferenceRequests().length,1,'the second save waits for the first');
+  release();
+  await waitFor(()=>preferenceRequests().length===2);
+  await page.getByText('Session unpinned.',{exact:true}).waitFor();
+  assert.deepEqual(preferenceRequests().map(row=>row.body),[{pinned:true},{pinned:false}]);
+  assert.equal(catalogReads(),reads,'personal edits do not refetch the inventory or catalogs');
+  await page.reload();
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
+});
+
+test('sidebar drag into and out of a folder renders while saves are held and preserves the pin',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const id='11111111-1111-4111-8111-111111111111';
+  reset({status:'idle',holdPreference:held,folders:[{id:'today',name:'Today'}],
+    inventoryRows:[{...session(id),title:'Folder latency test',pinned:true,folder:'',source:'native'}]});
+  const page=await pageFor(t,'#');
+  await page.getByRole('button',{name:/^Pinned /}).click();
+  const row=page.locator(`[data-session-key="native:${id}"]`);
+  await row.waitFor();
+  const today=page.locator('.session-group').filter({has:page.getByRole('button',{name:/^Today/})});
+  const recent=page.locator('.session-group').filter({has:page.getByRole('button',{name:/^Recent/})});
+  await row.dragTo(today.locator('.session-group-heading'));
+  await today.locator(`[data-session-key="native:${id}"]`).waitFor({timeout:500});
+  assert.equal(await row.getByRole('button',{name:'Unpin Folder latency test',exact:true}).isEnabled(),true);
+  await row.dragTo(recent.locator('.session-group-heading'));
+  await page.locator('#sessions-pinned').locator(`[data-session-key="native:${id}"]`).waitFor({timeout:500});
+  release();
+  await waitFor(()=>preferenceRequests().length===2);
+  await page.getByText('Moved to Pinned.',{exact:true}).waitFor();
+  assert.deepEqual(preferenceRequests().map(row=>row.body),[{folder:'Today'},{folder:''}]);
+  await page.reload();
+  await page.locator('#sessions-pinned').locator(`[data-session-key="native:${id}"]`).waitFor();
+});
+
+test('a rejected sidebar save restores placement and shows an error',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holdPreference:held,preferenceError:true});
+  const page=await pageFor(t);
+  await clickSidebarPin(page,'Pin Current native work');
+  await page.getByRole('button',{name:/^Pinned /}).click();
+  await page.getByRole('button',{name:'Unpin Current native work',exact:true}).waitFor({timeout:500});
+  release();
+  await page.getByRole('alert').filter({hasText:'Could not save sidebar preference.'}).waitFor();
+  await page.getByRole('button',{name:'Pin Current native work',exact:true}).waitFor();
+  assert.equal(await page.locator('#sessions-pinned').count(),0);
+});
+
+test('header and command palette see the current pin even when their conversation read is older',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',holdPreference:held});
+  const page=await pageFor(t);
+  await clickSidebarPin(page,'Pin Current native work');
+  await page.getByRole('button',{name:'Session actions',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Unpin',exact:true}).waitFor({timeout:500});
+  await page.keyboard.press('Escape');
+  const dialog=await palette(page);
+  await dialog.getByRole('option',{name:'Unpin session',exact:true}).waitFor({timeout:500});
+  release();
+});
 async function editTitle(page) {
   await page.getByRole('button',{name:/^Rename session:/}).click();
   const input=page.getByRole('textbox',{name:'Session name',exact:true});
@@ -784,6 +1054,74 @@ for(const width of [1440,768,320])test(`inline skills share one icon and keep su
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });
 
+for(const width of [1440,768,320])test(`assistant skills match the composer in streaming, progress and reloaded replies at ${width}px`,async t=>{
+  const marker='[/team](moyai-skill:personal%3Ateam?icon=users)';
+  reset({skills:[{id:'team',name:'team',description:'Team procedure',scope:'personal',reference:'personal:team',icon:'users'}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:`Use ${marker} here.`}],
+    workProgress:{messages:[]}});
+  const page=await pageFor(t,'#'+sessionId,width),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('/team');await page.getByRole('listbox',{name:'Skills'}).waitFor();await input.press('Enter');
+  const composer=input.getByLabel('/team skill');await composer.waitFor();
+  const icon=await composer.locator('svg').innerHTML();
+  await waitFor(()=>clients.size>0,'SSE connected');
+  emit({type:'response_start',run_id:turnId,step:1},1);
+  emit({type:'text_start',index:0,text:'Using /te',phase:'commentary'},2);
+  await page.locator('.turn-progress-history').getByText('Using /te',{exact:true}).waitFor();
+  assert.equal(await page.locator('.turn-progress-history .skill-mention').count(),0);
+  emit({type:'text_delta',index:0,text:'am to inspect.'},3);
+  const progress=page.locator('.turn-progress-history').getByLabel('/team skill');
+  await progress.waitFor();assert.equal(await progress.locator('svg').innerHTML(),icon);
+  await page.locator('.turn-progress-toggle').click();
+  await page.locator('.turn-progress-latest').getByLabel('/team skill').waitFor();
+  emit({type:'response_start',run_id:turnId,step:2},4);
+  emit({type:'text_start',index:0,text:'Finished with **/team** and `/personal:team`.',phase:'final_answer'},5);
+  await page.locator('.live-message .skill-mention').nth(1).waitFor();
+  assert.deepEqual(await page.locator('.live-message .skill-mention svg').evaluateAll(nodes=>nodes.map(node=>node.innerHTML)),[icon,icon]);
+  state.messages.push({id:2,turn_id:turnId,role:'assistant',author_id:null,content:`Finished with **/team** and \`/personal:team\`.\n\n${marker}`});
+  state.workProgress={messages:[{id:'saved',phase:'commentary',text:'Using /team to inspect.'}]};
+  state.status='completed';emit({},undefined,'finished');
+  await page.locator('.message.assistant:not(.live-message) .skill-mention').nth(2).waitFor();
+  state.skills=[];await page.reload();
+  await page.locator('.message.assistant .skill-mention').nth(2).waitFor();
+  await page.locator('.turn-progress-toggle').click();
+  await page.locator('.turn-progress-history').getByLabel('/team skill').waitFor();
+  assert.deepEqual(await page.locator('.message.assistant .skill-mention svg').evaluateAll(nodes=>nodes.map(node=>node.innerHTML)),[icon,icon,icon]);
+  assert.equal(await page.locator('.message.assistant strong .skill-mention').innerText(),'Team');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(state.requests.filter(row=>row.path==='/api/skills').length,1,'transcript rendering needs no catalog request');
+});
+
+test('assistant skill rendering preserves literals, rejects ambiguous names and stays within the conversation',async t=>{
+  const marker=scope=>`[/team](moyai-skill:${scope}%3Ateam?icon=auto)`;
+  const literals=['/team/file.txt','https://example.test/team','--path=/team','/unknown','\\/team',
+    '`run /team`','```sh\n/team\n```','[link /team](https://example.test/team)','[reference /team][ref]','<span>/team</span>'];
+  reset({status:'completed',messages:[
+    {id:1,turn_id:turnId,role:'user',author_id:'viewer',content:`Use ${marker('personal')} and ${marker('org')}.`},
+    {id:2,turn_id:turnId,role:'assistant',author_id:null,content:
+      '/team stays ambiguous. /personal:team and /org:team are scoped.\n\n'+literals.join('\n\n')+'\n\n[ref]: https://example.test/team'},
+  ]});
+  const page=await pageFor(t),answer=page.locator('.message.assistant');
+  await answer.getByLabel('/team skill').nth(1).waitFor();
+  assert.equal(await answer.locator('.skill-mention').count(),2);
+  assert.equal(await answer.locator('pre code').innerText(),'/team\n');
+  assert.match(await answer.locator('code:not(pre code)').innerText(),/run \/team/);
+  assert.equal(await answer.locator('a .skill-mention').count(),0);
+  assert.equal(await answer.locator('a').first().getAttribute('href'),'https://example.test/team');
+  assert.match(await answer.innerText(),/\/team stays ambiguous/);
+  // Remove ambiguity to exercise literal protection when /team is resolvable.
+  state.messages[0].content=`Use ${marker('personal')}.`;
+  state.messages[1].content='/team. **/team**, and \\/team; /team &amp; more.\n\n'+literals.join('\n\n')+'\n\n[ref]: https://example.test/team';
+  await page.reload();await answer.locator('.skill-mention').nth(2).waitFor();
+  assert.equal(await answer.locator('.skill-mention').count(),3);
+  assert.match(await answer.innerText(),/Team\. Team, and \/team; Team & more/);
+  const child='d'.repeat(32);
+  state.sessionOverrides={[child]:{title:'Unrelated conversation'}};
+  state.messagesBySession={[child]:[{id:3,turn_id:turnId,role:'assistant',author_id:null,content:'No selected skill: /team.'}]};
+  await page.goto(base+'/#'+child);await page.getByRole('heading',{name:'Unrelated conversation',exact:true}).waitFor();
+  await page.getByText('No selected skill: /team.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.skill-mention').count(),0);
+});
+
 test('inline mention editing preserves middle-of-text insertion, undo, copy/paste and code literals',async t=>{
   reset({status:'completed',skills:[{id:'p',name:'team',description:'Team procedure',scope:'personal',reference:'personal:team',icon:'👥'}]});
   const page=await pageFor(t,'#'+sessionId),input=page.getByRole('textbox',{name:'Message Moyai'}),options=page.getByRole('listbox',{name:'Skills'});
@@ -1185,6 +1523,7 @@ test('source collisions and identically named legacy folders survive paged inven
     [{...session(collision),source:'native',key:'native:'+collision,title:'Native collision',folder:'',pinned:false}],
   ];
   const page=await pageFor(t,'#run='+legacyId);const history=page.locator(`[data-session-key="legacy:${collision}"]`);
+  await page.getByRole('button',{name:/^Original folder/}).click();
   await history.waitFor();assert.equal(await page.getByRole('button',{name:'Folder actions for Original folder'}).count(),0);
   assert.equal(await page.getByRole('button',{name:/Original folder/}).count(),1);
   assert.ok(!state.requests.some(req=>req.path==='/api/pull-requests/statuses'));
@@ -1380,6 +1719,19 @@ test('answer controls are disabled while submission is in progress',async t=>{
   release();
 });
 
+test('a filtered sidebar refresh preserves the selected conversation pin when its row is absent',async t=>{
+  reset({status:'idle'});
+  const page=await pageFor(t);
+  await clickSidebarPin(page,'Pin Current native work');
+  await page.getByText('Session pinned.',{exact:true}).waitFor();
+  state.inventoryRows=[];
+  await page.getByRole('button',{name:'Show archived conversations',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path==='/api/history/sessions'&&row.query.includes('archived=true')));
+  await page.getByText('No sessions here yet.',{exact:true}).first().waitFor();
+  await page.getByRole('button',{name:'Session actions',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Unpin',exact:true}).waitFor({timeout:500});
+});
+
 test('the last answer submits a complete multi-question snapshot',async t=>{
   const pending=colorQuestion();
   pending.calls[0].args.questions.push({header:'Format',question:'Which format?',options:[{label:'Text'},{label:'JSON'}]});
@@ -1433,6 +1785,7 @@ for(const width of [1440,768,320])test(`sidebar nests three subagents and opens 
   const page=await pageFor(t,'#'+sessionId,width);
   if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
   const group=page.getByRole('group',{name:'Subagents of Current native work',exact:true});
+  await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
   await group.waitFor();assert.equal(await group.locator('[data-session-key]').count(),3);
   const parent=page.locator(`[data-session-key="native:${sessionId}"]`);
   const child=group.locator(`[data-session-key="native:${childIds[0]}"]`);

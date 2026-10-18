@@ -1,13 +1,12 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import { ArrowUp, Bug, Download, FileText, Check, Clock, ExternalLink, Link2, LockKeyhole, LogOut, Menu, MessageCircleQuestion, MessageSquare, PanelRight, Plus, Search, Settings, Square, SquarePen, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
 import { SkillMessage } from "./skill-content"
+import { SkillMarkdown, SkillMarkdownProvider } from "./skill-markdown"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "@/theme.css"
 import "./style.css"
@@ -23,6 +22,7 @@ import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { SessionTitle } from "./session-title"
+import { useSessionPreferences } from "./use-session-preferences"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
@@ -41,6 +41,7 @@ import { previewFileLink, type OpenFile } from "./file-links"
 import { firstMessage, waitsBehindActive, type Session, type Turn, type Message, type NewConversation } from "./conversation-state"
 import { ProductCredentialRequest } from "./product-credentials"
 import { QuestionChoices, type Question } from "./question-choices"
+import { BrowserLoginCard, type BrowserLoginMetadata, type LoginOutcome } from "./browser-login"
 
 const ComputerPanel = React.lazy(() => import("./computer").then(module => ({ default: module.ComputerPanel })))
 const SettingsPage = React.lazy(() => import("./settings").then(module => ({ default: module.SettingsPage })))
@@ -55,7 +56,7 @@ type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: 
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
 type Call = { tool_call_id: string; tool_name: string; args: Record<string, unknown> | string }
-type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, { request_id?: string }> }
+type Pending = { calls: Call[]; approvals: Call[]; metadata?: Record<string, BrowserLoginMetadata & { request_id?: string }> }
 type Effect = { id: string; turn_id: string; tool_name: string; arguments: unknown }
 type View = { session: Session; turns: Turn[]; messages?: Message[]; pending?: Pending; can_answer?: boolean; can_reply_with_text?: boolean; question_deadline?: string; credential_requests?: { request_id: string }[]; activity?: Activity[]; effects?: Effect[]; has_unsettled_effects?: boolean }
 type Activity = LiveEvent
@@ -110,7 +111,7 @@ function App() {
   const sessionsNow = useRef(sessions)
   sessionsNow.current = sessions
   const [sessionPageCount, setSessionPageCount] = useState(1)
-  const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, notice: "" })
+  const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, loaded: false, notice: "" })
   const [selected, setSelected] = useState(currentRoute)
   const [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceRequest | null>(null)
   const [prStates, setPrStates] = useState<Record<string, PRSummary[]>>({})
@@ -133,6 +134,12 @@ function App() {
   const settingsOpen = selected === "settings" || selected.startsWith("settings/")
   const historical = selected.startsWith("run=")
   const scopeKey = `${me?.user.id}:${me?.user.role}:${me?.user.individual}:${me?.csrf}`
+  const preferences = useSessionPreferences(scopeKey)
+  const preferenceRows = new Map(sessions.filter(row => !sessionIsReadOnly(row)).map(row => [row.id, row]))
+  const preferenceSession = (row: SidebarSession) => {
+    const latest = preferenceRows.get(row.id)
+    return preferences.apply(sessionIsReadOnly(row) || !latest ? row : { ...row, pinned: latest.pinned, folder: latest.folder })
+  }
   const routeScope = `${scopeKey}:${routeRevision}`, routeKey = `${routeScope}:${selected}`
   const originalId = historical ? decodeRoute(selected.slice(4)) : ""
   const acceptedStart = (initialConversation?.scope === scopeKey && initialConversation.value.session.id === selected)
@@ -177,7 +184,10 @@ function App() {
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
-    setInventoryState(previous => ({ ...previous, loading: true }))
+    const preferenceCheckpoint = preferences.checkpoint()
+    // Background polling keeps the existing list and pagination control quiet.
+    // Explicit pagination sets loading before starting its new refresh.
+    setInventoryState(previous => previous.loaded ? previous : { ...previous, loading: true })
     const inventory = async () => {
       const rows = new Map<string, Session>(), notices = new Set<string>()
       let cursor: string | null = null, hasMore = false
@@ -208,8 +218,9 @@ function App() {
       const results = await Promise.allSettled([
         inventory().then(result => {
           if (result && current()) {
+            preferences.acceptRead(preferenceCheckpoint, result.rows)
             setSessions(result.rows)
-            setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
+            setInventoryState({ loading: false, loaded: true, hasMore: result.hasMore, notice: result.notice })
           }
         }).catch(reason => {
           if (current() && reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
@@ -228,15 +239,16 @@ function App() {
     } finally {
       if (version === refreshVersion.current) setInventoryState(previous => ({ ...previous, loading: false }))
     }
-  }, [listView, sessionPageCount])
+  }, [listView, sessionPageCount, preferences])
 
   useEffect(() => {
     api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
-    const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
+    const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" }); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
     const accessChanged = () => {
       const requestCsrf = csrfToken()
       ++refreshVersion.current
       setSessions([]); setConnections([]); setFolders([]); setPrStates({}); setPrRefresh(value => value + 1); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false)
+      setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" })
       setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1)
       void api<Me>("/me").then(value => { if (csrfToken() === requestCsrf) { setCsrf(value.csrf); setMe(value) } }, () => {})
     }
@@ -292,7 +304,7 @@ function App() {
   const newSession = () => { location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
   const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
   const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
-  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
+  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} preferences={preferences} preferenceSession={preferenceSession} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
     setWorkspaceRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1, tab: "computer" }))
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
@@ -306,9 +318,13 @@ function App() {
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
-      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
-        hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
-        onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
+      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...preferences.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
+        hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => {
+          ++refreshVersion.current
+          setInventoryState(previous => ({ ...previous, loading: true }))
+          setSessionPageCount(value => value + 1)
+        }}
+        onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" }); setListView(value) }}
         onOpenSideChat={row => {
           const host = nativeSelected && nativeSelected !== row.id ? nativeSelected : row.parent_session_id
           if (!host) return
@@ -352,7 +368,7 @@ function AppCommandPalette({ current, historicalId, productMode, ...props }: {
 }) {
   const actions = useSessionActions()
   const session: PaletteCurrentSession | undefined = current ? {
-    ...current, source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
+    ...actions.preferenceSession(current), source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
   } : historicalId ? { id: historicalId, title: "Saved session", source: "legacy", read_only: true } : undefined
   return <CommandPalette {...props} scopeLabel="Your accessible sessions" currentSession={session} busy={actions.busy} search={searchSessions}
     destinations={settingsDestinations.filter(item => !item.productOnly || productMode === "existing")} onOpenSession={openSessionReference}
@@ -443,6 +459,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const endedStreams = useRef(new Set<string>())
   const [panelState, dispatchPanel] = useReducer((state: typeof emptyPanelState, action: PanelAction | { type: "reset" }) => action.type === "reset" ? emptyPanelState : panelReducer(state, action), emptyPanelState)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  const openedBrowserLogin = useRef("")
+  const panelReturnFocus = useRef<HTMLElement | null>(null)
   const sessionActions = useSessionActions()
   const exportTrace = useCallback(() => {
     setTraceBusy(true)
@@ -482,6 +500,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
     setAccountCatalog({ scope: "", rows: [], loading: false, error: "" }); setAccountNotice(""); setSkippedAccountScope("")
     dispatchPanel({ type: "reset" })
+    openedBrowserLogin.current = ""
+    panelReturnFocus.current = null
     sessionCallback.current?.(null)
   }
   const clearSensitiveNow = useRef(clearSensitive)
@@ -602,6 +622,22 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     () => clearSensitiveNow.current(),
   )
   const requestAnswered = Boolean(active && answeredRequest === active.id)
+  const browserLoginIds = view?.pending?.calls.filter(call => call.tool_name === "request_browser_login")
+    .map(call => call.tool_call_id).join(",") ?? ""
+  const browserLogin = view?.pending?.calls.find(call => call.tool_name === "request_browser_login")
+  const loginMetadata = browserLogin ? view?.pending?.metadata?.[browserLogin.tool_call_id] : undefined
+  const canResolveInput = Boolean(active && (view?.can_answer ?? active.actor_id === me.user.id))
+  useEffect(() => {
+    if (sideMode || !visible || !browserLoginIds || !canResolveInput || requestAnswered) return
+    const identity = `${id}:${active?.id}:${browserLoginIds}`
+    if (openedBrowserLogin.current === identity) return
+    openedBrowserLogin.current = identity
+    setWorkspaceOpen(false)
+    dispatchPanel({ type: "open", tab: { id: "computer", kind: "computer", title: "Computer" } })
+    const frame = requestAnimationFrame(() =>
+      transcript.current?.querySelector(".browser-login-request")?.scrollIntoView({ block: "end" }))
+    return () => cancelAnimationFrame(frame)
+  }, [id, active?.id, browserLoginIds, canResolveInput, visible, requestAnswered, sideMode])
   const answeringQuestion = Boolean(view?.session.status === "waiting" && view.can_reply_with_text && active && !requestAnswered && pictures.files.length === 0)
   const activeId = visible && active && ["running", "saving"].includes(active.status) && active.actor_id === me.user.id ? active.id : null
   useEffect(() => {
@@ -721,7 +757,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   // Questions and effect reviews remain in the conversation where they can be answered.
   const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
     && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
-  const chat = <section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
+  const chat = <SkillMarkdownProvider messages={visibleMessages}><section className={`chat file-drop-zone${space ? " swarm-space-mode" : ""}`} id={chatId} {...fileDrop.handlers}>
       <div className="chat-layout"><div className="chat-content">
         {!space && <SpaceBackdrop variant="chat" />}
         {fileDrop.dragging && <FileDropOverlay />}
@@ -747,7 +783,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
-                {message.content && <div className="message-content">{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown> : <SkillMessage content={message.content} />}</div>}
+                {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
               </div>
 
@@ -770,7 +806,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : active.id === liveText.turnId ? liveText.action || "Working…" : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? active.actor_id === me.user.id) && <>
             {view.question_deadline && <p className="notice">Optional question. If unanswered, Moyai will continue using its judgment after {new Date(view.question_deadline).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}.</p>}
-            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} />
+            <PendingRequests key={active.id} pending={view.pending} turnId={active.id} sessionId={id} submitted={requestAnswered} onAccepted={() => setAnsweredRequest(active.id)} onDone={load} onOpenComputer={() => sideMode ? sessionActions.openComputer(id) : addTab("computer")} />
           </>}
           {session.status === "waiting" && !view.can_answer && !view.pending && <p className="notice">Waiting for the original requester’s response. New messages will be queued.</p>}
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
@@ -822,7 +858,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           onOutput={openOutput} />
       </WorkspaceOverlayContent>}
       </div>
-      </section>
+      </section></SkillMarkdownProvider>
   if (sideMode) return <div className="conversation side-conversation">
     <header className="side-chat-heading"><h2 ref={heading} tabIndex={-1} title={session.title}>{session.title}</h2><a href={`#${id}`} title="Open as main conversation" aria-label="Open side chat as main conversation"><ExternalLink size={15} /></a></header>
     {chat}
@@ -859,7 +895,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       {chat}
 
       <PanelResizeHandle workspace={workspaceElement} enabled={panelState.visible && !panelState.expanded} chatId={chatId} />
-      <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab}>{(tab, activeTab) => {
+      <PanelTabs state={panelState} dispatch={dispatchPanel} onAdd={addTab} returnFocus={panelReturnFocus}>{(tab, activeTab) => {
         if (tab.kind === "action") return <ActionPanel
           key={JSON.stringify([authorityKey, connectionVersion, me.user.id, me.csrf, tab.action])}
           action={tab.action} active={activeTab} onDenied={() => clearSensitiveNow.current()} />
@@ -868,7 +904,19 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         if (tab.kind === "output") return <OutputPanel sessionId={tab.sessionId ?? id} resource={tab.resource} active={activeTab}
           onOpenFile={openOutput} onName={title => dispatchPanel({ type: "rename", id: tab.id, title })} />
         if (tab.kind === "files") return <FilesPanel sessionId={id} onOpen={openOutput} active={activeTab} />
-        if (tab.kind === "computer") return <React.Suspense fallback={<div className="panel-empty" role="status">Opening computer…</div>}><ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} /></React.Suspense>
+        if (tab.kind === "computer") return <div className="browser-login-computer">
+          {browserLoginIds && canResolveInput && !requestAnswered && <div className="browser-login-panel-hint" role="region" aria-label="Browser sign-in instructions">
+            <strong>Sign in using Computer</strong>
+            {loginMetadata?.site && <p>{loginMetadata.site}</p>}
+            {loginMetadata?.reason && <p>{loginMetadata.reason}</p>}
+            <p>Take control, complete sign-in, then release control. Return to the request to confirm or cancel.</p>
+            <Button type="button" variant="outline" size="sm" onClick={() => {
+              panelReturnFocus.current = transcript.current?.querySelector<HTMLButtonElement>(".browser-login-request button[aria-pressed]") ?? null
+              dispatchPanel({ type: "hide" })
+            }}>Back to sign-in request</Button>
+          </div>}
+          <React.Suspense fallback={<div className="panel-empty" role="status">Opening computer…</div>}><ComputerPanel id={id} hasWorkspace={Boolean(session.workspace)} active={activeTab} /></React.Suspense>
+        </div>
         if (tab.kind === "activity") return <>
           <div className="activity-toolbar">
             <Button variant="outline" size="sm" disabled={traceBusy} onClick={exportTrace}><Download size={15} />{traceBusy ? "Preparing trace…" : "Get debug trace"}</Button>
@@ -951,10 +999,11 @@ function EffectReview({ effect, onDone }: { effect: Effect; onDone: () => Promis
   </form>
 }
 
-function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void> }) {
+function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone, onOpenComputer }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void>; onOpenComputer: () => void }) {
   const [values, setValues] = useState<Record<string, string[]>>({})
   const [custom, setCustom] = useState<Record<string, string>>({})
   const [approvals, setApprovals] = useState<Record<string, boolean>>({})
+  const [browserLogins, setBrowserLogins] = useState<Record<string, LoginOutcome>>({})
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   const form = useRef<HTMLFormElement>(null)
@@ -970,21 +1019,23 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
   }, [busy, submitted])
   const questions = pending.calls.filter(call => call.tool_name === "ask_user_question").map(call => ({ call, questions: (typeof call.args === "string" ? JSON.parse(call.args) : call.args).questions as Question[] }))
   const credentials = pending.calls.filter(call => call.tool_name === "credentials_request")
-  const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request"].includes(call.tool_name))
-  const isComplete = (nextValues: typeof values, nextCustom: typeof custom) => questions.every(({ call, questions }) => questions.every(question => {
+  const logins = pending.calls.filter(call => call.tool_name === "request_browser_login")
+  const unknown = pending.calls.some(call => !["ask_user_question", "credentials_request", "request_browser_login"].includes(call.tool_name))
+  const isComplete = (nextValues: typeof values, nextCustom: typeof custom, nextLogins = browserLogins) => questions.every(({ call, questions }) => questions.every(question => {
     const key = `${call.tool_call_id}:${question.header}`
     return Boolean(nextCustom[key]?.trim() || nextValues[key]?.length)
   })) && pending.approvals.every(call => typeof approvals[call.tool_call_id] === "boolean")
-  const requiresContinue = pending.approvals.length > 0 || credentials.length > 0
+    && logins.every(call => Boolean(nextLogins[call.tool_call_id]))
+  const requiresContinue = pending.approvals.length > 0 || credentials.length > 0 || logins.length > 1 || (logins.length > 0 && questions.length > 0)
   async function refreshSubmitted() {
     setBusy(true); setError("")
     try { await onDone() }
     catch { setError("Your response was sent, but the conversation could not be refreshed.") }
     finally { setBusy(false) }
   }
-  async function submit(nextValues = values, nextCustom = custom) {
+  async function submit(nextValues = values, nextCustom = custom, nextLogins = browserLogins) {
     if (submitting.current || submitted || unknown) return
-    if (!isComplete(nextValues, nextCustom)) {
+    if (!isComplete(nextValues, nextCustom, nextLogins)) {
       setError(requiresContinue ? "Complete the remaining questions and approval requests before continuing." : "Answer the remaining questions before continuing.")
       return
     }
@@ -996,7 +1047,7 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
       const key = `${call.tool_call_id}:${question.header}`
       return { header: question.header, selected: nextCustom[key]?.trim() ? [] : nextValues[key] ?? [], custom_answer: nextCustom[key]?.trim() || null }
     }) }]))
-    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers }) }
+    try { await api(`/sessions/${sessionId}/answers`, "POST", { turn_id: turnId, request_key: requestKey.current, approvals, answers, ...(logins.length ? { browser_logins: nextLogins } : {}) }) }
     catch (e) {
       submitting.current = false
       setError(String(e)); setBusy(false)
@@ -1013,10 +1064,18 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
       return <div className="pending" key={call.tool_call_id}><h3>Secure access requested</h3><p>Provide access through the secure form to continue this task.</p>{requestId ? <ProductCredentialRequest requestId={requestId} onResolved={onDone} /> : <p role="alert">This request has no secure form reference. Refresh the session to check its current state.</p>}</div>
     })}
     {unknown && <p className="notice" role="status">This task is waiting for an input that this client cannot resolve.</p>}
-    {(questions.length > 0 || pending.approvals.length > 0) && <form ref={form} aria-busy={busy} className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
+    {(questions.length > 0 || pending.approvals.length > 0 || logins.length > 0) && <form ref={form} aria-busy={busy} className={questions.length ? "question-form" : "pending"} onSubmit={e => { e.preventDefault(); void submit() }}>
     {questions.length
       ? <div className="question-form-header"><MessageCircleQuestion size={14} aria-hidden="true" /><h3>{questions.reduce((count, item) => count + item.questions.length, 0) > 1 ? "Questions" : "Question"}</h3>{disabled && <span className="question-send-status" role="status">{submitted ? "Answer sent" : "Sending…"}</span>}</div>
-      : <h3>Your input is needed</h3>}
+      : logins.length === 0 && <h3>Your input is needed</h3>}
+    {logins.map(call => <BrowserLoginCard key={call.tool_call_id} metadata={pending.metadata?.[call.tool_call_id]}
+      outcome={browserLogins[call.tool_call_id]} disabled={disabled} onOpen={onOpenComputer}
+      onAnswer={outcome => {
+        if (submitting.current) return
+        const next = { ...browserLogins, [call.tool_call_id]: outcome }
+        setBrowserLogins(next)
+        if (!requiresContinue && isComplete(values, custom, next)) void submit(values, custom, next)
+      }} />)}
     {questions.map(({ call, questions }) => questions.map(question => {
       const key = `${call.tool_call_id}:${question.header}`
       return <QuestionChoices key={key} question={question} selected={values[key] ?? []} customAnswer={custom[key] ?? ""} disabled={disabled}
