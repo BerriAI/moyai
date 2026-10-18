@@ -13,6 +13,7 @@ from pydantic_ai import Conversation, ConversationTypeAdapter
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from pydantic_ai.run import AgentRunResultEvent
 from sqlalchemy import select
+from temporalio import activity
 from temporalio.api.deployment.v1 import WorkerDeploymentVersion as ProtoVersion
 from temporalio.api.workflowservice.v1 import (
     DescribeWorkerDeploymentRequest,
@@ -25,7 +26,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 
 from moyai.deployment_handoff import DeploymentHandoff
-from moyai.history_handoff import AgentCheckpoint, save_history_checkpoint
+from moyai.history_handoff import AgentCheckpoint, CheckpointSave, save_history_checkpoint
 from moyai.inference_usage import InferenceUsage
 from moyai.live_events import PUBLIC_TOPIC, ResponseStart
 from moyai.models import Effect, Event, Turn
@@ -207,3 +208,115 @@ async def test_unsettled_gateway_attempt_refuses_deployment_checkpoint(runtime, 
         attempt = await db.get(InferenceUsage, "attempt")
         attempt.status = "completed"
     assert (await save_history_checkpoint(checkpoint)).reference is not None
+
+
+@pytest.mark.parametrize("race", ["signal_during_save", "unsettled_ledger"])
+@pytest.mark.parametrize("runtime", ["history"], indirect=True)
+async def test_history_rollover_preserves_pending_deployment_without_repeating_work(
+    runtime, active, monkeypatch, race,
+):
+    from moyai import worker
+
+    session, turn, _ = active
+    model_entered, release_model = asyncio.Event(), asyncio.Event()
+    saved_history, release_save = asyncio.Event(), asyncio.Event()
+    model = runtime.models["test"]
+    original_stream = model.stream_function
+
+    async def gated_model(messages, info):
+        if not model_entered.is_set():
+            model_entered.set()
+            await release_model.wait()
+        async for item in original_stream(messages, info):
+            yield item
+
+    @activity.defn(name="moyai_save_history_checkpoint_v1")
+    async def hold_saved_history(checkpoint: AgentCheckpoint) -> CheckpointSave:
+        result = await save_history_checkpoint(checkpoint)
+        if result.reference is not None and not saved_history.is_set():
+            saved_history.set()
+            await release_save.wait()
+        return result
+
+    monkeypatch.setattr(model, "stream_function", gated_model)
+    monkeypatch.setattr(worker, "ACTIVITIES", [
+        hold_saved_history if item is save_history_checkpoint else item for item in worker.ACTIVITIES
+    ])
+    runtime.settings.history_continue_bytes = 16384
+    runtime.settings.worker_deployment = f"history-race-{uuid4().hex}"
+    runtime.settings.worker_build_id = "blue"
+    if race == "unsettled_ledger":
+        async with runtime.database.sessions.begin() as db:
+            db.add(InferenceUsage(
+                id="late-receipt", request_key="late-receipt", session_id=session.id,
+                turn_id=turn.id, actor_id=turn.actor_id, model=turn.model,
+                provider_scope="test-gateway", created_at=turn.created_at, status="unknown",
+            ))
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()],
+        data_converter=encrypted_converter(runtime.security, runtime.objects),
+    ) as environment:
+        runtime.client = environment.client
+        deployment = runtime.settings.worker_deployment
+        async with make_worker(runtime):
+            await promote(runtime.client, deployment, "blue")
+            runtime.settings.worker_build_id = "green"
+            async with make_worker(runtime):
+                handle = await runtime.client.start_workflow(
+                    TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+                )
+                first_run = handle.result_run_id
+                result_task = asyncio.create_task(handle.result())
+                observed_save = asyncio.create_task(saved_history.wait())
+                try:
+                    await asyncio.wait_for(model_entered.wait(), 30)
+                    await promote(runtime.client, deployment, "green")
+                    request = DeploymentHandoff("history-race", deployment, "blue")
+                    if race == "unsettled_ledger":
+                        await handle.signal(TurnWorkflow.checkpoint_handoff, request)
+                    release_model.set()
+                    done, _ = await asyncio.wait(
+                        {result_task, observed_save}, timeout=60, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    assert observed_save in done, "A pending deployment must not block required history rollover."
+                    if race == "signal_during_save":
+                        await handle.signal(TurnWorkflow.checkpoint_handoff, request)
+                    else:
+                        # Simulate a later authoritative confirmation of the
+                        # previously unknown gateway attempt.
+                        async with runtime.database.sessions.begin() as db:
+                            attempt = await db.get(InferenceUsage, "late-receipt")
+                            attempt.status = "completed"
+                    assert (await handle.query(TurnWorkflow.deployment_checkpoint))["request_id"] == "history-race"
+                    release_save.set()
+                    assert (await asyncio.wait_for(result_task, 90))["status"] == "completed"
+                    state = await handle.query(TurnWorkflow.deployment_checkpoint)
+                    assert state["build_id"] == "green"
+                    assert state["previous_request_id"] == "history-race"
+                    first = await runtime.client.get_workflow_handle(
+                        turn.workflow_id, run_id=first_run,
+                    ).fetch_history()
+                    second_id = first.events[-1].workflow_execution_continued_as_new_event_attributes.new_execution_run_id
+                    assert second_id
+                    second = await runtime.client.get_workflow_handle(
+                        turn.workflow_id, run_id=second_id,
+                    ).describe()
+                    # The first saved checkpoint did not qualify a deployment.
+                    # Its successor must remain blue until a fresh safe check.
+                    initial_version = (
+                        second.raw_description.workflow_execution_info.versioning_info.deployment_version.build_id
+                    )
+                    assert initial_version == "blue"
+                finally:
+                    release_model.set()
+                    release_save.set()
+                    observed_save.cancel()
+                    if not result_task.done():
+                        await handle.cancel()
+                    await asyncio.gather(result_task, observed_save, return_exceptions=True)
+    async with runtime.database.sessions() as db:
+        saved = await db.get(Turn, turn.id)
+        assert json.loads(saved.usage)["requests"] == 8
+    assert (runtime.settings.data_dir.parent / "computer/handoff-ledger.txt").read_text().splitlines() == [
+        "1", "2", "3", "4", "5", "6",
+    ]

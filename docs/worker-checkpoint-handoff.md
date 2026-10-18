@@ -76,6 +76,12 @@ retry budgets, stream offsets, and pending steering. Pending tool effects and
 unsettled gateway attempts prevent a deployment checkpoint. A refused or
 unacknowledged save leaves the existing agent running.
 
+An unsettled gateway receipt does not disable ordinary bounded-history
+continuation. If history must roll over, the saved turn remains pinned to its
+source release and carries the pending deployment request to a later safe
+boundary. Requests arriving while a checkpoint is being saved are also carried
+forward; they cannot grant an unchecked version change on that snapshot.
+
 After persistence, the old execution closes with continue-as-new and the new
 execution selects the routed release. Ordinary history rollover continues to
 retain its existing pinned version. The logical workflow ID and turn ID remain

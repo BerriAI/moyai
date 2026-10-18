@@ -82,7 +82,7 @@ class TurnWorkflow(PydanticAIWorkflow):
         self.pending_steering: list[str] = list(handoff.pending_steering) if handoff else []
         self.handing_off = False
         self.maintenance_notice = 0
-        self.deployment_handoff: DeploymentHandoff | None = None
+        self.deployment_handoff = handoff.pending_deployment_handoff if handoff else None
         self.previous_deployment_handoff = handoff.deployment_handoff if handoff else None
 
     @workflow.signal
@@ -194,6 +194,10 @@ class TurnWorkflow(PydanticAIWorkflow):
         try:
             history_handoff = workflow.patched(HISTORY_VERSION)
             deployment_handoff = workflow.patched(DEPLOYMENT_HANDOFF_VERSION)
+            if self.deployment_handoff and not self.deployment_handoff.applies_to(
+                workflow.info().get_current_deployment_version(),
+            ):
+                self.deployment_handoff = None
             checkpoint_workspace = workflow.patched(WORKSPACE_CHECKPOINT_VERSION)
             keep_computer = workflow.patched(COMPUTER_KEEPALIVE_VERSION)
             maintenance = workflow.patched(DRAIN_VERSION)
@@ -291,6 +295,7 @@ class TurnWorkflow(PydanticAIWorkflow):
                         checkpoint = self.checkpoint(prepared, agent_run, node)
                         if deployment_handoff:
                             checkpoint.deployment_handoff = self.deployment_handoff
+                            checkpoint.allow_history_only = self.history_full(limits)
                         try:
                             saved = await workflow.execute_activity(
                                 "moyai_save_history_checkpoint_v1",
@@ -309,7 +314,11 @@ class TurnWorkflow(PydanticAIWorkflow):
                             saved = CheckpointSave()
                         if saved.reference is not None:
                             checkpoint_ref = saved.reference
-                            checkpoint_release = checkpoint.deployment_handoff
+                            # Recorded v1 saves lack deployment_allowed. Their
+                            # successful reference already passed the v1 gate.
+                            checkpoint_release = (
+                                checkpoint.deployment_handoff if saved.deployment_allowed is not False else None
+                            )
                             self.events.stream.detach_pollers()
                             await workflow.wait_condition(workflow.all_handlers_finished)
                             break
@@ -334,7 +343,15 @@ class TurnWorkflow(PydanticAIWorkflow):
                         turn_id, HistoryHandoff(
                             checkpoint=checkpoint_ref, stream_state=self.events.stream.get_state(),
                             steered=sorted(self.steered), pending_steering=list(self.pending_steering),
-                            deployment_handoff=checkpoint_release,
+                            deployment_handoff=checkpoint_release or self.previous_deployment_handoff,
+                            # A signal can arrive while the snapshot is being
+                            # saved. Carry the latest unconsumed intent after
+                            # handlers settle; do not grant it an unchecked
+                            # version change on that already-saved snapshot.
+                            pending_deployment_handoff=(
+                                self.deployment_handoff
+                                if self.deployment_handoff != checkpoint_release else None
+                            ),
                         ),
                     ],
                     # Ordinary history rollover retains its pinned version.
