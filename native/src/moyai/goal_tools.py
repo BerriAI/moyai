@@ -23,6 +23,9 @@ This conversation has an explicit persistent goal. Call get_goal to inspect it.
 Keep working until that objective is achieved. The host will continue after a
 saved turn while the goal is active. Incorporate follow-up messages as steering;
 do not replace the objective or consider a status question a cancellation.
+When get_goal reports paused but this turn remains authorized, finish the
+current admitted work. Future automatic turns stay paused; do not resume them.
+An explicit human Pause or Stop separately revokes execution authority.
 Use update_goal(status="complete", evidence=...) only after verifying the whole
 objective is achieved and no required work remains. Then provide the final answer.
 If the same blocker prevents all useful progress, report it with
@@ -70,10 +73,10 @@ class GoalCapability(AbstractCapability[RunScope]):
                 binding = await db.get(GoalTurn, scope.turn_id)
                 if (
                     goal is None or binding is None or goal.owner_id != scope.actor_id
-                    or goal.status != "active" or goal.generation != scope.goal_generation
+                    or goal.status not in {"active", "paused"} or goal.generation != scope.goal_generation
                     or binding.generation != goal.generation
                 ):
-                    raise ToolFailed("The goal was paused, cleared, or changed. Stop and follow the current user direction.")
+                    raise ToolFailed("The goal was cleared or changed. Stop and follow the current user direction.")
                 if status is None:
                     return {"goal": service.view(goal)}
                 identity = hashlib.sha256(f"goal-tool:{scope.turn_id}:{ctx.run_id}:{ctx.tool_call_id}".encode()).hexdigest()
@@ -87,7 +90,9 @@ class GoalCapability(AbstractCapability[RunScope]):
                 binding.evidence = database.security.seal(evidence)
                 result = {
                     "goal": service.view(goal), "pending_status": status,
-                    "instruction": "Return your answer. The host applies this decision only after the result is saved."
+                    "instruction": "Return your answer. Automatic continuation remains paused; this report does not resume it."
+                    if goal.status == "paused" else
+                    "Return your answer. The host applies this decision only after the result is saved."
                     if status == "complete" else
                     "Return the blocker and any progress. The host stops only after three consecutive turns report the same blocker.",
                 }

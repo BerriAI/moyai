@@ -8,6 +8,9 @@
 No personal skill, connector, or installation is required. Select **Goal** from
 the `/` picker, or send `/goal <objective>`. Moyai saves the objective with the
 conversation and continues across turns until it verifies completion.
+Files attached when starting a goal are retained with its first message, using
+the same upload permissions as ordinary chat. Goal controls leave unsent files
+in the composer.
 
 | Command | Action |
 | --- | --- |
@@ -22,6 +25,10 @@ The goal panel shows its status, completed turns, token usage, and controls.
 Objectives accept up to 4,000 characters. Follow-up messages steer the work
 without replacing the objective. Questions and approval requests still require
 their normal answers; goal mode never grants additional permissions.
+If a queued follow-up uses a different requester, model, or account selection,
+automatic continuation pauses while the already admitted turn finishes.
+Resuming during that turn preserves its execution identity. Explicit **Pause
+goal** and **Stop** stop the current goal work.
 **Stop**, archiving, and deleting the conversation also suspend continuation.
 Only the conversation owner can change its goal.
 

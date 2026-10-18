@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { SkillComposer } from "./skill-composer"
-import { GoalDialog, GoalPanel, type Goal } from "./goal"
+import { GoalDialog, GoalPanel, goalCommandAction, type Goal } from "./goal"
 import { SkillMessage } from "./skill-content"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "@/theme.css"
@@ -468,6 +468,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   }, [])
   const workspaceElement = useRef<HTMLDivElement>(null), chatId = useId()
   const lastRequest = useRef<{ payload: string; key: string } | null>(null)
+  const lastGoalRequest = useRef<{ payload: string; key: string } | null>(null)
+  const goalSending = useRef(false)
   const composerInitialized = useRef(Boolean(view))
   const readThrough = useRef<number | null>(null)
   const loadVersion = useRef(0)
@@ -476,6 +478,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   function clearSensitive() {
     ++loadVersion.current
     ++sensitiveVersion.current
+    setGoalDialog(false); lastGoalRequest.current = null; setBusy(false)
     resolvedOnce.current = undefined
     composerInitialized.current = false
     readThrough.current = null
@@ -649,11 +652,47 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     followWork()
   }, [liveText, followWork])
 
+  async function applyGoal(command: string): Promise<void> {
+    if (goalSending.current || busy) throw new Error("Wait for the current submission to finish, then retry.")
+    const startingGoal = goalCommandAction(command) === "set"
+    if (startingGoal && (pictures.uploading || pictures.hasErrors)) {
+      throw new Error("Finish uploading or retry the attached files before starting a goal.")
+    }
+    if (startingGoal && accountBlocked) throw new Error("Resolve the connection error before starting a goal.")
+    const auth = csrfToken(), version = sensitiveVersion.current
+    const current = () => auth === csrfToken() && version === sensitiveVersion.current
+    const body = { prompt: command, ...(startingGoal ? {
+      model, connections: [...sendAccounts].sort(), attachments: pictures.readyFiles.map(file => file.id),
+    } : {}) }
+    const payload = JSON.stringify([id, auth, body])
+    if (lastGoalRequest.current?.payload !== payload) lastGoalRequest.current = { payload, key: crypto.randomUUID() }
+    const attempt = lastGoalRequest.current
+    goalSending.current = true; setBusy(true); setError("")
+    try {
+      await api(`/sessions/${id}/messages`, "POST", { ...body, request_key: attempt.key })
+      if (lastGoalRequest.current === attempt) lastGoalRequest.current = null
+      if (!current()) return
+      if (startingGoal) pictures.clear()
+      // The mutation is acknowledged. Refresh errors must not retry that mutation.
+      try { await load(); if (current()) await refreshList() }
+      catch { if (current()) setError("Your goal was updated, but the conversation could not be refreshed.") }
+    } finally {
+      goalSending.current = false
+      if (current()) setBusy(false)
+    }
+  }
+
   async function send(promptOverride?: string) {
     const prompt = promptOverride ?? (editing ? editText : draft)
     if (!editing && ["/goal", "/goal edit"].includes(prompt.trim())) {
       if (prompt.trim() === "/goal" && view?.goal) { setDraft(""); return }
       setGoalDialog(true); setDraft(""); return
+    }
+    if (!editing && goalCommandAction(prompt)) {
+      const version = sensitiveVersion.current
+      try { await applyGoal(prompt); if (version === sensitiveVersion.current) setDraft("") }
+      catch (reason) { if (version === sensitiveVersion.current) setError(String(reason)) }
+      return
     }
     if (editing) {
       if (busy || !prompt.trim()) return
@@ -668,7 +707,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       prompt, model: answeringQuestion ? active?.model ?? model : model, mode,
       connections: answeringQuestion ? active?.connections ?? sendAccounts : sendAccounts,
       attachments: pictures.readyFiles.map(file => file.id),
-      ...(answeringQuestion && !/^\/goal(?:\s|$)/.test(prompt.trim()) ? { reply_to: active?.id } : {}),
+      ...(answeringQuestion ? { reply_to: active?.id } : {}),
     }
     const serialized = JSON.stringify(body)
     if (lastRequest.current?.payload !== serialized) lastRequest.current = { payload: serialized, key: crypto.randomUUID() }
@@ -733,14 +772,10 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
         {fileDrop.dragging && <FileDropOverlay />}
         {view.goal && <GoalPanel goal={view.goal} canControl={view.goal.owner_id === me.user.id} busy={busy}
           onCommand={command => {
-            setBusy(true); setError("")
-            void api(`/sessions/${id}/messages`, "POST", { prompt: command, request_key: crypto.randomUUID() })
-              .then(() => load()).catch(reason => setError(String(reason))).finally(() => setBusy(false))
+            const version = sensitiveVersion.current
+            void applyGoal(command).catch(reason => { if (version === sensitiveVersion.current) setError(String(reason)) })
           }} onEdit={() => setGoalDialog(true)} />}
-        <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} goal={view.goal} onSubmit={async command => {
-          await api(`/sessions/${id}/messages`, "POST", { prompt: command, request_key: crypto.randomUUID(), model, connections: sendAccounts })
-          await load(); await refreshList()
-        }} />
+        <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} goal={view.goal} onSubmit={applyGoal} />
         {session.swarm_id && <SwarmPanel key={id} sessionId={id} visible={visible} onChanged={load}
           space={space} onSpaceChange={sideMode ? undefined : setSwarmSpace} />}
         {originalSessionId && !space && <React.Suspense fallback={<div className="muted" role="status">Opening earlier history…</div>}>

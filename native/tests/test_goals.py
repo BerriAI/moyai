@@ -8,15 +8,18 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import HTTPException
+from pydantic_ai import RunContext, RunUsage
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+from pydantic_ai.models.test import TestModel
 from sqlalchemy import func, select, update
 
 from moyai.api import COOKIE, create_app
 from moyai.contracts import NewMessage, NewSession
 from moyai.goal_models import Goal, GoalTurn
+from moyai.goal_tools import GoalCapability
 from moyai.goals import is_goal_command, parse_command
-from moyai.models import Message, Turn, User
+from moyai.models import Connection, Message, Turn, TurnImage, Upload, User
 from moyai.product_schema import GOAL_SCHEMA_VERSION, SLACK_ACTIVITY_SCHEMA_VERSION, application_metadata
 
 
@@ -271,6 +274,140 @@ async def test_dispatch_inspects_only_idle_goal_sessions(runtime, actor, monkeyp
     await runtime.database.fail(turn.id, "A failure leaves an idle conversation for inspection.")
     await runtime.database.goals.reconcile()
     tick.assert_awaited_once_with(session.id)
+
+
+async def mismatched_followup(runtime, actor, session_id, mismatch):
+    selected_actor, options = actor, {}
+    if mismatch == "actor":
+        async with runtime.database.sessions.begin() as db:
+            selected_actor = User(username="teammate", display_name="Teammate", password="unused")
+            db.add(selected_actor)
+    elif mismatch == "model":
+        runtime.settings.model_catalog = "other"
+        options["model"] = "other"
+    else:
+        async with runtime.database.sessions.begin() as db:
+            connection = Connection(
+                owner_id=actor.id, name="Other account", kind="github", shared=True,
+                credential=runtime.security.seal("synthetic credential"),
+            )
+            db.add(connection)
+            await db.flush()
+            options["connections"] = [connection.id]
+    return await runtime.database.submit(selected_actor, session_id, NewMessage(
+        prompt="Queue separate follow-up work.", request_key=f"followup-{mismatch}", **options,
+    ))
+
+
+@pytest.mark.parametrize("phase", ["starting", "running"])
+@pytest.mark.parametrize("mismatch", ["actor", "model", "accounts"])
+async def test_context_mismatch_pauses_continuation_without_revoking_admitted_turn(runtime, actor, phase, mismatch):
+    session = await runtime.database.create_session(actor, NewSession(visibility="shared"))
+    await command(runtime, actor, session.id, "/goal Verify the original task.")
+    original = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(original.id) if phase == "running" else None
+    await mismatched_followup(runtime, actor, session.id, mismatch)
+    assert (await goal(runtime, session.id))["status"] == "paused"
+    prepared = prepared or await runtime.database.prepare(original.id)
+    await runtime.database.authorize_scope(prepared.scope)
+    tools = GoalCapability(runtime.database.goals).tools.tools
+    ctx = RunContext(
+        deps=prepared.scope, model=TestModel(), usage=RunUsage(),
+        run_id=original.id, tool_call_id="goal-read",
+    )
+    assert (await tools["get_goal"].function(ctx))["goal"]["status"] == "paused"
+    ctx.tool_call_id = "goal-finish"
+    report = await tools["update_goal"].function(ctx, "complete", "The original task was verified.")
+    assert report["pending_status"] == "complete"
+    assert await runtime.database.save_result(
+        prepared.scope, conversation='{"messages":[]}', output="Original work finished.",
+        workspace=None, usage={},
+    )
+    await runtime.database.settle(original.id)
+    await runtime.database.goals.reconcile()
+    assert (await goal(runtime, session.id))["status"] == "paused"
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Turn, original.id)).status == "completed"
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 2
+        assert await db.scalar(select(func.count()).select_from(GoalTurn).where(GoalTurn.generated.is_(True))) == 0
+
+
+async def test_resume_preserves_live_turn_generation_but_explicit_pause_revokes_it(runtime, actor):
+    session, _ = await start(runtime, actor)
+    original = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(original.id)
+    followup = await mismatched_followup(runtime, actor, session.id, "model")
+    resumed = await command(runtime, actor, session.id, "/goal resume")
+    assert resumed["goal"]["generation"] == prepared.scope.goal_generation
+    await runtime.database.authorize_scope(prepared.scope)
+    await command(runtime, actor, session.id, "/goal pause")
+    with pytest.raises(PermissionError):
+        await runtime.database.authorize_scope(prepared.scope)
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Turn, followup.id)).status == "queued"
+
+
+async def test_context_hold_cancels_queued_automatic_work_and_resume_does_not_replay_it(runtime, actor):
+    session, _ = await start(runtime, actor)
+    await finish(runtime)
+    await runtime.database.goals.tick(session.id)
+    async with runtime.database.sessions() as db:
+        automatic = await db.scalar(select(Turn).where(Turn.status == "queued"))
+    manual = await mismatched_followup(runtime, actor, session.id, "model")
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Turn, automatic.id)).status == "stopped"
+        assert (await db.get(GoalTurn, automatic.id)).settled
+    await command(runtime, actor, session.id, "/goal resume")
+    next_turn, _ = await finish(runtime)
+    assert next_turn.id == manual.id
+    await runtime.database.goals.tick(session.id)
+    next_turn = await runtime.database.claim_next()
+    assert next_turn.id not in {automatic.id, manual.id}
+    assert (await goal(runtime, session.id))["status"] == "active"
+
+
+async def test_context_hold_does_not_bypass_revoked_requester_authority(runtime, actor):
+    session, _ = await start(runtime, actor)
+    original = await runtime.database.claim_next()
+    prepared = await runtime.database.prepare(original.id)
+    await mismatched_followup(runtime, actor, session.id, "model")
+    async with runtime.database.sessions.begin() as db:
+        await db.execute(update(User).where(User.id == actor.id).values(auth_version=User.auth_version + 1))
+    with pytest.raises(PermissionError, match="requester authority"):
+        await runtime.database.authorize_scope(prepared.scope)
+
+
+async def test_new_goal_retains_authorized_attachments_and_retries_atomically(runtime, actor):
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    digest = await runtime.objects.put(b"goal input")
+    async with runtime.database.sessions.begin() as db:
+        upload = Upload(owner_id=actor.id, name="input.txt", media_type="text/plain", size=10, digest=digest)
+        db.add(upload)
+    first = await command(runtime, actor, session.id, "/goal Read the input.", key="files", attachments=[upload.id])
+    assert await command(runtime, actor, session.id, "/goal Read the input.", key="files", attachments=[upload.id]) == first
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Upload, upload.id)).session_id == session.id
+        assert await db.get(TurnImage, (first["id"], upload.id)) is not None
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 1
+    with pytest.raises(HTTPException, match="Attach files when starting"):
+        await command(runtime, actor, session.id, "/goal pause", attachments=[upload.id])
+    assert (await goal(runtime, session.id))["status"] == "active"
+
+
+async def test_goal_cannot_bind_someone_elses_upload(runtime, actor):
+    session = await runtime.database.create_session(actor, NewSession())
+    async with runtime.database.sessions.begin() as db:
+        other = User(username="other-upload-owner", display_name="Other", password="unused")
+        db.add(other)
+        await db.flush()
+        upload = Upload(owner_id=other.id, name="private.txt", media_type="text/plain", size=1, digest="a" * 64)
+        db.add(upload)
+    with pytest.raises(HTTPException):
+        await command(runtime, actor, session.id, "/goal Read the input.", attachments=[upload.id])
+    async with runtime.database.sessions() as db:
+        assert await db.get(Goal, session.id) is None
+        assert await db.scalar(select(func.count()).select_from(Turn)) == 0
+        assert (await db.get(Upload, upload.id)).session_id is None
 
 
 async def test_goal_tools_are_builtin_and_complete_via_native_agent(runtime, actor):

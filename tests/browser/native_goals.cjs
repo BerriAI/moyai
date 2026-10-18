@@ -13,6 +13,7 @@ import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoalDialog, GoalPanel } from '../native/web/goal';
 import { SkillComposer } from '../native/web/skill-composer';
+import { Home } from '../native/web/home';
 import { setCsrf } from '../native/web/api';
 import '../frontend/theme.css';
 import '../native/web/style.css';
@@ -23,6 +24,10 @@ function Fixture() {
   const [goal,setGoal] = useState(initial), [open,setOpen] = useState(false), [draft,setDraft] = useState('');
   window.goalFixture = {setGoal};
   const command = value => { window.goalCommand = value; };
+  if(location.search.includes('home')) return <Home models={['test-model']} defaultModel="test-model"
+    preferences={{delivery_mode:'when_idle',connection_ids:location.search.includes('accounts')?['team']:[]}}
+    onStarted={value=>{window.startedConversation=value;}}
+    onCreated={async()=>{if(location.search.includes('refreshFailure'))throw new Error('List unavailable.');}} />;
   return <main style={{maxWidth:900,margin:'auto'}}>
     <GoalPanel goal={goal} canControl={true} busy={false} onCommand={command} onEdit={()=>setOpen(true)} />
     <GoalDialog open={open} onOpenChange={setOpen} goal={goal} onSubmit={async value=>command(value)} />
@@ -39,7 +44,11 @@ before(async () => {
   server = await createServer({
     configFile:false, root, cacheDir:cache, logLevel:"error",
     resolve:{alias:{"@":path.join(root,"frontend")}},
-    server:{host:"127.0.0.1",port:0,strictPort:false,hmr:false},
+    optimizeDeps:{
+      entries:["native/web/main.tsx"],
+      include:["three","three/examples/jsm/loaders/GLTFLoader.js"],
+    },
+    server:{host:"127.0.0.1",port:0,strictPort:false},
     plugins:[tailwindcss(), {
       name:"goal-regression",
       resolveId(id){if(id===moduleUrl)return path.join(root,"tests/__goal_fixture.tsx");},
@@ -60,11 +69,11 @@ after(async()=>{
   await browser?.close();await server?.close();
   if(cache)await fs.rm(cache,{recursive:true,force:true});
 });
-async function pageFor(t,width=1440){
+async function pageFor(t,width=1440,query="",handler){
   const page=await browser.newPage({viewport:{width,height:900},reducedMotion:"reduce"});
-  await page.route("**/api/skills?**",route=>route.fulfill({status:503,json:{detail:"Skills temporarily unavailable"}}));
+  await page.route("**/api/**",handler|| (route=>route.fulfill({status:503,json:{detail:"Skills temporarily unavailable"}})));
   t.after(()=>page.close());
-  await page.goto(address);
+  await page.goto(address+query);
   return page;
 }
 for(const width of [1440,768,320]){
@@ -94,4 +103,100 @@ test("native /goal remains available without a skill catalog and inserts plain c
   await input.fill("/goal Verify every output.");
   await input.press("Enter");
   assert.equal(await page.evaluate(()=>window.goalCommand),"/goal Verify every output.");
+});
+
+async function openHomeGoal(page,objective="Verify the requested result."){
+  const input=page.getByRole("textbox",{name:"Message Moyai",exact:true});
+  await input.fill("/goal ");
+  await input.press("Enter");
+  const dialog=page.getByRole("dialog",{name:"Set a goal",exact:true});
+  await dialog.getByLabel("Objective",{exact:true}).fill(objective);
+  return dialog;
+}
+function homeApi(requests,{fail,connections,upload}={}){
+  return async route=>{
+    const request=route.request(),url=new URL(request.url());
+    if(url.pathname==="/api/skills")return route.fulfill({json:{skills:[],has_more:false,next_offset:null}});
+    if(url.pathname==="/api/connections"){
+      if(connections)await connections;
+      return route.fulfill({json:[{id:"team",name:"Team",enabled:true,shared:true,read_only:true}]});
+    }
+    if(url.pathname==="/api/uploads"){
+      if(upload)await upload;
+      return route.fulfill({json:{id:"input-file",name:"input.txt",media_type:"text/plain",size:5}});
+    }
+    const body=request.postDataJSON();
+    requests.push({path:url.pathname,body});
+    if(url.pathname==="/api/sessions")return route.fulfill({json:{id:"home-goal",owner_id:"owner",model:"test-model",visibility:"shared",status:"idle"}});
+    if(url.pathname.endsWith("/messages")){
+      if(fail?.())return route.fulfill({status:503,json:{detail:"Goal admission temporarily unavailable."}});
+      return route.fulfill({status:202,json:{id:"goal-turn",actor_id:"owner",status:"queued",model:"test-model",connections:body.connections||[]}});
+    }
+    return route.fulfill({json:{}});
+  };
+}
+test("Home goal retains objective and budget after failed admission and retries the same request",async t=>{
+  const requests=[];let failed=true;
+  const page=await pageFor(t,1440,"?home",homeApi(requests,{fail:()=>failed}));
+  const dialog=await openHomeGoal(page);
+  await dialog.getByLabel("Token budget (optional)",{exact:true}).fill("12000");
+  await dialog.getByRole("button",{name:"Start goal",exact:true}).click();
+  await dialog.getByRole("alert").filter({hasText:"admission temporarily unavailable"}).waitFor();
+  assert.equal(await dialog.getByLabel("Objective",{exact:true}).inputValue(),"Verify the requested result.");
+  assert.equal(await dialog.getByLabel("Token budget (optional)",{exact:true}).inputValue(),"12000");
+  assert.equal(await page.evaluate(()=>window.startedConversation),undefined);
+  failed=false;
+  await dialog.getByRole("button",{name:"Start goal",exact:true}).click();
+  await dialog.waitFor({state:"hidden"});
+  const submitted=requests.filter(row=>row.path.endsWith("/messages"));
+  assert.equal(submitted.length,2);
+  assert.deepEqual(submitted[0],submitted[1]);
+  assert.equal(requests.filter(row=>row.path==="/api/sessions").length,1);
+});
+test("Home goal stays open while connections are pending and submits only after they are ready",async t=>{
+  const requests=[];let release;
+  const connections=new Promise(resolve=>{release=resolve;});
+  t.after(()=>release());
+  const page=await pageFor(t,768,"?home&accounts",homeApi(requests,{connections}));
+  const dialog=await openHomeGoal(page);
+  await dialog.getByRole("button",{name:"Start goal",exact:true}).click();
+  await dialog.getByRole("alert").filter({hasText:"Connections are still loading"}).waitFor();
+  assert.equal(requests.length,0);
+  release();
+  await page.waitForFunction(()=>!document.querySelector('button[aria-label="Send message"]').disabled);
+  await dialog.getByRole("button",{name:"Start goal",exact:true}).click();
+  await dialog.waitFor({state:"hidden"});
+  assert.deepEqual(requests.find(row=>row.path.endsWith("/messages")).body.connections,["team"]);
+});
+for(const pending of [false,true]){
+  test(`Home goal carries staged attachments${pending?" after uploading finishes":""}`,async t=>{
+    const requests=[];let release=()=>{};
+    const upload=pending?new Promise(resolve=>{release=resolve;}):undefined;
+    t.after(()=>release());
+    const page=await pageFor(t,1440,"?home",homeApi(requests,{upload}));
+    await page.locator('input[type="file"]').setInputFiles({name:"input.txt",mimeType:"text/plain",buffer:Buffer.from("input")});
+    if(!pending)await page.locator('.image-preview[aria-busy="false"]').waitFor();
+    const dialog=await openHomeGoal(page);
+    await dialog.getByRole("button",{name:"Start goal",exact:true}).click();
+    if(pending){
+      await dialog.getByRole("alert").filter({hasText:"files to finish uploading"}).waitFor();
+      assert.equal(requests.length,0);
+      release();
+      await page.waitForFunction(()=>document.querySelector('.image-preview[aria-busy="false"]'));
+      await dialog.getByRole("button",{name:"Start goal",exact:true}).click();
+    }
+    await dialog.waitFor({state:"hidden"});
+    assert.deepEqual(requests.find(row=>row.path.endsWith("/messages")).body.attachments,["input-file"]);
+    assert.equal((await page.evaluate(()=>window.startedConversation.attachments))[0].id,"input-file");
+  });
+}
+test("An accepted Home goal closes the dialog even if only the list refresh fails",async t=>{
+  const requests=[];
+  const page=await pageFor(t,1440,"?home&refreshFailure",homeApi(requests));
+  const dialog=await openHomeGoal(page);
+  await dialog.getByRole("button",{name:"Start goal",exact:true}).click();
+  await dialog.waitFor({state:"hidden"});
+  await page.getByRole("alert").filter({hasText:"message was sent"}).waitFor();
+  assert.equal(requests.filter(row=>row.path.endsWith("/messages")).length,1);
+  assert.equal((await page.evaluate(()=>window.startedConversation.turn)).id,"goal-turn");
 });

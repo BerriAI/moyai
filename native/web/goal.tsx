@@ -13,6 +13,14 @@ export type Goal = {
 }
 const labels = { active: "Working toward goal", paused: "Goal paused", complete: "Goal complete", blocked: "Goal needs attention", budget_limited: "Goal budget reached" }
 
+export function goalCommandAction(prompt: string): "view" | "set" | "edit" | "pause" | "resume" | "clear" | null {
+  if (/^( {4}|\t)/.test(prompt) || !/^\/goal(?:\s|$)/.test(prompt.trimStart())) return null
+  const value = prompt.trim().slice(5).trim()
+  if (!value) return "view"
+  if (value === "pause" || value === "resume" || value === "clear") return value
+  return /^edit(?:\s|$)/.test(value) ? "edit" : "set"
+}
+
 export function GoalDialog({ open, onOpenChange, goal, onSubmit }: {
   open: boolean; onOpenChange: (open: boolean) => void; goal?: Goal | null
   onSubmit: (command: string) => Promise<void>

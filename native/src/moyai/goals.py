@@ -39,7 +39,7 @@ def parse_command(prompt: str) -> tuple[str, str, int | None]:
         return "view", "", None
     if value in {"pause", "resume", "clear"}:
         return value, "", None
-    action = "edit" if value == "edit" or value.startswith("edit ") else "set"
+    action = "edit" if re.match(r"edit(?:\s|$)", value) else "set"
     if action == "edit":
         value = value[4:].strip()
     budget = None
@@ -104,10 +104,25 @@ class Goals:
             Turn.id.in_(bound), Turn.status.in_(tuple(s for s in BUSY if s not in {"saving", "waiting"})),
         ).values(status="stopped", finished_at=now()))
 
+    async def pause_continuation(self, db: AsyncSession, goal: Goal, reason: str) -> None:
+        """Hold future automatic work without revoking an already admitted turn."""
+        self.change(goal, "paused", reason)
+        cancelled = list(await db.scalars(update(Turn).where(
+            Turn.id.in_(select(GoalTurn.turn_id).where(
+                GoalTurn.session_id == goal.session_id, GoalTurn.generation == goal.generation,
+                GoalTurn.generated.is_(True),
+            )),
+            Turn.status == "queued",
+        ).values(status="stopped", finished_at=now()).returning(Turn.id)))
+        if cancelled:
+            await db.execute(update(GoalTurn).where(
+                GoalTurn.turn_id.in_(cancelled),
+            ).values(settled=True))
+
     async def command(self, actor: User, session_id: str, body: NewMessage) -> dict[str, Any]:
         action, objective, budget = parse_command(body.prompt)
-        if body.attachments or body.reply_to:
-            raise HTTPException(422, "Send goal controls separately from files and question answers.")
+        if body.reply_to or (body.attachments and action != "set"):
+            raise HTTPException(422, "Attach files when starting a goal; send goal controls separately from files and question answers.")
         identity = hashlib.sha256(f"goal:{session_id}:{actor.id}:{body.request_key}".encode()).hexdigest()
         fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
         async with self.database._admission_session(None) as db:
@@ -147,7 +162,9 @@ class Goals:
                 goal.created_at = now()
                 self.change(goal, "active")
                 await db.flush()
-                turn = await self.enqueue(db, actor, goal, body.request_key, objective, generated=False)
+                turn = await self.enqueue(
+                    db, actor, goal, body.request_key, objective, generated=False, attachments=body.attachments,
+                )
                 goal.source_turn_id = turn.id
             else:
                 if goal is None or goal.status == "cleared":
@@ -176,7 +193,15 @@ class Goals:
                     if goal.token_budget is not None and goal.tokens_used >= goal.token_budget:
                         raise HTTPException(409, "The token budget is exhausted. Edit the goal with a larger --budget.")
                     if goal.status != "active":
-                        goal.generation += 1
+                        active = await db.get(Turn, session.active_turn) if session.active_turn else None
+                        binding = await db.get(GoalTurn, active.id) if active else None
+                        # A context mismatch can pause just continuation. Resume
+                        # must not supersede the still-authorized current turn.
+                        if not (
+                            binding and binding.generation == goal.generation and active
+                            and active.status in {"starting", "running", "saving", "waiting"}
+                        ):
+                            goal.generation += 1
                         goal.blocked_count, goal.blocker = 0, ""
                         self.change(goal, "active")
             await db.flush()
@@ -206,8 +231,11 @@ class Goals:
             db, actor.id, json.loads(goal.connections),
             shared_session=session.visibility == "shared", surface=session.surface,
         )
-        if RunScope(session.id, source.id, actor.id, goal.model, grants).grants_key != goal.grants_key:
+        scope = RunScope(session.id, source.id, actor.id, goal.model, grants, session.visibility, session.surface)
+        if scope.grants_key != goal.grants_key:
             raise HTTPException(403, "The goal's original account permissions changed. Clear it and set a new goal.")
+        if session.workspace and session.workspace_scope != scope.workspace_key:
+            raise HTTPException(403, "The goal's original computer account context changed. Clear it and set a new goal.")
         return actor
 
     async def bind(self, db: AsyncSession, turn: Turn) -> None:
@@ -218,7 +246,10 @@ class Goals:
             turn.actor_id != goal.owner_id or turn.model != goal.model
             or set(json.loads(turn.connections)) != set(json.loads(goal.connections))
         ):
-            self.change(goal, "paused", "The requester, model, or selected accounts changed. Resume with the original context.")
+            await self.pause_continuation(
+                db, goal, "The requester, model, or selected accounts changed. "
+                "The current turn can finish; automatic continuation is paused. Resume with the original context.",
+            )
             return
         db.add(GoalTurn(turn_id=turn.id, session_id=goal.session_id, generation=goal.generation))
 
@@ -230,17 +261,21 @@ class Goals:
         actor = await db.get(User, turn.actor_id, populate_existing=True)
         if (
             goal is None or actor is None or not actor.enabled
-            or goal.status != "active" or goal.generation != binding.generation
+            or goal.status not in {"active", "paused"} or goal.generation != binding.generation
             or goal.owner_id != actor.id or goal.auth_version != actor.auth_version
         ):
-            raise PermissionError("This goal execution was paused, superseded, or lost its requester authority.")
+            raise PermissionError("This goal execution was superseded or lost its requester authority.")
+        # Native turn/session status enforces explicit Pause and Stop. A paused
+        # continuation alone does not revoke a turn already admitted to run.
         return goal
 
     async def enqueue(
         self, db: AsyncSession, actor: User, goal: Goal, key: str, prompt: str, *, generated: bool,
+        attachments: list[str] | None = None,
     ) -> Turn:
         turn = await self.database.submit(actor, goal.session_id, NewMessage(
             prompt=prompt, request_key=key, model=goal.model, connections=json.loads(goal.connections),
+            attachments=attachments or [],
         ), db=db)
         await db.flush()
         binding = await db.get(GoalTurn, turn.id)
@@ -277,7 +312,7 @@ class Goals:
                 return
             goal.checked_at = now()
             if session.deleted or session.archived:
-                self.change(goal, "paused", "The conversation was archived or deleted.")
+                await self.pause_continuation(db, goal, "The conversation was archived or deleted.")
                 return
             if not session.active_turn and await db.scalar(select(Effect.id).where(
                 Effect.session_id == session_id, Effect.state == "pending",
