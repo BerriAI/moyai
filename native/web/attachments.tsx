@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { FileText, LoaderCircle, Paperclip, Upload, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { csrfToken } from "./api"
+import { apiRequest } from "./api"
 import { isFileDrag, isInlineImage, receiveFileDrop } from "./attachment-files"
 import { AttachmentUploads, type DraftFile, type UploadedFile } from "./attachment-uploads"
 import "./attachments.css"
@@ -9,17 +9,10 @@ import "./attachments.css"
 export type { UploadedFile } from "./attachment-uploads"
 
 async function uploadFile(file: File, signal: AbortSignal): Promise<UploadedFile> {
-  const auth = csrfToken()
-  const response = await fetch(`/api/uploads?name=${encodeURIComponent(file.name || "clipboard.png")}`, {
-    method: "POST", headers: { "X-Moyai-CSRF": auth, "X-CSRF-Token": auth, "Content-Type": file.type || "application/octet-stream" },
+  return apiRequest<UploadedFile>(`/uploads?name=${encodeURIComponent(file.name || "clipboard.png")}`, {
+    method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" },
     body: file, signal,
   })
-  const result = await response.json()
-  if (!response.ok) {
-    if (response.status === 401 && auth === csrfToken()) window.dispatchEvent(new Event("moyai:signed-out"))
-    throw new Error(typeof result.detail === "string" ? result.detail : "File upload failed.")
-  }
-  return result as UploadedFile
 }
 
 export function useAttachments(onError: (message: string) => void) {

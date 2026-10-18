@@ -166,8 +166,25 @@ async def perform(browser, body, deadline, env, trace):
         await page.bring_to_front()
         trace("focused")
     trace("action")
+    navigation_error = None
     if action == "open":
-        await page.goto(body.get("url") or "about:blank", wait_until="domcontentloaded")
+        from playwright.async_api import Error
+        try:
+            await page.goto(body.get("url") or "about:blank", wait_until="domcontentloaded")
+        except Error as error:
+            # A returned network error is a known failed navigation, not a
+            # missing receipt. It does not imply that earlier redirects had no
+            # effects. Preserve timeouts/resets as unknown and never replay here.
+            known = {
+                "ERR_CONNECTION_REFUSED": "The destination refused the connection. Check that its server is running.",
+                "ERR_NAME_NOT_RESOLVED": "The destination hostname could not be resolved.",
+                "ERR_ADDRESS_UNREACHABLE": "The destination address could not be reached.",
+                "ERR_INTERNET_DISCONNECTED": "The browser has no network connection.",
+            }
+            code = next((code for code in known if str(error).startswith(f"Page.goto: net::{code} at ")), None)
+            if code is None:
+                raise
+            navigation_error = {"code": code, "message": known[code]}
     elif action in {"back", "forward"}:
         # History can restore a cached document without a fresh DOM
         # readiness event. A committed traversal is sufficient for the
@@ -229,6 +246,8 @@ async def perform(browser, body, deadline, env, trace):
         raise ValueError("Unsupported browser action.")
     trace("observe")
     result = {**(await tabs(await page_map(context), trace)), "tab_id": identity}
+    if navigation_error:
+        result["navigation_error"] = navigation_error
     if action == "inspect":
         snapshot = await page.locator("body").aria_snapshot(timeout=5000)
         result.update({

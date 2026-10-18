@@ -1,0 +1,1 @@
+there's a License Manager window open on your computer's desktop. what activation code does it show? reply with the code

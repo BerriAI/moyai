@@ -82,9 +82,46 @@ def browser(monkeypatch):
             ))
         async def __aexit__(self, *_):
             pass
-    monkeypatch.setitem(sys.modules, "playwright.async_api", SimpleNamespace(async_playwright=Playwright))
+    monkeypatch.setitem(sys.modules, "playwright.async_api", SimpleNamespace(
+        async_playwright=Playwright, Error=BrowserError,
+    ))
     monkeypatch.setattr(guest.subprocess, "run", lambda argv, **kwargs: calls.append(tuple(argv)))
     return first, second, pages, calls
+
+
+class BrowserError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("code", [
+    "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED", "ERR_ADDRESS_UNREACHABLE", "ERR_INTERNET_DISCONNECTED",
+])
+def test_failed_navigation_returns_its_known_error_without_repeating_it(browser, code):
+    _, page, _, _ = browser
+    navigations = []
+    async def refused(url, **kwargs):
+        navigations.append(url)
+        page.url = "chrome-error://chromewebdata/"
+        raise BrowserError(f"Page.goto: net::{code} at {url}")
+    page.goto = refused
+    result = guest.operate(
+        {"action": "open", "url": "http://127.0.0.1:4173", "new_tab": False}, time.time() + 25, {},
+    )
+    assert result["navigation_error"]["code"] == code
+    assert result["tab_id"] == page.identity
+    assert navigations == ["http://127.0.0.1:4173"]
+
+
+@pytest.mark.parametrize("message", [
+    "Page.goto: Timeout 15000ms exceeded at https://example.test/net::ERR_CONNECTION_REFUSED",
+    "Page.goto: net::ERR_CONNECTION_RESET at https://example.test/submit",
+])
+def test_ambiguous_navigation_still_fails_without_a_confirmed_outcome(browser, message):
+    _, page, _, _ = browser
+    page.goto = AsyncMock(side_effect=BrowserError(message))
+    with pytest.raises(BrowserError):
+        guest.operate({"action": "open", "url": "https://example.test", "new_tab": False}, time.time() + 25, {})
+    assert page.goto.await_count == 1
 
 
 def test_inspection_tracks_actual_visible_tab_without_focus_or_input(browser):

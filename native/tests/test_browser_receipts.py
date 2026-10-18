@@ -1,12 +1,14 @@
 """Native SDK + database regressions. Guest doubles are not live browser proof."""
 import asyncio
 import json
+from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from pydantic import TypeAdapter
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.capabilities import Capability, LocalWorkspace
+from pydantic_ai.capabilities import Capability, LocalWorkspace, durable_operation
 from pydantic_ai.durable_exec._toolset import CallToolResult, unwrap_tool_call_result, wrap_tool_call_result
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, TemporalDurability
 from pydantic_ai.exceptions import ToolFailed
@@ -15,6 +17,8 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.tools import Tool, ToolDefinition
 from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
 from sqlalchemy import select
+from temporalio.client import WorkflowFailureError
+from temporalio.common import RetryPolicy
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 from test_shared_browser import running_browser, workspace
@@ -24,7 +28,13 @@ from moyai.browser import BrowserAction, browser_capability
 from moyai.browser_outcomes import BROWSER_OUTCOME, browser_result
 from moyai.computer import DesktopCommandFailed, lease
 from moyai.contracts import NewMessage, NewSession, RunScope
-from moyai.effects import EffectReceipts, claim_browser_dispatch, effect_id, requires_receipt
+from moyai.effects import (
+    EffectReceipts,
+    PendingEffectError,
+    claim_browser_dispatch,
+    effect_id,
+    requires_receipt,
+)
 from moyai.models import ComputerOperation, Effect, User, new_id
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
@@ -105,7 +115,7 @@ async def test_unknown_web_write_survives_operation_expiry_and_blocks_new_ids(ru
         if operation:
             operation.expires_at = 0
     assert (await saved(runtime, items)).state == "pending"
-    with pytest.raises(PermissionError, match="reconciliation"):
+    with pytest.raises(ToolFailed, match="unconfirmed outcome"):
         await invocation(runtime, scope)
     # Redelivery of the original activity also cannot repeat the guest action.
     repeated = await items[-1](items[0], **items[1])
@@ -259,6 +269,30 @@ async def test_real_sdk_hook_order_handles_refusal_then_coding(runtime, actor, t
     ]
 
 
+async def test_real_sdk_reports_pending_write_without_crashing_or_dispatching_another_write(runtime, actor, monkeypatch):
+    session, scope = await running_browser(runtime, actor)
+    receipts = EffectReceipts(runtime.database)
+    await receipts.reserve(scope, "unknown-browser", "browser_open", {"url": "https://example.test"})
+    requests, commands = [], []
+    def model(messages, info):
+        requests.append(messages)
+        if len(requests) == 1:
+            return ModelResponse(parts=[ToolCallPart("shell", {"command": "must not execute"}, tool_call_id="blocked")])
+        assert "This action did not run" in str(messages)
+        return ModelResponse(parts=[TextPart("The browser outcome still needs review; no further command ran.")])
+    agent = Agent(FunctionModel(model), deps_type=type(scope), capabilities=[receipts])
+    @agent.tool
+    async def shell(ctx: RunContext[RunScope], command: str) -> str:
+        commands.append(command)
+        return command
+    result = await agent.run("Continue the task.", deps=scope)
+    assert result.output.endswith("no further command ran.")
+    assert commands == []
+    async with runtime.database.sessions() as db:
+        rows = list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
+    assert [(row.id, row.state) for row in rows] == [("unknown-browser", "pending")]
+
+
 @pytest.mark.parametrize("old_history", [False, True])
 async def test_native_temporal_browser_receipts_and_pre_guard_history_replay(runtime, actor, monkeypatch, old_history):
     """Actual SDK/Temporal history with a controlled dispatch, not browser E2E."""
@@ -334,3 +368,106 @@ async def test_native_temporal_browser_receipts_and_pre_guard_history_replay(run
     async with runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
     assert [row.state for row in rows] == ([] if old_history else ["confirmed"])
+
+
+@pytest.mark.parametrize("old_history", [False, True])
+async def test_temporal_pending_write_returns_failure_to_agent_and_replays_old_crash(
+    runtime, active, monkeypatch, old_history,
+):
+    """Real activity failure transport/replay, with synthetic browser and model."""
+    session, turn, _ = active
+    dispatches, commands, requests = [], [], []
+
+    async def controlled_request(database, scope, workspace, command, *, writing, before_dispatch=None, after_dispatch=None):
+        if before_dispatch:
+            await before_dispatch()
+        dispatches.append(writing)
+        if writing:
+            raise TimeoutError("The navigation response was lost after dispatch.")
+        return {"tabs": [], "observed": True}
+
+    monkeypatch.setattr("moyai.browser.agent_request", controlled_request)
+
+    def respond(messages, info):
+        requests.append(messages)
+        results = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+        if not results:
+            return ModelResponse(parts=[ToolCallPart(
+                "browser_open", {"url": "https://example.test"}, tool_call_id="uncertain-browser",
+            )])
+        if len(results) == 1:
+            return ModelResponse(parts=[ToolCallPart(
+                "shell", {"command": "must not execute"}, tool_call_id="blocked-shell",
+            )])
+        if len(results) == 2:
+            assert "This action did not run" in str(results[-1].content)
+            return ModelResponse(parts=[ToolCallPart("browser_read", {}, tool_call_id="inspect")])
+        return ModelResponse(parts=[TextPart("The earlier navigation needs review; no command ran.")])
+
+    async def stream(messages, info):
+        for part in respond(messages, info).parts:
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ToolCallPart):
+                yield {0: DeltaToolCall(name=part.tool_name, json_args=json.dumps(part.args), tool_call_id=part.tool_call_id)}
+
+    class LegacyReceipts(EffectReceipts):
+        @durable_operation("reserve")
+        async def reserve(
+            self, scope: RunScope, identity: str, name: str, args: dict[str, Any],
+            shell_readiness: bool = False,
+        ) -> None:
+            try:
+                await super().reserve(scope, identity, name, args, shell_readiness)
+            except PendingEffectError as error:
+                # The recorded pre-fix activity failure must retain its old
+                # workflow behavior when replayed by the new worker.
+                raise PermissionError(str(error)) from error
+
+    async def shell(ctx: RunContext[RunScope], command: str) -> str:
+        commands.append(command)
+        return command
+
+    runtime.models = {"test": FunctionModel(respond, stream_function=stream)}
+
+    def build(legacy):
+        runtime.durability = TemporalDurability(
+            models=runtime.models, run_context_type=HarnessActivityContext,
+            activity_config={"start_to_close_timeout": timedelta(seconds=10),
+                             "retry_policy": RetryPolicy(maximum_attempts=1)},
+        )
+        return Agent(runtime.models["test"], name="moyai", deps_type=RunScope, capabilities=[
+            LocalWorkspace(runtime.settings.data_dir.parent / "computer"),
+            (LegacyReceipts if legacy else EffectReceipts)(runtime.database),
+            browser_capability(runtime.database), Capability(id="test_commands", tools=[Tool(shell)]), runtime.durability,
+        ])
+
+    runtime.agent = build(old_history)
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        async with make_worker(runtime):
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            if old_history:
+                with pytest.raises(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), 30)
+            else:
+                assert (await asyncio.wait_for(handle.result(), 30))["status"] == "completed"
+            history = await handle.fetch_history()
+        runtime.agent = build(False)
+        TurnWorkflow.__pydantic_ai_agents__ = [runtime.agent]
+        await Replayer(
+            workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
+            interceptors=[ActivityCapacity()],
+        ).replay_workflow(history)
+
+    assert dispatches == ([True] if old_history else [True, False])
+    assert commands == []
+    assert len(requests) == (2 if old_history else 4)
+    async with runtime.database.sessions() as db:
+        rows = list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
+    assert [(row.tool_name, row.state) for row in rows] == [("browser_open", "pending")]
