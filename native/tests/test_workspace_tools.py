@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import cast
+
+import modal
+
 from moyai.tools import WORKSPACE_TOOLS, OpenComputerUse
 
 
@@ -19,11 +23,18 @@ class FakeImage:
 def test_open_computer_use_installs_accessibility_dependencies() -> None:
     image = FakeImage()
 
-    assert OpenComputerUse().install(image) is image
-    assert image.calls == [
-        ("apt_install", ("dbus-x11", "at-spi2-core", "python3-gi", "gir1.2-atspi-2.0")),
-        ("run_commands", ("npm i -g open-computer-use@1.1.2",)),
-    ]
+    assert OpenComputerUse().install(cast(modal.Image, image)) is image
+    assert image.calls[0] == (
+        "apt_install", ("dbus-x11", "at-spi2-core", "python3-gi", "gir1.2-atspi-2.0"),
+    )
+    assert image.calls[1][0] == "run_commands"
+    assert len(image.calls[1][1]) == 1
+    command = image.calls[1][1][0]
+    assert OpenComputerUse.TARBALL_URL in command
+    assert OpenComputerUse.TARBALL_SHA256 in command
+    assert "sha256sum -c -" in command
+    assert "--ignore-scripts" in command
+    assert "open-computer-use@" not in command
 
 
 def test_open_computer_use_is_a_workspace_tool() -> None:

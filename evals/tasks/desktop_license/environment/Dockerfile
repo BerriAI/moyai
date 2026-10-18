@@ -8,7 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core dbus dbus-x11 at-spi2-core python3 python3-gi python3-pil \
     gir1.2-gtk-3.0 gir1.2-atspi-2.0 nodejs npm imagemagick \
     && rm -rf /var/lib/apt/lists/* \
-    && npm i -g open-computer-use@1.1.2
+    && curl -fsSL -o /tmp/ocu.tgz https://registry.npmjs.org/open-computer-use/-/open-computer-use-1.1.2.tgz \
+    && echo "393d83a04c7f34edf4cb1d5b00ffee400fa20bf6725457493cda479420c5703e  /tmp/ocu.tgz" | sha256sum -c - \
+    && npm install -g --ignore-scripts /tmp/ocu.tgz \
+    && rm /tmp/ocu.tgz
 ENV DISPLAY=:99 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/moyai-dbus \
     XDG_RUNTIME_DIR=/tmp/xdg \
