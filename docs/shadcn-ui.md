@@ -2,8 +2,8 @@
 
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
-`frontend/theme.css`: The workspace uses matte charcoal surfaces, purple actions,
-fine neutral borders and semantic status colors. General Sans supplies the interface
+`frontend/theme.css`: The workspace uses cool graphite surfaces, purple actions,
+fine slate borders and semantic status colors. General Sans supplies the interface
 through Fontshare's official stylesheet; the bundled Geist font is its offline
 fallback. Geist Mono is used for code. General Sans is not redistributed in this
 public repository; see https://www.fontshare.com/licenses/itf-ffl. CSP allows only
@@ -20,7 +20,7 @@ sidebar and workspace styles own application layout.
 Desktop sidebars collapse to a 52px rail with an open button at the top;
 workspace and Settings share the collapsed state. Mobile navigation stays an overlay.
 
-The orbit workspace key uses the shared Button and Radix Dialog behavior, including
+The folder workspace key uses the shared Button and Radix Dialog behavior, including
 Escape, outside dismissal and the Command/Control-period shortcut. Its resource
 menu floats within the chat area and must not resize the transcript, move the
 composer or change their scroll positions. The independent Computer/resource
@@ -31,8 +31,9 @@ belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
-The home screen centers a static heading and the composer over a fine 64px grid.
-Draft starters fill and focus the composer without sending a message. Once a user
+The home screen places a left-aligned heading and an editor-style prompt over a
+subtle 24px dot grid. Compact draft starters fill and focus the composer without
+sending a message. Once a user
 starts drafting, the starters cannot replace their text. Home no longer loads the
 Three.js sculpture or runs the headline decode animation. Chat surfaces remain
 plain for reading; the full-width shell keeps navigation and independent panels
@@ -45,7 +46,9 @@ view with its pins, participation, archive and drag/drop behavior; moving a task
 between status groups is not an action. The chat composer uses a compact rounded
 entry above its attachment/model toolbar. Fenced Markdown code has a language
 header, local syntax coloring and plain-text copy; unknown languages remain
-readable plain text, and long lines scroll within a focusable region.
+readable plain text, and long lines scroll within a focusable region. PR diffs appear above
+provider-limit guidance, with repository, author and commit metadata available
+through a keyboard-accessible Review details disclosure.
 
 ```sh
 npm ci

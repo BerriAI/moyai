@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { Bug, Code2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
+import { ArrowUpRight, Bug, Code2, FileCode2, Globe, ListChecks, LockKeyhole, Send, Terminal } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -12,9 +12,9 @@ import type { NewConversation, Session, Turn } from "./conversation-state"
 
 type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
 const starters = [
-  { label: "Review code", prompt: "Review my changes for bugs and improvements.", Icon: Code2 },
-  { label: "Fix a bug", prompt: "Help me investigate and fix this bug: ", Icon: Bug },
-  { label: "Plan a feature", prompt: "Help me plan and implement this feature: ", Icon: ListChecks },
+  { label: "Review code", detail: "Find the edge cases", prompt: "Review my changes for bugs and improvements.", Icon: Code2 },
+  { label: "Fix a bug", detail: "Trace it to the source", prompt: "Help me investigate and fix this bug: ", Icon: Bug },
+  { label: "Plan a feature", detail: "Make the next change clear", prompt: "Help me plan and implement this feature: ", Icon: ListChecks },
 ]
 export function homeSubmission(prompt: string, model: string, privateSession: boolean, attachments: string[], selected: string[], available: HomeConnection[]) {
   const connections = [...new Set(selected)].sort()
@@ -91,11 +91,12 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
     {fileDrop.dragging && <FileDropOverlay />}
     <SpaceBackdrop />
+    <div className="home-workbench-bar"><span><FileCode2 size={14} />workspace<span className="home-path-separator">/</span><strong>new-session</strong></span><span className="home-workbench-context"><Code2 size={13} />Moyai</span></div>
     <div className="home-content">
       <header className="home-header">
-        <p className="home-eyebrow"><span aria-hidden="true" />Your workspace</p>
-        <h1>What are we working on?</h1>
-        <p className="home-subtitle">Build something new, investigate an issue, or pick up where you left off.</p>
+        <p className="home-eyebrow"><Terminal size={15} aria-hidden="true" />The space between idea and commit</p>
+        <h1>What are we <span>building?</span></h1>
+        <p className="home-subtitle">A feature. A stubborn bug. A better way to do it.</p>
       </header>
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         {error && <p className="error" role="alert">{error}</p>}
@@ -105,8 +106,9 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
           <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setSkippedScope(accountScope)}>Continue without connections</Button>
         </div>}
         <div className="composer home-composer">
+          <div className="home-editor-heading"><span><FileCode2 size={14} />New task</span><span className="home-editor-mode">PROMPT</span></div>
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={pictures.paste} />
+          <div className="home-editor-input"><span className="home-prompt-glyph" aria-hidden="true">›</span><SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe a change, paste an error, or ask a question…" onPaste={pictures.paste} /></div>
           <div className="composer-actions">
             <div className="home-composer-tools">
               <AttachButton add={pictures.add} disabled={busy} compact />
@@ -128,11 +130,12 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         </div>
       </form>
       <div className="home-starters" role="group" aria-label="Start with a prompt" aria-hidden={Boolean(draft.trim())}>
-        {starters.map(({ label, prompt, Icon }) => <Button key={label} type="button" variant="outline" disabled={busy || Boolean(draft.trim())}
+        <p className="home-starters-heading">Start with a prompt</p>
+        {starters.map(({ label, detail, prompt, Icon }, index) => <Button key={label} type="button" variant="ghost" aria-label={label} disabled={busy || Boolean(draft.trim())}
           onClick={() => {
             setDraft(prompt)
             setComposerFocus(value => value + 1)
-          }}><Icon aria-hidden="true" />{label}</Button>)}
+          }}><span className="home-starter-index" aria-hidden="true">0{index + 1}</span><Icon aria-hidden="true" /><span className="home-starter-label">{label}</span><span className="home-starter-detail" aria-hidden="true">{detail}</span><ArrowUpRight className="home-starter-arrow" aria-hidden="true" /></Button>)}
       </div>
     </div>
   </section>

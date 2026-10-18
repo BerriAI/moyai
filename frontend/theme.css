@@ -31,17 +31,17 @@
 
 :root {
   color-scheme: dark;
-  --ui-canvas: #111111;
-  --ui-background: #181818;
-  --ui-subtle: #151515;
-  --ui-foreground: #ededed;
-  --ui-primary: #b69af7;
-  --ui-primary-foreground: #111111;
-  --ui-secondary: #1f1f1f;
-  --ui-muted: #a3a3a3;
-  --ui-control-border: #707070;
-  --ui-border: #2a2a2a;
-  --ui-selection: #2b2537;
+  --ui-canvas: #0e1015;
+  --ui-background: #14171e;
+  --ui-subtle: #11141a;
+  --ui-foreground: #e5e8ef;
+  --ui-primary: #b59aff;
+  --ui-primary-foreground: #111019;
+  --ui-secondary: #1c202a;
+  --ui-muted: #a5aaba;
+  --ui-control-border: #697286;
+  --ui-border: #272c38;
+  --ui-selection: #252239;
   --ui-font: "General Sans", "Geist", ui-sans-serif, system-ui, sans-serif;
   --ui-font-mono: "Geist Mono", ui-monospace, monospace;
   --ui-headline-accent: #ededed;

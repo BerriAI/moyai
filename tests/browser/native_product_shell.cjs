@@ -727,7 +727,7 @@ test('home and inventory render while account and folder reads are held',async t
 
 for(const width of [1440,768,320])test(`home keeps the draft and controls reachable at ${width}px`,async t=>{
   reset({status:'idle'});const page=await pageFor(t,'',width);
-  const heading=page.getByRole('heading',{name:'What are we working on?',exact:true});
+  const heading=page.getByRole('heading',{name:'What are we building?',exact:true});
   await heading.waitFor();
   await page.evaluate(()=>document.fonts.ready);
   const geometry=await heading.boundingBox();

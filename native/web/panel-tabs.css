@@ -2,7 +2,7 @@
   --panel-resize-width: 8px;
   position: relative;
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 44px minmax(0, 1fr);
   grid-template-columns: minmax(320px, var(--workspace-chat-width, 65fr)) var(--panel-resize-width) minmax(300px, 35fr);
   min-width: 0;
 }
@@ -15,9 +15,9 @@
 .panel-resize-handle:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
 .workspace-resizing > :is(.chat, .details-panel, .topbar) { pointer-events: none; user-select: none; }
 .panel-resize-shield { position: fixed; inset: 0; z-index: 1200; cursor: col-resize; touch-action: none; user-select: none; }
-.conversation .topbar { min-height: 48px; height: 48px; padding: 6px 16px; gap: 12px; }
+.conversation .topbar { min-height: 44px; height: 44px; padding: 5px 16px; background: var(--ui-subtle); gap: 12px; }
 .conversation .topbar .session-heading { display: flex; align-items: center; gap: 10px; }
-.conversation .topbar h1 { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.4; }
+.conversation .topbar h1 { margin: 0; font-size: 13px; font-weight: 500; line-height: 1.4; }
 .conversation .topbar h1:has(.session-title-trigger, .session-title-input) { min-width: 0; padding: 3px; margin: -3px; }
 .conversation .topbar h1:has(.session-title-input) { flex: 1; }
 .session-title-trigger { max-width: 100%; height: 32px; padding: 0 4px; font: inherit; justify-content: flex-start; }
@@ -43,8 +43,8 @@
 .panel-tabbar { display: flex; align-items: center; gap: 4px; height: 48px; min-height: 48px; padding: 5px 8px; border-bottom: 1px solid var(--ui-border); background: var(--ui-subtle); }
 .panel-tablist { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; flex: 1; align-items: center; }
 .panel-tab { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; max-width: 220px; border: 1px solid transparent; border-radius: 7px; }
-.panel-tab.selected { background: var(--ui-secondary); border-color: var(--ui-border); }
-.panel-tab > [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 32px; padding: 6px 5px 6px 9px; font-size: 12px; text-align: left; cursor: pointer; color: var(--ui-muted); }
+.panel-tab.selected { background: var(--ui-background); border-color: var(--ui-border); box-shadow: inset 0 2px var(--ui-primary); }
+.panel-tab > [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 32px; padding: 6px 5px 6px 9px; font: 11px/18px var(--ui-font-mono); text-align: left; cursor: pointer; color: var(--ui-muted); }
 .panel-tab.selected > [role="tab"] { color: var(--ui-foreground); }
 .panel-tab > [role="tab"] > svg { flex: none; }
 .panel-tab > [role="tab"] > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
