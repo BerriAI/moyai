@@ -41,6 +41,8 @@ SCOPED_AUTOMATION_EFFECTS = {
     "automation_grant", "automation_self_update", "automation_claim_item", "automation_webhook_setup",
 }
 SERVICE_PREFIXES = ("github_", "linear_", "notion_", "slack_")
+SHELL_RECOVERY_VERSION = "moyai-shell-readiness-v1"
+SHELL_READINESS_SUPPORTED = "moyai_shell_readiness_supported"
 
 
 def requires_receipt(tool: ToolDefinition) -> bool:
@@ -111,7 +113,10 @@ class EffectReceipts(AbstractCapability[RunScope]):
         self.database = database
 
     @durable_operation("reserve")
-    async def reserve(self, scope: RunScope, identity: str, name: str, args: dict[str, Any]) -> None:
+    async def reserve(
+        self, scope: RunScope, identity: str, name: str, args: dict[str, Any],
+        shell_readiness: bool = False,
+    ) -> None:
         await self.database.authorize_scope(scope)
         serialized = json.dumps(args, sort_keys=True, default=str)
         fingerprint = hashlib.sha256(f"{name}:{serialized}".encode()).hexdigest()
@@ -132,7 +137,9 @@ class EffectReceipts(AbstractCapability[RunScope]):
                     arguments=self.database.security.seal(serialized), fingerprint=fingerprint,
                     resolution=(
                         self.database.security.seal({"browser_phase": "reserved"})
-                        if name in BROWSER_WRITES else None
+                        if name in BROWSER_WRITES else
+                        self.database.security.seal({"shell_phase": "reserved"})
+                        if name == "shell" and shell_readiness else None
                     ),
                 ))
         except IntegrityError as error:
@@ -174,7 +181,12 @@ class EffectReceipts(AbstractCapability[RunScope]):
         self, ctx: RunContext[RunScope], tool_defs: list[ToolDefinition]
     ) -> list[ToolDefinition]:
         return [
-            replace(tool, sequential=True) if requires_receipt(tool) else tool
+            replace(
+                tool, sequential=True,
+                metadata={**(tool.metadata or {}), SHELL_RECOVERY_VERSION: True},
+            ) if tool.name == "shell" and (tool.metadata or {}).get(SHELL_READINESS_SUPPORTED) and (
+                not workflow.in_workflow() or workflow.patched(SHELL_RECOVERY_VERSION)
+            ) else replace(tool, sequential=True) if requires_receipt(tool) else tool
             for tool in tool_defs
         ]
 
@@ -204,7 +216,10 @@ class EffectReceipts(AbstractCapability[RunScope]):
             # enforced by the SDK before this hook once the tool is marked below.
             identity = effect_id(ctx, call)
             try:
-                await self.reserve(ctx.deps, identity, call.tool_name, args)
+                if tool_def.name == "shell" and (tool_def.metadata or {}).get(SHELL_RECOVERY_VERSION):
+                    await self.reserve(ctx.deps, identity, call.tool_name, args, shell_readiness=True)
+                else:
+                    await self.reserve(ctx.deps, identity, call.tool_name, args)
             except Exception as error:
                 if tool_def.name in BROWSER_WRITES and await self.not_dispatched(identity):
                     raise ToolFailed("Browser reservation failed before dispatch. The action did not execute.") from error
