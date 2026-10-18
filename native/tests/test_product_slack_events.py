@@ -3,6 +3,7 @@
 import pytest
 import pytest_asyncio
 import test_product_slack_context as context_tests
+from app.connector_errors import ConnectorError
 from fastapi import HTTPException
 from sqlalchemy import select
 
@@ -38,6 +39,90 @@ async def conversation(ingress, monkeypatch):
     async with ingress.runtime.database.sessions() as db:
         binding = await db.scalar(select(ProductSlackBinding))
     return binding
+
+
+async def test_top_level_mention_acknowledges_before_context_preparation(ingress, monkeypatch):
+    service = ingress.service
+    calls = []
+    order = []
+    prepare = service.context.prepare
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            calls.append((method, url, kwargs))
+            order.append("reaction")
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    async def prepare_context(*args, **kwargs):
+        order.append("prepare")
+        return await prepare(*args, **kwargs)
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    monkeypatch.setattr(service.context, "prepare", prepare_context)
+
+    message = context_tests.mention_message()
+    message.pop("thread_ts")
+    await service.receive_payload(context_tests.envelope(message))
+
+    assert len(calls) == 1
+    method, url, kwargs = calls[0]
+    assert method == "POST" and url == "https://slack.com/api/reactions.add"
+    assert kwargs["headers"]["Authorization"] == "Bearer synthetic-bot-token"
+    assert kwargs["json"] == {"channel": context_tests.CHANNEL, "name": "eyes", "timestamp": message["ts"]}
+    assert order.index("reaction") < order.index("prepare")
+
+
+async def test_bound_thread_followup_acknowledges_followup_timestamp(ingress, conversation, monkeypatch):
+    service = ingress.service
+    calls = []
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            calls.append((method, kwargs))
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(followup("An ordinary followup."))
+
+    assert len(calls) == 1
+    method, kwargs = calls[0]
+    assert method == "POST"
+    assert kwargs["json"] == {"channel": context_tests.CHANNEL, "name": "eyes", "timestamp": "1792255890.001"}
+
+
+async def test_unaddressed_top_level_message_is_not_acknowledged(ingress, monkeypatch):
+    calls = []
+
+    async def request(method, url, **kwargs):
+        calls.append(url)
+        return {"ok": True}
+
+    monkeypatch.setattr(ingress.service.connectors, "request", request)
+    message = {**context_tests.mention_message(), "type": "message", "text": "Unaddressed top-level message."}
+    message.pop("thread_ts")
+
+    await ingress.service.receive_payload(context_tests.envelope(message))
+
+    assert "https://slack.com/api/reactions.add" not in calls
+
+
+async def test_missing_scope_acknowledgement_does_not_block_turn_admission(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            response = {"ok": False, "error": "missing_scope"}
+            raise ConnectorError("The app rejected this operation.", code=response["error"], rejected=True)
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+
+    await service.receive_payload(context_tests.envelope(context_tests.mention_message()))
+
+    async with runtime.database.sessions() as db:
+        assert len(list(await db.scalars(select(Turn)))) == 1
 
 
 @pytest.mark.parametrize("command,expected", [

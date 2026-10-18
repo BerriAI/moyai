@@ -16,6 +16,47 @@ const steering = {id:'steer',actor_id:'viewer',status:'accepted',parent_turn:'ro
 const input = (id,turn,time) => ({id,turn_id:turn,role:'user',author_id:'viewer',content:'Input',created_at:time});
 const progress = (id,text,time) => ({id,text,phase:'commentary',created_at:time});
 
+test('a queued follow-up cannot move the preceding saved answer below its input',async()=>{
+  const {orderedWorkMessages} = await loaded;
+  const next={...root,id:'next',created_at:at(10)};
+  const messages=[input(155,'root',at(0)),input(156,'next',at(10)),
+    {id:157,turn_id:'root',role:'assistant',content:'Hello',created_at:at(20)}];
+  assert.deepEqual(orderedWorkMessages(messages,[{...root,status:'completed'},next]).map(x=>x.id),[155,157,156]);
+  assert.deepEqual(messages.map(x=>x.id),[155,156,157],'storage order is not mutated');
+});
+
+test('available inputs and streamed answers render without a completion barrier',async()=>{
+  const {orderedWorkMessages,workSegments} = await loaded;
+  const next={...root,id:'next',status:'queued',created_at:at(10)};
+  const messages=[input(1,'root',at(0)),input(2,'next',at(10)),input(3,'steer',at(20))];
+  const turns=[root,next,steering];
+  assert.deepEqual(orderedWorkMessages(messages,turns).map(x=>x.id),[1,3,2],
+    'steering remains visible while its root is running and has no answer');
+  const live={id:-2,turn_id:'root',role:'assistant',content:'Streaming answer'};
+  const ordered=orderedWorkMessages([...messages,live],turns);
+  assert.deepEqual(ordered.map(x=>x.id),[1,3,-2,2]);
+  const segments=workSegments(ordered.filter(x=>x!==live),turns);
+  assert.equal(segments.get(1).earlier,true);
+  assert.equal(segments.get(3).hasFinalAnswer,false,'streamed text must not collapse working updates');
+});
+
+test('several early queued inputs keep each saved answer with its own execution',async()=>{
+  const {orderedWorkMessages} = await loaded;
+  const turns=[root,{...root,id:'second'},{...root,id:'third'}];
+  const messages=[input(1,'root',at(0)),input(2,'second',at(1)),input(3,'third',at(2)),
+    {id:4,turn_id:'root',role:'assistant',content:'First'},
+    {id:5,turn_id:'second',role:'assistant',content:'Second'}];
+  assert.deepEqual(orderedWorkMessages(messages,turns).map(x=>x.id),[1,4,2,5,3]);
+});
+
+test('unknown turns and invalid cross-requester steering do not inherit another execution',async()=>{
+  const {orderedWorkMessages} = await loaded;
+  const unknown=input(2,'unknown',at(10));
+  const foreign={...steering,actor_id:'other'};
+  const messages=[input(1,'root',at(0)),unknown,input(3,'steer',at(20))];
+  assert.deepEqual(orderedWorkMessages(messages,[root,foreign]).map(x=>x.id),[1,2,3]);
+});
+
 test('admission order places a promoted input after newer typed guidance and ignores receipt retries',async()=>{
   const {orderedWorkMessages,workSegments} = await loaded;
   const promoted={...steering,id:'promoted',created_at:at(5),guidance_at:at(30),accepted_at:at(35)};
