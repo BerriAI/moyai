@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import asdict, replace
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     # Modal's import-time client setup belongs to the worker process. Workspace
@@ -34,6 +35,8 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.usage import UsageLimits
     from pydantic_ai.workspaces import WorkspaceRef, WorkspaceUnavailableError
 
+    from .computer_keepalive import VERSION as COMPUTER_KEEPALIVE_VERSION
+    from .computer_keepalive import Keepalive
     from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
     from .history_handoff import VERSION as HISTORY_VERSION
     from .history_handoff import AgentCheckpoint, CheckpointSave, HistoryHandoff, HistoryLimits
@@ -96,6 +99,26 @@ class TurnWorkflow(PydanticAIWorkflow):
                 return
             await workflow.wait_condition(lambda notice=notice: self.maintenance_notice != notice)
 
+    async def keep_computer_alive(self, scope: RunScope) -> None:
+        while True:
+            try:
+                state = await workflow.execute_activity(
+                    "moyai_keep_computer_alive_v1", scope, result_type=Keepalive,
+                    start_to_close_timeout=timedelta(seconds=20),
+                    schedule_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except ActivityError as error:
+                if is_cancelled_exception(error):
+                    raise asyncio.CancelledError from error
+                # Do not confuse a maintenance transport failure with a failed
+                # agent action, or keep a worker activity slot while waiting.
+                workflow.logger.warning("Active computer maintenance will retry.")
+                state = Keepalive(True)
+            if not state.active:
+                return
+            await workflow.sleep(state.delay)
+
     @workflow.signal
     async def steer(self, turn_id: str) -> None:
         if turn_id in self.steered:
@@ -142,9 +165,11 @@ class TurnWorkflow(PydanticAIWorkflow):
     @workflow.run
     async def run(self, turn_id: str, handoff: HistoryHandoff | None = None) -> dict:
         prepared: PreparedTurn | None = None
+        keepalive: asyncio.Task[None] | None = None
         try:
             history_handoff = workflow.patched(HISTORY_VERSION)
             checkpoint_workspace = workflow.patched(WORKSPACE_CHECKPOINT_VERSION)
+            keep_computer = workflow.patched(COMPUTER_KEEPALIVE_VERSION)
             maintenance = workflow.patched(DRAIN_VERSION)
             if maintenance:
                 await self.maintenance_checkpoint(turn_id, "before_prepare")
@@ -164,6 +189,8 @@ class TurnWorkflow(PydanticAIWorkflow):
                 )
             if prepared is None:
                 raise ValueError("Turn preparation returned no authorized input.")
+            if keep_computer:
+                keepalive = asyncio.create_task(self.keep_computer_alive(prepared.scope))
             limits = await workflow.execute_activity(
                 "moyai_history_limits_v1", result_type=HistoryLimits, **CONTROL,
             ) if history_handoff else None
@@ -261,6 +288,11 @@ class TurnWorkflow(PydanticAIWorkflow):
                 if result is None and checkpoint_ref is None:
                     raise RuntimeError("The SDK ended without a run result.")
             if checkpoint_ref is not None:
+                if keepalive is not None:
+                    keepalive.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await keepalive
+                    keepalive = None
                 await self.events.stream.continue_as_new(lambda state: [
                     turn_id, HistoryHandoff(
                         checkpoint=checkpoint_ref, stream_state=state,
@@ -358,6 +390,13 @@ class TurnWorkflow(PydanticAIWorkflow):
                 "The agent turn failed; inspect its recorded activity before retrying.",
                 type=type(error).__name__, non_retryable=True,
             ) from error
+        finally:
+            # Keep maintenance running through answer/checkpoint settlement,
+            # including deferred answers, but never beyond this execution.
+            if keepalive is not None:
+                keepalive.cancel()
+                with suppress(asyncio.CancelledError):
+                    await keepalive
 
     @staticmethod
     def history_full(limits: HistoryLimits) -> bool:

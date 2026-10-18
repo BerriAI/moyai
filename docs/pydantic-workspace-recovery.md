@@ -4,6 +4,23 @@ Pydantic AI and Temporal retain the conversation, deferred requests, results and
 execution history. Moyai separately saves the Modal computer's filesystem at a
 settled run boundary. A conversation checkpoint is not a computer snapshot.
 
+## Active turns
+
+New workflows use `moyai-active-computer-keepalive-v1`. Temporal schedules a short
+maintenance activity at most every sixty seconds, or one third of the configured
+Modal idle timeout. The activity rechecks the current requester, turn, workspace
+scope and grants, then runs a fixed `/bin/true` command on the existing computer.
+It does not acquire a computer for a text-only turn or create a replacement.
+The timer continues during model calls, delegated work, and answer/checkpoint
+settlement. It stops on completion, Stop, lost authority, or confirmed computer
+termination. History handoff cancels the old timer before continuing as new.
+
+This protects active work from **idle** expiry, not from the configured maximum
+computer lifetime, provider loss, or an outage lasting longer than the idle
+window. The maximum lifetime is unchanged. Completed and approval-wait checkpoints
+retain the verification rules below; maintenance does not make a mid-action
+snapshot safe to restore or authorize replaying any action.
+
 ## Approval waits
 
 New workflows use the `moyai-workspace-checkpoint-v1` patch. They commit a received
