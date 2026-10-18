@@ -488,6 +488,8 @@ async def tool_context(ctx, *, visibility="shared", actor=None, delegate=False, 
     if surface != "web":
         async with ctx.product.database.sessions.begin() as db:
             await db.execute(update(Session).where(Session.id == session.id).values(surface=surface))
+    if surface == "slack":
+        await bind_slack_test_session(ctx.product.database, session.id, actor)
     turn = await ctx.product.database.submit(
         actor, session.id, NewMessage(prompt="Synthetic user scheduling request", request_key="tool-" + uuid4().hex),
     )
@@ -707,3 +709,16 @@ async def test_automation_captures_real_canonical_connection_ids_and_never_resel
         fresh = json.loads((await db.get(Turn, second["turn_id"])).connections)
     assert fresh[0] != original[0]
     assert "synthetic-token" not in json.dumps(fresh)
+
+
+async def bind_slack_test_session(database, session_id, actor):
+    """A synthetic signed DM with real product identity and audience enforcement."""
+    from moyai.product_slack_models import ProductSlackBinding
+    from moyai.slack_audience import can_read
+    slack = SimpleNamespace(runtime=SimpleNamespace(database=database),
+                            installation=lambda: {"team_id": "TTEST0001", "authority": "a" * 64})
+    database.slack_access = lambda db, session, viewer: can_read(slack, db, session, viewer)
+    async with database.sessions.begin() as db:
+        db.add(ProductSlackBinding(session_id=session_id, requester_id=actor.id, team_id="TTEST0001",
+            channel_id="DTEST0001", thread_ts="1792255740.000", started_ts="1792255740.000",
+            connection_authority="a" * 64))

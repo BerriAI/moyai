@@ -52,7 +52,9 @@ SWARM_SCHEMA_VERSION = "2026-10-16-native-swarms-v16"
 GITHUB_WORKFLOW_SCHEMA_VERSION = "2026-10-16-product-github-workflows-v17"
 DELEGATION_SCHEMA_VERSION = "2026-10-16-interactive-delegation-v18"
 SLACK_ACTIVITY_SCHEMA_VERSION = "2026-10-17-slack-activity-v19"
-PRODUCT_SCHEMA_VERSION = SLACK_ACTIVITY_SCHEMA_VERSION
+SLACK_TURN_SOURCE_SCHEMA_VERSION = "2026-10-17-slack-turn-source-v20"
+MESSAGE_SOURCE_SCHEMA_VERSION = "2026-10-18-message-sources-v21"
+PRODUCT_SCHEMA_VERSION = MESSAGE_SOURCE_SCHEMA_VERSION
 RECEIPTS = "moyai_app_schema_versions"
 GRANT_TABLE = "moyai_product_turn_authority"
 GRANT_TRIGGER = "moyai_product_grant_immutable"
@@ -92,6 +94,7 @@ CONTINUATION_TABLES = frozenset({
     "moyai_product_continuations", "moyai_product_workspace_restorations", "moyai_product_execution_contexts",
 })
 SLACK_TABLES = frozenset({"moyai_product_slack_bindings"})
+SLACK_TURN_SOURCE_TABLES = frozenset({"moyai_slack_turn_sources"})
 MEMORY_TABLES = frozenset({"moyai_product_memory_operations", "moyai_product_memory_barriers"})
 AUTOMATION_ACCESS_TABLES = frozenset({"moyai_product_automation_chat_grants"})
 CONTINUATION_CAPTURE_TABLES = frozenset({CONTINUATION_CAPTURE_TABLE})
@@ -128,6 +131,8 @@ MIGRATIONS = (
     (GITHUB_WORKFLOW_SCHEMA_VERSION, frozenset()),
     (DELEGATION_SCHEMA_VERSION, frozenset({"moyai_delegated_sessions", "moyai_delegated_turns"})),
     (SLACK_ACTIVITY_SCHEMA_VERSION, frozenset({"moyai_slack_activity"})),
+    (SLACK_TURN_SOURCE_SCHEMA_VERSION, SLACK_TURN_SOURCE_TABLES),
+    (MESSAGE_SOURCE_SCHEMA_VERSION, frozenset({"moyai_message_sources", "moyai_delivery_schedule"})),
 )
 
 

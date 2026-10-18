@@ -148,6 +148,8 @@ async def test_canonical_grants_survive_generated_resume_and_private_followup(
     await database.stopped(turn.id)
     async with database.sessions.begin() as db:
         (await db.get(Session, session.id)).surface = surface
+    if surface == "slack":
+        await fixtures.bind_slack_test_session(database, session.id, ctx.product.actor)
     parent = await database.submit(ctx.product.actor, session.id, NewMessage(
         prompt="Delegate", request_key="connected", connections=["slack"],
     ))

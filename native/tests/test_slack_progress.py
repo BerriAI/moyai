@@ -249,7 +249,8 @@ async def test_product_saving_notice_remains_deliverable_before_completion(runti
                 await slack.service.deliver(client, notice)
             expected = "Moyai is saving the work." if status == "saving" else "Final verdict."
             assert next(iter(messages.values()))["text"].startswith(expected)
-    assert len(messages) == 1 and len(requests) == 3
+    assert len(messages) == 2 and len(requests) == 4  # The original web input is mirrored once.
+    assert sum("(from Moyai)" in message["text"] for message in messages.values()) == 1
 
 
 @pytest.mark.parametrize("product", [False, True])

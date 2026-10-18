@@ -227,6 +227,9 @@ async def test_shared_and_slack_sessions_cannot_use_personal_agent_credentials(c
             session = await db.get(Session, prepared.scope.session_id)
             session.visibility, session.surface = "shared", surface
         shared = replace(prepared.scope, visibility="shared", surface=surface)
+        if surface == "slack":
+            from test_product_automations import bind_slack_test_session
+            await bind_slack_test_session(f.product.database, session.id, f.product.actor)
         assert not (await f.service.inventory(shared, ListCredentials()))["credentials"]
         with pytest.raises(HTTPException):
             await f.service.materialize(shared, [pending["request_id"]])
