@@ -23,6 +23,7 @@ import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
 import { SessionActionsProvider, SessionMenu, sessionIsReadOnly, sessionKey, useSessionActions } from "./session-actions"
 import { SessionTitle } from "./session-title"
+import { useSessionPreferences } from "./use-session-preferences"
 import { WorkspaceOverview, SubagentPanel, WorkspaceResourceProvider, WorkspaceMenuKey } from "./workspace"
 import { SwarmPanel } from "./swarm"
 import { PullRequestPanel } from "./pull-request"
@@ -133,6 +134,12 @@ function App() {
   const settingsOpen = selected === "settings" || selected.startsWith("settings/")
   const historical = selected.startsWith("run=")
   const scopeKey = `${me?.user.id}:${me?.user.role}:${me?.user.individual}:${me?.csrf}`
+  const preferences = useSessionPreferences(scopeKey)
+  const preferenceRows = new Map(sessions.filter(row => !sessionIsReadOnly(row)).map(row => [row.id, row]))
+  const preferenceSession = (row: SidebarSession) => {
+    const latest = preferenceRows.get(row.id)
+    return preferences.apply(sessionIsReadOnly(row) || !latest ? row : { ...row, pinned: latest.pinned, folder: latest.folder })
+  }
   const routeScope = `${scopeKey}:${routeRevision}`, routeKey = `${routeScope}:${selected}`
   const originalId = historical ? decodeRoute(selected.slice(4)) : ""
   const acceptedStart = (initialConversation?.scope === scopeKey && initialConversation.value.session.id === selected)
@@ -177,6 +184,7 @@ function App() {
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
+    const preferenceCheckpoint = preferences.checkpoint()
     setInventoryState(previous => ({ ...previous, loading: true }))
     const inventory = async () => {
       const rows = new Map<string, Session>(), notices = new Set<string>()
@@ -208,6 +216,7 @@ function App() {
       const results = await Promise.allSettled([
         inventory().then(result => {
           if (result && current()) {
+            preferences.acceptRead(preferenceCheckpoint, result.rows)
             setSessions(result.rows)
             setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
           }
@@ -228,7 +237,7 @@ function App() {
     } finally {
       if (version === refreshVersion.current) setInventoryState(previous => ({ ...previous, loading: false }))
     }
-  }, [listView, sessionPageCount])
+  }, [listView, sessionPageCount, preferences])
 
   useEffect(() => {
     api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
@@ -292,7 +301,7 @@ function App() {
   const newSession = () => { location.hash = ""; setMobileNav(false); setWorkspaceRequest(null) }
   const navigateSettings = (page: string) => { if (selected && !settingsOpen) lastConversation.current = selected; location.hash = `settings/${page}` }
   const toggleSidebar = () => { if (matchMedia("(max-width: 600px)").matches) setMobileNav(value => !value); else setSidebarHidden(value => !value) }
-  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
+  return <PanelRatioProvider key={JSON.stringify([me.product_mode || "standalone", me.user.id])} scope={me.product_mode || "standalone"} userId={me.user.id}><SessionActionsProvider key={scopeKey} userId={me.user.id} folders={folders} refresh={refresh} preferences={preferences} preferenceSession={preferenceSession} onNewSession={newSession} onDeleted={id => { if (nativeSelected === id) newSession() }} onOpenComputer={sessionId => {
     setWorkspaceRequest(previous => ({ sessionId, sequence: (previous?.sequence ?? 0) + 1, tab: "computer" }))
     location.hash = sessionId; setMobileNav(false)
   }}><div className={`app ${settingsOpen ? "settings-open" : ""} ${sidebarHidden ? "sidebar-collapsed" : ""}`}>
@@ -306,7 +315,7 @@ function App() {
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("automations")}><Clock />Automations</Button>
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
-      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...row, pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
+      <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...preferences.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
         hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
         onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
         onOpenSideChat={row => {
@@ -352,7 +361,7 @@ function AppCommandPalette({ current, historicalId, productMode, ...props }: {
 }) {
   const actions = useSessionActions()
   const session: PaletteCurrentSession | undefined = current ? {
-    ...current, source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
+    ...actions.preferenceSession(current), source: "native", capabilities: { read: true, rename: current.owner_id === actions.userId, pin: true, move: true },
   } : historicalId ? { id: historicalId, title: "Saved session", source: "legacy", read_only: true } : undefined
   return <CommandPalette {...props} scopeLabel="Your accessible sessions" currentSession={session} busy={actions.busy} search={searchSessions}
     destinations={settingsDestinations.filter(item => !item.productOnly || productMode === "existing")} onOpenSession={openSessionReference}
