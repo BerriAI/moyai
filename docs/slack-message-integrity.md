@@ -77,6 +77,10 @@ For **Slack access could not be verified right now**, allow the retry delay to p
 
 For **Conversation unavailable**, check the signed-in user's verified Slack account, profile freshness, workspace, channel membership and the connection in **Settings → Connections**. Inspect the recorded reason before changing the installation. Reconnecting changes installation authority: existing tasks/destinations remain fenced and do not silently regain execution or delivery permission. Use a new Slack conversation for work under a replacement installation. Do not manually rewrite old turn-authority records to bypass this fence.
 
+For **The Slack bot connection could not be renewed**, an administrator must reconnect Slack in **Settings → Connections**, then start a new Slack conversation. This applies when Slack rejects the stored refresh token; retrying a browser read cannot repair that credential. An ordinary deployment does not require reconnecting or adding OAuth scopes.
+
+Slack token renewal acquires its database write ownership before asking Slack to rotate the credential. User and bot renewals share a provider lock across processes, preserve each other's credentials and retain the existing installation authority. The save can proceed while a browser holds its admission read lock. Renewal finishes saving even if the requesting browser disconnects; database contention before renewal cannot consume the provider credential.
+
 For **Confirming Slack delivery**, inspect the original Slack thread and allow read reconciliation to settle it. Do not repost an uncertain send. For an explicit rejection, correct the connection/access problem and use **Retry delivery** if the original authority remains valid. A rate-limit rejection retries automatically.
 
 ## Retention boundaries
@@ -92,6 +96,8 @@ Requester debug exports intentionally include the original received prompt as di
 Automated coverage uses real encrypted native records, disposable local PostgreSQL, verified identity logic, synthetic Slack membership responses and a local HTTP receiver. Browser tests use the real React app with synthetic API data. These checks do not prove Slack provider configuration or production deployment.
 
 The execution regression admits a Slack input with eight selected GitHub repositories, runs concurrent credential discovery through the real connection toolset, and verifies that a model request occurs with zero Slack audience API calls during provider failure. Separate tests retain installation, sender, connection, policy, stopped-task and deleted-session fences, and check the OAuth scopes under every feature-flag combination.
+
+Token-renewal regressions use disposable PostgreSQL to hold the same admission lock as a browser, renew an expired bot token and verify its replacement is saved before that lock is released. They also cover competing connector instances, cancellation after rotation, writer contention before rotation, and connection replacement or deletion.
 
 The browser regression runs the real stream authorization wrapper for 80 events, followed by repeated inventory and transcript reads, and requires just one channel-info call and one membership-page call. Additional regressions cover concurrent readers, cancellation, installation/workspace isolation, expiry, membership revocation and rate-limit cooldown across channels. Local tests establish request bounds and access behavior; a live Slack task watched in the browser remains the production acceptance check.
 

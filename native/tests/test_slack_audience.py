@@ -486,3 +486,13 @@ async def test_linked_owner_can_find_delete_and_restore_their_slack_conversation
     assert (await product.reads.listing(product.reader, source='native', deleted=True))['sessions'][0]['can_manage']
     await product.database.restore_session(product.actor, product.session_id)
     assert (await product.database.messages(product.actor, product.session_id))[0]['is_self']
+
+
+async def test_rejected_refresh_token_explains_connection_recovery_without_exposing_provider_data(audience):
+    product = audience
+    product.state['failure'] = ConnectorError('private-provider-body', code='invalid_refresh_token')
+    with pytest.raises(HTTPException) as error:
+        await product.database.messages(product.actor, product.session_id)
+    assert error.value.status_code == 503
+    assert 'reconnect Slack' in error.value.detail and 'Settings → Connections' in error.value.detail
+    assert 'private-provider-body' not in error.value.detail

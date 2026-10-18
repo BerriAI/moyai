@@ -23,14 +23,14 @@ def new_credentials(credentials):
     return {**credentials, AUTHORITY: secrets.token_hex(32)}
 
 
-def refresh_connection(store, security, provider, original, credentials):
+def refresh_connection(store, security, provider, original, credentials, *, connection=None):
     previous = json.loads(security.decrypt(original["encrypted"]))
     fresh = {**credentials, AUTHORITY: authority(previous, original["encrypted"])}
-    changed = store.execute(
-        """UPDATE connections SET encrypted=?,updated_at=?
-           WHERE provider=? AND encrypted=?""",
-        (security.encrypt(json.dumps(fresh)), now(), provider, original["encrypted"]),
-    )
+    query = """UPDATE connections SET encrypted=?,updated_at=?
+               WHERE provider=? AND encrypted=?"""
+    values = (security.encrypt(json.dumps(fresh)), now(), provider, original["encrypted"])
+    changed = (connection.execute(query, values).rowcount if connection is not None
+               else store.execute(query, values))
     if not changed:
         raise ConnectorError(
             "The connection changed while refreshing. No action was sent.",

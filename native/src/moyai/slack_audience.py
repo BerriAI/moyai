@@ -44,6 +44,11 @@ def provider_failure(error: Exception) -> bool:
                    "denied" if denied else "unavailable", code, status, retry_after)
     if denied:
         return False
+    if code == "invalid_refresh_token":
+        raise HTTPException(
+            503, "The Slack bot connection could not be renewed. An administrator must reconnect Slack "
+            "in Settings → Connections.",
+        ) from None
     raise HTTPException(
         503, "Slack access could not be verified right now. Try again shortly.",
         headers={"Retry-After": str(retry_after)} if retry_after else None,
