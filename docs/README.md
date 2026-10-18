@@ -19,6 +19,7 @@
 | [PostgreSQL migration](postgres-migration.md) | Verified historical SQLite transfer |
 | [Object storage](object-storage.md) | Historical payload migration and backup requirements |
 | [UI components](shadcn-ui.md) | Shared controls, frontend build and browser checks |
+| [Debug traces](debug-traces.md) | Exporting and sharing an ATIF session trace |
 | [Verification](verification.md) | Local and CI checks and their limits |
 | [CI execution](ci-execution.md) | Isolated native test shards and runtime checks |
 | [Consolidation scope](consolidation.md) | Preserved functionality and removed runtime families |
