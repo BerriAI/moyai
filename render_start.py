@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 import uvicorn
@@ -16,6 +17,8 @@ LISTENER_GRACE_SECONDS = 30
 API_GRACEFUL_SHUTDOWN_SECONDS = 240
 BROKER_GRACEFUL_SHUTDOWN_SECONDS = 240
 NATIVE_WORKER_GRACEFUL_SHUTDOWN_SECONDS = 240
+ROLE_CONTROL_PROTOCOL = "moyai-role-drain-v1"
+ROLE_CONTROL_SOCKET = "/tmp/moyai-release/control.sock"
 
 
 class RenderOverlapServer(uvicorn.Server):
@@ -128,7 +131,11 @@ def main():
         from moyai.product_start import create_application
         product_config = load_product_config()
         assert product_config is not None
-        target = create_application(product_config, host="0.0.0.0")
+        control_socket = os.environ.get("MOYAI_ROLE_CONTROL_SOCKET", ROLE_CONTROL_SOCKET)
+        target = create_application(
+            product_config, host="0.0.0.0",
+            control_socket=Path(control_socket) if control_socket else None,
+        )
     role = os.environ.get("MOYAI_RUNTIME_ROLE")
     config = uvicorn.Config(
         target, host="0.0.0.0",

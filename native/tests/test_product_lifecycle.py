@@ -80,6 +80,27 @@ async def test_lost_owner_cannot_report_ready_or_disclose_connection_errors():
     assert life.failed and not life.healthy and retired == [True]
 
 
+async def test_adoption_pool_contention_does_not_retire_a_valid_owner():
+    from app.database import DatabaseBusyError
+
+    life = lifecycle("api")
+    attempted = asyncio.Event()
+    retired = []
+
+    async def busy():
+        attempted.set()
+        raise DatabaseBusyError("Local contention.")
+
+    life.admission = SimpleNamespace(refresh=busy)
+    life.retire = lambda: retired.append(True)
+    watching = asyncio.create_task(life.watch())
+    await attempted.wait()
+    await asyncio.sleep(0)
+    assert life.admission_busy and not life.failed and retired == []
+    watching.cancel()
+    await asyncio.gather(watching, return_exceptions=True)
+
+
 async def test_receipt_services_all_drain_before_cancellation_propagates():
     completed = []
 
@@ -118,6 +139,7 @@ def test_only_explicit_product_broker_workers_can_omit_the_gateway_key(tmp_path)
 @pytest.mark.parametrize("starts_polling", [True, False])
 async def test_worker_health_waits_for_native_polling_and_times_out_cleanly(monkeypatch, starts_polling):
     import moyai.worker as worker_module
+    from moyai.fleet_admission import FleetAdmission
 
     life = lifecycle("worker")
     life.ready = False
@@ -140,6 +162,12 @@ async def test_worker_health_waits_for_native_polling_and_times_out_cleanly(monk
     life.runtime.connect = connect
     life.runtime.product_inference = None
     life.runtime.settings = SimpleNamespace(validate_worker=lambda **_: None)
+    # This fixture deliberately has no canonical PostgreSQL connection. Fleet
+    # admission and sealing are exercised against PostgreSQL separately.
+    async def refresh(self):
+        return True
+    monkeypatch.setattr(FleetAdmission, "start", refresh)
+    monkeypatch.setattr(FleetAdmission, "refresh", refresh)
     monkeypatch.setattr(worker_module, "make_worker", waiting_worker)
 
     async def serve():

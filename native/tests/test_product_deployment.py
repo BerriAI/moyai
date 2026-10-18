@@ -331,7 +331,8 @@ def test_retired_core_never_falls_back(monkeypatch, core):
         load_product_config()
 
 
-def test_render_starts_the_selected_product_role(environment, monkeypatch):
+@pytest.mark.parametrize("control_socket", [None, "", "/tmp/moyai-release/control.sock"])
+def test_render_starts_the_selected_product_role(environment, monkeypatch, control_socket):
     from types import SimpleNamespace
 
     import render_start
@@ -339,14 +340,21 @@ def test_render_starts_the_selected_product_role(environment, monkeypatch):
     from moyai import product_start
 
     monkeypatch.setattr(os, "environ", {**environment, "RENDER_MIGRATION_STAGE": "false",
+                                      **({"MOYAI_ROLE_CONTROL_SOCKET": control_socket} if control_socket is not None else {}),
                                       "MOYAI_PUBLIC_URL": "https://synthetic.example.test"})
     application = SimpleNamespace(state=SimpleNamespace(product_lifecycle=None))
     calls = []
-    monkeypatch.setattr(product_start, "create_application", lambda *a, **kw: application)
+    def create(config, **kwargs):
+        assert config.role == "api"
+        selected = render_start.ROLE_CONTROL_SOCKET if control_socket is None else control_socket
+        assert kwargs == {"host": "0.0.0.0", "control_socket": Path(selected) if selected else None}
+        return application
+    monkeypatch.setattr(product_start, "create_application", create)
 
     class Server:
         def __init__(self, config, **kwargs):
             assert config.app is application
+            assert config.timeout_graceful_shutdown == 240
             calls.append("native")
 
         def run(self):
@@ -355,6 +363,61 @@ def test_render_starts_the_selected_product_role(environment, monkeypatch):
     monkeypatch.setattr(render_start, "RenderOverlapServer", Server)
     render_start.main()
     assert calls == ["native", "served"]
+
+
+@pytest.mark.parametrize("invalid_socket", [True, False])
+async def test_control_socket_binds_before_role_admission_and_closes_after_drain(
+    environment, monkeypatch, invalid_socket,
+):
+    import tempfile
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from moyai import api, product_lifecycle, product_start
+
+    config = configured({**environment, "MOYAI_RUNTIME_ROLE": "worker"})
+    events = []
+    with tempfile.TemporaryDirectory(prefix="moyai-start-") as directory:
+        path = Path("relative.sock") if invalid_socket else Path(directory) / "control.sock"
+
+        async def start():
+            events.append("runtime-start")
+
+        async def close():
+            assert not path.exists()
+            events.append("runtime-close")
+
+        runtime = SimpleNamespace(
+            product_config=config, product=SimpleNamespace(),
+            start=start, close=close,
+        )
+
+        @asynccontextmanager
+        async def role_lifespan(self):
+            assert path.exists()
+            events.append("worker-polling")
+            try:
+                yield
+            finally:
+                assert path.exists()
+                events.append("role-drained")
+
+        monkeypatch.setattr(product_start, "_runtime", lambda _: runtime)
+        monkeypatch.setattr(product_start, "verify_product_schema", lambda _: None)
+        monkeypatch.setattr(api, "create_app", lambda *a, **kw: FastAPI())
+        monkeypatch.setattr(product_lifecycle.ProductRoleLifecycle, "lifespan", role_lifespan)
+        app = product_start.create_application(config, control_socket=path)
+        if invalid_socket:
+            with pytest.raises(ValueError, match="absolute"):
+                async with app.router.lifespan_context(app):
+                    pytest.fail("An invalid control socket must not start the application.")
+            assert events == ["runtime-start", "runtime-close"]
+        else:
+            async with app.router.lifespan_context(app):
+                assert events == ["runtime-start", "worker-polling"]
+            assert events == ["runtime-start", "worker-polling", "role-drained", "runtime-close"]
 
 
 @pytest.mark.parametrize("command", ["user", "dev", "serve", "worker"])
