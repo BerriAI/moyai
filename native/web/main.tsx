@@ -18,6 +18,8 @@ import slackLogo from "./assets/slack-logo.svg"
 import { Home } from "./home"
 import type { GeneralPreferences } from "./general-preferences"
 import { MoyaiBrand, SidebarToggle } from "./brand"
+import { initializeAppearance } from "./appearance"
+import { AppearanceToggle } from "./appearance-toggle"
 import { SpaceBackdrop } from "./space-backdrop"
 import { activeSession, pollVisible } from "./polling"
 import { SessionSidebar, SessionFolder, SidebarSession, SessionListView } from "./sidebar"
@@ -332,7 +334,7 @@ function App() {
           setMobileNav(false)
         }}
         onOpenPullRequest={(sessionId, url) => { setWorkspaceRequest(previous => ({ sessionId, url, tab: "pull-request", sequence: (previous?.sequence ?? 0) + 1 })); location.hash = sessionId; setMobileNav(false) }} />
-      <div className="account"><span>{me.user.name}</span><Button variant="ghost" size="icon" aria-label="Settings" onClick={() => navigateSettings("overview")}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => {
+      <div className="account"><span>{me.user.name}</span><AppearanceToggle /><Button variant="ghost" size="icon" aria-label="Settings" onClick={() => navigateSettings("overview")}><Settings /></Button><Button variant="ghost" size="icon" aria-label="Sign out" onClick={async () => {
         try { const result = await api<{ logout_url?: string }>("/logout", "POST"); window.dispatchEvent(new Event("moyai:signed-out")); if (result.logout_url) navigateAuth(result.logout_url, true) }
         catch (reason) { setError(String(reason)) }
       }}><LogOut /></Button></div>
@@ -1126,4 +1128,5 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
   </>
 }
 
+initializeAppearance()
 createRoot(document.getElementById("root")!).render(<App />)

@@ -5,12 +5,13 @@ description: Build or refine Moyai's native React frontend using its established
 
 # Moyai UI
 
-Preserve the compact workspace: cool graphite surfaces, purple actions, fine
-slate borders, near-white text and opaque composer panels. Use General Sans
+Preserve the compact workspace: neutral charcoal and white themes, fine borders,
+restrained purple actions and opaque composer panels. Theme choice persists locally;
+dark is the default. Keep messages and composer focus borders neutral. Use General Sans
 from the official Fontshare stylesheet for the interface, local Geist as the
 fallback, and Geist Mono for code. Do not commit the restricted General Sans
 font binaries to this public repository.
-The home screen uses a static dot grid, an editor-style prompt and compact draft starters;
+The home screen uses a faint static dot grid, a plain rounded composer and compact draft starters;
 chat and Settings stay quiet for sustained work. Use 6–8px rounded controls and
 a 12px desktop frame. The default sidebar groups current work by Needs you,
 In progress, In review and Backlog; preserve the alternate folder view and

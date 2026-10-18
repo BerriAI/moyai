@@ -45,7 +45,7 @@
 .pr-view .pr-filename small { display: block; color: var(--ui-muted); font: inherit; }
 .pr-view .pr-file-stats { display: inline-flex; flex-wrap: wrap; gap: 8px; color: var(--ui-muted); font: 10px/18px var(--ui-font-mono); }
 .pr-view .pr-file .pr-notice { margin: 12px; }
-.pr-view .pr-diff { margin: 0; max-width: 100%; padding: 8px 0; overflow: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; white-space: pre; overflow-wrap: normal; tab-size: 4; font: 13px/21px var(--ui-font-mono); }
+.pr-view .pr-diff { margin: 0; max-width: 100%; padding: 8px 0; color: var(--ui-code-foreground); overflow: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; white-space: pre; overflow-wrap: normal; tab-size: 4; font: 13px/21px var(--ui-font-mono); }
 .pr-view .pr-diff > code { display: block; min-width: max-content; white-space: pre; overflow-wrap: normal; font: inherit; }
 .pr-view .pr-diff > code > span { display: block; padding-inline: 12px; min-height: 21px; }
 .pr-view .pr-diff:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }

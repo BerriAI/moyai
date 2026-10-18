@@ -2,8 +2,11 @@
 
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
-`frontend/theme.css`: The workspace uses cool graphite surfaces, purple actions,
-fine slate borders and semantic status colors. General Sans supplies the interface
+`frontend/theme.css`: The workspace uses neutral charcoal and white themes, fine
+borders, restrained purple actions and semantic status colors. A compact appearance
+control in the account footer and Settings switches light/dark mode without replacing
+drafts or navigating. The choice persists locally and applies before the first paint;
+dark is the default. Message surfaces and composer focus borders stay neutral. General Sans supplies the interface
 through Fontshare's official stylesheet; the bundled Geist font is its offline
 fallback. Geist Mono is used for code. General Sans is not redistributed in this
 public repository; see https://www.fontshare.com/licenses/itf-ffl. CSP allows only
@@ -31,8 +34,8 @@ belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
-The home screen places a left-aligned heading and an editor-style prompt over a
-subtle 24px dot grid. Compact draft starters fill and focus the composer without
+The home screen places a left-aligned heading and a plain rounded composer over a
+faint 24px dot grid. Compact draft starters fill and focus the composer without
 sending a message. Once a user
 starts drafting, the starters cannot replace their text. Home no longer loads the
 Three.js sculpture or runs the headline decode animation. Chat surfaces remain
@@ -67,6 +70,6 @@ application with its configured backend.
 Browser tests in `tests/browser/native_*.cjs` serve the real React application
 against synthetic APIs. They cover keyboard navigation, access revocation,
 historical routes, attachments, responsive panels and settings. Inspect affected
-screens at 1440, 768 and 320 pixels, including dialogs, focus, overflow and reduced
-motion. Fixture screenshots demonstrate presentation, not live provider execution.
+screens in both light and dark modes at 1440, 768 and 320 pixels, including dialogs,
+focus, overflow and reduced motion. Fixture screenshots demonstrate presentation, not live provider execution.
 See the [repository UI skill](../.agents/skills/moyai-ui/SKILL.md) before changes.

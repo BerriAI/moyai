@@ -50,7 +50,7 @@
   border-radius: 6px;
   background: var(--ui-background);
   color: var(--ui-foreground);
-  box-shadow: 0 12px 36px rgb(0 0 0 / 28%);
+  box-shadow: var(--ui-elevated-shadow);
   pointer-events: auto;
 }
 
@@ -108,8 +108,8 @@
 }
 .conversation .header-controls > .workspace-orbit-key:hover { background: var(--ui-secondary); }
 .conversation .header-controls > .workspace-orbit-key[data-open="true"] {
-  background: color-mix(in srgb, var(--ui-primary) 16%, var(--ui-canvas));
-  color: var(--ui-primary);
+  background: var(--ui-secondary);
+  color: var(--ui-foreground);
 }
 .workspace-orbit-alert { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--ui-danger); box-shadow: 0 0 0 2px var(--ui-canvas); }
 

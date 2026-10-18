@@ -43,7 +43,7 @@
 .panel-tabbar { display: flex; align-items: center; gap: 4px; height: 48px; min-height: 48px; padding: 5px 8px; border-bottom: 1px solid var(--ui-border); background: var(--ui-subtle); }
 .panel-tablist { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; flex: 1; align-items: center; }
 .panel-tab { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; max-width: 220px; border: 1px solid transparent; border-radius: 7px; }
-.panel-tab.selected { background: var(--ui-background); border-color: var(--ui-border); box-shadow: inset 0 2px var(--ui-primary); }
+.panel-tab.selected { background: var(--ui-background); border-color: var(--ui-border); }
 .panel-tab > [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 32px; padding: 6px 5px 6px 9px; font: 11px/18px var(--ui-font-mono); text-align: left; cursor: pointer; color: var(--ui-muted); }
 .panel-tab.selected > [role="tab"] { color: var(--ui-foreground); }
 .panel-tab > [role="tab"] > svg { flex: none; }

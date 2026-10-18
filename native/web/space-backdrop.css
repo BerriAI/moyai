@@ -1,7 +1,7 @@
 .space-backdrop { position: absolute; inset: 0; overflow: hidden; z-index: -1; pointer-events: none; }
 .home-space {
-  background-image: radial-gradient(ellipse at 48% 36%, #8b68db0d, transparent 60%), radial-gradient(#69738f26 .75px, transparent .75px);
-  background-size: 100% 100%, 24px 24px;
+  background-image: radial-gradient(var(--ui-home-dot) .75px, transparent .75px);
+  background-size: 24px 24px;
   mask-image: linear-gradient(#000, #000a 75%, transparent);
 }
 .chat-space { background: var(--ui-canvas); }

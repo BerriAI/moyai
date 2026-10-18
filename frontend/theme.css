@@ -3,6 +3,7 @@
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "tw-animate-css";
 @source "./";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   --color-background: var(--ui-background);
@@ -31,17 +32,35 @@
 
 :root {
   color-scheme: dark;
-  --ui-canvas: #0e1015;
-  --ui-background: #14171e;
-  --ui-subtle: #11141a;
-  --ui-foreground: #e5e8ef;
-  --ui-primary: #b59aff;
-  --ui-primary-foreground: #111019;
-  --ui-secondary: #1c202a;
-  --ui-muted: #a5aaba;
-  --ui-control-border: #697286;
-  --ui-border: #272c38;
-  --ui-selection: #252239;
+  --ui-canvas: #111111;
+  --ui-background: #181818;
+  --ui-subtle: #151515;
+  --ui-foreground: #ededed;
+  --ui-primary: #b69af7;
+  --ui-primary-foreground: #17131f;
+  --ui-secondary: #222225;
+  --ui-muted: #a3a3a8;
+  --ui-control-border: #68686e;
+  --ui-border: #2b2b2f;
+  --ui-selection: #292430;
+  --ui-frame: #2b2b2f;
+  --ui-message: #1c1c1e;
+  --ui-message-border: #303034;
+  --ui-focus-border: #77777e;
+  --ui-focus-ring: #77777e26;
+  --ui-home-dot: #73737826;
+  --ui-home-editor-border: #3c3c42;
+  --ui-backdrop: #0b0b0b;
+  --ui-prompt-muted: #a3a3a8;
+  --ui-code-foreground: #e0e0e4;
+  --ui-code-keyword: #c4a7e7;
+  --ui-code-string: #b2c8a5;
+  --ui-code-title: #adc1d6;
+  --ui-code-number: #d7bc95;
+  --ui-code-comment: #9b9b9f;
+  --ui-code-gutter: #8b8b92;
+  --ui-chart-teal: #8fd9d2;
+  --ui-chart-violet: #c4b8ee;
   --ui-font: "General Sans", "Geist", ui-sans-serif, system-ui, sans-serif;
   --ui-font-mono: "Geist Mono", ui-monospace, monospace;
   --ui-headline-accent: #ededed;
@@ -59,6 +78,56 @@
   --ui-merged-bg: #36234d;
   --ui-overlay: #000000a6;
   --ui-shadow: 0 16px 48px #0000004d;
+  --ui-elevated-shadow: 0 8px 24px #00000026;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+  --ui-canvas: #ffffff;
+  --ui-background: #ffffff;
+  --ui-subtle: #f8f8f8;
+  --ui-foreground: #242426;
+  --ui-primary: #7145b8;
+  --ui-primary-foreground: #ffffff;
+  --ui-secondary: #f0f0f2;
+  --ui-muted: #64646c;
+  --ui-control-border: #87878e;
+  --ui-border: #e2e2e5;
+  --ui-selection: #eeeaf4;
+  --ui-frame: #d9d9df;
+  --ui-message: #f5f5f6;
+  --ui-message-border: #e2e2e5;
+  --ui-focus-border: #87878e;
+  --ui-focus-ring: #87878e1f;
+  --ui-home-dot: #74747b24;
+  --ui-home-editor-border: #d2d2d7;
+  --ui-backdrop: #ededf0;
+  --ui-prompt-muted: #6b6b73;
+  --ui-code-foreground: #28282c;
+  --ui-code-keyword: #7348a0;
+  --ui-code-string: #326744;
+  --ui-code-title: #315e8c;
+  --ui-code-number: #895424;
+  --ui-code-comment: #64646b;
+  --ui-code-gutter: #74747b;
+  --ui-chart-teal: #25746e;
+  --ui-chart-violet: #795aa5;
+  --ui-headline-accent: #242426;
+  --ui-destructive: #a33040;
+  --ui-danger: #b43939;
+  --ui-danger-bg: #fff0f0;
+  --ui-danger-border: #d4a6a6;
+  --ui-success: #23733c;
+  --ui-success-bg: #edf7ef;
+  --ui-success-border: #a0c7aa;
+  --ui-warning: #8b650b;
+  --ui-warning-bg: #fff7df;
+  --ui-warning-border: #d0bb7d;
+  --ui-merged: #7145a0;
+  --ui-merged-bg: #f3edf9;
+  --ui-overlay: #24242666;
+  --ui-shadow: 0 16px 48px #2424261f;
+  --ui-elevated-shadow: 0 8px 24px #2424260f;
 }
 
 /* Geometry remains in the workspace styles; these rules describe the shared

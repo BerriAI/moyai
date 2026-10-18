@@ -11,11 +11,12 @@
 .output-view .output-notice, .files-view .output-notice, .files-source-dialog .output-notice { display: block; padding: 12px; background: var(--ui-subtle); border: 1px solid var(--ui-border); color: var(--ui-muted); font-size: 13px; line-height: 1.55; }
 .output-view .output-notice [data-slot="alert-description"], .files-view .output-notice [data-slot="alert-description"], .files-source-dialog .output-notice [data-slot="alert-description"] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: inherit; color: inherit; }
 .output-view .output-error, .files-view .output-error, .files-source-dialog .output-error { color: var(--ui-danger); background: var(--ui-danger-bg); border-color: var(--ui-danger-border); }
-.output-view .output-source { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.65 var(--ui-font-mono); tab-size: 4; }
+.output-view .output-source { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); color: var(--ui-code-foreground); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.65 var(--ui-font-mono); tab-size: 4; }
 .output-view .output-source code { white-space: inherit; overflow-wrap: inherit; font: inherit; }
 .output-view .output-switch { display: flex; gap: 4px; }
 .output-view .output-markdown { min-width: 0; max-width: 75ch; line-height: 1.65; overflow-wrap: anywhere; }
 .output-view .output-markdown > * + * { margin-top: 12px; }
+.output-view .output-markdown :is(h1, h2, h3) { font-family: var(--ui-font); }
 .output-view .output-markdown h1 { font-size: 22px; }
 .output-view .output-markdown h2 { font-size: 18px; }
 .output-view .output-markdown h3 { font-size: 16px; }

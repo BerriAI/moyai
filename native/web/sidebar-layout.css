@@ -6,9 +6,9 @@
 
 .sidebar > .new-chat { border: 0; border-radius: 6px; background: transparent; font-weight: 400; }
 .sidebar > .new-chat:hover { background: var(--ui-secondary); }
-.sidebar .rail-section-label { margin: 12px 10px 0; color: var(--ui-muted); font: 10px/1.6 var(--ui-font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.sidebar .rail-section-label { margin: 12px 10px 0; color: var(--ui-muted); font: 11px/1.6 var(--ui-font); letter-spacing: .04em; text-transform: uppercase; }
 .sidebar .rail-palette-trigger { flex: none; border: 0; border-radius: 6px; width: 28px; height: 28px; min-height: 28px; padding: 0; color: var(--ui-muted); }
-.sidebar .rail-button { font-weight: 400; font-size: 13px; border-radius: 6px; }
+.sidebar .rail-button { font-family: var(--ui-font); font-weight: 400; font-size: 13px; border-radius: 6px; }
 .sidebar .session-title { font-size: 13px; }
 
 .sidebar > .new-chat,
@@ -296,7 +296,7 @@
 }
 
 .sidebar .rail-destinations { gap: 0; margin-bottom: 4px; }
-.sidebar .rail-destinations .rail-button { min-height: 32px; height: 32px; padding-inline: 10px; gap: 9px; color: #b8b8bd; }
+.sidebar .rail-destinations .rail-button { min-height: 32px; height: 32px; padding-inline: 10px; gap: 9px; color: var(--ui-muted); }
 .sidebar .rail-destinations .rail-button svg, .sidebar > .new-chat svg { width: 15px; height: 15px; }
 .sidebar .rail-destinations .rail-button:hover { color: var(--ui-foreground); }
 @media (max-width: 600px), (pointer: coarse) {
@@ -309,20 +309,20 @@
 .sidebar .sidebar-grouping-trigger > svg:last-child:not(:first-child) { display: none; }
 .sidebar .sidebar-grouping-trigger svg { width: 15px; height: 15px; }
 .sidebar .status-view .session-group { margin-bottom: 10px; }
-.sidebar .status-view .session-group-toggle { font-family: var(--ui-font-mono); font-size: 11px; font-weight: 500; gap: 8px; padding-inline: 6px; color: #b8b8bd; }
-.sidebar .status-view .session-group-toggle small { font-size: 10px; font-weight: 400; opacity: .7; }
+.sidebar .status-view .session-group-toggle { font-family: var(--ui-font); font-size: 13px; font-weight: 500; gap: 8px; padding-inline: 6px; color: var(--ui-foreground); }
+.sidebar .status-view .session-group-toggle small { font-size: 11px; font-weight: 400; color: var(--ui-muted); }
 .sidebar [data-status-group="needs-you"] .session-group-toggle > svg:first-child { color: var(--ui-warning); }
 .sidebar [data-status-group="in-review"] .session-group-toggle > svg:first-child { color: var(--ui-primary); }
-.sidebar .status-view .session-row { --session-leading-width: 22px; min-height: 28px; margin-block: 1px; padding: 1px 6px; grid-template-columns: minmax(0, 1fr) auto; border-radius: 6px; }
-.sidebar .status-view .session-row > a { min-height: 26px; padding-inline: 0; gap: 0; font-size: 13px; line-height: 20px; }
+.sidebar .status-view .session-row { --session-leading-width: 22px; min-height: 32px; margin-block: 1px; padding: 1px 6px; grid-template-columns: minmax(0, 1fr) auto; border-radius: 6px; }
+.sidebar .status-view .session-row > a { min-height: 30px; padding-inline: 0; gap: 0; font-size: 13px; line-height: 20px; }
 .sidebar .status-view .session-row .session-indicator { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.sidebar .status-view .session-row-time { grid-column: 2; grid-row: 1; padding-inline: 5px; color: #89898f; font-size: 10px; line-height: 20px; font-variant-numeric: tabular-nums; }
+.sidebar .status-view .session-row-time { grid-column: 2; grid-row: 1; padding-inline: 5px; color: var(--ui-muted); font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; }
 .sidebar .status-view .session-row-time svg { vertical-align: middle; color: var(--ui-muted); }
 .sidebar .status-view .session-row-meta { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; }
 .sidebar .status-view .session-row-actions { grid-column: 2; grid-row: 1; }
 .sidebar .status-view .session-row:is(:hover, :has(:focus-visible), :has([data-state="open"])) .session-row-time { display: none; }
-.sidebar .status-view .session-row.selected { background: var(--ui-selection); box-shadow: inset 2px 0 0 var(--ui-primary); }
-.sidebar .status-view .session-children-toggle { inset-inline-start: 6px; top: 3px; width: var(--session-leading-width); }
+.sidebar .status-view .session-row.selected { background: var(--ui-selection); }
+.sidebar .status-view .session-children-toggle { inset-inline-start: 6px; top: 5px; width: var(--session-leading-width); }
 .sidebar .status-view .session-pr-indicator { font-size: 10px; }
 .app.sidebar-collapsed .sidebar .rail-palette-trigger { display: none; }
 @media (hover: none), (pointer: coarse), (max-width: 600px) {

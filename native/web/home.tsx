@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUpRight, Bug, Code2, FileCode2, Globe, ListChecks, LockKeyhole, Send, Terminal } from "lucide-react"
+import { ArrowUpRight, Bug, Code2, FileCode2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -91,10 +91,10 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
     {fileDrop.dragging && <FileDropOverlay />}
     <SpaceBackdrop />
-    <div className="home-workbench-bar"><span><FileCode2 size={14} />workspace<span className="home-path-separator">/</span><strong>new-session</strong></span><span className="home-workbench-context"><Code2 size={13} />Moyai</span></div>
+    <div className="home-workbench-bar"><span><FileCode2 size={14} />Workspace<span className="home-path-separator">/</span><strong>New session</strong></span><span className="home-workbench-context"><Code2 size={13} />Moyai</span></div>
     <div className="home-content">
       <header className="home-header">
-        <p className="home-eyebrow"><Terminal size={15} aria-hidden="true" />The space between idea and commit</p>
+        <p className="home-eyebrow">Workspace</p>
         <h1>What are we <span>building?</span></h1>
         <p className="home-subtitle">A feature. A stubborn bug. A better way to do it.</p>
       </header>
@@ -106,9 +106,9 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
           <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setSkippedScope(accountScope)}>Continue without connections</Button>
         </div>}
         <div className="composer home-composer">
-          <div className="home-editor-heading"><span><FileCode2 size={14} />New task</span><span className="home-editor-mode">PROMPT</span></div>
+          <div className="home-editor-heading"><span><FileCode2 size={14} />New session</span><span className="home-editor-mode">Draft</span></div>
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <div className="home-editor-input"><span className="home-prompt-glyph" aria-hidden="true">›</span><SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe a change, paste an error, or ask a question…" onPaste={pictures.paste} /></div>
+          <div className="home-editor-input"><SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe a change, paste an error, or ask a question…" onPaste={pictures.paste} /></div>
           <div className="composer-actions">
             <div className="home-composer-tools">
               <AttachButton add={pictures.add} disabled={busy} compact />
@@ -131,11 +131,11 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
       </form>
       <div className="home-starters" role="group" aria-label="Start with a prompt" aria-hidden={Boolean(draft.trim())}>
         <p className="home-starters-heading">Start with a prompt</p>
-        {starters.map(({ label, detail, prompt, Icon }, index) => <Button key={label} type="button" variant="ghost" aria-label={label} disabled={busy || Boolean(draft.trim())}
+        {starters.map(({ label, detail, prompt, Icon }) => <Button key={label} type="button" variant="ghost" aria-label={label} disabled={busy || Boolean(draft.trim())}
           onClick={() => {
             setDraft(prompt)
             setComposerFocus(value => value + 1)
-          }}><span className="home-starter-index" aria-hidden="true">0{index + 1}</span><Icon aria-hidden="true" /><span className="home-starter-label">{label}</span><span className="home-starter-detail" aria-hidden="true">{detail}</span><ArrowUpRight className="home-starter-arrow" aria-hidden="true" /></Button>)}
+          }}><Icon aria-hidden="true" /><span className="home-starter-label">{label}</span><span className="home-starter-detail" aria-hidden="true">{detail}</span><ArrowUpRight className="home-starter-arrow" aria-hidden="true" /></Button>)}
       </div>
     </div>
   </section>
