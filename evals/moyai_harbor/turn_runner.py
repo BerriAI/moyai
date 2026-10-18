@@ -51,6 +51,7 @@ database_fixtures = import_module("product_database_fixtures")
 product_database_state = database_fixtures.product_database_state
 CREDENTIAL_TOOLS = ("credentials_list", "credentials_request", "credentials_run")
 BOT_USER = "UBOT00001"
+SLACK_BOT_TOKEN = "synthetic-slack-bot-token"
 SLACK_USER = "UTEST0001"
 TEAM = "TTEST0001"
 CHANNEL = "CTEST0001"
@@ -253,10 +254,10 @@ async def run_runtime_turn(
             bot_credentials = {
                 "access_token": "synthetic-slack-user-token",
                 "bot": {
-                    "access_token": "synthetic-slack-bot-token",
+                    "access_token": SLACK_BOT_TOKEN,
                     "bot_user_id": BOT_USER,
                     "team": {"id": TEAM},
-                    "scope": "channels:history,groups:history,chat:write",
+                    "scope": "channels:read,channels:history,groups:history,chat:write",
                 },
             }
             runtime.product_connections.connectors.save("slack", bot_credentials, "Eval Slack")
@@ -305,6 +306,18 @@ def slack_transport(
 ) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/api/conversations.info":
+            if request.headers.get("Authorization") != "Bearer " + SLACK_BOT_TOKEN:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
+            if request.url.params.get("channel") != CHANNEL:
+                return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+            # The synthetic event belongs to this public, unshared channel. Let
+            # the real audience checker verify its caller and current binding.
+            return httpx.Response(200, json={"ok": True, "channel": {
+                "id": CHANNEL, "name": "harbor-eval", "is_channel": True,
+                "is_private": False, "is_ext_shared": False, "is_member": True,
+                "is_im": False, "is_mpim": False, "is_group": False,
+            }})
         if path.endswith("/conversations.replies"):
             reads.append({
                 "method": request.method,

@@ -18,6 +18,18 @@ fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
 
+@pytest.fixture
+def harbor_runner(monkeypatch):
+    pytest.importorskip("harbor")
+    pytest.importorskip("moto")
+    for directory in (ROOT / "native/tests", ROOT / "native/src", ROOT / "evals"):
+        monkeypatch.syspath_prepend(str(directory))
+    from moyai_harbor import turn_runner
+
+    assert Path(turn_runner.__file__).resolve() == ROOT / "evals/moyai_harbor/turn_runner.py"
+    return turn_runner
+
+
 @pytest.mark.asyncio
 async def test_exact_slack_host_is_intercepted_and_other_transports_preserved():
     slack_calls, other_calls, mounted_calls = [], [], []
@@ -66,16 +78,11 @@ def test_fixture_restores_client_constructor_after_workflow_failure():
 
 
 @pytest.mark.asyncio
-async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(monkeypatch):
+async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(monkeypatch, harbor_runner):
     # The complete runner integration uses Harbor's optional development overlay.
-    pytest.importorskip("harbor")
-    pytest.importorskip("moto")
-    for directory in (ROOT / "native/tests", ROOT / "native/src", ROOT / "evals"):
-        monkeypatch.syspath_prepend(str(directory))
-    from moyai_harbor import turn_runner as runner
     from openai import AsyncOpenAI
 
-    assert Path(runner.__file__).resolve() == ROOT / "evals/moyai_harbor/turn_runner.py"
+    runner = harbor_runner
     network_calls = []
 
     async def network(_transport, request):
@@ -137,3 +144,92 @@ async def test_delayed_workflow_context_read_uses_fixture_without_slack_network(
     assert result["posted_reply"] == "A concrete answer"
     assert len(result["slack_thread_reads"]) == 1
     assert [request.url.host for request in network_calls] == ["gateway.example"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change,allowed,provider_reads", [
+    ("none", True, 1),
+    ("unknown_channel", False, 1),
+    ("unlinked_person", False, 0),
+    ("other_workspace_actor", False, 0),
+    ("replaced_installation", False, 0),
+    ("invalid_token", False, 1),
+])
+async def test_fixture_metadata_obeys_native_audience_assertion(
+    monkeypatch, harbor_runner, change, allowed, provider_reads,
+):
+    from fastapi import HTTPException
+    from moyai.database import Database
+    from moyai.product_slack_models import ProductSlackBinding
+    from moyai.slack_audience import can_read
+
+    runner = harbor_runner
+    principal = SimpleNamespace(
+        id=f"slack:{runner.TEAM}:{runner.SLACK_USER}", kind="slack", individual=False,
+    )
+    if change == "unlinked_person":
+        principal = SimpleNamespace(id="unlinked-person", kind="user", individual=True, email="eval@example.test")
+    elif change == "other_workspace_actor":
+        principal.id = f"slack:TOTHER001:{runner.SLACK_USER}"
+    identity = SimpleNamespace(
+        authorize_admission=AsyncMock(return_value=principal), _table=lambda name: name,
+    )
+    actor = SimpleNamespace(id=principal.id, product_grant=object())
+    binding = SimpleNamespace(
+        team_id=runner.TEAM,
+        channel_id="CUNKNOWN1" if change == "unknown_channel" else runner.CHANNEL,
+        connection_authority="a" * 64,
+    )
+    session = SimpleNamespace(id="slack-session", surface="slack")
+    db = SimpleNamespace(
+        info={},
+        get=AsyncMock(side_effect=lambda model, _key: binding if model is ProductSlackBinding else None),
+        execute=AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=list))),
+    )
+    # Only the admitted identity and database rows are fixtures. Both production
+    # access predicates run unchanged, including linked-identity and provider checks.
+    database = Database.__new__(Database)
+    database.product_mode = "existing"
+    database.product_identity = identity
+    reads, network_calls = [], []
+
+    async def request(method, url, **kwargs):
+        reads.append((method, url, kwargs))
+        async with httpx.AsyncClient() as client:
+            response = await client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response.json()
+
+    async def reject_network(_transport, request):
+        network_calls.append(request)
+        raise AssertionError("An audience fixture request escaped to the network")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_network)
+    slack = SimpleNamespace(
+        runtime=SimpleNamespace(database=database),
+        installation=lambda: {
+            "team_id": runner.TEAM,
+            "authority": ("b" if change == "replaced_installation" else "a") * 64,
+        },
+        connectors=SimpleNamespace(
+            slack_bot_token=AsyncMock(return_value=(
+                "invalid-synthetic-token" if change == "invalid_token" else runner.SLACK_BOT_TOKEN
+            )),
+            request=request,
+        ),
+    )
+    database.slack_access = lambda db, session, actor: can_read(slack, db, session, actor)
+    with fixture.route_slack_clients(runner.slack_transport([], [])):
+        if allowed:
+            await database.check_source_audience(db, session, actor)
+        else:
+            with pytest.raises(HTTPException, match="Conversation unavailable") as error:
+                await database.check_source_audience(db, session, actor)
+            assert error.value.status_code == 404
+    identity.authorize_admission.assert_awaited_once_with(db, actor.product_grant)
+    assert len(reads) == provider_reads
+    assert not network_calls
+    if reads:
+        assert reads[0][0:2] == ("GET", "https://slack.com/api/conversations.info")
+        assert reads[0][2]["params"] == {"channel": binding.channel_id}
+    assert db.execute.await_count == (1 if change == "unlinked_person" else 0)
