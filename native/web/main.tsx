@@ -111,7 +111,7 @@ function App() {
   const sessionsNow = useRef(sessions)
   sessionsNow.current = sessions
   const [sessionPageCount, setSessionPageCount] = useState(1)
-  const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, notice: "" })
+  const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, loaded: false, notice: "" })
   const [selected, setSelected] = useState(currentRoute)
   const [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceRequest | null>(null)
   const [prStates, setPrStates] = useState<Record<string, PRSummary[]>>({})
@@ -185,7 +185,9 @@ function App() {
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
     const preferenceCheckpoint = preferences.checkpoint()
-    setInventoryState(previous => ({ ...previous, loading: true }))
+    // Background polling keeps the existing list and pagination control quiet.
+    // Explicit pagination sets loading before starting its new refresh.
+    setInventoryState(previous => previous.loaded ? previous : { ...previous, loading: true })
     const inventory = async () => {
       const rows = new Map<string, Session>(), notices = new Set<string>()
       let cursor: string | null = null, hasMore = false
@@ -218,7 +220,7 @@ function App() {
           if (result && current()) {
             preferences.acceptRead(preferenceCheckpoint, result.rows)
             setSessions(result.rows)
-            setInventoryState({ loading: false, hasMore: result.hasMore, notice: result.notice })
+            setInventoryState({ loading: false, loaded: true, hasMore: result.hasMore, notice: result.notice })
           }
         }).catch(reason => {
           if (current() && reason instanceof ApiError && [401, 403, 404].includes(reason.status)) setSessions([])
@@ -241,11 +243,12 @@ function App() {
 
   useEffect(() => {
     api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
-    const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
+    const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" }); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
     const accessChanged = () => {
       const requestCsrf = csrfToken()
       ++refreshVersion.current
       setSessions([]); setConnections([]); setFolders([]); setPrStates({}); setPrRefresh(value => value + 1); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false)
+      setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" })
       setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1)
       void api<Me>("/me").then(value => { if (csrfToken() === requestCsrf) { setCsrf(value.csrf); setMe(value) } }, () => {})
     }
@@ -316,8 +319,12 @@ function App() {
         <Button variant="ghost" className="rail-button" onClick={() => navigateSettings("connections")}><Link2 />Connections</Button>
       </nav>
       <SessionSidebar key={me.user.id} sessions={sessions.map(row => ({ ...preferences.apply(row), pull_requests: sessionIsReadOnly(row) ? [] : prStates[row.id] ?? [] }))} folders={folders} selected={nativeSelected || selected} userId={me.user.id} view={listView}
-        hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => setSessionPageCount(value => value + 1)}
-        onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, notice: "" }); setListView(value) }}
+        hasMore={inventoryState.hasMore} loading={inventoryState.loading} notice={inventoryState.notice} onLoadMore={() => {
+          ++refreshVersion.current
+          setInventoryState(previous => ({ ...previous, loading: true }))
+          setSessionPageCount(value => value + 1)
+        }}
+        onViewChange={value => { ++refreshVersion.current; setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" }); setListView(value) }}
         onOpenSideChat={row => {
           const host = nativeSelected && nativeSelected !== row.id ? nativeSelected : row.parent_session_id
           if (!host) return
