@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import Markdown from "react-markdown"
+import { CodeBlock } from "./code-block"
 import remarkGfm from "remark-gfm"
 import { Download, ExternalLink, FileCode2, FileImage, FileText, Film, Globe, Music, Plus, RefreshCw, Search, X } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -52,6 +53,7 @@ function ResourceIcon({ kind, media }: { kind: OutputResource["kind"]; media?: s
 }
 function Prose({ text, sessionId, onOpenFile }: { text: string; sessionId: string; onOpenFile?: OpenFile }) {
   return <div className="output-markdown" onClickCapture={event => previewFileLink(event, sessionId, onOpenFile)}><Markdown skipHtml remarkPlugins={[remarkGfm]} components={{
+    pre: CodeBlock,
     a: ({ href, children }) => {
       if (href && onOpenFile && fileReference(href, sessionId, location.origin)) return <a href={href}>{children}</a>
       const url = href ? externalUrl(href) : undefined

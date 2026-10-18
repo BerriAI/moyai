@@ -12,6 +12,7 @@ import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
 import { MoyaiBrand, SidebarToggle } from "./brand"
+import { AppearanceToggle } from "./appearance-toggle"
 import type { GeneralPreferences } from "./general-preferences"
 import "./settings.css"
 
@@ -975,7 +976,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
         {groups.filter(group => group !== "Administration" || user.role === "admin").map(group => <section className="ns-nav-group" key={group}><h2>{group}</h2>{destinations.filter(item => item.group === group && (!item.productOnly || productMode === "existing")).map(item => <React.Fragment key={item.id}>{navLink(item.id, item.title, <item.Icon size={17} aria-hidden="true" />)}</React.Fragment>)}</section>)}
       </nav><div className="ns-account"><span>{user.name}</span><small>{user.role === "admin" ? "Administrator" : "Workspace member"}</small></div>
     </aside>
-    <div className="ns-main"><div className="ns-breadcrumb" aria-label="Breadcrumb"><SettingsLink page="overview" navigate={navigate}>Settings</SettingsLink>{current !== "overview" && <><ChevronRight size={14} aria-hidden="true" /><span>{title}</span></>}</div>
+    <div className="ns-main"><div className="ns-breadcrumb" aria-label="Breadcrumb"><SettingsLink page="overview" navigate={navigate}>Settings</SettingsLink>{current !== "overview" && <><ChevronRight size={14} aria-hidden="true" /><span>{title}</span></>}<AppearanceToggle /></div>
       <div className="ns-content" id="native-settings-content" ref={content}>{!reportPage && <header className="ns-page-heading"><h1 ref={heading} tabIndex={-1}>{title}</h1><p>{current === "overview" ? "Make Moyai work the way your team does." : destination?.description}</p></header>}
         <div key={`${user.id}:${current}`}>
           {destination?.productOnly && productMode !== "existing" ? <div className="ns-empty"><h2>Existing product accounts required</h2><p>This page is available when Moyai uses the existing product account service.</p></div>
