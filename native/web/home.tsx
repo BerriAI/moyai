@@ -1,18 +1,21 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUp, Globe, LockKeyhole } from "lucide-react"
+import { ArrowUp, Bug, Code2, Globe, ListChecks, LockKeyhole } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { DecodeHeadline } from "./decode-headline"
 import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
-import meteorPoster from "./assets/moyai-meteor-poster.webp"
 import { api, csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { GeneralPreferences } from "./general-preferences"
 import type { NewConversation, Session, Turn } from "./conversation-state"
 
 type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
+const starters = [
+  { label: "Review code", prompt: "Review my changes for bugs and improvements.", Icon: Code2 },
+  { label: "Fix a bug", prompt: "Help me investigate and fix this bug: ", Icon: Bug },
+  { label: "Plan a feature", prompt: "Help me plan and implement this feature: ", Icon: ListChecks },
+]
 export function homeSubmission(prompt: string, model: string, privateSession: boolean, attachments: string[], selected: string[], available: HomeConnection[]) {
   const connections = [...new Set(selected)].sort()
   const allowed = new Set(available.filter(row => row.enabled && (privateSession || row.shared)).map(row => row.id))
@@ -42,20 +45,14 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   const needsAccounts = preferences?.connection_ids != null ? preferences.connection_ids.length > 0 : productMode === "existing"
   const selectedAccounts = skipAccounts || !needsAccounts ? [] : accounts.filter(row => preferences?.connection_ids == null || preferences.connection_ids.includes(row.id)).map(row => row.id)
   const accountsReady = !needsAccounts || skipAccounts || (catalog.scope === accountScope && !catalog.loading && !catalog.error)
-  const sculpture = useRef<HTMLDivElement>(null)
+  const composer = useRef<HTMLDivElement>(null)
   const admission = useRef<{ signature: string; session?: Session; request: string } | null>(null)
   const submitting = useRef(false)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
     document.title = "New session · Moyai"
-    let disposed = false
-    let cleanupSculpture = () => {}
-    // The composer is useful before the decorative WebGL module is downloaded.
-    void import("@/moyai-sculpture").then(({ mountSculpture }) => {
-      if (!disposed) cleanupSculpture = mountSculpture(sculpture.current)
-    }).catch(() => {}) // The static image remains a complete fallback.
-    return () => { disposed = true; mounted.current = false; cleanupSculpture() }
+    return () => { mounted.current = false }
   }, [])
   useEffect(() => {
     if (!needsAccounts) return
@@ -94,10 +91,12 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
   return <section className="home file-drop-zone" {...fileDrop.handlers}>
     {fileDrop.dragging && <FileDropOverlay />}
     <SpaceBackdrop />
-    <div className="home-sculpture" ref={sculpture}><img src={meteorPoster} alt="Moyai meteor" /></div>
     <div className="home-content">
-      <p className="home-eyebrow">A space for your next big idea</p>
-      <DecodeHeadline paused={busy || Boolean(draft.trim())} />
+      <header className="home-header">
+        <p className="home-eyebrow"><span aria-hidden="true" />Your workspace</p>
+        <h1>What are we working on?</h1>
+        <p className="home-subtitle">Build something new, investigate an issue, or pick up where you left off.</p>
+      </header>
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         {error && <p className="error" role="alert">{error}</p>}
         {needsAccounts && catalog.scope === accountScope && catalog.error && !skipAccounts && <div className="home-connection-error" role="alert">
@@ -107,7 +106,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
         </div>}
         <div className="composer home-composer">
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
-          <SkillComposer value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Ask Moyai to build, investigate, or type / for skills…" onPaste={pictures.paste} />
+          <SkillComposer ref={composer} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe the work, or type / for skills…" onPaste={pictures.paste} />
           <div className="composer-actions">
             <div className="home-composer-tools">
               <AttachButton add={pictures.add} disabled={busy} compact />
@@ -128,6 +127,20 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
           <span>Drop files or paste images · Enter to send</span>
         </div>
       </form>
+      <div className="home-starters" role="group" aria-label="Start with a prompt" aria-hidden={Boolean(draft.trim())}>
+        {starters.map(({ label, prompt, Icon }) => <Button key={label} type="button" variant="outline" disabled={busy || Boolean(draft.trim())}
+          onClick={() => {
+            setDraft(prompt)
+            requestAnimationFrame(() => {
+              const input = composer.current
+              if (!input) return
+              input.focus()
+              const selection = window.getSelection()
+              selection?.selectAllChildren(input)
+              selection?.collapseToEnd()
+            })
+          }}><Icon aria-hidden="true" />{label}</Button>)}
+      </div>
     </div>
   </section>
 }

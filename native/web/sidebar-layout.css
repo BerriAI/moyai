@@ -4,11 +4,12 @@
   padding: 12px 12px 8px;
 }
 
-.sidebar > .new-chat { border: 0; border-radius: 9px; }
-.sidebar .rail-section-label { margin: 12px 10px 0; color: var(--ui-muted); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; }
-.sidebar .rail-palette-trigger { border: 1px solid var(--ui-border); border-radius: 9px; min-height: 36px; }
-.sidebar .rail-button { font-weight: 400; border-radius: 8px; }
-.sidebar .session-title { font-size: 14.5px; }
+.sidebar > .new-chat { border: 0; border-radius: 4px; background: transparent; font-weight: 400; }
+.sidebar > .new-chat:hover { background: var(--ui-secondary); }
+.sidebar .rail-section-label { margin: 12px 10px 0; color: var(--ui-muted); font: 10px/1.6 var(--ui-font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.sidebar .rail-palette-trigger { border: 1px solid var(--ui-border); border-radius: 4px; min-height: 32px; }
+.sidebar .rail-button { font-weight: 400; font-size: 13px; border-radius: 4px; }
+.sidebar .session-title { font-size: 13px; }
 
 .sidebar > .new-chat,
 .sidebar > .rail-button {
@@ -72,6 +73,7 @@
   min-height: 48px;
   padding: 2px 4px;
   margin-block: 2px;
+  border-radius: 4px;
 }
 
 .sidebar .session-row > a {

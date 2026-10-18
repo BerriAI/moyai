@@ -5,12 +5,12 @@ description: Build or refine Moyai's native React frontend using its established
 
 # Moyai UI
 
-Preserve the space workspace: near-black neutral surfaces, lavender actions,
-near-white text, local Manrope interface typography and opaque composer panels.
-The wordmark, home headline and code retain Share Tech Mono. The home screen
-uses deterministic stars, the decode headline and interactive Moyai meteor.
-Chats reuse the static stars at lower brightness; Settings stay quiet for sustained
-work. The workspace menu floats without reflowing chat; only the independent side
+Preserve the compact workspace: matte charcoal surfaces, purple actions, fine
+neutral borders, near-white text and opaque composer panels. Use local Geist
+for interface typography and Geist Mono for code and small operational labels.
+The home screen uses a static fine grid, a centered heading and draft starters;
+chat and Settings stay quiet for sustained work. Controls have restrained corners.
+The workspace menu floats without reflowing chat; only the independent side
 panel changes chat proportions. Inspect current screens before changing them.
 
 ## Sources and controls

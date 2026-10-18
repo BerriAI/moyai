@@ -23,27 +23,28 @@
   --color-border: var(--ui-border);
   --color-input: var(--ui-border);
   --color-ring: var(--ui-primary);
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 8px;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 6px;
 }
 
 :root {
   color-scheme: dark;
-  --ui-canvas: #0b0b0f;
-  --ui-background: #151519;
-  --ui-subtle: #0e0e12;
-  --ui-foreground: #e9e8ed;
-  --ui-primary: #a48cf0;
-  --ui-primary-foreground: #171126;
-  --ui-secondary: #232228;
-  --ui-muted: #acabb2;
-  --ui-control-border: #706c7e;
-  --ui-border: #ffffff18;
-  --ui-font: "Manrope", ui-sans-serif, system-ui, sans-serif;
-  --ui-font-mono: "Share Tech Mono", ui-monospace, monospace;
-  --ui-headline-accent: #c1b1ee;
+  --ui-canvas: #111111;
+  --ui-background: #181818;
+  --ui-subtle: #151515;
+  --ui-foreground: #ededed;
+  --ui-primary: #b69af7;
+  --ui-primary-foreground: #111111;
+  --ui-secondary: #1f1f1f;
+  --ui-muted: #a3a3a3;
+  --ui-control-border: #707070;
+  --ui-border: #2a2a2a;
+  --ui-selection: #2b2537;
+  --ui-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --ui-font-mono: "Geist Mono", ui-monospace, monospace;
+  --ui-headline-accent: #ededed;
   --ui-destructive: #a73b49;
   --ui-danger: #e0807a;
   --ui-danger-bg: #421e2b;
@@ -56,25 +57,26 @@
   --ui-warning-border: #655532;
   --ui-merged: #ddc6ff;
   --ui-merged-bg: #36234d;
-  --ui-overlay: #01050bc9;
-  --ui-shadow: 0 24px 80px #00000080, 0 0 0 1px #b8a8ff08;
+  --ui-overlay: #000000a6;
+  --ui-shadow: 0 16px 48px #0000004d;
 }
 
 /* Geometry remains in the workspace styles; these rules describe the shared
    component boundary and portalled surfaces. No Tailwind preflight reset. */
 [data-dialog-body]:not([hidden]), [data-popover-body]:not([hidden]) { display: contents; }
 [data-overlay-root] { display: contents; }
-[data-slot="dialog-overlay"] { position: fixed; inset: 0; z-index: 1000; background: var(--ui-overlay); backdrop-filter: blur(8px); }
+[data-slot="dialog-overlay"] { position: fixed; inset: 0; z-index: 1000; background: var(--ui-overlay); }
 [data-slot="dialog-content"] {
   position: fixed; inset: auto; top: 50%; left: 50%;
   z-index: 1001; margin: 0; display: block; width: min(520px, calc(100vw - 32px));
   max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: auto;
   background: var(--ui-background); color: var(--ui-foreground); padding: 24px;
-  border: 1px solid var(--ui-border); border-radius: 8px; box-shadow: var(--ui-shadow);
+  border: 1px solid var(--ui-border); border-radius: 6px; box-shadow: var(--ui-shadow);
   animation: none;
   overscroll-behavior: contain;
 }
 [data-slot="popover-content"] { background: var(--ui-background); z-index: 1002; }
+[data-slot="button"][data-variant="default"] { font-family: var(--ui-font-mono); font-size: 12px; font-weight: 600; border-radius: 2px; }
 [data-slot="tooltip-content"] { z-index: 1003; max-width: min(320px, calc(100vw - 24px)); }
 /* Closed tooltips must release their Escape-key layer before a dialog opens. */
 [data-slot="tooltip-content"][data-state="closed"] { animation: none; }
@@ -105,7 +107,7 @@
 [data-styled] [data-slot="select-trigger"] {
   position: absolute; inset: 0; width: 100%; height: 100%; min-width: 0;
   padding: 9px 12px; border: 1px solid var(--settings-control-border, var(--ui-muted));
-  border-radius: 8px; background: var(--ui-background); color: var(--ui-foreground);
+  border-radius: 4px; background: var(--ui-background); color: var(--ui-foreground);
   font-size: .933333rem; font-weight: 400; line-height: 1.45; text-align: start;
 }
 [data-slot="select-trigger"] > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -114,7 +116,7 @@
 [data-slot="select-content"] {
   z-index: 1010; min-width: var(--radix-select-trigger-width); max-width: calc(100vw - 16px);
   max-height: min(320px, var(--radix-select-content-available-height));
-  border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-background);
+  border: 1px solid var(--ui-border); border-radius: 4px; background: var(--ui-background);
   color: var(--ui-foreground); box-shadow: var(--ui-shadow); animation: none;
   overscroll-behavior: contain;
 }

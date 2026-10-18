@@ -10,7 +10,7 @@
   padding: 0;
   gap: 0;
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: 6px;
   background: var(--ui-background);
   border-color: var(--ui-control-border);
   box-shadow: var(--ui-shadow);

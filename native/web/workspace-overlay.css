@@ -47,7 +47,7 @@
   scrollbar-color: var(--ui-control-border) transparent;
   padding: 10px 12px;
   border: 1px solid var(--ui-border);
-  border-radius: 12px;
+  border-radius: 6px;
   background: var(--ui-background);
   color: var(--ui-foreground);
   box-shadow: 0 12px 36px rgb(0 0 0 / 28%);

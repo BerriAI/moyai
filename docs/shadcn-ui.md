@@ -2,9 +2,10 @@
 
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
-`frontend/theme.css`: The space workspace uses near-black neutral surfaces, lavender actions,
-local Manrope interface typography and semantic status colors. The wordmark,
-home headline and code retain Share Tech Mono. Both fonts are served locally.
+`frontend/theme.css`: The workspace uses matte charcoal surfaces, purple actions,
+fine neutral borders and semantic status colors. Geist supplies the interface
+typography; Geist Mono is used for code and small operational labels. Both fonts
+are served locally under the bundled SIL Open Font License.
 The retired escaped-template renderer is no longer used.
 
 Use direct React components for buttons, dialogs, forms, selects and menus.
@@ -26,17 +27,12 @@ belong to `native/web/public`. Analytics rendering and automation normalization
 are ordinary modules with type declarations. There are no build-time source
 extractors or imports from a legacy static tree.
 
-The home screen keeps the original meteor's frontal photograph and irregular oval
-outline, with the supplied Meshy geometry for the sides and back.
-`frontend/moyai-original-surface.ts` fades the reference image into the textured
-stone as the rock turns. The Three.js viewer loads lazily and supports drag and
-keyboard rotation; Home resets the view. The original image remains the loading
-and WebGL fallback. See the [original-profile asset notes](../scripts/assets/original-profile.md).
-
-The headline decodes once per home-screen visit; its cursor blinks five times,
-then disappears. The rock stays still until rotated. Rendering stops offscreen
-and in background tabs; reduced motion disables rotation inertia. Geometry,
-materials, textures, reflection targets and shadow maps are disposed on unmount.
+The home screen centers a static heading and the composer over a fine 64px grid.
+Draft starters fill and focus the composer without sending a message. Once a user
+starts drafting, the starters cannot replace their text. Home no longer loads the
+Three.js sculpture or runs the headline decode animation. Chat surfaces remain
+plain for reading; the full-width shell keeps navigation and independent panels
+compact across viewport sizes.
 
 ```sh
 npm ci

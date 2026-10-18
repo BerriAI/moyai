@@ -666,11 +666,10 @@ for(const attention of ['question','effect'])test(`swarm reveals a pending ${att
   assert.equal(await page.getByRole('region',{name:'Live swarm space',exact:true}).count(),0);
 });
 
-test('home and inventory render while account/folder reads and decoration are held',async t=>{
+test('home and inventory render while account and folder reads are held',async t=>{
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',holds:{'/api/connections':held,'/api/session-folders':held}});
   const page=await browser.newPage();t.after(()=>page.close());
-  await page.route('**/frontend/moyai-sculpture.ts',route=>route.abort());
   await page.goto(base+'/');
   await page.getByRole('textbox',{name:'Message Moyai'}).waitFor();
   await page.locator(`[data-session-key="native:${sessionId}"]`).waitFor();
@@ -678,87 +677,59 @@ test('home and inventory render while account/folder reads and decoration are he
   assert.equal(await page.getByText('Opening workspace…',{exact:true}).count(),0);
 });
 
-for(const width of [1440,768,320])test(`space home respects reduced motion and keeps controls reachable at ${width}px`,async t=>{
+for(const width of [1440,768,320])test(`home keeps the draft and controls reachable at ${width}px`,async t=>{
   reset({status:'idle'});const page=await pageFor(t,'',width);
-  await page.getByRole('heading',{name:'What are we working on?',exact:true}).waitFor();
+  const heading=page.getByRole('heading',{name:'What are we working on?',exact:true});
+  await heading.waitFor();
   await page.evaluate(()=>document.fonts.ready);
-  assert.deepEqual(await page.locator('.decode-text').allTextContents(),['> what are we','  working on?▌']);
-  const geometry=await page.locator('.decode-headline').boundingBox();
-  await page.getByRole('textbox',{name:'Message Moyai'}).fill('A draft that must survive animation.');
-  assert.equal(await page.locator('.decode-headline').evaluate(el=>el.getBoundingClientRect().height),geometry.height);
+  const geometry=await heading.boundingBox();
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('A draft that must stay ready to edit.');
+  assert.deepEqual(await heading.boundingBox(),geometry,'Typing must not shift the home layout.');
+  assert.equal(await input.innerText(),'A draft that must stay ready to edit.');
   assert.equal(await page.locator('.home').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
   assert.equal(await page.getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
   assert.equal(await page.getByRole('button',{name:'Swarm',exact:true}).count(),0);
   assert.equal(await page.locator('.home .account-selection, .home .suggestions, .home-mode-options').count(),0);
   assert.equal(await page.getByText('Drop files or paste images · Enter to send',{exact:true}).isVisible(),true);
   assert.equal(await page.locator('.home-composer').getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
-});
-
-test('textured rock renders front, side and back and restores Home after remount',async t=>{
-  reset({status:'idle'});
-  const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
-  t.after(()=>page.close());
-  const errors=[];
-  page.on('pageerror',error=>errors.push(error.message));
-  page.on('console',message=>{if(message.type()==='error'&&/WebGL|shader|texture|GLTF/i.test(message.text()))errors.push(message.text());});
-  await page.route('**/static/models/moyai.glb',route=>route.fulfill({
-    path:path.resolve('native/web/public/moyai.glb'),contentType:'model/gltf-binary',
-  }));
-  await page.goto(base+'/');
-  const canvas=page.locator('.home-sculpture canvas');
-  await canvas.waitFor({state:'visible'});
-  const painted=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  await canvas.press('Home');await painted();
-  const front=await canvas.screenshot();
-  assert.ok(front.length>4000,'The actual model and textures must render, not an empty canvas.');
-  for(let index=0;index<9;index++)await canvas.press('ArrowRight');
-  await painted();const side=await canvas.screenshot();
-  for(let index=0;index<9;index++)await canvas.press('ArrowRight');
-  await painted();const back=await canvas.screenshot();
-  assert.equal(front.equals(side),false);assert.equal(side.equals(back),false);
-  await canvas.press('Home');await painted();
-  assert.ok(front.equals(await canvas.screenshot()),'Home must restore the initial view.');
-  await page.getByRole('link',{name:'idle Current native work',exact:true}).click();
-  await canvas.waitFor({state:'detached'});
-  await page.getByRole('button',{name:'New session ⌘⇧O',exact:true}).click();
-  await canvas.waitFor({state:'visible'});await painted();
-  assert.equal(await canvas.count(),1);
-  assert.deepEqual(errors,[]);
-});
-
-test('headline plays once, cursor flashes five times, and neither restarts after editing a draft',async t=>{
-  reset({status:'idle'});
-  const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'no-preference'});
-  t.after(()=>page.close());
-  await page.goto(base+'/');
-  const caret=page.locator('.decode-caret');
-  await caret.waitFor({state:'attached'});
-  const blinking=await caret.evaluate(el=>new Promise((resolve,reject)=>{
-    let flashes=0,lit=false,frame;
-    const timeout=setTimeout(()=>{cancelAnimationFrame(frame);reject(new Error('Cursor did not stop blinking.'));},12000);
-    const sample=()=>{
-      const visible=getComputedStyle(el).opacity==='1';
-      if(visible&&!lit)flashes++;
-      lit=visible;frame=requestAnimationFrame(sample);
-    };
-    el.addEventListener('animationend',()=>{
-      clearTimeout(timeout);cancelAnimationFrame(frame);
-      resolve({flashes,opacity:getComputedStyle(el).opacity});
-    },{once:true});
-    sample();
-  }));
-  assert.deepEqual(blinking,{flashes:5,opacity:'0'});
-  const settled=['> what are we','  working on?▌'];
-  assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
-  assert.equal(await page.locator('.home-header').count(),0);
-  const input=page.getByRole('textbox',{name:'Message Moyai'});
-  await input.fill('Keep this draft.');
-  assert.equal(await input.innerText(),'Keep this draft.');
+  assert.equal(await page.getByRole('button',{name:'Review code',exact:true}).isVisible(),false);
   await input.fill('');
-  await page.waitForTimeout(400);
-  assert.deepEqual(await page.locator('.decode-text').allTextContents(),settled);
-  assert.equal(await caret.evaluate(el=>getComputedStyle(el).opacity),'0');
-  assert.equal(await caret.evaluate(el=>el.getAnimations()[0]?.playState),'finished');
+  assert.equal(await page.getByRole('button',{name:'Review code',exact:true}).isVisible(),true);
+});
+
+for(const [label,prompt] of [
+  ['Review code','Review my changes for bugs and improvements.'],
+  ['Fix a bug','Help me investigate and fix this bug: '],
+  ['Plan a feature','Help me plan and implement this feature: '],
+])test(`home starter "${label}" opens an editable draft without sending`,async t=>{
+  reset({status:'idle'});const page=await pageFor(t,'');
+  await page.getByRole('button',{name:label,exact:true}).click();
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await page.waitForFunction(expected=>document.querySelector('.skill-editor')?.textContent===expected,prompt);
+  assert.equal(await input.evaluate(el=>el===document.activeElement),true);
+  assert.equal(state.requests.some(row=>row.method==='POST'&&(row.path==='/api/sessions'||row.path.endsWith('/messages'))),false);
+  await page.keyboard.type(' Please focus on the current branch.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.method==='POST'&&row.path.endsWith('/messages')));
+  assert.equal(state.requests.find(row=>row.method==='POST'&&row.path.endsWith('/messages')).body.prompt,prompt+' Please focus on the current branch.');
+});
+
+test('home draft survives model and privacy changes before sending',async t=>{
+  reset({status:'idle',models:['test-model','second-model']});const page=await pageFor(t,'');
+  await page.getByRole('button',{name:'Plan a feature',exact:true}).click();
+  const input=page.getByRole('textbox',{name:'Message Moyai'});
+  await input.fill('Plan a feature that exports the selected report.');
+  await page.getByRole('button',{name:'Private session',exact:true}).click();
+  await page.getByRole('combobox',{name:'Model',exact:true}).click();
+  await page.getByRole('option',{name:'second-model',exact:true}).click();
+  assert.equal(await input.innerText(),'Plan a feature that exports the selected report.');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.method==='POST'&&row.path.endsWith('/messages')));
+  const sent=state.requests.find(row=>row.method==='POST'&&row.path.endsWith('/messages'));
+  assert.equal(sent.body.prompt,'Plan a feature that exports the selected report.');
+  assert.equal(sent.body.model,'second-model');
+  assert.equal(state.requests.find(row=>row.method==='POST'&&row.path==='/api/sessions').body.visibility,'private');
 });
 
 for(const width of [1440,320])test(`selected chat keeps its highlight while actions hide at ${width}px`,async t=>{

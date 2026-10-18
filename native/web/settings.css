@@ -1,6 +1,6 @@
 .native-settings {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 240px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   width: 100%;
@@ -16,7 +16,7 @@
   min-height: 0;
   min-width: 0;
   padding: 12px 12px 8px;
-  background: var(--ui-subtle);
+  background: var(--ui-background);
   border-inline-end: 1px solid var(--ui-border);
 }
 .native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 40px; }
