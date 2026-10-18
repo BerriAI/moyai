@@ -36,6 +36,7 @@ async function handle(req,res,next) {
   if(url.pathname==='/api/session-folders')return json(state.folders||[]);
   if(url.pathname==='/api/pull-requests/statuses')return json(state.prStatuses||{});
   if(url.pathname==='/api/history/sessions'||url.pathname==='/api/history/search') {
+    if(url.pathname==='/api/history/sessions'&&state.inventoryError)return json({detail:'Inventory temporarily unavailable.'},503);
     if(url.pathname==='/api/history/sessions'&&state.inventoryRows)return json({sessions:state.inventoryRows,ancestors:state.inventoryAncestors||[],has_more:false});
     const rows=[{...session(legacyId),key:'legacy:'+legacyId,source:'legacy',url:'/#run='+legacyId,title:'Saved earlier investigation',read_only:true,match:{snippet:'Body-only needle <img src=x onerror=alert(1)>'}},
       {...session(),key:'native:'+sessionId,source:'native',url:'/#'+sessionId}];
@@ -160,9 +161,10 @@ async function handle(req,res,next) {
 }
 async function waitFor(predicate,label='condition') {const end=Date.now()+10000;while(!predicate()){if(Date.now()>end)throw new Error('Timed out: '+label);await new Promise(resolve=>setTimeout(resolve,25));}}
 function emit(value,id,event) {for(const client of clients)client.write(`${id===undefined?'':`id: ${id}\n`}${event?`event: ${event}\n`:''}data: ${JSON.stringify(value)}\n\n`);}
-async function pageFor(t,route='#'+sessionId,width=1440) {
+async function pageFor(t,route='#'+sessionId,width=1440,initialize) {
   const page=await browser.newPage({viewport:{width,height:1000},reducedMotion:'reduce'});t.after(()=>page.close());
   const errors=[];page.on('pageerror',error=>errors.push(error.message));t.after(()=>assert.deepEqual(errors,[]));
+  if(initialize)await initialize(page);
   await page.goto(base+'/'+route);return page;
 }
 for(const width of [1440,768,320])test(`ordinary question accepts a composer answer at ${width}px`,async t=>{
@@ -244,6 +246,130 @@ async function clickSidebarPin(page, name) {
   await page.getByRole('button',{name,exact:true}).click({timeout:5000});
 }
 
+function sidebarDefaultsFixture() {
+  const child='d'.repeat(32),pinned='e'.repeat(32),filed='f'.repeat(32),shared='1'.repeat(32);
+  reset({status:'idle',folders:[{id:'today',name:'Today'}],sessionOverrides:{
+    [child]:{title:'Curie',parent_session_id:sessionId},
+  }});
+  state.inventoryRows=[
+    {...session(),source:'native'},
+    {...session(child),source:'native'},
+    {...session(pinned),title:'Pinned work',pinned:true,source:'native'},
+    {...session(filed),title:'Filed work',folder:'Today',source:'native'},
+    {...session(shared),title:'Shared work',owner_id:'teammate',participated:true,source:'native'},
+  ];
+  return child;
+}
+
+for(const width of [1440,768,320])test(`sidebar starts with only Recent open and keeps child routes collapsed at ${width}px`,async t=>{
+  const child=sidebarDefaultsFixture();
+  const page=await pageFor(t,'#',width);
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  const recent=page.getByRole('button',{name:/^Recent /});
+  await page.getByRole('button',{name:/^Pinned /}).waitFor();
+  assert.equal(await recent.getAttribute('aria-expanded'),'true');
+  for(const name of [/^Pinned /,/^Participated /,/^Today /])
+    assert.equal(await page.getByRole('button',{name}).getAttribute('aria-expanded'),'false');
+  const expand=page.getByRole('button',{name:'Expand subagents for Current native work',exact:true});
+  await expand.waitFor();
+  assert.equal(await page.locator(`[data-session-key="native:${child}"]`).isVisible(),false);
+  await expand.press('Enter');
+  assert.equal(await page.locator(`[data-session-key="native:${child}"]`).isVisible(),true);
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).press('Space');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.goto(base+'/#'+child);
+  if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.getByRole('heading',{name:'Curie',exact:true}).waitFor();
+  await expand.waitFor();
+  assert.equal(await page.locator(`[data-session-key="native:${child}"]`).isVisible(),false);
+  const sidebar=await page.getByRole('navigation',{name:'Conversations',exact:true}).boundingBox();
+  assert.ok(sidebar&&sidebar.x>=0&&sidebar.x+sidebar.width<=width);
+});
+
+test('explicit sidebar expansion survives reload and polling without opening new branches',async t=>{
+  sidebarDefaultsFixture();
+  const page=await pageFor(t,'#');
+  await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
+  await page.getByRole('button',{name:/^Participated /}).click();
+  await page.getByRole('button',{name:/^Today /}).click();
+  await page.getByRole('button',{name:/^Recent /}).click();
+  await page.reload();
+  await page.getByRole('button',{name:/^Today /}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/^Recent /}).getAttribute('aria-expanded'),'false');
+  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'true');
+  assert.equal(await page.getByRole('button',{name:/^Today /}).getAttribute('aria-expanded'),'true');
+  await page.getByRole('button',{name:/^Recent /}).click();
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
+  const newParent='2'.repeat(32),newChild='3'.repeat(32);
+  state.inventoryRows.push({...session(newParent),source:'native',title:'New parent'},
+    {...session(newChild),source:'native',title:'New child',parent_session_id:newParent});
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.getByRole('button',{name:'Expand subagents for New parent',exact:true}).waitFor();
+  assert.equal(await page.locator(`[data-session-key="native:${newChild}"]`).isVisible(),false);
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
+});
+
+for(const stored of ['legacy','malformed','unavailable'])test(`sidebar safely adopts collapsed defaults with ${stored} storage`,async t=>{
+  sidebarDefaultsFixture();
+  const page=await pageFor(t,'#',1440,async page=>page.addInitScript(kind=>{
+    if(kind==='unavailable'){
+      Storage.prototype.getItem=()=>{throw new Error('Storage unavailable');};
+      Storage.prototype.setItem=()=>{throw new Error('Storage unavailable');};
+    }else{
+      localStorage.setItem('moyai-native-folders:viewer',kind==='legacy'?JSON.stringify({version:2,closed:[]}):'{bad json');
+      localStorage.setItem('moyai-subagents:viewer',kind==='legacy'?JSON.stringify(['native:'+'a'.repeat(32)]):JSON.stringify({version:1,expanded:{}}));
+      localStorage.setItem('moyai-subagents:another-user',JSON.stringify({version:1,expanded:['native:'+'a'.repeat(32)]}));
+    }
+  },stored));
+  await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
+  await page.getByRole('button',{name:'Collapse subagents for Current native work',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/^Recent /}).getAttribute('aria-expanded'),'true');
+  assert.equal(await page.getByRole('button',{name:/^Participated /}).getAttribute('aria-expanded'),'false');
+});
+
+test('background inventory refresh stays quiet while explicit pagination shows loading and recovers from failure',async t=>{
+  reset();
+  state.inventoryPages=[[{...session(),source:'native'}],[{...session('4'.repeat(32)),source:'native',title:'Older work'}]];
+  const page=await pageFor(t,'#');
+  const more=page.getByRole('button',{name:'Show more sessions',exact:true});
+  await more.waitFor();
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  state.holds={'/api/history/sessions':held};
+  const reads=()=>state.requests.filter(r=>r.path==='/api/history/sessions').length;
+  let count=reads();
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await waitFor(()=>reads()>count,'held background inventory read');
+  assert.equal(await more.isVisible(),true);
+  assert.equal(await more.isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Loading…',exact:true}).count(),0);
+  count=reads();await more.click();
+  await waitFor(()=>reads()>count,'manual pagination replaces background read');
+  const loading=page.getByRole('button',{name:'Loading…',exact:true});
+  await loading.waitFor();assert.equal(await loading.isEnabled(),false);
+  state.inventoryError=true;release();
+  await more.waitFor();assert.equal(await more.isEnabled(),true);
+  state.inventoryError=false;state.holds={};
+  await more.click();
+  await page.getByRole('link',{name:/Older work/}).waitFor();
+  assert.equal(await loading.count(),0);
+});
+
+test('an empty sidebar shows initial loading but remains settled during later background reads',async t=>{
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  reset({status:'idle',inventoryRows:[],holds:{'/api/history/sessions':held}});
+  const page=await pageFor(t,'#');
+  await page.locator('#sessions-recent').getByText('Loading sessions…',{exact:true}).waitFor();
+  release();state.holds={};
+  await page.getByText('No sessions here yet.',{exact:true}).waitFor();
+  let releaseRefresh;const refreshHeld=new Promise(resolve=>{releaseRefresh=resolve;});t.after(()=>releaseRefresh());
+  state.holds={'/api/history/sessions':refreshHeld};
+  const count=state.requests.filter(r=>r.path==='/api/history/sessions').length;
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await waitFor(()=>state.requests.filter(r=>r.path==='/api/history/sessions').length>count);
+  assert.equal(await page.getByText('Loading sessions…',{exact:true}).count(),0);
+  assert.equal(await page.getByText('No sessions here yet.',{exact:true}).isVisible(),true);
+});
+
 test('sidebar pin and unpin render before a held save without blocking other actions or refreshing catalogs',async t=>{
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
   reset({status:'idle',holdPreference:held});
@@ -252,6 +378,7 @@ test('sidebar pin and unpin render before a held save without blocking other act
   const catalogReads=()=>state.requests.filter(row=>['/api/connections','/api/session-folders','/api/history/sessions'].includes(row.path)).length;
   const reads=catalogReads();
   await clickSidebarPin(page,'Pin Current native work');
+  await page.getByRole('button',{name:/^Pinned /}).click();
   const unpin=page.getByRole('button',{name:'Unpin Current native work',exact:true});
   await unpin.waitFor({timeout:500});
   assert.equal(await unpin.isEnabled(),true);
@@ -274,6 +401,7 @@ test('sidebar drag into and out of a folder renders while saves are held and pre
   reset({status:'idle',holdPreference:held,folders:[{id:'today',name:'Today'}],
     inventoryRows:[{...session(id),title:'Folder latency test',pinned:true,folder:'',source:'native'}]});
   const page=await pageFor(t,'#');
+  await page.getByRole('button',{name:/^Pinned /}).click();
   const row=page.locator(`[data-session-key="native:${id}"]`);
   await row.waitFor();
   const today=page.locator('.session-group').filter({has:page.getByRole('button',{name:/^Today/})});
@@ -296,6 +424,7 @@ test('a rejected sidebar save restores placement and shows an error',async t=>{
   reset({status:'idle',holdPreference:held,preferenceError:true});
   const page=await pageFor(t);
   await clickSidebarPin(page,'Pin Current native work');
+  await page.getByRole('button',{name:/^Pinned /}).click();
   await page.getByRole('button',{name:'Unpin Current native work',exact:true}).waitFor({timeout:500});
   release();
   await page.getByRole('alert').filter({hasText:'Could not save sidebar preference.'}).waitFor();
@@ -1269,6 +1398,7 @@ test('source collisions and identically named legacy folders survive paged inven
     [{...session(collision),source:'native',key:'native:'+collision,title:'Native collision',folder:'',pinned:false}],
   ];
   const page=await pageFor(t,'#run='+legacyId);const history=page.locator(`[data-session-key="legacy:${collision}"]`);
+  await page.getByRole('button',{name:/^Original folder/}).click();
   await history.waitFor();assert.equal(await page.getByRole('button',{name:'Folder actions for Original folder'}).count(),0);
   assert.equal(await page.getByRole('button',{name:/Original folder/}).count(),1);
   assert.ok(!state.requests.some(req=>req.path==='/api/pull-requests/statuses'));
@@ -1530,6 +1660,7 @@ for(const width of [1440,768,320])test(`sidebar nests three subagents and opens 
   const page=await pageFor(t,'#'+sessionId,width);
   if(width===320)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
   const group=page.getByRole('group',{name:'Subagents of Current native work',exact:true});
+  await page.getByRole('button',{name:'Expand subagents for Current native work',exact:true}).click();
   await group.waitFor();assert.equal(await group.locator('[data-session-key]').count(),3);
   const parent=page.locator(`[data-session-key="native:${sessionId}"]`);
   const child=group.locator(`[data-session-key="native:${childIds[0]}"]`);

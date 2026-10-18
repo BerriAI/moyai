@@ -42,6 +42,15 @@ queue; **Send now** moves saved input into the transcript while admission settle
 Session search is available through Command/Ctrl+K rather than a second sidebar
 filter.
 
+The sidebar initially opens **Recent** and closes **Pinned**, **Participated**,
+folders and subagent branches. Expand a section or branch with its toggle;
+explicit choices are remembered per account in this browser. Opening a child
+conversation or refreshing the list does not expand its ancestors. Older
+open-by-default preferences adopt these defaults once. Dropping a session into
+a folder still reveals its destination. Background refreshes keep the list
+steady; loading feedback appears on the first load and when **Show more sessions**
+is clicked.
+
 Saved-file links in the transcript, subagent results and side chats open the
 right-panel preview. Text and Markdown render in the panel; supported images,
 videos and audio use its media viewer. **Download original** remains available
