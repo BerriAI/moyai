@@ -4,4 +4,4 @@
   background-size: 24px 24px;
   mask-image: linear-gradient(#000, #000a 75%, transparent);
 }
-.chat-space { background: var(--ui-canvas); }
+.chat-space { background: var(--ui-reading-surface); }

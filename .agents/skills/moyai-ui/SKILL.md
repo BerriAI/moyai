@@ -6,7 +6,9 @@ description: Build or refine Moyai's native React frontend using its established
 # Moyai UI
 
 Preserve the compact workspace: neutral charcoal and white themes, fine borders,
-restrained purple actions and opaque composer panels. Theme choice persists locally;
+restrained purple actions and frosted glass navigation, toolbars and composers.
+Keep code and reading surfaces quiet. Use solid fallback surfaces when blur is
+unavailable or reduced transparency is requested; avoid blur on layout ancestors. Theme choice persists locally;
 dark is the default. Keep messages and composer focus borders neutral. Use General Sans
 from the official Fontshare stylesheet for the interface, local Geist as the
 fallback, and Geist Mono for code. Do not commit the restricted General Sans

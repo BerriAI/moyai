@@ -130,6 +130,69 @@ html[data-theme="light"] {
   --ui-elevated-shadow: 0 8px 24px #2424260f;
 }
 
+/* Solid surfaces are the baseline for browsers without backdrop filtering. */
+:root {
+  --ui-shell: var(--ui-canvas);
+  --ui-reading-surface: var(--ui-canvas);
+  --ui-glass-surface: var(--ui-background);
+  --ui-glass-chrome: var(--ui-subtle);
+  --ui-glass-elevated: var(--ui-background);
+  --ui-glass-line: var(--ui-border);
+  --ui-glass-sheen: none;
+  --ui-glass-blur: none;
+  --ui-glass-inset: inset 0 0 0 transparent;
+  --ui-glass-shadow: var(--ui-elevated-shadow);
+  --ui-desktop-image: none;
+  --ui-window-shadow: 0 12px 40px #00000026;
+}
+
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  :root {
+    --ui-shell: rgb(17 17 19 / 66%);
+    --ui-reading-surface: rgb(17 17 19 / 90%);
+    --ui-glass-surface: rgb(30 30 33 / 68%);
+    --ui-glass-chrome: rgb(27 27 30 / 76%);
+    --ui-glass-elevated: rgb(27 27 30 / 92%);
+    --ui-glass-line: rgb(255 255 255 / 12%);
+    --ui-glass-sheen: linear-gradient(135deg, rgb(255 255 255 / 4%), transparent 50%);
+    --ui-glass-blur: blur(24px) saturate(110%);
+    --ui-glass-inset: inset 0 1px 0 rgb(255 255 255 / 7%);
+    --ui-glass-shadow: var(--ui-glass-inset), 0 8px 24px rgb(0 0 0 / 16%);
+    --ui-desktop-image: radial-gradient(ellipse at 4% 0%, #4b4e56 0%, transparent 52%), radial-gradient(ellipse at 100% 100%, #292b31 0%, transparent 58%);
+    --ui-window-shadow: inset 0 1px 0 rgb(255 255 255 / 7%), 0 20px 60px rgb(0 0 0 / 32%);
+  }
+  html[data-theme="light"] {
+    --ui-shell: rgb(255 255 255 / 62%);
+    --ui-reading-surface: rgb(255 255 255 / 80%);
+    --ui-glass-surface: rgb(255 255 255 / 54%);
+    --ui-glass-chrome: rgb(255 255 255 / 66%);
+    --ui-glass-elevated: rgb(255 255 255 / 92%);
+    --ui-glass-line: rgb(73 77 89 / 14%);
+    --ui-glass-sheen: linear-gradient(135deg, rgb(255 255 255 / 70%), transparent 55%);
+    --ui-glass-inset: inset 0 1px 0 rgb(255 255 255 / 90%);
+    --ui-glass-shadow: var(--ui-glass-inset), 0 8px 24px rgb(41 45 58 / 8%);
+    --ui-desktop-image: radial-gradient(ellipse at 3% 0%, #c8ccd6 0%, transparent 56%), radial-gradient(ellipse at 100% 100%, #d1d5dd 0%, transparent 58%);
+    --ui-window-shadow: inset 0 1px 0 rgb(255 255 255 / 90%), 0 20px 60px rgb(41 45 58 / 14%);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  :root, html[data-theme="light"] {
+    --ui-shell: var(--ui-canvas);
+    --ui-reading-surface: var(--ui-canvas);
+    --ui-glass-surface: var(--ui-background);
+    --ui-glass-chrome: var(--ui-subtle);
+    --ui-glass-elevated: var(--ui-background);
+    --ui-glass-line: var(--ui-border);
+    --ui-glass-sheen: none;
+    --ui-glass-blur: none;
+    --ui-glass-inset: inset 0 0 0 transparent;
+    --ui-glass-shadow: var(--ui-elevated-shadow);
+    --ui-desktop-image: none;
+    --ui-window-shadow: none;
+  }
+}
+
 /* Geometry remains in the workspace styles; these rules describe the shared
    component boundary and portalled surfaces. No Tailwind preflight reset. */
 [data-dialog-body]:not([hidden]), [data-popover-body]:not([hidden]) { display: contents; }
@@ -139,12 +202,12 @@ html[data-theme="light"] {
   position: fixed; inset: auto; top: 50%; left: 50%;
   z-index: 1001; margin: 0; display: block; width: min(520px, calc(100vw - 32px));
   max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: auto;
-  background: var(--ui-background); color: var(--ui-foreground); padding: 24px;
+  background: var(--ui-glass-elevated); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); color: var(--ui-foreground); padding: 24px;
   border: 1px solid var(--ui-border); border-radius: 10px; box-shadow: var(--ui-shadow);
   animation: none;
   overscroll-behavior: contain;
 }
-[data-slot="popover-content"] { background: var(--ui-background); z-index: 1002; }
+[data-slot="popover-content"] { background: var(--ui-glass-elevated); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); z-index: 1002; }
 [data-slot="button"] { font-family: var(--ui-font); font-size: 12px; font-weight: 400; }
 [data-slot="button"][data-variant="default"] { font-weight: 500; border-radius: 6px; }
 [data-slot="tooltip-content"] { z-index: 1003; max-width: min(320px, calc(100vw - 24px)); }
@@ -186,7 +249,8 @@ html[data-theme="light"] {
 [data-slot="select-content"] {
   z-index: 1010; min-width: var(--radix-select-trigger-width); max-width: calc(100vw - 16px);
   max-height: min(320px, var(--radix-select-content-available-height));
-  border: 1px solid var(--ui-border); border-radius: 4px; background: var(--ui-background);
+  border: 1px solid var(--ui-border); border-radius: 4px; background: var(--ui-glass-elevated);
+  background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur);
   color: var(--ui-foreground); box-shadow: var(--ui-shadow); animation: none;
   overscroll-behavior: contain;
 }

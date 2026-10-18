@@ -48,7 +48,8 @@
   padding: 10px 12px;
   border: 1px solid var(--ui-border);
   border-radius: 6px;
-  background: var(--ui-background);
+  background: var(--ui-glass-elevated);
+  background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur);
   color: var(--ui-foreground);
   box-shadow: var(--ui-elevated-shadow);
   pointer-events: auto;

@@ -3,7 +3,11 @@
 The React application lives in `native/web`. It imports shared shadcn/Radix
 controls from `frontend/components/ui` and semantic tokens from
 `frontend/theme.css`: The workspace uses neutral charcoal and white themes, fine
-borders, restrained purple actions and semantic status colors. A compact appearance
+borders, restrained purple actions and semantic status colors. Navigation, toolbars
+and composers use subtle frosted glass over a static neutral backdrop; code and
+reading surfaces remain calm. Glass is progressively enhanced, with solid fills
+when backdrop filtering is unavailable or reduced transparency is requested.
+Avoid applying blur to layout ancestors or stacking multiple blur layers. A compact appearance
 control in the account footer and Settings switches light/dark mode without replacing
 drafts or navigating. The choice persists locally and applies before the first paint;
 dark is the default. Message surfaces and composer focus borders stay neutral. General Sans supplies the interface

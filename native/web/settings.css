@@ -5,7 +5,7 @@
   min-height: 0;
   width: 100%;
   color: var(--ui-foreground);
-  background: var(--ui-canvas);
+  background: transparent;
   font-size: 14px;
   line-height: 1.55;
 }
@@ -16,8 +16,9 @@
   min-height: 0;
   min-width: 0;
   padding: 8px 10px 8px;
-  background: var(--ui-background);
-  border-inline-end: 1px solid var(--ui-border);
+  background: var(--ui-glass-surface);
+  background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur);
+  border-inline-end: 1px solid var(--ui-glass-line);
 }
 .native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 40px; }
 .native-settings .ns-brand-row > .moyai-brand { flex: 1; }
@@ -33,8 +34,8 @@
 .native-settings .ns-account { margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--ui-border); overflow-wrap: anywhere; }
 .native-settings .ns-account small { font-size: 11px; }
 .native-settings .ns-nav-toggle { display: none; }
-.native-settings .ns-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.native-settings .ns-breadcrumb { display: flex; align-items: center; gap: 10px; min-height: 64px; flex: none; padding: 16px 32px; border-bottom: 1px solid var(--ui-border); color: var(--ui-muted); font-size: 13px; }
+.native-settings .ns-main { background: var(--ui-reading-surface); min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.native-settings .ns-breadcrumb { display: flex; align-items: center; gap: 10px; min-height: 64px; flex: none; padding: 16px 32px; border-bottom: 1px solid var(--ui-border); color: var(--ui-muted); font-size: 13px; background: var(--ui-glass-chrome); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); box-shadow: var(--ui-glass-inset); }
 .native-settings .ns-content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-padding-block: 24px; padding: 40px max(32px, calc((100% - 1056px) / 2)) 64px; }
 .native-settings .ns-page-heading { margin-bottom: 32px; }
 .native-settings .ns-page-heading h1 { margin: 0 0 8px; font-size: 28px; font-weight: 450; line-height: 1.25; letter-spacing: -.035em; overflow-wrap: anywhere; }

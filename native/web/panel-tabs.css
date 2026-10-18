@@ -15,7 +15,7 @@
 .panel-resize-handle:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
 .workspace-resizing > :is(.chat, .details-panel, .topbar) { pointer-events: none; user-select: none; }
 .panel-resize-shield { position: fixed; inset: 0; z-index: 1200; cursor: col-resize; touch-action: none; user-select: none; }
-.conversation .topbar { min-height: 44px; height: 44px; padding: 5px 16px; background: var(--ui-subtle); gap: 12px; }
+.conversation .topbar { min-height: 44px; height: 44px; padding: 5px 16px; background: var(--ui-glass-chrome); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); box-shadow: var(--ui-glass-inset); gap: 12px; }
 .conversation .topbar .session-heading { display: flex; align-items: center; gap: 10px; }
 .conversation .topbar h1 { margin: 0; font-size: 13px; font-weight: 500; line-height: 1.4; }
 .conversation .topbar h1:has(.session-title-trigger, .session-title-input) { min-width: 0; padding: 3px; margin: -3px; }
@@ -40,7 +40,7 @@
   background: var(--ui-canvas);
 }
 .tabbed-panel[hidden], .panel-tab-content[hidden], .panel-tab-content[data-state="inactive"] { display: none !important; }
-.panel-tabbar { display: flex; align-items: center; gap: 4px; height: 48px; min-height: 48px; padding: 5px 8px; border-bottom: 1px solid var(--ui-border); background: var(--ui-subtle); }
+.panel-tabbar { display: flex; align-items: center; gap: 4px; height: 48px; min-height: 48px; padding: 5px 8px; border-bottom: 1px solid var(--ui-border); background: var(--ui-glass-chrome); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); box-shadow: var(--ui-glass-inset); }
 .panel-tablist { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; flex: 1; align-items: center; }
 .panel-tab { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; max-width: 220px; border: 1px solid transparent; border-radius: 7px; }
 .panel-tab.selected { background: var(--ui-background); border-color: var(--ui-border); }
