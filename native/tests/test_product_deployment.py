@@ -63,6 +63,23 @@ def configured(env):
     return config
 
 
+def test_worker_versions_share_a_contract_but_require_explicit_adoption(environment):
+    from app.native_contract import core_contract
+
+    unversioned = core_contract(configured(environment).legacy_settings())
+    environment.update(MOYAI_WORKER_DEPLOYMENT="moyai-release", MOYAI_WORKER_BUILD_ID="blue")
+    blue = configured(environment)
+    native = Settings(_env_file=None, **blue.native_overrides())
+    assert (native.worker_deployment, native.worker_build_id) == ("moyai-release", "blue")
+    blue_contract = core_contract(blue.legacy_settings())
+    environment["MOYAI_WORKER_BUILD_ID"] = "green"
+    green_contract = core_contract(configured(environment).legacy_settings())
+    assert blue_contract == green_contract
+    assert blue_contract != unversioned
+    environment["MOYAI_WORKER_DEPLOYMENT"] = "different-fleet"
+    assert core_contract(configured(environment).legacy_settings()) != blue_contract
+
+
 def test_pydantic_default_and_standalone_remain_usable_without_product_sources(tmp_path):
     assert select_core({}) == "pydantic"
     with pytest.raises(ProductConfigurationError):
