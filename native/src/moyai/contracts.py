@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from .product_identity import ProductGrant
 
@@ -150,6 +150,15 @@ class NewSession(BaseModel):
 
 
 class NewMessage(BaseModel):
+    # Transport provenance is assigned only by verified server ingress. It is
+    # deliberately not a request field, even when a client submits these names.
+    _authored_text: str | None = PrivateAttr(default=None)
+    _source: dict[str, Any] | None = PrivateAttr(default=None)
+
+    @property
+    def authored_text(self) -> str:
+        return self.prompt if self._authored_text is None else self._authored_text
+
     prompt: str = Field(default="", max_length=500_000)
     request_key: str = Field(min_length=1, max_length=200)
     model: str | None = None

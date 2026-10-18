@@ -76,6 +76,10 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
             select(Message).where(Message.session_id == session_id).order_by(Message.id)
         ))
 
+        from .message_sources import public_message
+        public = {row.id: (await public_message(runtime.database, db, row))[0] for row in messages}
+        own = {turn.actor_id: await runtime.database.same_person(db, user, turn.actor_id) for turn in turns}
+
     messages_by_turn: dict[str, list[Message]] = {}
     for message in messages:
         messages_by_turn.setdefault(message.turn_id, []).append(message)
@@ -116,16 +120,16 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                 "step_id": len(steps) + 1,
                 "timestamp": user_message.created_at,
                 "source": "user",
-                "message": runtime.security.unseal(user_message.content).decode(),
+                "message": public[user_message.id],
                 "extra": {
                     "turn_id": turn.id,
                     "turn_status": turn.status,
-                    "author": "requester" if user_message.author_id == user.id else "teammate",
+                    "author": "requester" if own.get(user_message.author_id or "", False) else "teammate",
                 },
             }
             steps.append(user_step)
 
-        if turn.actor_id == user.id:
+        if own[turn.actor_id]:
             snapshot = await latest_turn_snapshot(runtime, turn.id)
             if snapshot is not None:
                 tool_steps: dict[str, tuple[dict[str, Any], bool]] = {}

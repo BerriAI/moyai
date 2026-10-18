@@ -187,6 +187,9 @@ class ProductMemoryStore:
                     if row["expires_at"] and row["expires_at"] <= now():
                         continue
                     note = self.service._unpack(dict(row))
+                    from .message_sources import valid_memory_source
+                    if not await valid_memory_source(self.service.database, db, note):
+                        continue  # Keep the note for owner review; never automatically recall suspect evidence.
                     if automatic and note["repo_url"] and note["repo_url"] != repository:
                         continue
                     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", note["key"]) or len(note["key"]) > 80:
@@ -254,9 +257,10 @@ class ProductMemoryStore:
                     f"- {self._native_name(path)} (original: {path[len(self.prefix):]})"
                     for path in native_paths if path.startswith(self.prefix)
                 )
-            terms = search_terms(" ".join(
-                self.service.database.security.unseal(message.content).decode() for message in inputs
-            ))
+            from .message_sources import public_message
+            async with self.service.database.sessions() as db:
+                terms = search_terms(" ".join([(await public_message(self.service.database, db, message))[0]
+                                             for message in inputs]))
             ranked = sorted(notes, key=lambda note: (
                 note["kind"] in {"preference", "feedback"},
                 len(terms & search_terms(" ".join(note[key] for key in ("key", "title", "content")))),
@@ -519,7 +523,9 @@ class ProductMemoryStore:
                 source.update(body.observation.model_dump())
             else:
                 message = next((row for row in inputs if row.id == body.source_message_id), None)
-                if message is None or body.source_quote not in self.service.database.security.unseal(message.content).decode():
+                from .message_sources import memory_text
+                authored = await memory_text(self.service.database, db, message) if message else ""
+                if message is None or body.source_quote not in authored:
                     raise ToolFailed("Use an exact quote from the current requester's own message.")
                 source.update(native_message_id=message.id, quote=body.source_quote)
             note = Note.model_validate({

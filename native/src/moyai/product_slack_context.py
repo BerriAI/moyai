@@ -65,6 +65,8 @@ class SlackThreadContext:
                 authorize=lambda: self._authorize(principal, installed, grant), recheck=True,
             )
         await self._authorize(principal, installed, grant)
+        if body._source is not None:
+            body._source = {**body._source, "context_status": context["status"]}
         return body.model_copy(update={"prompt": body.prompt + self._render(context)})
 
     async def _cached_prompt(self, actor: User, origin: dict[str, str], body: NewMessage) -> str | None:

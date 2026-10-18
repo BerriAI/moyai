@@ -836,3 +836,30 @@ async def test_real_pg_slack_origin_never_exports_private_history(continuation, 
     assert failure.value.status_code == 403
     async with product.database.sessions() as db:
         assert await db.scalar(select(func.count()).select_from(ProductContinuation)) == 0
+
+
+@PG
+async def test_historical_slack_binding_exists_before_first_native_admission(continuation, monkeypatch):
+    from moyai.models import SlackThread
+    from moyai.product_slack_conversations import SlackConversations
+    from moyai.product_slack_models import ProductSlackBinding
+    product = continuation
+    await product.sql("UPDATE moyai.runs SET private_owner_id=''")
+    await product.sql("ALTER TABLE moyai.slack_threads ADD team_id text, ADD channel text, ADD thread_ts text, ADD paused integer")
+    await product.sql("ALTER TABLE moyai.slack_events ADD user_id text, ADD created_at text")
+    await product.sql("INSERT INTO moyai.slack_threads VALUES(:id,'TTEST0001','CTEST0001','1792255740.000',0)", id=ROOT)
+    slack = SimpleNamespace(runtime=product.runtime, installation=lambda: {'team_id': 'TTEST0001', 'authority': 'a' * 64})
+    slack.events = SimpleNamespace(conversations=SlackConversations(slack))
+    product.runtime.product_slack = slack
+    async def membership(*_):
+        return True  # Audience/revocation uses the real identity tests in test_slack_audience.
+    monkeypatch.setattr('moyai.slack_audience.can_read_binding', membership)
+    async def bound(db, session, actor):
+        return await db.get(ProductSlackBinding, session.id) is not None
+    product.database.slack_access = bound
+    result = await admit(product)
+    async with product.database.sessions() as db:
+        binding = await db.get(ProductSlackBinding, result['id'])
+        thread = await db.scalar(select(SlackThread).where(SlackThread.session_id == result['id']))
+        assert binding.source_run_id == ROOT and thread.channel_id == 'CTEST0001'
+        assert (await db.get(Turn, result['turn_id'])).session_id == binding.session_id

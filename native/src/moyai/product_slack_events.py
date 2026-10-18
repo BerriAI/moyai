@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from app.db import database as source_database
@@ -103,6 +103,11 @@ class SlackEvents:
         if not settings.slack_bot_enabled or not settings.slack_session_users:
             raise HTTPException(403, "Slack chat is disabled.")
         installed = await source_database(self.slack.installation)
+        if isinstance(payload.get("event"), dict) and payload["event"].get("subtype") in {
+            "message_changed", "message_deleted",
+        }:
+            from .slack_message_updates import receive_update
+            return {"ok": True, "updated": await receive_update(self, payload, installed)}
         event = self._eligible_event(payload, installed)
         if event is None:
             return {"ok": True}
@@ -120,6 +125,7 @@ class SlackEvents:
         if not settings.slack_thread_chat_enabled and not message.mentioned:
             return {"ok": True}
         actor, principal = await self.slack.actor(installed["team_id"], message.origin["user_id"])
+        cast(Any, actor).slack_channel_evidence = (message.origin["team_id"], message.origin["channel_id"])
         conversation = await self.conversations.resolve(
             thread, actor, message.origin, installed, mentioned=message.mentioned, command=message.command_name,
         )
@@ -172,6 +178,11 @@ class SlackEvents:
             prompt=message.prompt + attachments["context"], request_key="slack-message:" + message.key,
             mode="asap", connections=selections, attachments=attachments["images"],
         )
+        body._authored_text = message.prompt
+        body._source = {
+            "kind": "slack", **message.origin,
+            "files": attachments.get("files", []),
+        }
         body = await self.slack.context.prepare(actor, principal, message.origin, installed, body, source=message.source)
         return SlackSubmission(body, attachments["uploads"])
 

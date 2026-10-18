@@ -631,6 +631,14 @@ async def unified(product, tmp_path):
         database=SimpleNamespace(sessions=sessions, user=current_user), security=security,
         product_identity=product.identity, product_history=product.history, product_files=product.files,
     )
+    from types import MethodType
+
+    from moyai.database import Database
+    runtime.database.security = security
+    runtime.database.product_identity = None
+    runtime.database.product_authority_enabled = False
+    for method in ("allowed_session", "check_source_audience", "same_person"):
+        setattr(runtime.database, method, MethodType(getattr(Database, method), runtime.database))
 
     async def actor():
         return user

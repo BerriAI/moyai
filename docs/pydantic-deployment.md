@@ -75,6 +75,9 @@ prefix and explicit key. These formats are not interchangeable. Changing a
 destination or key requires the existing verified migration procedure, not a
 configuration fallback. See [object-storage.md](object-storage.md).
 
+For the v20 Slack message/provenance cutover, encrypted inbox compatibility and
+legacy transcript repair, follow [Slack messages in Moyai](slack-message-integrity.md#upgrade-and-repair).
+
 ## Native maintenance control contract
 
 The installed runtime provides the following maintenance interface:

@@ -110,6 +110,12 @@ async def test_first_reply_receives_parent_link_and_unfurl_in_prepared_input(ing
     assert calls
     assert not has_invocations(prepared.prompt)
     assert await runtime.skill_invocations.expand(prepared.prompt, prepared.scope) == prepared.prompt
+    transcript = await runtime.database.messages(await runtime.database.user(turn.actor_id), turn.session_id)
+    assert transcript[0]["content"] == "do we support this?"
+    assert transcript[0]["source"] == "slack"
+    assert transcript[0]["is_self"] is True
+    assert transcript[0]["author_name"]
+    assert DEEPSEEK_URL not in transcript[0]["content"]
 
 
 async def test_thread_pages_exclude_other_threads_and_messages_after_the_request(ingress, monkeypatch):
