@@ -16,7 +16,6 @@ from fastapi import HTTPException
 from temporalio import activity
 
 from .contracts import RunScope
-from .models import Session
 from .workspace_recovery import locked_scope
 
 VERSION = "moyai-active-computer-keepalive-v1"
@@ -38,10 +37,9 @@ async def keep_computer_alive(scope: RunScope) -> Keepalive:
     delay = min(60, max(1, runtime.settings.computer_idle_timeout // 3))
     try:
         async with database.sessions.begin() as db:
-            session = await db.get(Session, scope.session_id)
-            if session is None or session.status not in {"running", "saving"}:
-                return Keepalive(False)
-            session, turn = await locked_scope(database, db, scope, status=session.status)
+            # Answer acceptance can change running -> saving while this tick
+            # waits for a lock. Both are active phases of the same admitted turn.
+            session, turn = await locked_scope(database, db, scope, status=("running", "saving"))
             await database.swarms.authorize(db, turn, scope=scope)
             reference = json.loads(session.workspace or "null")
             if reference is None:

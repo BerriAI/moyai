@@ -14,6 +14,11 @@ It does not acquire a computer for a text-only turn or create a replacement.
 The timer continues during model calls, delegated work, and answer/checkpoint
 settlement. It stops on completion, Stop, lost authority, or confirmed computer
 termination. History handoff cancels the old timer before continuing as new.
+The session-row fence admits both `running` and `saving` atomically and refreshes
+the turn after acquiring that fence. A normal transition into saving while a tick
+waits for a lock therefore keeps maintenance active. The turn and session must
+still agree on their current phase; preparation and checkpoint publication retain
+their stricter single-phase fences.
 
 This protects active work from **idle** expiry, not from the configured maximum
 computer lifetime, provider loss, or an outage lasting longer than the idle
