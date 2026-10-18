@@ -55,6 +55,8 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
+DELIVERY_POLL_SECONDS = 3.0
+MIN_DELIVERY_INTERVAL = 1.0
 
 
 class SlackInstallationUnavailable(HTTPException):
@@ -154,6 +156,7 @@ class ProductSlack:
         self.inbox = HookInbox(self.store, self, list)
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
+        self.delivery_wakeup = asyncio.Event()
 
     async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
         host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
@@ -192,13 +195,26 @@ class ProductSlack:
 
     async def watch(self) -> None:
         while True:
+            # Clear before scanning so a commit during the pump cannot get lost
+            # between deciding to wait and beginning the wait.
+            self.delivery_wakeup.clear()
             try:
                 await self.pump()
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - preserve the durable queue across provider/store outages
                 logger.warning("Product Slack delivery remains saved (%s).", type(error).__name__)
-            await asyncio.sleep(3)
+            finished = time.monotonic()
+            try:
+                await asyncio.wait_for(self.delivery_wakeup.wait(), DELIVERY_POLL_SECONDS)
+            except TimeoutError:
+                pass
+            # Pump sends at most one update per channel. Even a burst of commit
+            # hints must respect Slack's per-channel pacing; missed hints and
+            # disconnected listeners retain the existing three-second fallback.
+            remaining = MIN_DELIVERY_INTERVAL - (time.monotonic() - finished)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
 
     def verify_signature(self, body: bytes, headers: Any) -> None:
         stamp = headers.get("x-slack-request-timestamp", "")

@@ -836,11 +836,11 @@ class Database:
 
     async def authorize_scope(
         self, scope: RunScope, *, input_id: str | None = None, db: AsyncSession | None = None,
-    ) -> None:
-        """Recheck live authority before a dispatched effect or resumed approval."""
+    ) -> list[Grant]:
+        """Recheck live authority and return the grants read by this check."""
         if db is None:
             async with self.sessions() as transaction:
-                await self.authorize_scope(scope, input_id=input_id, db=transaction)
+                return await self.authorize_scope(scope, input_id=input_id, db=transaction)
         else:
             actor = await db.get(User, scope.actor_id)
             turn = await db.get(Turn, scope.turn_id)
@@ -861,6 +861,7 @@ class Database:
                 pending = await self.latest_guidance(db, turn.id)
                 if pending and pending != input_id:
                     raise GuidanceChanged("New guidance arrived before this action was dispatched.")
+            return current
 
     @staticmethod
     def guidance_order():
