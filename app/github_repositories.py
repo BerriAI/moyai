@@ -298,9 +298,11 @@ class GitHubRepositories:
         return repo
 
     async def refresh_connection(self):
+        from .github import require_protection_permission
         credentials = await self.ensure_connection()
         expected = self.connection_version()
-        await self.installation(credentials)
+        installed = await self.installation(credentials)
+        require_protection_permission(installed.get('permissions'))
         selected = self.connected_ids(credentials)
         repositories = []
         # Listing needs only metadata. GitHub accepts at most 500 IDs per token;

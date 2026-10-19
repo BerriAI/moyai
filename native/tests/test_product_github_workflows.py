@@ -418,11 +418,10 @@ async def test_deleted_acknowledged_branch_is_not_recreated(publication):
 
 
 async def test_deleted_intermediate_branch_cannot_be_recreated_to_finish_a_pr(publication):
-    from app.connector_errors import ConnectorError
     f = publication
     request = Publish(**create_request().model_dump(), head_branch="feature/intermediate")
     f.provider.fail_before_pr = True
-    with pytest.raises(ConnectorError, match="before PR"):
+    with pytest.raises(ToolFailed, match="before PR"):
         await invoke(f, "create_pull_request", request)
     assert not f.provider.pulls
     del f.provider.refs[request.head_branch]

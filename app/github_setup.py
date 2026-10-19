@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, ValidationError
 
 from .connector_errors import ConnectorError
-from .github import MANIFEST_PERMISSIONS, supports_permissions
+from .github import MANIFEST_PERMISSIONS, require_protection_permission, supports_permissions
 from .github_repositories import positive_id
 from .security import digest
 
@@ -120,6 +120,7 @@ def routes(connectors, security, store, settings):
                     or not supports_permissions(data.get('permissions'))
                     or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', data.get('slug', ''))):
                 raise ConnectorError('Use the organization-owned App with Contents and Pull requests write access, plus Metadata read access. Additional permissions are supported.')
+            require_protection_permission(data.get('permissions'))
             config.update(slug=data['slug'], owner_id=data['owner']['id'], owner_login=data['owner']['login'])
             github.save_app(config)
             connectors.expire_approvals('github')
@@ -245,6 +246,7 @@ def routes(connectors, security, store, settings):
             if (data.get('owner', {}).get('id') != owner['owner_id'] or not supports_permissions(data.get('permissions'))
                     or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', data.get('slug', ''))):
                 raise ConnectorError('The registered GitHub App has a different owner or permissions. An administrator must inspect it.')
+            require_protection_permission(data.get('permissions'))
             config = {k: data[k] for k in ('id', 'slug', 'pem')}
             config.update(owner_id=owner['owner_id'], owner_login=owner['owner_login'])
             store.execute('DELETE FROM github_registration WHERE state_hash=?', (digest(state),))
