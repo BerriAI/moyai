@@ -312,20 +312,28 @@ class ProductHistoryAdapter:
         except (SQLAlchemyError, TimeoutError):
             raise HTTPException(503, "Existing product history is unavailable; check its database/schema.") from None
 
+    def graph_cte(self) -> str:
+        """Share a fresh graph within this statement; never mutate source views."""
+        from .history_graph import ancestry_query
+
+        t = self.table
+        if self.engine.dialect.name == "postgresql":
+            # These are the canonical views' exact direct-parent semantics.
+            # Following the unique parent avoids the downward view's inflated
+            # fan-out estimates; roots reuse this one expansion.
+            return f"""WITH ancestry AS MATERIALIZED ({ancestry_query(t('runs'))}),
+                history_roots AS MATERIALIZED (
+                    SELECT a.run_id,r.id AS root_id FROM ancestry a
+                    JOIN {t('runs')} r ON r.id=a.ancestor_id WHERE r.parent_run_id=''
+                )"""
+        return f"""WITH ancestry AS (SELECT run_id,ancestor_id FROM {t('run_ancestry')}),
+            history_roots AS (SELECT run_id,root_id FROM {t('run_roots')})"""
+
     def access_cte(self, *, deleted: bool = False) -> str:
         t = self.table
         live = "" if deleted else "AND r.deleted_at='' AND r.deletion_requested_at=''"
         ancestor_live = "" if deleted else "OR a.deleted_at!='' OR a.deletion_requested_at!=''"
-        # The canonical ancestry relation is a recursive view. Referencing it
-        # separately for each ACL predicate expands the complete graph repeatedly.
-        # Share one statement-local snapshot without caching authorization across
-        # requests or removing the final live ACL checks.
-        materialized = "MATERIALIZED " if self.engine.dialect.name == "postgresql" else ""
-        return f"""WITH ancestry AS {materialized}(
-            SELECT run_id,ancestor_id FROM {t('run_ancestry')}
-        ), history_roots AS {materialized}(
-            SELECT run_id,root_id FROM {t('run_roots')}
-        ), identities AS (
+        return self.graph_cte() + f""", identities AS (
             SELECT :actor AS id UNION SELECT id FROM {t('users')}
               WHERE kind='slack' AND linked_user_id=:actor
         ), visible AS (
@@ -478,10 +486,21 @@ class ProductHistoryAdapter:
         if exclude_continued and self.continuation_schema:
             where += f""" AND NOT EXISTS(SELECT 1 FROM "{self.continuation_schema}".moyai_product_continuations c
                 WHERE c.source_schema=:continuation_source AND c.source_session_id=r.id)"""
+        # Filter navigation once before the ordered LIMIT. With sparse personal
+        # history, PostgreSQL otherwise walks the ordered roots index and scans
+        # all visible rows again for each root, expecting to fill the page early.
+        # Materialize only IDs/timestamps; project sidebar fields after paging.
+        materialized = "MATERIALIZED " if self.engine.dialect.name == "postgresql" else ""
         async with self.read() as conn:
             result = await conn.execute(text(
-                self.access_cte(deleted=deleted) + f"SELECT {self.columns()} {self.from_runs()} WHERE {where} "
-                "ORDER BY r.updated_at DESC,r.created_at DESC,r.id DESC LIMIT :limit OFFSET :offset"
+                self.access_cte(deleted=deleted) + f""", navigation_candidates AS {materialized}(
+                    SELECT r.id,r.updated_at,r.created_at FROM {t('runs')} r
+                    JOIN visible v ON v.id=r.id WHERE {where}
+                ), navigation_page AS (
+                    SELECT id FROM navigation_candidates
+                    ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT :limit OFFSET :offset
+                ) SELECT {self.columns()} {self.from_runs()} WHERE r.id IN (SELECT id FROM navigation_page)
+                ORDER BY r.updated_at DESC,r.created_at DESC,r.id DESC"""
             ), self.params(current) | {"limit": limit + 1, "offset": offset, "is_admin": int(current.role == "admin"),
                                       "continuation_source": self.schema})
             rows = [dict(r) for r in result.mappings()]

@@ -447,10 +447,11 @@ async def test_historical_reads_use_native_controls_and_preserve_verified_attrib
     from moyai.slack_audience import historical_access, historical_messages
     product = audience
     source_id = 'a' * 32
-    product.slack.runtime.product_history = SimpleNamespace(table=lambda name: f'moyai.{name}')
+    from moyai.product_history import ProductHistoryAdapter
+    product.slack.runtime.product_history = ProductHistoryAdapter(product.adapter, product.source, schema='moyai')
     async with product.source.begin() as db:
         for ddl in (
-            'CREATE TABLE moyai.runs(id text PRIMARY KEY,owner_id text)',
+            "CREATE TABLE moyai.runs(id text PRIMARY KEY,owner_id text,parent_run_id text DEFAULT '')",
             'CREATE TABLE moyai.run_roots(run_id text,root_id text)',
             'CREATE TABLE moyai.slack_threads(run_id text,team_id text,channel text,thread_ts text)',
             'CREATE TABLE moyai.slack_events(run_id text,user_id text,created_at text)',
@@ -458,7 +459,8 @@ async def test_historical_reads_use_native_controls_and_preserve_verified_attrib
             'CREATE TABLE moyai.slack_receipts(message_id integer,run_id text,team_id text,channel text,message_ts text,user_id text)',
         ):
             await db.execute(text(ddl))
-        await db.execute(text('INSERT INTO moyai.runs VALUES(:id,:actor)'), {'id': source_id, 'actor': product.raw_principal.id})
+        await db.execute(text('INSERT INTO moyai.runs(id,owner_id) VALUES(:id,:actor)'),
+                         {'id': source_id, 'actor': product.raw_principal.id})
         await db.execute(text('INSERT INTO moyai.run_roots VALUES(:id,:id)'), {'id': source_id})
         await db.execute(text("INSERT INTO moyai.slack_threads VALUES(:id,'TLOCAL001','GPRIVATE1','1792255700.001')"), {'id': source_id})
         await db.execute(text("INSERT INTO moyai.slack_events VALUES(:id,'UACTUAL01','2026-10-17')"), {'id': source_id})
