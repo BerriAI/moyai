@@ -169,8 +169,8 @@ async function handle(req,res,next) {
     if(req.method==='PATCH') {
       if(state.holdPreference&&(data.pinned!==undefined||data.folder!==undefined))await state.holdPreference;
       if(state.preferenceError&&(data.pinned!==undefined||data.folder!==undefined))return json({detail:'Could not save sidebar preference.'},503);
-      if(state.holdRename)await state.holdRename;
-      if(state.renameError)return json({detail:'Could not save the session name.'},503);
+      if(state.holdRename&&data.title!==undefined)await state.holdRename;
+      if(state.renameError||state.renameErrors?.includes(data.title))return json({detail:'Could not save the session name.'},503);
       const id=url.pathname.split('/')[3];
       if(data.title!==undefined)state.titles={...state.titles,[id]:data.title};
       if(data.pinned!==undefined||data.folder!==undefined) {
@@ -638,7 +638,7 @@ test('header editing cancels Escape, ignores blank and unchanged names, and reta
   assert.equal(renameRequests().length,0);
 });
 
-test('header draft survives polls and failed saves, and IME Enter does not commit',async t=>{
+test('header draft survives polls and IME input; failed saves roll back with an explicit retry',async t=>{
   reset({renameError:true});const page=await pageFor(t);const input=await editTitle(page);
   await input.fill('Keep this draft');
   const reads=()=>state.requests.filter(row=>row.path===`/api/sessions/${sessionId}`&&row.method==='GET').length;
@@ -648,9 +648,13 @@ test('header draft survives polls and failed saves, and IME Enter does not commi
   await input.dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
   assert.equal(renameRequests().length,0);
   await input.press('Enter');await page.getByRole('alert').filter({hasText:'Could not save the session name.'}).waitFor();
-  assert.equal(await input.inputValue(),'Keep this draft');
+  await input.waitFor({state:'hidden'});
+  assert.equal(await page.locator('.topbar h1').innerText(),'Background title');
+  assert.equal(await page.title(),'Background title · Moyai');
   state.renameError=false;
-  await input.press('Enter');await page.getByRole('button',{name:'Rename session: Keep this draft',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Retry rename',exact:true}).click();
+  await page.getByRole('button',{name:'Rename session: Keep this draft',exact:true}).waitFor();
+  await waitFor(()=>renameRequests().length===2);
   assert.equal(renameRequests().length,2);
 });
 
@@ -659,15 +663,88 @@ test('pending header save cannot be submitted twice or rename a newly opened ses
   t.after(()=>release());const page=await pageFor(t);const input=await editTitle(page);
   await input.fill('Saved on the first session');await input.press('Enter');
   await waitFor(()=>renameRequests().length===1,'pending title write');
-  await input.press('Enter');await input.press('Tab');
+  await page.getByRole('button',{name:'Rename session: Saved on the first session',exact:true}).waitFor({timeout:500});
+  await input.waitFor({state:'hidden'});
   assert.equal(renameRequests().length,1);
   await page.locator(`.session-row a[href="#${'c'.repeat(32)}"]`).click();
   await page.waitForURL('**/#'+'c'.repeat(32));
   await page.getByRole('button',{name:'Rename session: Current native work',exact:true}).waitFor();
   release();
   await waitFor(()=>state.titles?.[sessionId]==='Saved on the first session','original write committed');
-  await waitFor(()=>state.requests.filter(row=>row.path==='/api/history/sessions').length>1,'sidebar refreshed');
+  await page.locator(`.session-row a[href="#${sessionId}"]`).getByText('Saved on the first session',{exact:true}).waitFor();
   assert.equal(await page.locator('.topbar h1').innerText(),'Current native work');
+  assert.equal(state.titles?.['c'.repeat(32)],undefined);
+});
+
+for(const gesture of ['Enter','blur'])test(`header ${gesture} immediately updates every title while the write is held and does not refresh catalogs`,async t=>{
+  let release;reset({holdRename:new Promise(resolve=>{release=resolve;})});
+  t.after(()=>release());const page=await pageFor(t);const input=await editTitle(page);
+  await page.locator('.session-row.selected .session-title').waitFor();
+  const catalogs=()=>state.requests.filter(req=>['/api/history/sessions','/api/connections','/api/session-folders'].includes(req.path)).length;
+  const before=catalogs();
+  await input.fill('Immediate title');
+  if(gesture==='Enter')await input.press('Enter');
+  else await page.getByRole('textbox',{name:'Message Moyai',exact:true}).click();
+  await page.getByRole('button',{name:'Rename session: Immediate title',exact:true}).waitFor({timeout:500});
+  assert.equal(await page.title(),'Immediate title · Moyai');
+  assert.equal(await page.locator('.session-row.selected .session-title').innerText(),'Immediate title');
+  await waitFor(()=>renameRequests().length===1);
+  assert.equal(state.titles?.[sessionId],undefined,'the server has not saved yet');
+  assert.equal(catalogs(),before,'rename does not refetch the catalog');
+  release();
+  await waitFor(()=>state.titles?.[sessionId]==='Immediate title');
+  await page.getByRole('status').filter({hasText:'Session renamed.'}).waitFor();
+  assert.equal(catalogs(),before,'acknowledgment does not refetch the catalog either');
+});
+
+test('rapid header renames serialize and an earlier failure cannot undo or offer a retry over the newer name',async t=>{
+  let release;reset({holdRename:new Promise(resolve=>{release=resolve;}),renameErrors:['First name']});
+  t.after(()=>release());const page=await pageFor(t);
+  const first=await editTitle(page);await first.fill('First name');await first.press('Enter');
+  await page.getByRole('button',{name:'Rename session: First name',exact:true}).waitFor({timeout:500});
+  const second=await editTitle(page);await second.fill('Second name');await second.press('Enter');
+  await page.getByRole('button',{name:'Rename session: Second name',exact:true}).waitFor({timeout:500});
+  await waitFor(()=>renameRequests().length===1);
+  release();await waitFor(()=>state.titles?.[sessionId]==='Second name');
+  await page.getByRole('status').filter({hasText:'Session renamed.'}).waitFor();
+  assert.deepEqual(renameRequests().map(row=>row.body.title),['First name','Second name']);
+  assert.equal(await page.getByRole('button',{name:'Retry rename',exact:true}).count(),0);
+  assert.equal(await page.locator('.topbar h1').innerText(),'Second name');
+  assert.equal(await page.locator('.session-row.selected .session-title').innerText(),'Second name');
+  await page.reload();await page.getByRole('button',{name:'Rename session: Second name',exact:true}).waitFor();
+});
+
+test('a failed newer rename rolls header, sidebar and browser title back to the last acknowledged name',async t=>{
+  reset({renameErrors:['Rejected name']});const page=await pageFor(t);
+  const first=await editTitle(page);await first.fill('Saved name');await first.press('Enter');
+  await waitFor(()=>state.titles?.[sessionId]==='Saved name');
+  const second=await editTitle(page);await second.fill('Rejected name');await second.press('Enter');
+  await page.getByRole('button',{name:'Retry rename',exact:true}).waitFor();
+  assert.equal(await page.locator('.topbar h1').innerText(),'Saved name');
+  assert.equal(await page.locator('.session-row.selected .session-title').innerText(),'Saved name');
+  assert.equal(await page.title(),'Saved name · Moyai');
+  const third=await editTitle(page);await third.fill('New draft');
+  await third.press('Escape');
+  assert.equal(await page.locator('.topbar h1').innerText(),'Saved name');
+});
+
+test('a rename failure stays actionable after navigating away and editing another session',async t=>{
+  let release;reset({createdSession:true,holdRename:new Promise(resolve=>{release=resolve;}),renameErrors:['Rejected name']});
+  t.after(()=>release());const page=await pageFor(t);
+  const input=await editTitle(page);await input.fill('Rejected name');await input.press('Enter');
+  await waitFor(()=>renameRequests().length===1);
+  await page.locator(`.session-row a[href="#${'c'.repeat(32)}"]`).click();
+  await page.waitForURL('**/#'+'c'.repeat(32));
+  await page.getByRole('button',{name:'Session actions',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Pin',exact:true}).click();
+  await page.getByRole('status').filter({hasText:'Session pinned.'}).waitFor();
+  release();
+  await page.getByRole('button',{name:'Retry rename',exact:true}).waitFor();
+  assert.match(await page.locator('.action-toast[role="alert"]').innerText(),/Rejected name/);
+  assert.equal(await page.locator('.topbar h1').innerText(),'Current native work');
+  state.renameErrors=[];
+  await page.getByRole('button',{name:'Retry rename',exact:true}).click();
+  await waitFor(()=>state.titles?.[sessionId]==='Rejected name');
   assert.equal(state.titles?.['c'.repeat(32)],undefined);
 });
 
@@ -1575,6 +1652,9 @@ test('a saved rename succeeds while its catalog refresh failure stays globally o
   await title.press('Enter');
   await title.waitFor({state:'hidden'});
   await page.getByRole('heading',{name:'Saved despite catalog outage',exact:true}).waitFor();
+  await waitFor(()=>state.titles?.[sessionId]==='Saved despite catalog outage');
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await page.locator('.global-error').waitFor();
   assert.match(await page.locator('.global-error').innerText(),/Catalog unavailable/);
   assert.equal(await page.locator('.action-toast[role="alert"]').count(),0,'the successful rename is not a failed action');
   assert.equal(state.requests.filter(req=>req.method==='PATCH'&&req.body?.title==='Saved despite catalog outage').length,1);
