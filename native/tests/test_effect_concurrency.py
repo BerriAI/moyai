@@ -210,7 +210,7 @@ async def qualify_parallel_children(runtime, active, *, legacy=False):
 
 
 @pytest.mark.parametrize("complete_first", [False, True])
-async def test_cancel_waiting_children_leaves_only_dispatched_effect_uncertain(runtime, active, complete_first):
+async def test_cancel_waiting_children_preserves_evidence_and_allows_follow_up(runtime, active, complete_first):
     session, turn, prepared = active
     scenario = ParallelChildren(complete_first=complete_first)
     # Isolate tool lifecycle cancellation from the SDK's streamed-event teardown.
@@ -234,7 +234,8 @@ async def test_cancel_waiting_children_leaves_only_dispatched_effect_uncertain(r
             assert [row.state for row in rows] == expected and rows[-1].resolution is None
             scenario.release_shell.set()
             history = await handle.fetch_history()
-        # A newly authorized turn still cannot bypass the uncertain operation.
+        # A new turn can make independent progress without manual outcome review.
+        # The cancelled attempt retains its evidence and cannot be replayed.
         async with runtime.database.sessions() as db:
             actor = await db.get(User, prepared.scope.actor_id)
         following = await runtime.database.submit(actor, session.id, NewMessage(
@@ -243,9 +244,21 @@ async def test_cancel_waiting_children_leaves_only_dispatched_effect_uncertain(r
         await runtime.database.claim_next()
         admitted = await runtime.database.prepare(following.id)
         receipts = EffectReceipts(runtime.database)
-        with pytest.raises(PermissionError, match="reconciliation"):
-            await receipts.reserve(admitted.scope, "never-replay-unknown", "shell", {"child": 99})
-        assert [r.state for r in await effect_rows(runtime, session.id)] == expected
+        settled = await effect_rows(runtime, session.id)
+        assert [row.id for row in settled] == [row.id for row in rows]
+        assert [row.state for row in settled] == [*expected[:-1], "failed"]
+        assert settled[-1].settled_at is not None
+        assert [(row.arguments, row.fingerprint, row.resolution) for row in settled] == [
+            (row.arguments, row.fingerprint, row.resolution) for row in rows
+        ]
+        with pytest.raises(PermissionError):
+            await receipts.reserve(
+                prepared.scope, rows[-1].id, "shell", json.loads(runtime.security.unseal(rows[-1].arguments)),
+            )
+        await receipts.reserve(admitted.scope, "independent-follow-up", "shell", {"child": 99})
+        assert [row.id for row in await effect_rows(runtime, session.id)] == [
+            *[row.id for row in rows], "independent-follow-up",
+        ]
         await Replayer(
             interceptors=[ActivityCapacity()],
             workflows=[TurnWorkflow], plugins=[PydanticAIPlugin()], data_converter=converter,
