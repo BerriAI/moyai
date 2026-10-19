@@ -11,6 +11,7 @@ import { api, ApiError, csrfToken } from "./api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
+import { updateProductUserRole } from "./generated/api"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
 import type { GeneralPreferences } from "./general-preferences"
@@ -848,7 +849,7 @@ function UsersPage({ user }: { user: SettingsUser }) {
         initial={{ role: editor.role }} fields={[{ name: "role", label: "Role", type: "select", options: [{ value: "member", label: "Member" }, { value: "admin", label: "Administrator" }] }]}
         onSave={async values => {
           if (values.role === editor.role) return
-          await api("/settings/users/role", "PUT", { email: editor.email, role: values.role, revision: editor.revision })
+          await updateProductUserRole({ body: { email: editor.email ?? "", role: values.role === "admin" ? "admin" : "member", revision: editor.revision ?? 0 } })
           resource.refresh(); window.dispatchEvent(new Event("moyai:access-changed"))
         }} onClose={() => setEditor(null)} />}
       {!product && editor && <Editor title={editor === "new" ? "Add user" : "Edit user"} description={editor === "new" ? "Share new credentials through an approved channel." : "Saving changes revokes existing sign-ins and stops this user’s pending or running work. Saved history is retained."} initial={editor === "new" ? { username: "", display_name: "", password: "", role: "member", enabled: true } : { username: editor.username, display_name: editor.display_name, password: "", role: editor.role, enabled: editor.enabled }} fields={[

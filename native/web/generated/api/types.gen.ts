@@ -834,6 +834,703 @@ export type Preferences = {
 };
 
 /**
+ * ProductAutomationCapabilities
+ */
+export type ProductAutomationCapabilities = {
+    /**
+     * Enable
+     */
+    enable: boolean;
+    /**
+     * Migrate
+     */
+    migrate: boolean;
+    /**
+     * Pause
+     */
+    pause: boolean;
+    /**
+     * Retire
+     */
+    retire: boolean;
+    /**
+     * Run
+     */
+    run: boolean;
+    /**
+     * Test Event
+     */
+    test_event: boolean;
+    /**
+     * Update
+     */
+    update: boolean;
+    /**
+     * Webhook
+     */
+    webhook: boolean;
+};
+
+/**
+ * ProductAutomationDefinition
+ *
+ * A saved canonical definition as returned to the editor.
+ */
+export type ProductAutomationDefinition = {
+    /**
+     * Environment Id
+     *
+     * Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.
+     */
+    environment_id: string;
+    /**
+     * Github Repository Id
+     */
+    github_repository_id: number | null;
+    /**
+     * Harness
+     */
+    harness: string;
+    /**
+     * Max Runs Per Hour
+     */
+    max_runs_per_hour: number | null;
+    /**
+     * Metadata
+     */
+    metadata: {
+        [key: string]: string;
+    };
+    /**
+     * Mode
+     */
+    mode: 'modal' | 'demo';
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Plugins
+     */
+    plugins: Array<'linear' | 'github' | 'slack' | 'notion'>;
+    /**
+     * Prompt
+     */
+    prompt: string;
+    /**
+     * Queue Events
+     */
+    queue_events: boolean;
+    /**
+     * Repo Url
+     */
+    repo_url: string;
+    self_management: ProductAutomationSelfManagement;
+    /**
+     * Triggers
+     */
+    triggers: Array<ProductAutomationTrigger>;
+};
+
+/**
+ * ProductAutomationEvent
+ */
+export type ProductAutomationEvent = {
+    /**
+     * Action
+     */
+    action: string;
+    /**
+     * Assignee Id
+     */
+    assignee_id: string;
+    /**
+     * Branch
+     */
+    branch: string;
+    /**
+     * Channel Id
+     */
+    channel_id: string;
+    /**
+     * Conclusion
+     */
+    conclusion: string;
+    /**
+     * Epic
+     */
+    epic: string;
+    /**
+     * Event
+     */
+    event: string;
+    /**
+     * Include Thread Replies
+     */
+    include_thread_replies: boolean;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Label Id
+     */
+    label_id: string;
+    /**
+     * Payload Pattern
+     */
+    payload_pattern: string;
+    /**
+     * Priority
+     */
+    priority: number | null;
+    /**
+     * Project
+     */
+    project: string;
+    /**
+     * Provider
+     */
+    provider: 'session' | 'slack' | 'github' | 'gitlab' | 'linear' | 'jira' | 'pylon' | 'pagerduty' | 'webhook';
+    /**
+     * Reaction
+     */
+    reaction: string;
+    /**
+     * Repository
+     */
+    repository: string;
+    /**
+     * Repository Id
+     */
+    repository_id: number | null;
+    /**
+     * Sender Type
+     */
+    sender_type: 'any' | 'human' | 'bot';
+    /**
+     * Service Id
+     */
+    service_id: string;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Team Id
+     */
+    team_id: string;
+    /**
+     * Text Contains
+     */
+    text_contains: string;
+    /**
+     * Text Starts With
+     */
+    text_starts_with: string;
+    /**
+     * Urgency
+     */
+    urgency: string;
+};
+
+/**
+ * ProductAutomationEventDelivery
+ */
+export type ProductAutomationEventDelivery = {
+    /**
+     * Detail
+     */
+    detail: string;
+    /**
+     * Received At
+     */
+    received_at: string;
+    /**
+     * Status
+     */
+    status: string;
+};
+
+/**
+ * ProductAutomationHistoryEntry
+ */
+export type ProductAutomationHistoryEntry = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Detail
+     */
+    detail: string;
+    /**
+     * Engine
+     */
+    engine: string;
+    /**
+     * Occurrence
+     */
+    occurrence: string;
+    /**
+     * Outcome
+     */
+    outcome: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Session Id
+     */
+    session_id: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string | null;
+};
+
+/**
+ * ProductAutomationHistoryPage
+ */
+export type ProductAutomationHistoryPage = {
+    /**
+     * History
+     */
+    history: Array<ProductAutomationHistoryEntry>;
+    /**
+     * Next Cursor
+     */
+    next_cursor: string | null;
+    /**
+     * Untrusted Reference
+     */
+    untrusted_reference: boolean;
+};
+
+/**
+ * ProductAutomationInventory
+ */
+export type ProductAutomationInventory = {
+    /**
+     * Automations
+     */
+    automations: Array<ProductAutomationSummary>;
+    capabilities: ProductAutomationInventoryCapabilities;
+    /**
+     * Event Choices
+     */
+    event_choices: {
+        [key: string]: Array<[
+            string,
+            string
+        ]>;
+    };
+    /**
+     * Migration
+     */
+    migration: 'opt_in';
+    /**
+     * Next Offset
+     */
+    next_offset: number | null;
+    /**
+     * Source
+     */
+    source: 'canonical_product';
+};
+
+/**
+ * ProductAutomationInventoryCapabilities
+ */
+export type ProductAutomationInventoryCapabilities = {
+    /**
+     * Create
+     */
+    create: boolean;
+    /**
+     * Read
+     */
+    read: boolean;
+};
+
+/**
+ * ProductAutomationMutationResult
+ */
+export type ProductAutomationMutationResult = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Legacy Paused
+     */
+    legacy_paused: boolean;
+    /**
+     * Native State
+     */
+    native_state: string;
+    /**
+     * Outcome
+     */
+    outcome: string;
+    /**
+     * Previous Harness
+     */
+    previous_harness: string | null;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Sync State
+     */
+    sync_state: string;
+};
+
+/**
+ * ProductAutomationNativeState
+ */
+export type ProductAutomationNativeState = {
+    /**
+     * Core
+     */
+    core: string;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Last Error
+     */
+    last_error: string;
+    /**
+     * Source Revision
+     */
+    source_revision: number;
+    /**
+     * State
+     */
+    state: 'paused' | 'active' | 'deleted';
+    /**
+     * Sync State
+     */
+    sync_state: string;
+    /**
+     * Synced Generation
+     */
+    synced_generation: number;
+};
+
+/**
+ * ProductAutomationPreview
+ */
+export type ProductAutomationPreview = {
+    /**
+     * Activation
+     */
+    activation: string;
+    /**
+     * Blockers
+     */
+    blockers: Array<string>;
+    capabilities: ProductAutomationCapabilities;
+    /**
+     * Catchup Seconds
+     */
+    catchup_seconds: number;
+    definition: ProductAutomationDefinition;
+    /**
+     * Execution Visibility
+     */
+    execution_visibility: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Legacy Fence
+     */
+    legacy_fence: string;
+    /**
+     * Legacy Paused
+     */
+    legacy_paused: boolean;
+    /**
+     * Migration Changes
+     */
+    migration_changes: Array<string>;
+    native: ProductAutomationNativeState | null;
+    /**
+     * Overlap
+     */
+    overlap: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Sharing Notice
+     */
+    sharing_notice: string;
+    /**
+     * Supported
+     */
+    supported: boolean;
+    /**
+     * Target Core
+     */
+    target_core: string;
+};
+
+/**
+ * ProductAutomationRunResult
+ */
+export type ProductAutomationRunResult = {
+    /**
+     * Session Id
+     */
+    session_id: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string | null;
+};
+
+/**
+ * ProductAutomationSelfManagement
+ */
+export type ProductAutomationSelfManagement = {
+    /**
+     * Instructions
+     */
+    instructions: boolean;
+    /**
+     * Schedule
+     */
+    schedule: boolean;
+};
+
+/**
+ * ProductAutomationSummary
+ */
+export type ProductAutomationSummary = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Legacy Paused
+     */
+    legacy_paused: boolean;
+    /**
+     * Name
+     */
+    name: string;
+    native: ProductAutomationNativeState | null;
+    /**
+     * Owned
+     */
+    owned: boolean;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Triggers
+     */
+    triggers: Array<ProductAutomationTrigger>;
+};
+
+/**
+ * ProductAutomationTestContext
+ *
+ * Normalized provider context; its other keys depend on the provider.
+ */
+export type ProductAutomationTestContext = {
+    /**
+     * Matched Trigger Ids
+     */
+    matched_trigger_ids: Array<string>;
+    [key: string]: unknown;
+};
+
+/**
+ * ProductAutomationTestResult
+ */
+export type ProductAutomationTestResult = {
+    context: ProductAutomationTestContext | null;
+    /**
+     * Matches
+     */
+    matches: boolean;
+    /**
+     * Started
+     */
+    started: false;
+};
+
+/**
+ * ProductAutomationTiming
+ */
+export type ProductAutomationTiming = {
+    /**
+     * Cron
+     */
+    cron: string;
+    /**
+     * Frequency
+     */
+    frequency: 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'cron' | 'once';
+    /**
+     * Run At
+     */
+    run_at: string | null;
+    /**
+     * Time
+     */
+    time: string;
+    /**
+     * Timezone
+     */
+    timezone: string;
+    /**
+     * Weekday
+     */
+    weekday: number;
+};
+
+/**
+ * ProductAutomationTrigger
+ */
+export type ProductAutomationTrigger = {
+    event: ProductAutomationEvent | null;
+    /**
+     * Id
+     */
+    id: string;
+    schedule: ProductAutomationTiming | null;
+};
+
+/**
+ * ProductAutomationWebhookExample
+ */
+export type ProductAutomationWebhookExample = {
+    /**
+     * Event Header
+     */
+    event_header: string;
+    /**
+     * Payload
+     */
+    payload: {
+        [key: string]: unknown;
+    };
+    /**
+     * Trigger Id
+     */
+    trigger_id: string;
+};
+
+/**
+ * ProductAutomationWebhookInfo
+ */
+export type ProductAutomationWebhookInfo = {
+    /**
+     * Deliveries
+     */
+    deliveries: Array<ProductAutomationEventDelivery>;
+    /**
+     * Providers
+     */
+    providers: Array<ProductAutomationWebhookProvider>;
+    /**
+     * Ready
+     */
+    ready: boolean;
+};
+
+/**
+ * ProductAutomationWebhookProvider
+ */
+export type ProductAutomationWebhookProvider = {
+    /**
+     * Examples
+     */
+    examples: Array<ProductAutomationWebhookExample>;
+    /**
+     * Provider
+     */
+    provider: string;
+    /**
+     * Ready
+     */
+    ready: boolean;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * ProductAutomationWebhookResult
+ */
+export type ProductAutomationWebhookResult = {
+    /**
+     * Configured
+     */
+    configured: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Paused
+     */
+    paused: boolean;
+    /**
+     * Provider
+     */
+    provider: string;
+    /**
+     * Registered At Provider
+     */
+    registered_at_provider: boolean;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Secret
+     */
+    secret: string;
+};
+
+/**
  * ProductSaveSecret
  */
 export type ProductSaveSecret = {
@@ -911,6 +1608,24 @@ export type ProductUpdateSecret = {
      * Value
      */
     value?: null;
+};
+
+/**
+ * ProductUserRoleResult
+ */
+export type ProductUserRoleResult = {
+    /**
+     * Email
+     */
+    email: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Role
+     */
+    role: 'admin' | 'member';
 };
 
 /**
@@ -2561,7 +3276,7 @@ export type GetMeResponses = {
 
 export type GetMeResponse = GetMeResponses[keyof GetMeResponses];
 
-export type ListingApiProductAutomationsGetData = {
+export type ListProductAutomationsData = {
     body?: never;
     path?: never;
     query?: {
@@ -2577,46 +3292,50 @@ export type ListingApiProductAutomationsGetData = {
     url: '/api/product/automations';
 };
 
-export type ListingApiProductAutomationsGetErrors = {
+export type ListProductAutomationsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ListingApiProductAutomationsGetError = ListingApiProductAutomationsGetErrors[keyof ListingApiProductAutomationsGetErrors];
+export type ListProductAutomationsError = ListProductAutomationsErrors[keyof ListProductAutomationsErrors];
 
-export type ListingApiProductAutomationsGetResponses = {
+export type ListProductAutomationsResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationInventory;
 };
 
-export type CreateApiProductAutomationsPostData = {
+export type ListProductAutomationsResponse = ListProductAutomationsResponses[keyof ListProductAutomationsResponses];
+
+export type CreateProductAutomationData = {
     body: Save;
     path?: never;
     query?: never;
     url: '/api/product/automations';
 };
 
-export type CreateApiProductAutomationsPostErrors = {
+export type CreateProductAutomationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateApiProductAutomationsPostError = CreateApiProductAutomationsPostErrors[keyof CreateApiProductAutomationsPostErrors];
+export type CreateProductAutomationError = CreateProductAutomationErrors[keyof CreateProductAutomationErrors];
 
-export type CreateApiProductAutomationsPostResponses = {
+export type CreateProductAutomationResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationMutationResult;
 };
 
-export type EditApiProductAutomationsIdentityPutData = {
+export type CreateProductAutomationResponse = CreateProductAutomationResponses[keyof CreateProductAutomationResponses];
+
+export type UpdateProductAutomationData = {
     body: Save;
     path: {
         /**
@@ -2628,23 +3347,25 @@ export type EditApiProductAutomationsIdentityPutData = {
     url: '/api/product/automations/{identity}';
 };
 
-export type EditApiProductAutomationsIdentityPutErrors = {
+export type UpdateProductAutomationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type EditApiProductAutomationsIdentityPutError = EditApiProductAutomationsIdentityPutErrors[keyof EditApiProductAutomationsIdentityPutErrors];
+export type UpdateProductAutomationError = UpdateProductAutomationErrors[keyof UpdateProductAutomationErrors];
 
-export type EditApiProductAutomationsIdentityPutResponses = {
+export type UpdateProductAutomationResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationMutationResult;
 };
 
-export type HistoryApiProductAutomationsIdentityHistoryGetData = {
+export type UpdateProductAutomationResponse = UpdateProductAutomationResponses[keyof UpdateProductAutomationResponses];
+
+export type ListProductAutomationHistoryData = {
     body?: never;
     path: {
         /**
@@ -2665,23 +3386,25 @@ export type HistoryApiProductAutomationsIdentityHistoryGetData = {
     url: '/api/product/automations/{identity}/history';
 };
 
-export type HistoryApiProductAutomationsIdentityHistoryGetErrors = {
+export type ListProductAutomationHistoryErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type HistoryApiProductAutomationsIdentityHistoryGetError = HistoryApiProductAutomationsIdentityHistoryGetErrors[keyof HistoryApiProductAutomationsIdentityHistoryGetErrors];
+export type ListProductAutomationHistoryError = ListProductAutomationHistoryErrors[keyof ListProductAutomationHistoryErrors];
 
-export type HistoryApiProductAutomationsIdentityHistoryGetResponses = {
+export type ListProductAutomationHistoryResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationHistoryPage;
 };
 
-export type MigrateApiProductAutomationsIdentityMigratePostData = {
+export type ListProductAutomationHistoryResponse = ListProductAutomationHistoryResponses[keyof ListProductAutomationHistoryResponses];
+
+export type MigrateProductAutomationData = {
     body: Migration;
     path: {
         /**
@@ -2693,23 +3416,25 @@ export type MigrateApiProductAutomationsIdentityMigratePostData = {
     url: '/api/product/automations/{identity}/migrate';
 };
 
-export type MigrateApiProductAutomationsIdentityMigratePostErrors = {
+export type MigrateProductAutomationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type MigrateApiProductAutomationsIdentityMigratePostError = MigrateApiProductAutomationsIdentityMigratePostErrors[keyof MigrateApiProductAutomationsIdentityMigratePostErrors];
+export type MigrateProductAutomationError = MigrateProductAutomationErrors[keyof MigrateProductAutomationErrors];
 
-export type MigrateApiProductAutomationsIdentityMigratePostResponses = {
+export type MigrateProductAutomationResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationMutationResult;
 };
 
-export type PreviewApiProductAutomationsIdentityPreviewGetData = {
+export type MigrateProductAutomationResponse = MigrateProductAutomationResponses[keyof MigrateProductAutomationResponses];
+
+export type GetProductAutomationPreviewData = {
     body?: never;
     path: {
         /**
@@ -2721,23 +3446,25 @@ export type PreviewApiProductAutomationsIdentityPreviewGetData = {
     url: '/api/product/automations/{identity}/preview';
 };
 
-export type PreviewApiProductAutomationsIdentityPreviewGetErrors = {
+export type GetProductAutomationPreviewErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PreviewApiProductAutomationsIdentityPreviewGetError = PreviewApiProductAutomationsIdentityPreviewGetErrors[keyof PreviewApiProductAutomationsIdentityPreviewGetErrors];
+export type GetProductAutomationPreviewError = GetProductAutomationPreviewErrors[keyof GetProductAutomationPreviewErrors];
 
-export type PreviewApiProductAutomationsIdentityPreviewGetResponses = {
+export type GetProductAutomationPreviewResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationPreview;
 };
 
-export type RunNowApiProductAutomationsIdentityRunPostData = {
+export type GetProductAutomationPreviewResponse = GetProductAutomationPreviewResponses[keyof GetProductAutomationPreviewResponses];
+
+export type RunProductAutomationData = {
     body: Mutation;
     path: {
         /**
@@ -2749,23 +3476,25 @@ export type RunNowApiProductAutomationsIdentityRunPostData = {
     url: '/api/product/automations/{identity}/run';
 };
 
-export type RunNowApiProductAutomationsIdentityRunPostErrors = {
+export type RunProductAutomationErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RunNowApiProductAutomationsIdentityRunPostError = RunNowApiProductAutomationsIdentityRunPostErrors[keyof RunNowApiProductAutomationsIdentityRunPostErrors];
+export type RunProductAutomationError = RunProductAutomationErrors[keyof RunProductAutomationErrors];
 
-export type RunNowApiProductAutomationsIdentityRunPostResponses = {
+export type RunProductAutomationResponses = {
     /**
      * Successful Response
      */
-    202: unknown;
+    202: ProductAutomationRunResult;
 };
 
-export type TestEventApiProductAutomationsIdentityTestEventPostData = {
+export type RunProductAutomationResponse = RunProductAutomationResponses[keyof RunProductAutomationResponses];
+
+export type TestProductAutomationEventData = {
     body: TestEvent;
     path: {
         /**
@@ -2777,23 +3506,25 @@ export type TestEventApiProductAutomationsIdentityTestEventPostData = {
     url: '/api/product/automations/{identity}/test-event';
 };
 
-export type TestEventApiProductAutomationsIdentityTestEventPostErrors = {
+export type TestProductAutomationEventErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type TestEventApiProductAutomationsIdentityTestEventPostError = TestEventApiProductAutomationsIdentityTestEventPostErrors[keyof TestEventApiProductAutomationsIdentityTestEventPostErrors];
+export type TestProductAutomationEventError = TestProductAutomationEventErrors[keyof TestProductAutomationEventErrors];
 
-export type TestEventApiProductAutomationsIdentityTestEventPostResponses = {
+export type TestProductAutomationEventResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationTestResult;
 };
 
-export type InfoApiProductAutomationsIdentityWebhookGetData = {
+export type TestProductAutomationEventResponse = TestProductAutomationEventResponses[keyof TestProductAutomationEventResponses];
+
+export type GetProductAutomationWebhookData = {
     body?: never;
     path: {
         /**
@@ -2805,23 +3536,25 @@ export type InfoApiProductAutomationsIdentityWebhookGetData = {
     url: '/api/product/automations/{identity}/webhook';
 };
 
-export type InfoApiProductAutomationsIdentityWebhookGetErrors = {
+export type GetProductAutomationWebhookErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type InfoApiProductAutomationsIdentityWebhookGetError = InfoApiProductAutomationsIdentityWebhookGetErrors[keyof InfoApiProductAutomationsIdentityWebhookGetErrors];
+export type GetProductAutomationWebhookError = GetProductAutomationWebhookErrors[keyof GetProductAutomationWebhookErrors];
 
-export type InfoApiProductAutomationsIdentityWebhookGetResponses = {
+export type GetProductAutomationWebhookResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationWebhookInfo;
 };
 
-export type ConfigureApiProductAutomationsIdentityWebhookPostData = {
+export type GetProductAutomationWebhookResponse = GetProductAutomationWebhookResponses[keyof GetProductAutomationWebhookResponses];
+
+export type ConfigureProductAutomationWebhookData = {
     body: WebhookSetupWritable;
     path: {
         /**
@@ -2833,23 +3566,25 @@ export type ConfigureApiProductAutomationsIdentityWebhookPostData = {
     url: '/api/product/automations/{identity}/webhook';
 };
 
-export type ConfigureApiProductAutomationsIdentityWebhookPostErrors = {
+export type ConfigureProductAutomationWebhookErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ConfigureApiProductAutomationsIdentityWebhookPostError = ConfigureApiProductAutomationsIdentityWebhookPostErrors[keyof ConfigureApiProductAutomationsIdentityWebhookPostErrors];
+export type ConfigureProductAutomationWebhookError = ConfigureProductAutomationWebhookErrors[keyof ConfigureProductAutomationWebhookErrors];
 
-export type ConfigureApiProductAutomationsIdentityWebhookPostResponses = {
+export type ConfigureProductAutomationWebhookResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationWebhookResult;
 };
 
-export type StateApiProductAutomationsIdentityActionPostData = {
+export type ConfigureProductAutomationWebhookResponse = ConfigureProductAutomationWebhookResponses[keyof ConfigureProductAutomationWebhookResponses];
+
+export type SetProductAutomationStateData = {
     body: Mutation;
     path: {
         /**
@@ -2865,21 +3600,23 @@ export type StateApiProductAutomationsIdentityActionPostData = {
     url: '/api/product/automations/{identity}/{action}';
 };
 
-export type StateApiProductAutomationsIdentityActionPostErrors = {
+export type SetProductAutomationStateErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type StateApiProductAutomationsIdentityActionPostError = StateApiProductAutomationsIdentityActionPostErrors[keyof StateApiProductAutomationsIdentityActionPostErrors];
+export type SetProductAutomationStateError = SetProductAutomationStateErrors[keyof SetProductAutomationStateErrors];
 
-export type StateApiProductAutomationsIdentityActionPostResponses = {
+export type SetProductAutomationStateResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductAutomationMutationResult;
 };
+
+export type SetProductAutomationStateResponse = SetProductAutomationStateResponses[keyof SetProductAutomationStateResponses];
 
 export type AccountsApiProductConnectionsGetData = {
     body?: never;
@@ -5481,28 +6218,30 @@ export type CreateUserApiSettingsUsersPostResponses = {
     201: unknown;
 };
 
-export type RoleApiSettingsUsersRolePutData = {
+export type UpdateProductUserRoleData = {
     body: RoleEdit;
     path?: never;
     query?: never;
     url: '/api/settings/users/role';
 };
 
-export type RoleApiSettingsUsersRolePutErrors = {
+export type UpdateProductUserRoleErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RoleApiSettingsUsersRolePutError = RoleApiSettingsUsersRolePutErrors[keyof RoleApiSettingsUsersRolePutErrors];
+export type UpdateProductUserRoleError = UpdateProductUserRoleErrors[keyof UpdateProductUserRoleErrors];
 
-export type RoleApiSettingsUsersRolePutResponses = {
+export type UpdateProductUserRoleResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ProductUserRoleResult;
 };
+
+export type UpdateProductUserRoleResponse = UpdateProductUserRoleResponses[keyof UpdateProductUserRoleResponses];
 
 export type DeleteUserApiSettingsUsersIdentityDeleteData = {
     body?: never;
