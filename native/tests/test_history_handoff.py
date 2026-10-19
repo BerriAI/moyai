@@ -276,7 +276,10 @@ async def test_checkpoint_without_a_computer_and_refused_saves_keep_agent_alive(
     assert runtime.security.unseal(saved.result).decode() == "Completed without a computer."
     assert json.loads(saved.usage)["requests"] == 4
     if outcome == "pending_effect":
-        assert effect is not None and effect.state == "pending"
+        # The uncertain write blocked rollover while the turn was active.
+        # Final-answer acceptance settles the attempt without inventing its outcome.
+        assert effect is not None and effect.state == "failed"
+        assert effect.settled_at is not None and effect.resolution is None
 
 
 @pytest.mark.parametrize("runtime", ["history_retry"], indirect=True)
