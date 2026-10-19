@@ -426,7 +426,10 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
       event.preventDefault(); setBusy(true); setError("")
       const form = new FormData(event.currentTarget)
       try {
-        const { data: result } = await loginWithPassword({ body: { username: String(form.get("username") ?? ""), password: String(form.get("password") ?? "") } })
+        const { data: result } = await loginWithPassword({ body: {
+          ...(form.has("username") ? { username: String(form.get("username")) } : {}),
+          password: String(form.get("password") ?? ""),
+        } })
         if (result.csrf) setCsrf(result.csrf)
         onLogin((await getMe()).data)
       } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
