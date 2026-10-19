@@ -1537,11 +1537,15 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
   await waitFor(()=>savedPolls()>polls,'saved poll');
   assert.equal(await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).count(),1);
   emit({type:'tool_call',id:'call1',name:'read_file',arguments:{path:'private-tool-detail'}},3);
-  await page.locator('.live-action').getByText('Using read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
+  state.workProgress={messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}],
+    tools:[{id:'call1',name:'read_file',status:'running',created_at:new Date().toISOString()}],subagents:[]};
+  await page.locator('.live-action').getByText('Read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
   for(const client of clients)client.end();await waitFor(()=>state.streams.length===2,'browser reconnect');assert.equal(state.streams[1].last,'3');
   emit({type:'text_delta',index:0,text:'duplicate'},2);emit({type:'response_start',run_id:turnId,step:2},4);emit({type:'text_start',index:0,text:'Wrong attempt'},5);
   emit({type:'response_start',run_id:turnId,step:2},6);emit({type:'text_start',index:0,text:'Final',phase:'final_answer'},7);emit({type:'text_delta',index:0,text:' answer'},8);
   await page.locator('.live-message').getByText('Final answer',{exact:true}).waitFor();assert.equal(await page.getByText(/Unlabelled child text|Wrong attempt|duplicate/).count(),0);
+  await page.locator('.live-action').getByText('Read file…',{exact:true}).waitFor();
+  state.workProgress.tools[0].status='completed';
   state.messages.push({id:2,turn_id:turnId,role:'assistant',author_id:null,content:'Final answer'});state.status='completed';emit({},undefined,'finished');
   await page.waitForFunction(()=>document.querySelectorAll('.message.assistant:not(.live-message)').length===1);
   assert.equal(await page.getByText('Final answer',{exact:true}).count(),1);
