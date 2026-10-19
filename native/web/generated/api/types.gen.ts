@@ -1425,6 +1425,22 @@ export type ApprovalReply = {
 };
 
 /**
+ * AskUserRequest
+ *
+ * One `ask_user_question` call, handed to the `Answerer` and carried by `AskUserRequestedEvent`.
+ */
+export type AskUserRequest = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Questions
+     */
+    questions: Array<Question>;
+};
+
+/**
  * AuthConfig
  */
 export type AuthConfig = {
@@ -5200,6 +5216,12 @@ export type PendingRequests = {
             [key: string]: JsonValue;
         };
     };
+    /**
+     * Questions
+     *
+     * Use the same validated questions for presentation and answer checking.
+     */
+    readonly questions: Array<AskUserRequest>;
 };
 
 /**
@@ -7873,6 +7895,58 @@ export type PullRequestStatusRequest = {
      * Session Ids
      */
     session_ids: Array<string>;
+};
+
+/**
+ * Question
+ *
+ * One multiple-choice question.
+ */
+export type Question = {
+    /**
+     * Header
+     *
+     * Short label naming the question, unique within the call; the answer is keyed by it.
+     */
+    header: string;
+    /**
+     * Multi Select
+     *
+     * Whether the user may pick more than one option.
+     */
+    multi_select?: boolean;
+    /**
+     * Options
+     *
+     * The choices to offer.
+     */
+    options: Array<QuestionOption>;
+    /**
+     * Question
+     *
+     * The full question text.
+     */
+    question: string;
+};
+
+/**
+ * QuestionOption
+ *
+ * One choice the user can pick.
+ */
+export type QuestionOption = {
+    /**
+     * Description
+     *
+     * What choosing this option means.
+     */
+    description?: string | null;
+    /**
+     * Label
+     *
+     * Short option name, one to five words.
+     */
+    label: string;
 };
 
 /**
@@ -10637,6 +10711,28 @@ export type LoginWritable = {
 };
 
 /**
+ * PendingRequests
+ */
+export type PendingRequestsWritable = {
+    /**
+     * Approvals
+     */
+    approvals: Array<PendingToolCall>;
+    /**
+     * Calls
+     */
+    calls: Array<PendingToolCall>;
+    /**
+     * Metadata
+     */
+    metadata: {
+        [key: string]: {
+            [key: string]: JsonValue;
+        };
+    };
+};
+
+/**
  * ProductSaveSecret
  */
 export type ProductSaveSecretWritable = {
@@ -10800,6 +10896,57 @@ export type SecretInputWritable = {
      * Value
      */
     value: string;
+};
+
+/**
+ * SessionDetail
+ */
+export type SessionDetailWritable = {
+    /**
+     * Activity
+     */
+    activity: Array<ToolCallActivity | ToolResultActivity> | null;
+    /**
+     * Can Answer
+     */
+    can_answer: boolean | null;
+    /**
+     * Can Reply With Text
+     */
+    can_reply_with_text: boolean | null;
+    /**
+     * Credential Requests
+     */
+    credential_requests: Array<CredentialRequestRef> | null;
+    /**
+     * Effects
+     */
+    effects: Array<SessionEffect>;
+    goal: GoalView | null;
+    /**
+     * Has Unsettled Effects
+     */
+    has_unsettled_effects: boolean;
+    /**
+     * Messages
+     */
+    messages: Array<SessionMessage> | null;
+    pending: PendingRequestsWritable | null;
+    /**
+     * Question Deadline
+     */
+    question_deadline: string | null;
+    reference: SessionReference | null;
+    session: SessionDetailSession;
+    slack_delivery: SlackDeliveryStatus | null;
+    /**
+     * Transcript Version
+     */
+    transcript_version: string | null;
+    /**
+     * Turns
+     */
+    turns: Array<SessionTurn>;
 };
 
 /**

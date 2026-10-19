@@ -51,18 +51,34 @@ export async function send(input: string | Request, init: RequestInit = {}): Pro
   throw new ApiError(detailMessage(value) ?? responseFailure(response.status), response.status)
 }
 
+export async function readJson(response: Response, signal?: AbortSignal | null): Promise<unknown> {
+  try {
+    return await response.json()
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error
+    throw new ApiError("Moyai returned an unreadable response. Please try again.", response.status)
+  }
+}
+
+/** Validate JSON before the SDK can treat an empty body or proxy page as data. */
+export async function sendJson(input: string | Request, init: RequestInit = {}): Promise<Response> {
+  const response = await send(input, init)
+  const method = typeof input === "string" ? init.method : input.method
+  // The generated SDK also exposes SSE. Never consume a live stream as JSON.
+  const streaming = response.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() === "text/event-stream"
+  if (!streaming && response.status !== 204 && response.status !== 205 && method !== "HEAD") {
+    await readJson(response.clone(), typeof input === "string" ? init.signal : input.signal)
+  }
+  return response
+}
+
 /** Legacy: `T` is an unchecked cast. New code calls the generated SDK from ./generated/api. */
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json")
   const response = await send(`/api${path}`, { ...options, headers })
   if (response.status === 204 || response.status === 205 || options.method === "HEAD") return undefined as T
-  try {
-    return await response.json() as T
-  } catch (error) {
-    if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error
-    throw new ApiError("Moyai returned an unreadable response. Please try again.", response.status)
-  }
+  return await readJson(response, options.signal) as T
 }
 
 /** Legacy: see apiRequest. */

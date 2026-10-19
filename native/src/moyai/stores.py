@@ -69,6 +69,12 @@ class NativeStores:
             self.steps = await asyncio.to_thread(
                 SqliteStepStore, database=self.database, max_snapshots_per_run=None
             )
+            # SDK constructors are lazy. Establish WAL and the shared schema
+            # before concurrent agent activities race their first connection.
+            # These public reads create no user runs, files or plan items.
+            await self.steps.get_run(run_id="__schema_probe__")
+            await self.memory.read("__schema_probe__", max_chars=1)
+            await self.plan("__schema_probe__").get_items()
 
     def plan(self, session_id: str) -> PlanStore:
         # Constructors only select a namespace; reads/writes are native durable operations.

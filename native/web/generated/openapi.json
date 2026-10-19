@@ -2568,6 +2568,28 @@
         "title": "ApprovalReply",
         "type": "object"
       },
+      "AskUserRequest": {
+        "description": "One `ask_user_question` call, handed to the `Answerer` and carried by `AskUserRequestedEvent`.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/Question"
+            },
+            "title": "Questions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "questions",
+          "id"
+        ],
+        "title": "AskUserRequest",
+        "type": "object"
+      },
       "AuthConfig": {
         "properties": {
           "access_enabled": {
@@ -9282,12 +9304,22 @@
             },
             "title": "Metadata",
             "type": "object"
+          },
+          "questions": {
+            "description": "Use the same validated questions for presentation and answer checking.",
+            "items": {
+              "$ref": "#/components/schemas/AskUserRequest"
+            },
+            "readOnly": true,
+            "title": "Questions",
+            "type": "array"
           }
         },
         "required": [
           "calls",
           "approvals",
-          "metadata"
+          "metadata",
+          "questions"
         ],
         "title": "PendingRequests",
         "type": "object"
@@ -14073,6 +14105,80 @@
           "session_ids"
         ],
         "title": "PullRequestStatusRequest",
+        "type": "object"
+      },
+      "Question": {
+        "additionalProperties": false,
+        "description": "One multiple-choice question.",
+        "properties": {
+          "header": {
+            "description": "Short label naming the question, unique within the call; the answer is keyed by it.",
+            "maxLength": 25,
+            "minLength": 1,
+            "title": "Header",
+            "type": "string"
+          },
+          "multi_select": {
+            "default": false,
+            "description": "Whether the user may pick more than one option.",
+            "title": "Multi Select",
+            "type": "boolean"
+          },
+          "options": {
+            "description": "The choices to offer.",
+            "items": {
+              "$ref": "#/components/schemas/QuestionOption"
+            },
+            "maxItems": 6,
+            "minItems": 2,
+            "title": "Options",
+            "type": "array"
+          },
+          "question": {
+            "description": "The full question text.",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "header",
+          "question",
+          "options"
+        ],
+        "title": "Question",
+        "type": "object"
+      },
+      "QuestionOption": {
+        "additionalProperties": false,
+        "description": "One choice the user can pick.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What choosing this option means.",
+            "title": "Description"
+          },
+          "label": {
+            "description": "Short option name, one to five words.",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "QuestionOption",
         "type": "object"
       },
       "QueuedEdit": {
