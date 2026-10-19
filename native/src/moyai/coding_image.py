@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+
 import modal
 
 # Official https://nodejs.org/dist/v22.23.3/SHASUMS256.txt.
@@ -13,8 +15,10 @@ NODE_SHA256 = {
 }
 
 
-def with_node(image: modal.Image) -> modal.Image:
-    return image.apt_install("xz-utils").run_commands(f"""set -eu
+def node_install_script() -> str:
+    """One installer for Modal images and the packaged Lambda image."""
+    return f"""#!/bin/sh
+set -eu
 case "$(dpkg --print-architecture)" in
   amd64) arch=x64; checksum={NODE_SHA256['amd64']} ;;
   arm64) arch=arm64; checksum={NODE_SHA256['arm64']} ;;
@@ -27,4 +31,17 @@ printf '%s  %s\\n' "$checksum" "$archive" | sha256sum --check -
 tar -xJf "$archive" --no-same-owner --strip-components=1 -C /usr/local
 test "$(node --version)" = "v{NODE_VERSION}"
 npm --version
-""")
+# Reject incompatible dependencies during installation, before a preview can
+# run with optional native packages silently omitted by npm.
+npm config set --global engine-strict true
+"""
+
+
+def with_node(image: modal.Image) -> modal.Image:
+    # Modal emits each command as a Dockerfile RUN instruction. Literal newlines
+    # in the shell script would become separate, invalid Dockerfile instructions.
+    command = (
+        "import subprocess; "
+        f"subprocess.run(['sh'], input={node_install_script()!r}, text=True, check=True)"
+    )
+    return image.apt_install("xz-utils").run_commands(f"python3 -c {shlex.quote(command)}")

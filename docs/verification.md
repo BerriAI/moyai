@@ -86,3 +86,33 @@ application health, user sign-in, historical files, a real model/Modal
 task and continuation/approval recovery. Preserve uncertain
 external effects for explicit reconciliation. No deployment is performed by the
 consolidation test suite.
+
+## Coding computer Node runtime
+
+`native/src/moyai/coding_image.py` owns the exact Node version and the official
+AMD64/ARM64 archive checksums. Fresh and restored Modal project images use its
+installer, and `scripts/lambda_image.py` includes that same installer in the
+Lambda image package. Install Node before any image-bundled npm dependencies.
+Do not add a separate Node pin to a preview launcher.
+
+The bundled npm configuration enables `engine-strict`, so an incompatible
+dependency reports an install error instead of leaving a partially usable
+preview. A repository that requires another Node version must select that
+runtime before both installation and execution. Changing the image pin rebuilds
+the Node layer and bundled dependencies. Existing live computers and filesystem
+checkpoints retain their environments; reinstall project dependencies from the
+lockfile when changing their runtime.
+
+With Docker available, run:
+
+```sh
+uv run --frozen python -m scripts.node_runtime_smoke --platform linux/amd64
+uv run --frozen python -m scripts.node_runtime_smoke --platform linux/arm64
+```
+
+The native runtime CI runs both architectures. It builds the complete packaged
+Lambda image, installs the repository's locked dependencies, loads Tailwind's
+native binding, and starts Vite through npm. The install hook, npm and preview
+must all report the pinned Node executable/version. It also checks that an
+unsupported Node engine fails installation. These container checks supplement
+actual-app model/Modal verification.

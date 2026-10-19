@@ -1,5 +1,10 @@
-FROM public.ecr.aws/docker/library/python:3.13-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep curl jq util-linux nodejs npm tar attr xvfb openbox xterm xdotool chromium tint2 x11vnc x11-xserver-utils fonts-dejavu-core dbus-x11 at-spi2-core python3-gi gir1.2-atspi-2.0 && rm -rf /var/lib/apt/lists/*
+FROM public.ecr.aws/docker/library/python:3.13-slim AS node-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils && rm -rf /var/lib/apt/lists/*
+COPY install-node.sh /opt/moyai/install-node.sh
+RUN sh /opt/moyai/install-node.sh
+
+FROM node-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep jq util-linux tar attr xvfb openbox xterm xdotool chromium tint2 x11vnc x11-xserver-utils fonts-dejavu-core dbus-x11 at-spi2-core python3-gi gir1.2-atspi-2.0 && rm -rf /var/lib/apt/lists/*
 COPY tools/package.json tools/package-lock.json /opt/moyai/tools/
 RUN npm ci --ignore-scripts --prefix /opt/moyai/tools && ln -sf /opt/moyai/tools/node_modules/.bin/ocu /usr/local/bin/ocu
 RUN pip install --no-cache-dir uv pytest pillow==12.3.0 websockify==0.13.0 playwright==1.63.0
