@@ -470,9 +470,9 @@ async def test_temporal_pending_write_returns_failure_to_agent_and_replays_old_c
     assert len(requests) == (2 if old_history else 4)
     async with runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
-    assert [(row.tool_name, row.state) for row in rows] == [
-        ("browser_open", "failed" if old_history else "pending"),
-    ]
+    # Final-answer acceptance now settles failed attempts before checkpointing;
+    # the original receipt still records the uncertain navigation.
+    assert [(row.tool_name, row.state) for row in rows] == [("browser_open", "failed")]
     if old_history:
         async with runtime.database.sessions() as db:
             event = await db.scalar(select(Event).where(
