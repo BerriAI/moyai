@@ -41,7 +41,6 @@ from pydantic_ai_harness.conversation_search import SnapshotHistorySource
 from pydantic_ai_harness.planning import PlanItem
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError
 
 from .artifacts import artifact_capability
 from .browser import browser_capability
@@ -69,6 +68,7 @@ from .stores import NativeStores
 from .swarm_tools import SwarmCapability
 from .tools import WORKSPACE_TOOLS
 from .tools.desktop import desktop_capability
+from .tools.tool_caller import ToolCaller
 
 PACKAGE_ROOT = Path(__file__).resolve().parent / "resources"
 if not PACKAGE_ROOT.is_dir():
@@ -243,6 +243,7 @@ class Authority(AbstractCapability[RunScope]):
 
     def __init__(self, database: Database):
         self.database = database
+        self.tool_caller = ToolCaller()
 
     def get_model_settings(self):
         def for_request(ctx: RunContext[RunScope]) -> OpenAIResponsesModelSettings:
@@ -296,12 +297,7 @@ class Authority(AbstractCapability[RunScope]):
         # admission identity. Already-running delegates retain their old identity.
         token = DELEGATED_INPUT.set(input_identity(ctx)) if call.tool_name == "delegate_task" else None
         try:
-            return await handler(args)
-        except ActivityError as error:
-            cause = error.cause
-            if isinstance(cause, ApplicationError) and cause.type == "MoyaiGuidanceChanged":
-                raise ToolFailed("New guidance arrived before dispatch; this action did not execute.") from error
-            raise
+            return await self.tool_caller.call(call, tool_def, args, handler)
         finally:
             if token is not None:
                 DELEGATED_INPUT.reset(token)
