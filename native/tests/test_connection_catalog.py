@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, RunUsage
@@ -12,7 +13,9 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_core import ValidationError
 
 from moyai.connection_catalog import CatalogToolset, ConnectionCatalog, connection_search
-from moyai.contracts import Grant, RunScope
+from moyai.contracts import ExecutionContext, Grant, RunScope
+from moyai.product_connections import ProductCatalogToolset
+from moyai.product_identity import ProductGrant
 
 
 def context(**changes):
@@ -246,3 +249,173 @@ async def test_cached_write_still_requires_native_approval():
     assert isinstance(result.output, DeferredToolRequests)
     assert [call.tool_name for call in result.output.approvals] == ["publish"]
     assert not writes
+
+
+def product_context(**changes):
+    return context(
+        **{"grants": [Grant(
+            "connection", "github", 1, "",
+            policy={"product": {"repository_id": 7, "authority": "epoch"}},
+        )], **changes},
+    )
+
+
+async def test_product_turns_share_definitions_but_rebuild_current_validators_credentials_and_scope(monkeypatch):
+    catalog, builds, checks, calls = ConnectionCatalog(), [], [], []
+    allowed, credential = True, "original"
+
+    async def check(scope, grant):
+        checks.append(scope.turn_id)
+        assert grant in scope.grants
+        if not allowed:
+            raise PermissionError("Access revoked")
+
+    monkeypatch.setattr("moyai.runtime.current", lambda: SimpleNamespace(
+        product_connections=SimpleNamespace(check=check),
+    ))
+
+    def factory(ctx):
+        def build(name):
+            builds.append((ctx.deps.turn_id, name))
+            tools = FunctionToolset(id="canonical")
+
+            @tools.tool_plain
+            async def read(number: int) -> str:
+                await check(ctx.deps, ctx.deps.grants[0])
+                calls.append((ctx.deps.turn_id, credential, number))
+                return ctx.deps.turn_id
+
+            return tools
+        return build
+
+    for turn in ("first", "second", "third"):
+        ctx = product_context(turn_id=turn)
+        async with ProductCatalogToolset(catalog, ctx, factory(ctx)) as tools:
+            definitions = await tools.get_tools(ctx)
+            definitions["read"].tool_def.description = "caller-local mutation"
+    assert builds == [("first", None)]
+    assert checks == ["first", "second", "third"]
+    ctx = product_context(turn_id="fourth")
+    async with ProductCatalogToolset(catalog, ctx, factory(ctx)) as tools:
+        tool = (await tools.get_tools(ctx))["read"]
+        assert tool.tool_def.description != "caller-local mutation"
+        credential = "rotated"
+        with pytest.raises(ValidationError):
+            await tools.call_tool("read", {"number": "invalid"}, ctx, tool)
+        assert await tools.call_tool("read", {"number": 7}, ctx, tool) == "fourth"
+        allowed = False
+        with pytest.raises(PermissionError, match="revoked"):
+            await tools.call_tool("read", {"number": 8}, ctx, tool)
+    assert builds == [("first", None), ("fourth", "read")]
+    assert calls == [("fourth", "rotated", 7)]
+    ctx = product_context(turn_id="stopped-or-revoked")
+    async with ProductCatalogToolset(catalog, ctx, factory(ctx)) as tools:
+        with pytest.raises(PermissionError, match="revoked"):
+            await tools.get_tools(ctx)
+    assert not catalog.entries
+
+
+@pytest.mark.parametrize("changes", [
+    {"session_id": "other-session"},
+    {"actor_id": "other-actor"},
+    {"model": "other-model"},
+    {"visibility": "shared"},
+    {"surface": "slack"},
+    {"execution_context": ExecutionContext("shared", "automation")},
+    {"product_grant": ProductGrant("actor", "changed-authority")},
+    {"swarm_id": "mission"},
+    {"swarm_name": "other-mission"},
+    {"delegation_depth": 1},
+    {"delegation_generated": True},
+    {"goal_generation": 1},
+    {"grants": [replace(product_context().deps.grants[0], revision=2)]},
+    {"grants": [replace(product_context().deps.grants[0], credential="changed-credential")]},
+    {"grants": [replace(product_context().deps.grants[0], read_only=False)]},
+    {"grants": [replace(product_context().deps.grants[0], policy={
+        "product": {"repository_id": 8, "authority": "epoch"},
+    })]},
+    {"grants": [replace(product_context().deps.grants[0], policy={
+        "product": {"repository_id": 7, "authority": "revoked-and-reconnected"},
+    })]},
+    {"grants": [replace(product_context().deps.grants[0], policy={
+        "product": {"repository_id": 7, "authority": "epoch"}, "allowed_tools": ["read"],
+    })]},
+])
+def test_product_schema_reuse_keeps_identity_grants_and_provenance_isolated(changes):
+    catalog = ConnectionCatalog()
+
+    def factory(name):
+        return FunctionToolset(id="canonical")
+
+    first = ProductCatalogToolset(catalog, product_context(), factory)
+    same = ProductCatalogToolset(catalog, product_context(turn_id="next-turn"), factory)
+    changed = ProductCatalogToolset(catalog, product_context(turn_id="next-turn", **changes), factory)
+    assert first.key == same.key
+    assert first.key != changed.key
+
+
+async def test_product_discovery_rechecks_revocation_after_await_and_discards_definitions(monkeypatch):
+    catalog, ctx = ConnectionCatalog(), product_context()
+    entered, release = asyncio.Event(), asyncio.Event()
+    revoked = False
+
+    async def check(scope, grant):
+        if revoked:
+            raise PermissionError("Turn stopped")
+
+    monkeypatch.setattr("moyai.runtime.current", lambda: SimpleNamespace(
+        product_connections=SimpleNamespace(check=check),
+    ))
+
+    class SlowTools(FunctionToolset):
+        async def get_tools(self, ctx):
+            entered.set()
+            await release.wait()
+            return await super().get_tools(ctx)
+
+    def factory(name):
+        tools = SlowTools(id="canonical")
+        tools.add_function(lambda: "ok", name="read")
+        return tools
+
+    async def discover():
+        async with ProductCatalogToolset(catalog, ctx, factory) as tools:
+            return await tools.get_tools(ctx)
+
+    pending = asyncio.create_task(discover())
+    await entered.wait()
+    revoked = True
+    release.set()
+    with pytest.raises(PermissionError, match="stopped"):
+        await pending
+    assert not catalog.entries
+    assert not catalog.loading
+
+
+async def test_product_schema_drift_on_direct_execution_invalidates_shared_key(monkeypatch):
+    catalog = ConnectionCatalog()
+
+    async def check(scope, grant):
+        pass
+
+    monkeypatch.setattr("moyai.runtime.current", lambda: SimpleNamespace(
+        product_connections=SimpleNamespace(check=check),
+    ))
+    read_only = True
+
+    def factory(name):
+        tools = FunctionToolset(id="canonical")
+        tools.add_function(
+            lambda: "ok", name="read", metadata={"annotations": {"readOnlyHint": read_only}},
+        )
+        return tools
+
+    first, second = product_context(), product_context(turn_id="next-turn")
+    async with ProductCatalogToolset(catalog, first, factory) as tools:
+        original = (await tools.get_tools(first))["read"].tool_def
+    read_only = False
+    # Durable execution reconstructs directly, without first listing the catalog.
+    async with ProductCatalogToolset(catalog, second, factory) as tools:
+        with pytest.raises(ToolFailed, match="definition changed"):
+            await tools.get_tool_for_tool_def(original, second)
+    assert not catalog.entries
