@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import io
@@ -422,7 +423,14 @@ async def test_read_bound_and_missing_schema_raise_without_creating_bridge_rows(
         assert (await conn.exec_driver_sql("SELECT count(*) FROM sqlite_master WHERE name='missing_source'")).scalar_one() == 0
 
 
-async def test_report_exceeds_old_record_ceiling_without_losing_totals_or_detail_pages(billing_product):
+async def test_report_exceeds_old_record_ceiling_without_losing_totals_or_detail_pages(
+    billing_product, monkeypatch,
+):
+    import moyai.product_billing_routes as billing_routes
+
+    # This is an accuracy/population regression, not a runner-speed benchmark.
+    # Keep it bounded on slower CI workers; deadline enforcement is tested below.
+    monkeypatch.setattr(billing_routes, "REPORT_TIMEOUT_SECONDS", 60.0)
     context = billing_product
     count = 50_001
     base = old_row(user_id="google:admin-sub", cost="0.000000000000000001")
@@ -452,6 +460,57 @@ async def test_report_exceeds_old_record_ceiling_without_losing_totals_or_detail
     assert sum(Decimal(row["spend"] or "0") for row in result["daily"]) == Decimal(result["total"]["spend"])
     assert result["daily"][-1]["cumulative_spend"] == result["total"]["spend"]
     assert result["users"][0]["spend"] == result["models"][0]["spend"] == result["total"]["spend"]
+
+
+@pytest.mark.parametrize("interrupt", ["deadline", "caller"])
+async def test_report_cancellation_releases_readers(billing_product, monkeypatch, interrupt):
+    import moyai.product_billing_routes as billing_routes
+
+    context = billing_product
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    deadlines = []
+    real_timeout = asyncio.timeout
+    real_read = billing_routes.read_product_billing
+
+    def observed_timeout(delay):
+        # Verify the production budget, then expire its real timeout only once
+        # both database readers are open. No sleep or machine-speed assumption.
+        assert delay == 15.0
+        deadline = real_timeout(delay)
+        deadlines.append(deadline)
+        return deadline
+
+    async def blocked_read(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(billing_routes.asyncio, "timeout", observed_timeout)
+    monkeypatch.setattr(billing_routes, "read_product_billing", blocked_read)
+    task = asyncio.create_task(context.service.report(start="2026-10-01", end="2026-10-31"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert len(deadlines) == 1
+        if interrupt == "deadline":
+            deadlines[0].reschedule(asyncio.get_running_loop().time())
+        else:
+            task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=5)
+        assert task in done, "The report must stop at its own deadline or caller cancellation."
+        with pytest.raises(TimeoutError if interrupt == "deadline" else asyncio.CancelledError):
+            await task
+        assert cancelled.is_set()
+        assert deadlines[0].expired() is (interrupt == "deadline")
+        assert context.source.pool.checkedout() == context.writer.pool.checkedout() == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    monkeypatch.setattr(billing_routes, "read_product_billing", real_read)
+    result = await context.service.report(start="2026-10-01", end="2026-10-31")
+    assert result["total"]["requests"] == 0
 
 
 def test_reconciliation_population_is_not_limited_by_fetch_bounds(rules, monkeypatch):
