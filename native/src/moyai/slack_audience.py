@@ -127,11 +127,11 @@ async def historical_access(slack, conn, principal, ids: list[str]) -> set[str]:
         return set()
     history = slack.runtime.product_history
     t = history.table
-    rows = (await conn.execute(text(f"""
+    rows = (await conn.execute(text(history.graph_cte() + f"""
         SELECT roots.run_id,s.team_id,s.channel,s.thread_ts,r.owner_id,
           (SELECT e.user_id FROM {t('slack_events')} e WHERE e.run_id=s.run_id
            ORDER BY e.created_at LIMIT 1) AS sender
-        FROM {t('run_roots')} roots LEFT JOIN {t('slack_threads')} s ON s.run_id=roots.root_id
+        FROM history_roots roots LEFT JOIN {t('slack_threads')} s ON s.run_id=roots.root_id
         JOIN {t('runs')} r ON r.id=roots.root_id WHERE roots.run_id IN :ids
           AND (s.run_id IS NOT NULL OR EXISTS(SELECT 1 FROM {t('slack_events')} e WHERE e.run_id=roots.root_id))
     """).bindparams(bindparam("ids", expanding=True)), {"ids": ids})).mappings().all()
