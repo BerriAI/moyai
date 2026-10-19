@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import httpx
 import httpx2
+import jwt
 import pytest
 import pytest_asyncio
 import test_product_authority as authority
@@ -156,6 +157,41 @@ async def test_same_logical_activity_retry_never_dispatches_again(inference):
     with pytest.raises(InferenceAdmissionError, match="already dispatched"):
         await perform(inference, attempt=2)
     assert len(inference.calls) == len(await requests(inference)) == 1
+
+
+@pytest.mark.parametrize("receipt_only", [False, True])
+async def test_signed_admission_binds_request_and_receipt_mode_ignores_response_cost(inference, receipt_only):
+    settings = inference.service.settings
+    settings.litellm_charge_receipt_secret = "synthetic-charge-context-secret-at-least-32-characters"
+    settings.litellm_charge_receipts_enabled = receipt_only
+    settings.litellm_spend_recovery_enabled = False
+    bodies = []
+
+    async def upstream(request):
+        bodies.append(request.content)
+        return httpx2.Response(
+            200, stream=WireStream(json.dumps(payload(cost="999")).encode()),
+            headers={"content-type": "application/json"},
+        )
+
+    await perform(inference, handler=upstream)
+    row, = await requests(inference)
+    claims = jwt.decode(
+        inference.calls[0]["x-litellm-billing-context"],
+        settings.litellm_charge_receipt_secret, algorithms=["HS256"], audience="litellm-charge-receipts",
+    )
+    assert claims == {
+        "version": 1, "sub": row.id, "aud": "litellm-charge-receipts",
+        "iat": claims["iat"], "exp": claims["iat"] + 300,
+        "gateway_scope": row.gateway_scope, "key_hash": row.key_hash,
+        "method": "POST", "route": "/v1/responses", "body_sha256": hashlib.sha256(bodies[0]).hexdigest(),
+    }
+    assert row.purpose == inference.scope.surface
+    assert row.status == "completed"
+    async with inference.product.database.sessions() as db:
+        usage = await db.get(InferenceUsage, row.request_key)
+        assert usage.cost_usd == row.cost_usd == (None if receipt_only else "999")
+        assert usage.cost_source == row.cost_source == (None if receipt_only else "response_usage")
 
 
 async def test_workflow_retry_with_new_run_id_cannot_repeat_paid_activity(inference, monkeypatch):

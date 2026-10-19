@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import JsonValue
 from sqlalchemy import JSON, BigInteger, Boolean, CheckConstraint, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -48,6 +49,11 @@ class BillingRecord(Base):
     reasoning_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     cost_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     coverage_error: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    billing_request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    billing_receipts: Mapped[dict[str, JsonValue] | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=True,
+    )
+    billing_purpose: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Historical metadata remains available to the unchanged recovery policy.
     legacy_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -67,6 +73,8 @@ class BillingRecord(Base):
         Index("ix_moyai_billing_records_actor_time", "actor_id", "created_at"),
         Index("ix_moyai_billing_records_session", "session_id"),
         Index("ix_moyai_billing_records_turn", "turn_id"),
+        Index("ix_moyai_billing_records_billing_request", "billing_request_id"),
+        Index("ix_moyai_billing_records_receipts", "billing_receipts", postgresql_using="gin"),
         Index("ix_moyai_billing_records_legacy_run", "legacy_run_id"),
         Index("ix_moyai_billing_records_legacy_recovery", "key_hash", "gateway_scope", "cost_next_attempt_at"),
         Index(
