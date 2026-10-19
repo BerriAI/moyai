@@ -35,7 +35,7 @@ from moyai.effects import (
     effect_id,
     requires_receipt,
 )
-from moyai.models import ComputerOperation, Effect, User, new_id
+from moyai.models import ComputerOperation, Effect, Event, User, new_id
 from moyai.storage import encrypted_converter
 from moyai.worker import make_worker
 from moyai.worker_capacity import ActivityCapacity
@@ -470,4 +470,14 @@ async def test_temporal_pending_write_returns_failure_to_agent_and_replays_old_c
     assert len(requests) == (2 if old_history else 4)
     async with runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
-    assert [(row.tool_name, row.state) for row in rows] == [("browser_open", "pending")]
+    assert [(row.tool_name, row.state) for row in rows] == [
+        ("browser_open", "failed" if old_history else "pending"),
+    ]
+    if old_history:
+        async with runtime.database.sessions() as db:
+            event = await db.scalar(select(Event).where(
+                Event.turn_id == turn.id, Event.kind == "failure_diagnostics",
+            ))
+        assert event is not None
+        details = json.loads(runtime.security.unseal(event.content))
+        assert any(item.get("application_type") == "PermissionError" for item in details["exception_chain"])
