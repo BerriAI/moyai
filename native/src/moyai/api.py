@@ -131,8 +131,10 @@ class EventStream(StreamingResponse):
 
 
 def session_view(session: Session) -> dict[str, Any]:
+    from .slack_messages import plain_slack_title
+
     return {
-        "id": session.id, "title": session.title, "owner_id": session.owner_id,
+        "id": session.id, "title": plain_slack_title(session.title) if session.surface == "slack" else session.title, "owner_id": session.owner_id,
         "visibility": session.visibility, "surface": session.surface,
         "model": session.model, "status": session.status,
         "active_turn": session.active_turn, "archived": session.archived, "deleted": session.deleted,

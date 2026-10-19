@@ -115,6 +115,10 @@ class SlackFileDelivery:
             result: object = response.json()
             if not isinstance(result, dict):
                 raise TypeError("Slack file upload API returned a non-object response.")
+            if result.get("ok") is False:
+                code = result.get("error")
+                safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,80}", code) else "unknown_error"
+                raise ValueError(f"Slack {api_method} rejected the upload: {safe_code}.")
             normalized: dict[str, object] = {}
             for key, value in result.items():
                 if not isinstance(key, str):

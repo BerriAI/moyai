@@ -13,7 +13,7 @@ from test_product_slack import slack as canonical_slack
 
 from moyai.models import Delivery, Turn, User, new_id
 from moyai.slack import deliver_one, reconcile_one, stage_deliveries
-from moyai.slack_progress import anchor_identity, claim_delivery, stage_progress
+from moyai.slack_progress import anchor_identity, claim_delivery, legacy_anchor_identity, stage_progress
 
 bridge = canonical_bridge
 slack = canonical_slack
@@ -28,7 +28,7 @@ async def queued(runtime, active, *, product, kind, text):
     else:
         identity = f"slack-answer:{turn.id}" if kind == "final" else f"slack-commentary:{turn.id}:{kind}"
     destination = {"channel": "CTEST0001", "thread_ts": "1792100000.000"}
-    if kind not in {"anchor", "final"}:
+    if kind != "final":
         destination["progress"] = True
     async with runtime.database.sessions.begin() as db:
         delivery = Delivery(
@@ -63,7 +63,7 @@ def transport():
 async def test_one_reply_is_edited_from_progress_to_final(runtime, active, slack, product):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
-    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Inspecting the relevant code.")
     update = await queued(runtime, active, product=product, kind="one", text="Checking the handler.")
     final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
     requests, messages, handle = transport()
@@ -84,7 +84,7 @@ async def test_one_reply_is_edited_from_progress_to_final(runtime, active, slack
 async def test_late_progress_cannot_overwrite_final(runtime, active, slack, product, status):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
-    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Inspecting the relevant code.")
     progress = await queued(runtime, active, product=product, kind="one", text="Checking.")
     late = await queued(runtime, active, product=product, kind="late", text="Stale update.")
     final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
@@ -122,7 +122,7 @@ async def test_late_progress_cannot_overwrite_final(runtime, active, slack, prod
 async def test_ambiguous_update_is_reconciled_before_final(runtime, active, slack, product, status, cancel):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
-    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Inspecting the relevant code.")
     progress = await queued(runtime, active, product=product, kind="one", text="Checking.")
     final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
     requests, messages, handle = transport()
@@ -166,7 +166,7 @@ async def test_ambiguous_update_is_reconciled_before_final(runtime, active, slac
 async def test_fast_answer_skips_unsent_placeholder(runtime, active, slack, product, status):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
-    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Inspecting the relevant code.")
     final = await queued(runtime, active, product=product, kind="final", text="Yep, I'm here.")
     async with runtime.database.sessions.begin() as db:
         (await db.get(Turn, active[1].id)).status = status
@@ -182,7 +182,7 @@ async def test_saving_transition_after_preflight_blocks_progress_at_claim(runtim
     from moyai import slack_progress
 
     await bind(slack, active)
-    initial = await queued(runtime, active, product=False, kind="anchor", text="Received.")
+    initial = await queued(runtime, active, product=False, kind="anchor", text="Inspecting the relevant code.")
     late = await queued(runtime, active, product=False, kind="late", text="Stale update.")
     requests, messages, handle = transport()
     entered, release = asyncio.Event(), asyncio.Event()
@@ -229,9 +229,9 @@ async def test_saving_transition_after_preflight_blocks_progress_at_claim(runtim
         assert len(answers) == 1 and answers[0].status == "sent"
 
 
-async def test_product_saving_notice_remains_deliverable_before_completion(runtime, active, slack):
+async def test_product_saving_is_silent_until_completion(runtime, active, slack):
     await bind(slack, active)
-    initial = await queued(runtime, active, product=True, kind="anchor", text="Received.")
+    initial = await queued(runtime, active, product=True, kind="anchor", text="Inspecting the relevant code.")
     requests, messages, handle = transport()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
         await slack.service.deliver(client, initial)
@@ -247,9 +247,9 @@ async def test_product_saving_notice_remains_deliverable_before_completion(runti
                 ).order_by(Delivery.created_at)))
             for notice in notices:
                 await slack.service.deliver(client, notice)
-            expected = "Moyai is saving the work." if status == "saving" else "Final verdict."
+            expected = "Inspecting the relevant code." if status == "saving" else "Final verdict."
             assert next(iter(messages.values()))["text"].startswith(expected)
-    assert len(messages) == 2 and len(requests) == 4  # The original web input is mirrored once.
+    assert len(messages) == 2 and len(requests) == 3  # The original web input is mirrored once.
     assert sum("(from Moyai)" in message["text"] for message in messages.values()) == 1
 
 
@@ -257,7 +257,7 @@ async def test_product_saving_notice_remains_deliverable_before_completion(runti
 async def test_revoked_sender_cannot_replace_the_reply(runtime, active, slack, product):
     await bind(slack, active)
     deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
-    initial = await queued(runtime, active, product=product, kind="anchor", text="Received.")
+    initial = await queued(runtime, active, product=product, kind="anchor", text="Inspecting the relevant code.")
     final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
     requests, _, handle = transport()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
@@ -273,7 +273,6 @@ async def test_revoked_sender_cannot_replace_the_reply(runtime, active, slack, p
 
 async def test_progress_staging_coalesces_native_updates(runtime, active, slack, monkeypatch):
     await bind(slack, active)
-    await queued(runtime, active, product=True, kind="anchor", text="Received.")
     sequence = 0
 
     async def read_progress(turn):
@@ -296,3 +295,93 @@ async def test_different_delivery_rows_share_one_turn_reservation(runtime, activ
         claim_delivery(runtime, second, product=True),
     )
     assert sorted(claimed) == [False, True]
+
+
+@pytest.mark.parametrize("product", [False, True])
+async def test_no_reply_until_authored_progress_or_answer(runtime, active, slack, product, monkeypatch):
+    await bind(slack, active)
+    messages = []
+
+    async def read_progress(turn):
+        return {"messages": messages, "subagents": []}
+
+    monkeypatch.setattr(runtime.work_progress, "read", read_progress)
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    for status in ("queued", "running", "saving"):
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Turn, active[1].id)).status = status
+        if product:
+            await slack.service.stage()
+        await stage_progress(runtime, product=product)
+        async with runtime.database.sessions() as db:
+            rows = list(await db.scalars(select(Delivery)))
+        # Product mode mirrors authored web input, but creates no bot chatter.
+        assert all(json.loads(row.destination).get("input") for row in rows)
+    async with runtime.database.sessions.begin() as db:
+        (await db.get(Turn, active[1].id)).status = "running"
+    messages.append({"id": "first-real-update", "text": "Inspecting the handler."})
+    await stage_progress(runtime, product=product)
+    await stage_progress(runtime, product=product)
+    async with runtime.database.sessions() as db:
+        updates = list(await db.scalars(select(Delivery).where(Delivery.destination.contains('"progress": true'))))
+    assert len(updates) == 1
+    requests, posted, handle = transport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        await deliver(client, updates[0])
+        async with runtime.database.sessions.begin() as db:
+            (await db.get(Turn, active[1].id)).status = "completed"
+        final = await queued(runtime, active, product=product, kind="final", text="Final verdict.")
+        await deliver(client, final)
+    assert [path for path, _ in requests] == ["/chat.postMessage", "/chat.update"]
+    assert requests[0][1]["text"].startswith("Inspecting the handler.")
+    assert len(posted) == 1 and next(iter(posted.values()))["text"] == "Final verdict."
+
+
+@pytest.mark.parametrize("product,kind", [(False, "anchor"), *[(True, kind) for kind in ("anchor", "queued", "running", "saving")]])
+async def test_upgrade_suppresses_unsent_lifecycle_chatter(runtime, active, slack, product, kind):
+    from moyai.slack_progress import skip_obsolete
+
+    await bind(slack, active)
+    row = await queued(runtime, active, product=product, kind="anchor", text="Legacy placeholder.")
+    async with runtime.database.sessions.begin() as db:
+        saved = await db.get(Delivery, row.id)
+        saved.identity = (legacy_anchor_identity(active[1].id, product) if kind == "anchor"
+                          else f"product-slack:{active[1].id}:{kind}:0")
+        saved.destination = json.dumps({"channel": "CTEST0001", "thread_ts": "1792100000.000"})
+    async with runtime.database.sessions() as db:
+        saved = await db.get(Delivery, row.id)
+    assert await skip_obsolete(runtime, saved, product=product)
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Delivery, row.id)).status == "suppressed"
+
+
+@pytest.mark.parametrize("product", [False, True])
+@pytest.mark.parametrize("legacy_status", ["sent", "sending"])
+async def test_upgrade_reuses_legacy_reply_after_reconciliation(runtime, active, slack, product, legacy_status, monkeypatch):
+    await bind(slack, active)
+    row = await queued(runtime, active, product=product, kind="anchor", text="Legacy placeholder.")
+    async with runtime.database.sessions.begin() as db:
+        saved = await db.get(Delivery, row.id)
+        saved.identity = legacy_anchor_identity(active[1].id, product)
+        saved.status = legacy_status
+        saved.receipt = runtime.security.seal({"ts": "1792100000.001"})
+
+    async def read_progress(turn):
+        return {"messages": [{"id": "real-update", "text": "Checking the handler."}], "subagents": []}
+
+    monkeypatch.setattr(runtime.work_progress, "read", read_progress)
+    await stage_progress(runtime, product=product)
+    async with runtime.database.sessions() as db:
+        update = await db.scalar(select(Delivery).where(Delivery.id != row.id))
+    requests, messages, handle = transport()
+    messages["1792100000.001"] = {"text": "Legacy placeholder.", "ts": "1792100000.001"}
+    deliver = slack.service.deliver if product else lambda client, row: deliver_one(runtime, client, row)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+        if legacy_status == "sending":
+            await deliver(client, update)
+            assert requests == []
+            async with runtime.database.sessions.begin() as db:
+                (await db.get(Delivery, row.id)).status = "sent"
+        await deliver(client, update)
+    assert [path for path, _ in requests] == ["/chat.update"]
+    assert len(messages) == 1

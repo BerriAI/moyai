@@ -210,6 +210,8 @@ class SlackDeliveryStatus(ApiView):
     pending: int
     sending: int
     rejected: int
+    rejected_files: int = 0
+    file_error_codes: list[str] = Field(default_factory=list)
 
 
 class SlackDeliveryRetry(ApiView):

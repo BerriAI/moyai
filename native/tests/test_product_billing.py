@@ -366,6 +366,50 @@ async def test_counterpart_lookup_precedes_date_filter_across_midnight(store, ru
     assert len(unresolved.charges) == 1 and unresolved.charges[0].occurred_at is None
 
 
+async def test_reconciliation_reads_period_once_and_follows_new_cross_date_aliases(store, rules, monkeypatch):
+    await seed(store, old=[
+        old_row(id="inside", gateway_id="first-call", created_at="2026-10-02T00:00:00+00:00"),
+        old_row(id="outside-broker", gateway_id="second-call", created_at="2026-09-30T23:59:59+00:00"),
+    ], new=[new_row(provider_request_id="first-call", created_at="2026-09-30T23:59:59+00:00")])
+    original = BillingReader.records
+    inside_reads = 0
+
+    async def counted(reader, *args, **kwargs):
+        nonlocal inside_reads
+        async for row in original(reader, *args, **kwargs):
+            inside_reads += row.get("id") == "inside"
+            yield row
+
+    monkeypatch.setattr(BillingReader, "records", counted)
+    result = await project(store, rules, bindings={
+        SourceRef("native", "native-observation"): NativeBinding(
+            SCOPE, RequestIdentity("broker_request", "outside-broker"), "verified", "1",
+        ),
+    })
+    # The out-of-period broker anchors its native counterpart outside October.
+    # The in-period request must not be fetched again for every closure round.
+    assert len(result.charges) == 1
+    assert result.charges[0].observations[0].source == SourceRef("legacy", "inside")
+    assert result.actual_subtotal == Decimal("0.123400")
+    assert inside_reads == 1
+
+
+async def test_explicit_read_bound_covers_accumulated_counterparts(store, rules):
+    await seed(store, old=[
+        old_row(id="inside", gateway_id="shared-call"),
+        old_row(id="outside-1", gateway_id="shared-call", created_at="2026-09-30T00:00:00+00:00"),
+        old_row(id="outside-2", gateway_id="shared-call", created_at="2026-09-30T00:00:01+00:00"),
+    ])
+    with pytest.raises(BillingReadError, match="too_many_accounting_records"):
+        await project(store, rules, max_records=2)
+
+
+async def test_counterpart_with_missing_date_is_not_silently_discarded(store, rules):
+    await seed(store, old=[old_row(), old_row(id="undated", created_at=None)])
+    with pytest.raises(BillingReadError, match="invalid_accounting_timestamp"):
+        await project(store, rules)
+
+
 async def test_read_bound_and_missing_schema_raise_without_creating_bridge_rows(store, rules):
     await seed(store, old=[old_row(id=f"request-{i}", gateway_id=f"call-{i}") for i in range(3)])
     with pytest.raises(BillingReadError, match="too_many_accounting_records"):
@@ -439,6 +483,22 @@ async def test_daily_cumulative_totals_preserve_missing_costs_and_exact_precisio
     ]
     assert [row["cumulative_spend"] for row in value["daily"]] == [None, None, "1E-18", "1E-18", "1E-18"]
     assert value["daily"][-1]["cumulative_spend"] == value["total"]["spend"]
+
+
+async def test_service_reader_keeps_one_sqlite_snapshot_during_cost_recovery(billing_product):
+    context = billing_product
+    await seed(context.writer, old=[old_row()])
+    async with context.writer.connect() as connection:
+        await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+    async with context.service._reader(context.source, None) as reader:
+        first = await reader.rows("legacy", PERIOD)
+        async with context.writer.begin() as writer:
+            await writer.execute(text("UPDATE model_requests SET cost='9.99'"))
+        again = await reader.rows("legacy", PERIOD)
+        assert first[0]["cost"] == again[0]["cost"] == "0.123400"
+    async with context.service._reader(context.source, None) as reader:
+        fresh = await reader.rows("legacy", PERIOD)
+        assert fresh[0]["cost"] == "9.99"
 
 
 async def test_infrastructure_sources_preserve_credits_estimates_overrides_scope_and_exclusive_end(store, rules):

@@ -30,6 +30,7 @@ from moyai.product_billing import (
     RecoveryPolicy,
     read_product_billing,
 )
+from moyai.product_inference import ProductInferenceRequest
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("MOYAI_TEST_POSTGRES"), reason="Set a disposable local PostgreSQL URL.",
@@ -108,7 +109,7 @@ async def test_batched_counterpart_lookup_keeps_aliases_namespaces_and_exact_row
     await activate(ctx.engine, ctx.storage)
     # No rows are selected by date: only counterpart aliases can discover them.
     outside = report_range("custom", "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z")
-    identities = [f"absent-{index}" for index in range(2100)] + ["wanted-alias", "shared-id"]
+    identities = [f"absent-{index}" for index in range(10_100)] + ["wanted-alias", "shared-id"]
     async with ctx.engine.connect() as connection:
         await connection.execute(text("SET TRANSACTION READ ONLY"))
         old = BillingReader(connection, schema=ctx.storage.source_schema, storage=ctx.storage)
@@ -144,6 +145,41 @@ async def test_consolidated_reader_fetches_more_than_fifty_thousand_records(bill
         bounded = BillingReader(connection, schema=ctx.storage.source_schema, storage=ctx.storage, max_records=2)
         with pytest.raises(BillingReadError, match="too_many_accounting_records"):
             await bounded.rows("legacy", PERIOD)
+
+
+async def test_large_native_counterpart_lookup_keeps_admission_proof_with_few_queries(billing):
+    ctx = billing
+    await seed(ctx, new=[new_row(id="native-key", request_key="native-key")])
+    async with ctx.native.begin() as connection:
+        await connection.execute(insert(ProductInferenceRequest).values(
+            id="broker-key", request_key="native-key", logical_key="logical-key",
+            session_id="native-session", turn_id="native-turn", actor_id="native-user",
+            authority_version="fixture", model="route", gateway_scope=SCOPE.gateway_scope,
+            key_hash=SCOPE.key_hash, status="completed", gateway_id="known-gateway",
+            cost_receipt_id="known-receipt", created_at="2026-10-02T00:00:00+00:00",
+            owner_pid=1, owner_started="2026-10-02T00:00:00+00:00",
+        ))
+    await prepare(ctx.engine, ctx.storage)
+    await finish_backfill(ctx)
+    await activate(ctx.engine, ctx.storage)
+    queries = []
+
+    @event.listens_for(ctx.native.sync_engine, "before_cursor_execute")
+    def observed(_conn, _cursor, statement, _parameters, _context, _many):
+        if f"FROM {ctx.storage.native_schema}.moyai_product_inference_requests" in statement:
+            queries.append(statement)
+
+    outside = report_range("custom", "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z")
+    candidates = [f"absent-{index}" for index in range(10_100)] + [
+        "known-gateway", "known-receipt", "broker-key",
+    ]
+    async with ctx.native.connect() as connection:
+        reader = BillingReader(connection, schema=ctx.storage.native_schema, storage=ctx.storage)
+        records = await reader.rows("native", outside, matching=candidates, outside_period=True)
+    assert len(records) == 1 and records[0]["id"] == "native-key"
+    assert records[0]["_admission"]["id"] == "broker-key"
+    assert records[0]["_admission"]["cost_receipt_id"] == "known-receipt"
+    assert 1 <= len(queries) <= 4  # Avoid one admission query per 200 aliases.
 
 
 async def test_exact_projection_survives_backfill_cutover_and_rollback(billing):

@@ -358,3 +358,13 @@ def test_command_output_redacts_direct_and_common_encoded_material():
     bindings = [{"format": "env", "value": json.dumps({"EXAMPLE_TOKEN": token})}]
     output = redact_output(token + " " + base64.b64encode(token.encode()).decode(), bindings)
     assert token not in output and output == "[credential redacted] [credential redacted]"
+
+
+async def test_root_credential_request_survives_history_segment_without_allowing_other_runs(credentials):
+    f = credentials
+    scope = replace(f.scope, history_segment=5)
+    result = await f.service.request(scope, scope.root_run_id, "continued-credential", request_body())
+    assert result["status"] == "pending"
+    for foreign in ["another-root", f.scope.turn_id, f.scope.turn_id + ":segment:4"]:
+        with pytest.raises((HTTPException, PermissionError)):
+            await f.service.request(scope, foreign, "foreign-credential", request_body())

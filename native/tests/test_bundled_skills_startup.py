@@ -78,11 +78,11 @@ async def test_default_agent_reaches_temporal_model_without_computer(runtime, ac
                     "load_capability", {key: "coding"}, tool_call_id="load-bundled-coding",
                 )])
         else:
-            assert any(
-                isinstance(part, ToolReturnPart)
-                and "Do not replace a missing integration with a mock" in str(part.content)
-                for message in messages for part in message.parts
-            )
+            delivered = "\n".join(str(part.content) for message in messages for part in message.parts
+                                  if isinstance(part, ToolReturnPart) and part.tool_name == "load_capability")
+            assert "Do not replace a missing integration with a mock" in delivered
+            assert "one installer at a time for each shared dependency directory" in delivered
+            assert "directory" in delivered and "publish_branch" in delivered
         return ModelResponse(parts=[TextPart("Ready without a computer.")])
 
     models: dict[str, Model[Any]] = {"test": scripted_model(respond)}

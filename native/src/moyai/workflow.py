@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from .history_handoff import VERSION as HISTORY_VERSION
     from .history_handoff import AgentCheckpoint, CheckpointSave, HistoryHandoff, HistoryLimits
     from .images import prompt_content
+    from .input_identity import identified_prompt
     from .live_events import public_event_sink
     from .product_continuation_errors import public_preparation_message
     from .product_drain import DRAIN_VERSION, DrainDecision
@@ -171,9 +172,12 @@ class TurnWorkflow(PydanticAIWorkflow):
         enqueue_id = None
         if not self.finished and self.agent_run is not None:
             try:
+                content = prompt_content(value.prompt, value.images) or ""
+                if workflow.patched("moyai-steering-part-identity-v1"):
+                    content = identified_prompt(content, value.turn_id, self.turn_id)
                 enqueue_id = self.agent_run.enqueue(
                     ModelRequest(
-                        parts=[UserPromptPart(content=prompt_content(value.prompt, value.images) or "")],
+                        parts=[UserPromptPart(content=content)],
                         metadata={
                             "moyai_input_id": value.turn_id, "moyai_parent_turn_id": self.turn_id,
                         },
@@ -442,6 +446,17 @@ class TurnWorkflow(PydanticAIWorkflow):
             )
             if prepared is None and workflow.patched("moyai-public-preparation-errors-v1"):
                 message = public_preparation_message(error) or message
+            if prepared is not None and workflow.patched("moyai-failure-workspace-checkpoint-v1"):
+                # Capture before failure settlement clears active ownership. A
+                # capture failure must never prevent the original error settling.
+                with suppress(ActivityError):
+                    await workflow.execute_activity(
+                        "moyai_preserve_failed_workspace_v1", turn_id,
+                        start_to_close_timeout=timedelta(
+                            minutes=17 if prepared.workspace and prepared.workspace.get("provider") == "lambda" else 3,
+                        ),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
             await workflow.execute_activity(
                 "moyai_fail_turn_v1",
                 args=[turn_id, message],

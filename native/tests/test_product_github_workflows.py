@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import get_args
 
 import pytest
@@ -37,6 +38,7 @@ from moyai.github_workflow_types import (
     StackMember,
     StackRead,
     SubmitReview,
+    WorkspacePublishBranch,
 )
 from moyai.models import Effect
 from moyai.pr_publications import PRPublication
@@ -95,6 +97,32 @@ async def test_native_catalog_exposes_typed_workflows_and_readonly_hides_all_wri
         and name not in {"request_pull_request_write_access", "request_pr_lifecycle_access"}
     }
     assert set(get_args(PublicationStatus.model_fields["operation"].annotation)) == provider_writes
+
+
+async def test_staged_publication_uses_the_existing_native_reservation_and_receipt(publication):
+    f = publication
+    calls = []
+
+    async def run(command, **options):
+        calls.append(command)
+        assert command[:3] == ["python3", "-I", "-c"]
+        assert command[-2:] == ["/workspace/repo", "a" * 40]
+        return SimpleNamespace(exit_code=0, stdout=json.dumps({"files": [{"path": "hello.txt", "content": "Staged content"}]}))
+
+    f.ctx.workspace = SimpleNamespace(run=run)
+    request = WorkspacePublishBranch(repository_id=123, directory="/workspace/repo", base_sha="a" * 40,
+                                     branch="work/staged", title="Publish the staged edit", request_key="staged-once")
+    f.ctx.tool_call_id = "staged-call"
+    await reserve(f, "publish_branch", request)
+    native = toolset(f.service, f.scope, f.grant)
+    selected = (await native.get_tools(f.ctx))["publish_branch"]
+    arguments = selected.args_validator.validate_python({"request": request.model_dump(mode="json")})
+    result = await native.call_tool("publish_branch", arguments, f.ctx, selected)
+    assert result["branch"] == "work/staged"
+    before = list(mutations(f.provider))
+    assert await native.call_tool("publish_branch", arguments, f.ctx, selected) == result
+    assert mutations(f.provider) == before
+    assert calls
 
 
 async def interrupt_after_ack(f, request, kind):

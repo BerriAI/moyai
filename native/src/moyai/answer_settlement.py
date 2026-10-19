@@ -330,6 +330,7 @@ class AnswerSettlement:
             if session and session.active_turn == turn.id:
                 session.active_turn = None
                 session.status = "failed"
+                session.updated_at = turn.finished_at or now()
 
     async def stopped(self, turn_id: str, conversation: str | None = None) -> None:
         async with self.database._admission_session(None) as db:
@@ -364,3 +365,4 @@ class AnswerSettlement:
             turn.finished_at = now()
             session.active_turn = None
             session.status = "stopped"
+            session.updated_at = turn.finished_at or now()

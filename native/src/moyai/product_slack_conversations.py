@@ -15,6 +15,7 @@ from .contracts import NewMessage, NewSession
 from .models import Session, SlackThread, User, new_id
 from .product_identity import ProductPrincipal
 from .product_slack_models import ProductSlackBinding
+from .slack_messages import plain_slack_title
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,7 +108,7 @@ class SlackConversations:
     ) -> Session:
         if source is None:
             session = await self.database.create_session(
-                actor, NewSession(title=prompt[:100] or "Slack conversation", visibility="shared"), db=db,
+                actor, NewSession(title=plain_slack_title(prompt)[:100] or "Slack conversation", visibility="shared"), db=db,
             )
             session.surface = "slack"
             return session

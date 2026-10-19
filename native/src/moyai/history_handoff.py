@@ -6,6 +6,7 @@ an interrupted or uncertain external action is never replayed from a snapshot.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -13,7 +14,8 @@ from typing import TYPE_CHECKING
 from fastapi import HTTPException
 from pydantic import TypeAdapter
 from pydantic_ai import ConversationTypeAdapter
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, is_provider_valid
+from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, StepEvent, is_provider_valid
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from temporalio import activity
@@ -75,18 +77,65 @@ def is_turn_run(run_id: str | None, turn_id: str) -> bool:
     return run_id != suffix and suffix.isascii() and suffix.isdecimal() and int(suffix) > 0
 
 
-async def latest_turn_snapshot(runtime: Runtime, turn_id: str) -> ContinuableSnapshot | None:
-    """The new segment may not have written its first snapshot yet."""
+async def turn_run_ids(runtime: Runtime, turn_id: str) -> list[str]:
+    """Only server-recorded continuations of this authorized turn."""
     async with runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Event).where(
             Event.turn_id == turn_id, Event.kind == "history_segment",
-        ).order_by(Event.id.desc())))
+        ).order_by(Event.id)))
     run_ids = [json.loads(runtime.security.unseal(row.content))["run_id"] for row in rows]
-    for run_id in [*run_ids, turn_id]:
-        snapshot = await runtime.stores.steps.latest_snapshot(run_id=run_id)
+    return list(dict.fromkeys([turn_id, *(run_id for run_id in run_ids if is_turn_run(run_id, turn_id))]))
+
+
+async def latest_turn_snapshot(
+    runtime: Runtime, turn_id: str, *, include_interrupted: bool = False,
+) -> ContinuableSnapshot | None:
+    """The new segment may not have written its first snapshot yet."""
+    for run_id in reversed(await turn_run_ids(runtime, turn_id)):
+        snapshot = await runtime.stores.steps.latest_snapshot(run_id=run_id, include_interrupted=include_interrupted)
         if snapshot is not None:
             return snapshot
     return None
+
+
+async def turn_events(runtime: Runtime, turn_id: str) -> list[StepEvent]:
+    runs = await turn_run_ids(runtime, turn_id)
+    batches = await asyncio.gather(*(runtime.stores.steps.list_events(run_id=run_id) for run_id in runs))
+    events = [event for batch in batches for event in batch]
+    return sorted(events, key=lambda event: event.timestamp)
+
+
+async def failed_attempts(runtime: Runtime, turn_id: str, events: list[StepEvent]) -> list[StepEvent]:
+    """Recover only failed calls missing from the native lifecycle event log."""
+    runs = await turn_run_ids(runtime, turn_id)
+    recorded = {event.tool_call_id for event in events if event.tool_call_id}
+    # Before-dispatch hooks can reject a call before the SDK emits its lifecycle
+    # event. Its saved failed result is still authoritative evidence of an attempt.
+    snapshot = await latest_turn_snapshot(runtime, turn_id, include_interrupted=True)
+    if snapshot is None:
+        return []
+    run_id = None
+    calls = {}
+    missing = []
+    for message in snapshot.messages:
+        if isinstance(message, ModelResponse):
+            run_id = message.run_id if message.run_id in runs else None
+            calls = {part.tool_call_id: part.tool_name for part in message.parts if isinstance(part, ToolCallPart)}
+        elif isinstance(message, ModelRequest) and run_id:
+            for part in message.parts:
+                if (
+                    isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id
+                    and part.tool_call_id not in recorded and part.tool_name
+                    and calls.get(part.tool_call_id) == part.tool_name
+                    and (isinstance(part, RetryPromptPart) or getattr(part, "outcome", None) == "failed")
+                ):
+                    missing.append(StepEvent(
+                        run_id=run_id, kind="tool_call_failed", step_index=0,
+                        tool_call_id=part.tool_call_id, tool_name=part.tool_name,
+                        timestamp=message.timestamp or snapshot.timestamp,
+                    ))
+                    recorded.add(part.tool_call_id)
+    return missing
 
 
 @activity.defn(name="moyai_history_limits_v1")
