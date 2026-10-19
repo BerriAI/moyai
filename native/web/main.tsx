@@ -200,6 +200,8 @@ function App() {
     void refresh()
   }
   useEffect(() => { if (selected && !settingsOpen) lastConversation.current = selected }, [selected, settingsOpen])
+  // Shared inventory refreshes own their errors here and resolve after handling
+  // them. Consumers must not recast an inventory failure as a send/history error.
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const version = ++refreshVersion.current
     const updateCheckpoint = sessionUpdates.checkpoint()
@@ -479,8 +481,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const [skippedAccountScope, setSkippedAccountScope] = useState("")
   const [error, setError] = useState("")
   const [loadError, setLoadError] = useState("")
-  const [listError, setListError] = useState("")
-  const listRefreshVersion = useRef(0)
   const pictures = useAttachments(setError)
   const [busy, setBusy] = useState(false)
   const submitting = useRef(false)
@@ -533,7 +533,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     sessionUpdates.invalidate(id)
     ++loadVersion.current
     ++sensitiveVersion.current
-    ++listRefreshVersion.current
     historyRequest.current?.controller.abort(); historyRequest.current = null
     setGoalDialog(false); lastGoalRequest.current = null; setBusy(false)
     resolvedOnce.current = undefined
@@ -543,7 +542,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     submitting.current = false; setSending(false)
     viewNow.current = null
     completeHistory.current = null
-    setHistoryState({ complete: false, loading: false, error: "" }); setListError("")
+    setHistoryState({ complete: false, loading: false, error: "" })
     liveNow.current = emptyLiveTranscript()
     setLiveText(liveNow.current); setView(null); setMessages([]); setPlan([]); setActivity([]); setPanelError("")
     setDraft(""); setAnsweredRequest(null); setEditing(null); setEditText(""); pictures.clear(); setSendingNow(new Set()); setModel(me.default_model); setSelectedAccounts([]); setWorkspaceOpen(false)
@@ -667,12 +666,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     try { await request }
     finally { if (loadFlight.current?.version === version) loadFlight.current = null }
   }, [id, me.user.id, sideMode, sessionUpdates, readHistory])
-  async function refreshSidebarAfterSend() {
-    const request = ++listRefreshVersion.current, scope = sensitiveVersion.current, auth = csrfToken()
-    const current = () => request === listRefreshVersion.current && scope === sensitiveVersion.current && auth === csrfToken()
-    try { await refreshList(); if (current()) setListError("") }
-    catch { if (current()) setListError("Your message was sent, but the session list could not be refreshed.") }
-  }
   async function reloadAfterAction(message?: string) {
     const version = sensitiveVersion.current, auth = csrfToken()
     try { await load() }
@@ -930,7 +923,8 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       void reloadAfterAction(body.reply_to
         ? "Your response was sent, but the conversation could not be refreshed."
         : "Your message was sent, but the conversation could not be refreshed.")
-      void refreshSidebarAfterSend()
+      // App.refresh reports inventory failures in its independent global notice.
+      void refreshList()
     } catch (e) {
       if (current()) setError(String(e))
     } finally {
@@ -1031,7 +1025,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             followingWork.current = element.scrollHeight - element.scrollTop - element.clientHeight < 180
           }}
           onClickCapture={event => previewFileLink(event, id, sideMode ? onOpenFile : openOutput)}>
-          {!historyState.complete && <p className="muted" role="status">{historyState.loading ? "Loading conversation history…" : "Conversation history is incomplete."}</p>}
           {historyState.complete && !messages.length && <div className="empty-chat"><h2>Start with a task or a question.</h2><p className="muted">Your work and saved outputs stay with this conversation.</p></div>}
           {visibleMessages.map(message => {
             const turn = view.turns.find(item => item.id === message.turn_id)
@@ -1058,6 +1051,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             </article>{segment && renderProgress(segment)}</React.Fragment>
           })}
           {unanchored.get(null)?.map(renderProgress)}
+          {!historyState.complete && <p className="muted" role="status">{historyState.loading ? "Loading conversation history…" : "Conversation history is incomplete."}</p>}
           {starting && <div className="working live-action" role="status"><span className="running-dot" /><span>Starting…</span></div>}
           {active && ["starting", "running", "saving"].includes(active.status) && <div className="working live-action" role="status"><span className="running-dot" /><span>{active.status === "saving" ? "Saving the response…" : active.status === "starting" ? "Starting…" : reconnecting ? "Reconnecting to live progress…" : currentTool ? `${toolLabel(currentTool.name)}…` : "Working…"}</span>{!sideMode && <Button type="button" variant="ghost" size="sm" onClick={() => addTab("activity")}>Activity</Button>}</div>}
           {view.pending && active && (view.can_answer ?? (active.is_self ?? active.actor_id === me.user.id)) && <>
@@ -1078,7 +1072,6 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
             { key: "action", message: error, clear: () => setError("") },
             { key: "session", message: loadError, clear: () => setLoadError("") },
             { key: "history", message: historyState.error, clear: () => setHistoryState(previous => ({ ...previous, error: "" })) },
-            { key: "sidebar", message: listError, clear: () => setListError("") },
           ].filter(notice => notice.message).map(notice => <div className="error" role="alert" key={notice.key}>{notice.message}
             {notice.key === "history" && <Button type="button" size="sm" variant="ghost" disabled={historyState.loading} onClick={() => void reloadAfterAction()}>Retry history</Button>}
             <Button type="button" size="sm" variant="ghost" onClick={notice.clear}>Dismiss</Button>

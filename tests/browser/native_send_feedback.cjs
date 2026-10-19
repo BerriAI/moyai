@@ -46,7 +46,9 @@ async function scenario(t, options = {}) {
     if (pathname === "/api/auth/config") return json({ mode: "standalone", password_enabled: true });
     if (pathname === "/api/history/sessions") {
       if (state.posts.length && options.sidebar) await options.sidebar.promise;
-      if (state.posts.length && options.sidebarFailure) return json({ detail: "Sidebar unavailable." }, 503);
+      if (state.posts.length && (typeof options.sidebarFailure === "function" ? options.sidebarFailure() : options.sidebarFailure)) {
+        return json({ detail: "Sidebar unavailable." }, 503);
+      }
       return json({ sessions: [], ancestors: [], has_more: false, next_cursor: null });
     }
     if (pathname === "/api/sessions/chat/messages" && request.method() === "POST") {
@@ -277,8 +279,9 @@ test("a failed history page retains known rows and retries without submitting th
 
 test("successful conversation history cannot clear a failed sidebar refresh notice", async t => {
   const read = gate();
+  let sidebarFailing = true;
   t.after(() => read.release());
-  const { page, input, state } = await scenario(t, { read, sidebarFailure: true });
+  const { page, input, state } = await scenario(t, { read, sidebarFailure: () => sidebarFailing });
   await input.fill("Send despite a failed sidebar refresh");
   await input.press("Enter");
   await page.locator(".message.user").filter({ hasText: "Send despite a failed sidebar refresh" }).waitFor();
@@ -289,6 +292,12 @@ test("successful conversation history cannot clear a failed sidebar refresh noti
   assert.equal(await notice.isVisible(), true);
   assert.equal((await input.innerText()).trim(), "");
   assert.equal(state.posts.length, 1, "A refresh failure never replays an accepted send");
+  sidebarFailing = false;
+  const refreshed = page.waitForResponse(response => response.url().includes("/api/history/sessions"));
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await refreshed;
+  await notice.waitFor({ state: "hidden" });
+  assert.equal(state.posts.length, 1, "Only a successful inventory refresh clears its notice");
 });
 
 test("a late accepted receipt cannot restore content after sign-out", async t => {
