@@ -1,9 +1,13 @@
 """Safe delivery feedback and retries for Slack's explicit rejections only."""
 
+import json
+import re
+
 from fastapi import HTTPException
 from sqlalchemy import func, select, update
 
 from .models import Delivery, DeliverySchedule
+from .slack_file_delivery import SlackFileDelivery
 
 
 async def status(database, db, session_id):
@@ -11,7 +15,20 @@ async def status(database, db, session_id):
         Delivery.session_id == session_id, Delivery.identity.startswith('product-slack:'),
         Delivery.status.in_(['pending', 'sending', 'rejected']),
     ).group_by(Delivery.status))).all())
-    return {key: counts.get(key, 0) for key in ('pending', 'sending', 'rejected')}
+    result = {key: counts.get(key, 0) for key in ('pending', 'sending', 'rejected')}
+    rejected_files, codes = 0, set()
+    for row in await db.scalars(select(Delivery).where(
+        Delivery.session_id == session_id, Delivery.identity.startswith('product-slack:'),
+        Delivery.status == 'rejected',
+    )):
+        if not SlackFileDelivery.is_content(json.loads(database.security.unseal(row.content))):
+            continue
+        rejected_files += 1
+        receipt = json.loads(database.security.unseal(row.receipt)) if row.receipt else {}
+        match = re.fullmatch(r'Slack [A-Za-z.]+ rejected the upload: ([a-z0-9_]{1,80})\.', receipt.get('error', ''))
+        if match:
+            codes.add(match[1])
+    return {**result, 'rejected_files': rejected_files, 'file_error_codes': sorted(codes)}
 
 
 async def retry(runtime, actor, session_id):

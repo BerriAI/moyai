@@ -41,7 +41,7 @@ async def conversation(ingress, monkeypatch):
     return binding
 
 
-async def test_top_level_mention_acknowledges_before_context_preparation(ingress, monkeypatch):
+async def test_top_level_mention_does_not_add_a_reaction(ingress, monkeypatch):
     service = ingress.service
     calls = []
     order = []
@@ -59,13 +59,8 @@ async def test_top_level_mention_acknowledges_before_context_preparation(ingress
     message.pop("thread_ts")
     await service.receive_payload(context_tests.envelope(message))
 
-    assert len(calls) == 1
-    method, url, kwargs = calls[0]
-    assert method == "POST" and url == "https://slack.com/api/reactions.add"
-    assert kwargs["headers"]["Authorization"] == "Bearer synthetic-bot-token"
-    assert kwargs["json"] == {"channel": context_tests.CHANNEL, "name": "eyes", "timestamp": message["ts"]}
-    assert order == ["reaction"]
-
+    assert calls == []
+    assert order == []
 
 async def test_admission_wakes_status_and_delivery_lanes(ingress, monkeypatch):
     service, runtime = ingress.service, ingress.runtime
@@ -85,7 +80,7 @@ async def test_admission_wakes_status_and_delivery_lanes(ingress, monkeypatch):
     assert service.delivery_wakeup.is_set()
 
 
-async def test_bound_thread_followup_acknowledges_followup_timestamp(ingress, conversation, monkeypatch):
+async def test_bound_thread_followup_does_not_add_a_reaction(ingress, conversation, monkeypatch):
     service = ingress.service
     calls = []
 
@@ -98,11 +93,7 @@ async def test_bound_thread_followup_acknowledges_followup_timestamp(ingress, co
     monkeypatch.setattr(service.connectors, "request", request)
     await service.receive_payload(followup("An ordinary followup."))
 
-    assert len(calls) == 1
-    method, kwargs = calls[0]
-    assert method == "POST"
-    assert kwargs["json"] == {"channel": context_tests.CHANNEL, "name": "eyes", "timestamp": "1792255890.001"}
-
+    assert calls == []
 
 async def test_unaddressed_top_level_message_is_not_acknowledged(ingress, monkeypatch):
     calls = []

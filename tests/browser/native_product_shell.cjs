@@ -20,7 +20,7 @@ async function handle(req,res,next) {
   const data=body?JSON.parse(body):null;
   state.requests.push({path:url.pathname,query:url.search,method:req.method,body:data,headers:req.headers});
   if(state.holds?.[url.pathname])await state.holds[url.pathname];
-  const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
+  const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(url.pathname==='/api/history/sessions'&&status===200?{ancestors:[],...value}:value));};
   const failure=state.httpErrors?.[`${req.method}:${url.pathname}`];
   if(failure) {
     if(failure.network){req.socket.destroy();return;}
@@ -108,7 +108,7 @@ async function handle(req,res,next) {
       const value=state.actionDetails?.[key];
       return value ? json(value) : json({detail:'Action not found.'},404);
     }
-    if(url.pathname.endsWith('/progress/'+turnId))return json(state.workProgress||{messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
+    if(/\/progress\/[^/]+$/.test(url.pathname))return json(state.workProgressByTurn?.[url.pathname.split('/').at(-1)]||state.workProgress||{messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}]});
     if(url.pathname.endsWith('/events')) {
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
       res.write('event: connected\ndata: {}\n\n'); clients.add(res);
@@ -172,7 +172,7 @@ async function handle(req,res,next) {
     const result={session:row,reference:{...row,source:'native',url:'/#'+row.id,...state.reference},turns:state.turnsBySession?.[row.id]||state.turns||[{id:turnId,actor_id:'viewer',status:state.status,connections:[],usage:{}}],activity:[],pending:state.pending,can_answer:state.canAnswer,can_reply_with_text:state.canReply,question_deadline:state.questionDeadline,has_unsettled_effects:state.effects?.length>0,effects:state.effects};
     if(url.searchParams.get('include_messages')==='true'&&!state.omitInitialMessages)
       result.messages=(state.messagesBySession?.[row.id]||state.messages).slice(0,state.paginate?200:undefined);
-    if(state.slackDelivery)result.slack_delivery=state.slackDelivery;
+    if(state.slackDelivery)result.slack_delivery={rejected_files:0,file_error_codes:[],...state.slackDelivery};
     if(state.goal)result.goal=state.goal;
     if(state.holdSessionRead)await state.holdSessionRead;
     return json(result);
@@ -1537,11 +1537,15 @@ test('root streaming survives saved-state polling, reconnect replay, per-round r
   await waitFor(()=>savedPolls()>polls,'saved poll');
   assert.equal(await page.locator('.turn-progress-history').getByText('I will inspect.',{exact:true}).count(),1);
   emit({type:'tool_call',id:'call1',name:'read_file',arguments:{path:'private-tool-detail'}},3);
-  await page.locator('.live-action').getByText('Using read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
+  state.workProgress={messages:[{id:'saved-progress',phase:'commentary',text:'I will inspect.'}],
+    tools:[{id:'call1',name:'read_file',status:'running',created_at:new Date().toISOString()}],subagents:[]};
+  await page.locator('.live-action').getByText('Read file…',{exact:true}).waitFor();assert.equal(await page.getByText('private-tool-detail',{exact:true}).count(),0);
   for(const client of clients)client.end();await waitFor(()=>state.streams.length===2,'browser reconnect');assert.equal(state.streams[1].last,'3');
   emit({type:'text_delta',index:0,text:'duplicate'},2);emit({type:'response_start',run_id:turnId,step:2},4);emit({type:'text_start',index:0,text:'Wrong attempt'},5);
   emit({type:'response_start',run_id:turnId,step:2},6);emit({type:'text_start',index:0,text:'Final',phase:'final_answer'},7);emit({type:'text_delta',index:0,text:' answer'},8);
   await page.locator('.live-message').getByText('Final answer',{exact:true}).waitFor();assert.equal(await page.getByText(/Unlabelled child text|Wrong attempt|duplicate/).count(),0);
+  await page.locator('.live-action').getByText('Read file…',{exact:true}).waitFor();
+  state.workProgress.tools[0].status='completed';
   state.messages.push({id:2,turn_id:turnId,role:'assistant',author_id:null,content:'Final answer'});state.status='completed';emit({},undefined,'finished');
   await page.waitForFunction(()=>document.querySelectorAll('.message.assistant:not(.live-message)').length===1);
   assert.equal(await page.getByText('Final answer',{exact:true}).count(),1);
@@ -1618,6 +1622,57 @@ test('stopped work without a final answer keeps its updates expanded',async t=>{
   await page.reload();
   await page.getByText('Observed before interruption.',{exact:true}).waitFor();
   assert.equal(await page.locator('.message.assistant').count(),0);
+});
+
+for(const width of [1440,768,320])test(`resumed work without a new message stays visible after reload at ${width}px`,async t=>{
+  const at=seconds=>new Date(Date.now()-60000+seconds*1000).toISOString();
+  const resumed='after-login';
+  reset({sessionOverrides:{[sessionId]:{active_turn:resumed}},
+    turns:[{id:resumed,actor_id:'viewer',status:'running',created_at:at(30),connections:[],usage:{}},
+      {id:turnId,actor_id:'viewer',status:'resumed',created_at:at(0),finished_at:at(20),connections:[],usage:{}}],
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',content:'Inspect the protected page.',created_at:at(0)}],
+    workProgressByTurn:{[turnId]:{messages:[],tools:[],subagents:[]},[resumed]:{
+      messages:[{id:'after-login-update',phase:'commentary',text:'Inspection continued after sign-in.',created_at:at(35)}],
+      tools:[{id:'resumed-read',name:'read_file',status:'completed',created_at:at(36),finished_at:at(37)}],subagents:[]}},
+    actionDetails:{'resumed-read':{id:'resumed-read',name:'read_file',status:'completed',input:'{"path":"README.md"}',output:'Saved content',restricted:false,input_truncated:false,output_truncated:false}},
+  });
+  const page=await pageFor(t,'#'+sessionId,width);
+  await page.getByText('Inspection continued after sign-in.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.message.user').count(),1);
+  const continuation=page.locator(`.turn-progress[data-turn-id="${resumed}"]`);
+  await continuation.getByRole('button',{name:'1 action',exact:true}).click();
+  await continuation.getByRole('button',{name:'Open Read file action',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith(`/progress/${resumed}/actions/resumed-read`)));
+  await page.reload();
+  await page.getByText('Inspection continued after sign-in.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.message.user').count(),1);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+test('replayed historical actions cannot rapidly cycle the current status label',async t=>{
+  reset({workProgress:{messages:[],subagents:[],tools:[{id:'current',name:'shell',status:'running',created_at:new Date().toISOString()}]}});
+  const page=await pageFor(t);
+  await page.locator('.live-action').getByText('Run command…',{exact:true}).waitFor();
+  await waitFor(()=>clients.size>0);
+  for(let i=0;i<80;i++)emit({type:'tool_call',id:`old-${i}`,name:i%2?'browser_open':'edit_file',created_at:'2020-01-01T00:00:00Z'},i);
+  await page.getByRole('button',{name:'81 actions',exact:true}).waitFor();
+  assert.match(await page.locator('.live-action').innerText(),/^Run command…/);
+  state.workProgress.tools[0].status='completed';
+  await page.locator('.live-action').getByText('Working…',{exact:true}).waitFor();
+});
+
+for(const width of [1440,768,320])test(`Slack links and file upload failures are readable at ${width}px`,async t=>{
+  reset({status:'completed',sessionOverrides:{[sessionId]:{surface:'slack',visibility:'shared',can_manage:true}},
+    slackDelivery:{pending:0,sending:0,rejected:1,rejected_files:1,file_error_codes:['missing_scope']},
+    messages:[{id:1,turn_id:turnId,role:'user',author_id:'viewer',source:'slack',content:'Inspect <https://example.test/repo?a=1&amp;b=2|the repository>. Keep `<https://example.test/literal|code>` literal.'}],
+  });
+  const page=await pageFor(t,'#'+sessionId,width);
+  const link=page.locator('.message-content').getByRole('link',{name:'the repository',exact:true});
+  await link.waitFor();assert.equal(await link.getAttribute('href'),'https://example.test/repo?a=1&b=2');
+  assert.equal(await page.locator('.message-content').getByRole('link',{name:'code',exact:true}).count(),0);
+  await page.getByText(/Slack could not upload 1 file\(s\).*missing_scope/).waitFor();
+  await page.getByRole('button',{name:'Retry delivery',exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });
 
 test('access revocation removes transcript, draft and panel state before reauthorization',async t=>{
@@ -2214,6 +2269,86 @@ test('chat links remain accented and underlined while plain inline code stays ne
   assert.notEqual(await code.evaluate(el=>getComputedStyle(el).color),linkColor);
   assert.equal(await linkedCode.evaluate(el=>getComputedStyle(el).color),linkColor);
   assert.equal(await link.evaluate(el=>getComputedStyle(el).textDecorationLine),'underline');
+});
+
+// Large synthetic screenshots reproduce the overflowing assistant image report.
+async function imageConversation(t,width=1440) {
+  reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:
+    'Here is the updated workspace preview.\n\n![Workspace preview](/test-images/wide.svg)\n\nThe complete screenshot is available above.\n\n![Mobile preview](/test-images/tall.svg)\n\n[![Linked preview](/test-images/small.svg)](https://example.test/design)\n\n![Missing preview](/test-images/missing.svg)'}]});
+  return pageFor(t,'#'+sessionId,width,async page=>{
+    await page.route('**/test-images/*',route=>{
+      const name=new URL(route.request().url()).pathname.split('/').pop();
+      if(name==='missing.svg')return route.fulfill({status:404,body:'Missing image'});
+      const [w,h]=name==='wide.svg'?[2400,1400]:name==='tall.svg'?[600,1800]:[80,40];
+      return route.fulfill({contentType:'image/svg+xml',body:`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 1200 700" preserveAspectRatio="none">
+        <rect width="1200" height="700" fill="#161619"/><rect width="230" height="700" fill="#222226"/>
+        <g fill="#aaa8b0" font-family="sans-serif" font-size="20"><text x="28" y="50">Workspace</text><text x="28" y="120">New conversation</text><text x="28" y="175">Recent work</text></g>
+        <text x="280" y="90" fill="#ededf0" font-family="sans-serif" font-size="30">Your workspace, in focus</text>
+        <rect x="280" y="130" width="870" height="380" rx="12" fill="#25252a" stroke="#45454c"/>
+        <path d="M320 440L450 360L560 395L690 240L820 290L960 180L1110 210" fill="none" stroke="#b39aef" stroke-width="8"/>
+        <text x="280" y="575" fill="#aaa8b0" font-family="sans-serif" font-size="22">Synthetic preview for layout verification</text></svg>`});
+    });
+  });
+}
+
+for(const width of [1440,768,320])test(`chat image previews fit the conversation at ${width}px`,async t=>{
+  const page=await imageConversation(t,width);
+  const image=page.getByRole('img',{name:'Workspace preview',exact:true});await image.waitFor();
+  await image.evaluate(el=>el.decode());
+  await image.scrollIntoViewIfNeeded();
+  if(process.env.MOYAI_IMAGE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.MOYAI_IMAGE_SCREENSHOTS,`chat-images-${width}-dark.png`)});
+  const geometry=await image.evaluate(el=>{
+    const box=el.getBoundingClientRect(),column=el.closest('.message-content').getBoundingClientRect();
+    return {left:box.left,right:box.right,width:box.width,height:box.height,columnLeft:column.left,columnRight:column.right,ratio:el.naturalWidth/el.naturalHeight};
+  });
+  assert(geometry.left>=geometry.columnLeft&&geometry.right<=geometry.columnRight+1,JSON.stringify(geometry));
+  assert(geometry.height<=280&&geometry.width<=480,JSON.stringify(geometry));
+  assert(Math.abs(geometry.width/geometry.height-geometry.ratio)<0.01,'Keep the entire screenshot in its original proportions');
+  const trigger=await page.getByRole('button',{name:'Enlarge image: Workspace preview',exact:true}).boundingBox();
+  const preview=await image.boundingBox();
+  assert(preview.y>=trigger.y&&preview.y+preview.height<=trigger.y+trigger.height,'The preview must fit its clickable card without overlapping following text');
+  const tall=page.getByRole('img',{name:'Mobile preview',exact:true});await tall.evaluate(el=>el.decode());
+  assert((await tall.boundingBox()).height<=280);
+  assert.equal(await page.locator('.transcript').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await image.scrollIntoViewIfNeeded();
+  if(process.env.MOYAI_IMAGE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.MOYAI_IMAGE_SCREENSHOTS,`chat-images-${width}-light.png`)});
+});
+
+for(const width of [1440,320])test(`chat image viewer supports keyboard and fits at ${width}px`,async t=>{
+  const page=await imageConversation(t,width);
+  const trigger=page.getByRole('button',{name:'Enlarge image: Workspace preview',exact:true});await trigger.waitFor();
+  await trigger.focus();await page.keyboard.press('Enter');
+  const dialog=page.getByRole('dialog',{name:'Workspace preview',exact:true});await dialog.waitFor();
+  const image=dialog.getByRole('img',{name:'Workspace preview',exact:true});await image.evaluate(el=>el.decode());
+  const box=await dialog.boundingBox();assert(box.x>=0&&box.x+box.width<=width&&box.y>=0&&box.y+box.height<=1000);
+  assert(box.width>=Math.min(1120,width-32)-1,'The viewer should use the available screen width');
+  assert.equal(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  const original=dialog.getByRole('link',{name:'Open original',exact:true});
+  assert.equal(await original.getAttribute('href'),'/test-images/wide.svg');assert.equal(await original.getAttribute('target'),'_blank');
+  if(process.env.MOYAI_IMAGE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.MOYAI_IMAGE_SCREENSHOTS,`chat-image-viewer-${width}.png`)});
+  await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
+  await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Enlarge image: Workspace preview');
+  assert.equal(await trigger.evaluate(el=>el===document.activeElement),true);
+  await trigger.click();await dialog.waitFor();await dialog.getByRole('button',{name:'Close',exact:true}).click();
+  await dialog.waitFor({state:'detached'});
+});
+
+test('chat images preserve image links, small originals, and readable failures',async t=>{
+  const page=await imageConversation(t);
+  const link=page.getByRole('link',{name:'Linked preview',exact:true});await link.waitFor();
+  assert.equal(await link.getAttribute('href'),'https://example.test/design');
+  assert.equal(await link.locator('button, a').count(),0,'Linked images must not contain nested interactive elements');
+  const small=link.locator('img');await small.evaluate(el=>el.decode());
+  assert.equal((await small.boundingBox()).width,80,'Small originals should not be upscaled');
+  await page.getByText('Image unavailable',{exact:true}).waitFor();
+  const missing=page.getByRole('button',{name:'Enlarge image: Missing preview',exact:true});
+  await missing.click();
+  const dialog=page.getByRole('dialog',{name:'Missing preview',exact:true});await dialog.waitFor();
+  assert.equal(await dialog.getByRole('link',{name:'Open original',exact:true}).getAttribute('href'),'/test-images/missing.svg');
 });
 
 test('highlighted code preserves literal markup and copies the original text',async t=>{

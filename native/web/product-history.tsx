@@ -10,11 +10,16 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { api, ApiError } from "./api"
+import { ApiError } from "./api"
+import {
+  continueProductSession, getHistorySession, getMe, listConnections, getProductSessionFileContent, listProductContinuationFiles,
+  listProductSessionChildren, listProductSessionFiles, listProductSessionMessages, previewProductContinuation,
+  type ContinuationRecoveryFile, type HistoryAttachment, type ProductContinuationResult, type ProductFile,
+} from "./generated/api"
 import "./product-history.css"
 import slackLogo from "./assets/slack-logo.svg"
 
-export type HistorySessionRef = { source: "native" | "legacy"; id: string; url: string; source_session_id?: string }
+export type HistorySessionRef = Pick<ProductContinuationResult, "id" | "url"> & { source: "native" | "legacy"; source_session_id?: string }
 export type ProductHistoryProps = {
   sessionId: string
   onOpenSession?: (session: HistorySessionRef) => void
@@ -26,40 +31,22 @@ export type ProductHistoryProps = {
   /** Render the immutable earlier transcript within an already continued native chat. */
   historicalOnly?: boolean
 }
-type Session = HistorySessionRef & {
-  title: string; status: string; model: string; visibility: string; created_at: string; updated_at: string
-  owner?: { id: string; name: string | null }; parent_session_id?: string | null; root_session_id?: string
-  archived: boolean; pinned: boolean; folder: string; execution_engine: string; read_only: boolean
-  read_marker_key?: string; completion_marker?: string
-}
-type Message = {
-  id: number; role: string; author_id?: string; author_name?: string; is_self?: boolean; source?: string; source_url?: string; status?: string; created_at: string
-  content: string; content_truncated?: boolean; attachments?: Resource[]
-}
-type Resource = {
-  id: string; name: string; kind: "upload" | "artifact"; size: number; media_type: string
-  url: string; preview_url?: string; download_url?: string; original_url?: string
-  preview_supported?: boolean; compatibility_download_supported?: boolean; original_download_available?: boolean
-}
-type Page<T> = { has_more: boolean; next_offset: number | null } & T
-type Files = {
-  files: Resource[]; sources: Resource[]; next_offset: number | null
-  has_more: Record<string, boolean>; limitations?: string[]; capture_inventory_truncated?: boolean
-}
-type Preview = {
-  name: string; preview_kind: string; text: string | null; language: string | null
-  truncated: boolean; notice: string | null; size: number; media_type: string
-}
+/** A listed file: an attachment, a saved output, or a recovered workspace package. */
+type Resource = Pick<HistoryAttachment | ProductFile | ContinuationRecoveryFile, "id" | "name" | "kind" | "size" | "media_type" | "url" | "download_url">
+  & Partial<Pick<ProductFile, "preview_url" | "preview_supported">>
 type Load<T> = { key: string; data?: T; loading: boolean; error?: Error }
 
-function useJson<T>(path: string | null, enabled: boolean, revision: number): Load<T> {
+/** `path` identifies the request (null disables it); `load` performs it. */
+function useJson<T>(path: string | null, enabled: boolean, revision: number, load: (signal: AbortSignal) => Promise<T>): Load<T> {
   const key = `${path ?? ""}:${revision}`
   const [result, setResult] = useState<Load<T>>({ key: "", loading: false })
+  const loader = useRef(load)
+  loader.current = load
   useEffect(() => {
     if (!enabled || !path) { setResult({ key, loading: false }); return }
     const controller = new AbortController()
     setResult({ key, loading: true })
-    void api<T>(path, "GET", undefined, controller.signal).then(data => {
+    void loader.current(controller.signal).then(data => {
       if (!controller.signal.aborted) setResult({ key, data, loading: false })
     }, reason => {
       if (!controller.signal.aborted) setResult({
@@ -86,6 +73,18 @@ function timestamp(value?: string) {
 }
 function bytes(value: number) {
   return value < 1024 ? `${value} B` : value < 1024 ** 2 ? `${(value / 1024).toFixed(1)} KB` : `${(value / 1024 ** 2).toFixed(1)} MB`
+}
+
+const fileKinds = ["attachment", "published", "capture", "archive"] as const
+/** Read a validated preview URL's query back into the typed file content request. */
+function fileContentQuery(value: string) {
+  const params = new URL(value, window.location.origin).searchParams
+  const kind = fileKinds.find(item => item === params.get("kind"))
+  if (!kind) throw new Error("This file has no preview.")
+  return {
+    kind, id: params.get("id") ?? undefined, path: params.get("path") ?? undefined,
+    revision: params.get("revision") ?? undefined, preview: params.get("preview") === "true",
+  }
 }
 
 /** Accept only the adapter's same-origin, session-scoped read endpoints. */
@@ -142,12 +141,17 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
   const interactive = useRef(enabled)
   interactive.current = enabled
   const root = `/product/sessions/${encodeURIComponent(sessionId)}`
-  const detail = useJson<{ session: Session; continuation?: HistorySessionRef; continuation_supported?: boolean }>(
-    `/history/sessions/${encodeURIComponent(sessionId)}?source=legacy`, enabled, revision + authorityRevision)
-  const messages = useJson<Page<{ messages: Message[] }>>(`${root}/messages?limit=40&offset=${messageOffset}`, enabled, revision)
-  const children = useJson<Page<{ sessions: Session[] }>>(`${root}/children?limit=20&offset=${childOffset}`, enabled, revision)
-  const files = useJson<Files>(`${root}/files?limit=20&offset=${fileOffset}`, enabled, revision)
-  const recovery = useJson<{ files: Resource[] }>(`${root}/continuation/files`, enabled && historicalOnly, revision)
+  const path = { run_id: sessionId }
+  const detail = useJson(`/history/sessions/${encodeURIComponent(sessionId)}?source=legacy`, enabled, revision + authorityRevision,
+    async signal => (await getHistorySession({ path, query: { source: "legacy" }, signal })).data)
+  const messages = useJson(`${root}/messages?limit=40&offset=${messageOffset}`, enabled, revision,
+    async signal => (await listProductSessionMessages({ path, query: { limit: 40, offset: messageOffset }, signal })).data)
+  const children = useJson(`${root}/children?limit=20&offset=${childOffset}`, enabled, revision,
+    async signal => (await listProductSessionChildren({ path, query: { limit: 20, offset: childOffset }, signal })).data)
+  const files = useJson(`${root}/files?limit=20&offset=${fileOffset}`, enabled, revision,
+    async signal => (await listProductSessionFiles({ path, query: { limit: 20, offset: fileOffset }, signal })).data)
+  const recovery = useJson(`${root}/continuation/files`, enabled && historicalOnly, revision,
+    async signal => (await listProductContinuationFiles({ path, signal })).data)
   const fatal = securityError || [detail.error, messages.error, children.error, files.error, recovery.error].find(denied)
   const session = fatal ? undefined : detail.data?.session
   const openedContinuation = useRef("")
@@ -191,7 +195,7 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
     startPending.current = true; setStarting(true); setActionError("")
     try {
       // Reauthorize the displayed history; the callback only opens a fresh composer.
-      await api(`/history/sessions/${encodeURIComponent(sessionId)}?source=legacy`)
+      await getHistorySession({ path: { run_id: sessionId }, query: { source: "legacy" } })
       if (mounted.current && interactive.current) await onStartNewNative()
     } catch (reason) {
       if (mounted.current) {
@@ -323,14 +327,6 @@ function HistoryView({ sessionId, onOpenSession, onStartNewNative, active = true
   </section>
 }
 
-type ContinuationPreview = {
-  state: "ready" | "blocked" | "continued"; source_fingerprint?: string; continuation?: HistorySessionRef
-  blockers: { code: string; message: string; action: string }[]
-  history_count: number; imported_count: number; visibility: string; file_notice: string
-  requires_recent_history: boolean; requires_workspace_ack: boolean; requires_workspace_drain: boolean
-}
-type ContinuationConnection = { id: string; name: string; kind: string; enabled: boolean }
-
 function ContinuationComposer({ sessionId, active, revision, onContinued, onDenied }: {
   sessionId: string; active: boolean; revision: number
   onContinued: (session: HistorySessionRef) => void; onDenied: (error: Error) => void
@@ -342,10 +338,13 @@ function ContinuationComposer({ sessionId, active, revision, onContinued, onDeni
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
   const pending = useRef(false), mounted = useRef(true), requestKey = useRef(crypto.randomUUID())
   const endpoint = `/product/sessions/${encodeURIComponent(sessionId)}/continuation`
-  const review = useJson<ContinuationPreview>(endpoint, active && open, revision + attempt)
-  const me = useJson<{ models: string[]; default_model: string }>("/me", active && open, revision)
-  const connections = useJson<ContinuationConnection[]>(
-    review.data ? `/connections?shared=${review.data.visibility === "shared"}` : null, active && open, revision + attempt)
+  const review = useJson(endpoint, active && open, revision + attempt,
+    async signal => (await previewProductContinuation({ path: { run_id: sessionId }, signal })).data)
+  const me = useJson("/me", active && open, revision, async signal => (await getMe({ signal })).data)
+  const shared = review.data?.visibility === "shared"
+  const connectionsPath = review.data ? `/connections?shared=${shared}` : null
+  const connections = useJson(connectionsPath, active && open, revision + attempt,
+    async signal => (await listConnections({ query: { shared }, signal })).data)
   const data = review.data
   useEffect(() => {
     mounted.current = true
@@ -363,11 +362,11 @@ function ContinuationComposer({ sessionId, active, revision, onContinued, onDeni
     if (!active || pending.current || !data || data.state !== "ready" || !prompt.trim()) return
     pending.current = true; setBusy(true); setError("")
     try {
-      const result = await api<HistorySessionRef>(endpoint, "POST", {
+      const { data: result } = await continueProductSession({ path: { run_id: sessionId }, body: {
         prompt, model: model || me.data?.default_model, connections: selected, request_key: requestKey.current,
         expected_source_fingerprint: data.source_fingerprint, accept_recent_history: recent,
         accept_workspace_omissions: omissions, drain_idle_workspace: drain,
-      })
+      } })
       if (mounted.current) onContinued(result)
     } catch (reason) {
       if (mounted.current) {
@@ -458,7 +457,8 @@ function FilePreview({ sessionId, resource, active, onDenied }: {
   const [revision, setRevision] = useState(0)
   const previewUrl = productFileUrl(resource.preview_url, sessionId)
   const downloadUrl = productFileUrl(resource.download_url ?? resource.url, sessionId)
-  const preview = useJson<Preview>(previewUrl?.replace(/^\/api/, "") ?? null, active && resource.preview_supported !== false, revision)
+  const preview = useJson(previewUrl ?? null, active && resource.preview_supported !== false, revision,
+    async signal => (await getProductSessionFileContent({ path: { run_id: sessionId }, query: fileContentQuery(previewUrl ?? ""), signal })).data)
   useEffect(() => {
     if (preview.error instanceof ApiError && [401, 403].includes(preview.error.status)) onDenied(preview.error)
   }, [preview.error, onDenied])

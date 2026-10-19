@@ -98,7 +98,7 @@ after(async () => {
 async function pageFor(t, width = 1440, handler) {
   const context = await browser.newContext({ viewport: { width, height: 900 } });
   const page = await context.newPage();
-  await page.route("**/api/**", handler || (route => route.fulfill({ json: mission() })));
+  await page.route(/^https?:\/\/[^/]+\/api\//, handler || (route => route.fulfill({ json: mission() })));
   t.after(async () => { await page.unrouteAll({ behavior: "wait" }); await context.close(); });
   await page.goto(address);
   return page;

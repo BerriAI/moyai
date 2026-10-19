@@ -5,7 +5,8 @@ import { ChevronRight, File, Flower2, GitMerge, GitPullRequest, GitPullRequestCl
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { api, ApiError } from "./api"
+import { ApiError } from "./api"
+import { attachSessionLink, getSubagent, getWorkspace, removeSessionLink, type PullRequestStatus, type SessionWorkspace, type SubagentDetail, type WorkspaceLink, type WorkspaceSubagent } from "./generated/api"
 import type { SidebarSession } from "./session-actions"
 import type { OutputResource } from "./workspace-types"
 import { previewFileLink, type OpenFile } from "./file-links"
@@ -13,19 +14,14 @@ import { pollVisible } from "./polling"
 import { WorkspaceKey } from "./workspace-overlay"
 import "./workspace.css"
 
-type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type AttachmentKind = "pull_request" | "output"
-type Link = { id?: string; kind: AttachmentKind | "source"; url: string; title: string; origin: "attached" | "mentioned"; can_remove: boolean }
-export type Subagent = { id: string; parent_id: string; session_id?: string | null; name: string; avatar: number; status: string; can_inspect: boolean; started_at: string; depth: number }
+type Link = WorkspaceLink
+export type Subagent = WorkspaceSubagent
 type PanelAgent = Pick<Subagent, "id" | "name" | "status" | "avatar"> & Partial<Pick<Subagent, "can_inspect">>
-type WorkspaceData = {
-  links: Link[]; files: { id: string; name: string; url: string; size: number; media_type?: string }[]
-  sources: { id: string; name: string; media_type: string; url: string; size?: number }[]
-  subagents: Subagent[]; subagents_limited: boolean
-}
-type AgentDetail = { id: string; name: string; output: string; steps: { kind: string; tool?: string; timestamp: string }[] }
+type WorkspaceData = SessionWorkspace
+type AgentDetail = SubagentDetail
 type OverviewProps = {
-  id: string; pullRequests: PRSummary[]; onUpdated: () => void
+  id: string; pullRequests: PullRequestStatus[]; onUpdated: () => void
   onPullRequest: (url: string, title: string) => void
   onSubagent: (agent: Subagent) => void; onOutput: (output: OutputResource) => void
   onSubagentSideChat?: (agent: Subagent) => void
@@ -64,7 +60,6 @@ function useWorkspaceResources(id: string, enabled = true, expanded = true) {
   const [value, setValue] = useState<{ id: string; data: WorkspaceData | null; error: string }>({ id, data: null, error: "" })
   const sequence = useRef(0), mounted = useRef(false)
   const read = useRef<AbortController | null>(null)
-  const base = `/sessions/${encodeURIComponent(id)}`
   const fail = useCallback((reason: unknown) => {
     setValue(previous => ({ id, data: previous.id === id && !isAccessError(reason) ? previous.data : null, error: message(reason) }))
   }, [id])
@@ -75,12 +70,12 @@ function useWorkspaceResources(id: string, enabled = true, expanded = true) {
     signal?.addEventListener("abort", abort, { once: true })
     read.current?.abort(); read.current = controller
     try {
-      const next = await api<WorkspaceData>(`${base}/workspace`, "GET", undefined, controller.signal)
+      const { data: next } = await getWorkspace({ path: { session_id: id }, signal: controller.signal })
       if (mounted.current && !controller.signal.aborted && version === sequence.current) setValue({ id, data: next, error: "" })
     } catch (error) {
       if (mounted.current && !controller.signal.aborted && version === sequence.current) fail(error)
     } finally { signal?.removeEventListener("abort", abort) }
-  }, [base, id, fail])
+  }, [id, fail])
   useEffect(() => {
     mounted.current = enabled
     setValue(previous => previous.id !== id || (!enabled && (previous.data || previous.error))
@@ -129,7 +124,6 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
   const [formError, setFormError] = useState(""), [busy, setBusy] = useState(false)
   const mounted = useRef(false), write = useRef<AbortController | null>(null)
   const opener = useRef<HTMLElement | null>(null), root = useRef<HTMLDivElement>(null)
-  const base = `/sessions/${encodeURIComponent(id)}`
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false; write.current?.abort() }
@@ -138,12 +132,12 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
     if (error && !data) { setLinkKind(null); setUrl(""); setTitle("") }
   }, [error, data])
   function add(kind: AttachmentKind, trigger: HTMLElement) { opener.current = trigger; setUrl(""); setTitle(""); setFormError(""); setLinkKind(kind) }
-  async function mutate(path: string, method: string, body?: object) {
+  async function mutate(method: "POST" | "DELETE", send: (signal: AbortSignal) => Promise<unknown>) {
     if (write.current) return
     const controller = new AbortController()
     write.current = controller; setBusy(true)
     try {
-      await api(path, method, body, controller.signal)
+      await send(controller.signal)
       if (!mounted.current || controller.signal.aborted) return
       await refresh()
       if (mounted.current && !controller.signal.aborted) {
@@ -159,14 +153,14 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
     } finally { if (write.current === controller) write.current = null; if (mounted.current) setBusy(false) }
   }
   function removeControl(link: Link) {
-    return link.can_remove && link.id ? <Button type="button" className="workspace-remove" size="icon-sm" variant="ghost" aria-label={`Remove link ${link.title}`} title={`Remove link ${link.title}`} disabled={busy} onClick={() => void mutate(`${base}/links/${encodeURIComponent(link.id!)}`, "DELETE")}><X size={14} /></Button> : null
+    return link.can_remove && link.id ? <Button type="button" className="workspace-remove" size="icon-sm" variant="ghost" aria-label={`Remove link ${link.title}`} title={`Remove link ${link.title}`} disabled={busy} onClick={() => void mutate("DELETE", signal => removeSessionLink({ path: { session_id: id, link_id: link.id! }, signal }))}><X size={14} /></Button> : null
   }
   function heading(label: string, count: number, kind?: AttachmentKind) {
     return <div className="workspace-picker-heading"><h3>{label}</h3><span>{count}</span>{kind && <Button type="button" size="icon-sm" variant="ghost" aria-label={`Add ${label.toLowerCase()}`} title={`Add ${label.toLowerCase()}`} disabled={busy} onClick={event => add(kind, event.currentTarget)}><Plus size={16} /></Button>}</div>
   }
   const prs = data?.links.filter(link => link.kind === "pull_request") ?? []
   for (const summary of pullRequests) {
-    if (!prs.some(link => link.url.toLowerCase() === summary.url.toLowerCase())) prs.push({ kind: "pull_request", url: summary.url, title: summary.title, origin: "mentioned", can_remove: false })
+    if (!prs.some(link => link.url.toLowerCase() === summary.url.toLowerCase())) prs.push({ id: null, kind: "pull_request", url: summary.url, title: summary.title, origin: "mentioned", can_remove: false })
   }
   const outputLinks = data?.links.filter(link => link.kind === "output") ?? []
   const outputs: OutputResource[] = data ? [
@@ -199,7 +193,7 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
         {outputs.map(output => <div className="workspace-picker-row" key={`${output.kind}:${output.id}`}><Button type="button" className="workspace-resource-action" variant="ghost" title={output.name} onClick={() => onOutput(output)}>
           {output.media_type?.startsWith("image/") ? <Image size={18} aria-hidden="true" /> : <File size={18} aria-hidden="true" />}<span><strong>{output.name}</strong><small>{output.kind === "artifact" ? `${fileSize(output.size)} · Saved file` : `${output.size === undefined ? "" : `${fileSize(output.size)} · `}Uploaded file`}</small></span><ChevronRight size={15} aria-hidden="true" />
         </Button></div>)}
-        {outputLinks.map(link => <div className="workspace-picker-row" key={link.url}><Button type="button" className="workspace-resource-action" variant="ghost" title={link.title || link.url} onClick={() => onOutput({ kind: "link", id: link.id, name: link.title || link.url, url: link.url })}>
+        {outputLinks.map(link => <div className="workspace-picker-row" key={link.url}><Button type="button" className="workspace-resource-action" variant="ghost" title={link.title || link.url} onClick={() => onOutput({ kind: "link", id: link.id ?? undefined, name: link.title || link.url, url: link.url })}>
           <Globe size={18} aria-hidden="true" /><span><strong>{link.title || link.url}</strong><small>Attached output link</small></span><ChevronRight size={15} aria-hidden="true" />
         </Button>{removeControl(link)}</div>)}
         {!outputs.length && !outputLinks.length && <p className="workspace-picker-empty">Saved files, uploads, and attached previews appear here.</p>}
@@ -214,7 +208,7 @@ function WorkspaceContents({ id, pullRequests, onPullRequest, onSubagent, onSuba
         event.preventDefault()
         if (write.current || !linkKind) return
         setFormError("")
-        try { const validated = attachmentUrl(url, linkKind); void mutate(`${base}/links`, "POST", { kind: linkKind, url: validated, title: title.trim() }) }
+        try { const validated = attachmentUrl(url, linkKind); void mutate("POST", signal => attachSessionLink({ path: { session_id: id }, body: { kind: linkKind, url: validated, title: title.trim() }, signal })) }
         catch (error) { setFormError(message(error)) }
       }}>
         <label>URL<Input autoFocus required type="url" maxLength={2048} disabled={busy} value={url} onChange={event => setUrl(event.target.value)} placeholder={linkKind === "pull_request" ? "https://github.com/owner/repo/pull/123" : "https://…"} /></label>
@@ -243,7 +237,7 @@ function SubagentContent({ sessionId, agent, active, onOpenFile }: { sessionId: 
       let terminal = ["completed", "failed", "interrupted", "stopped"].includes(agent.status), denied = false
       setLoading(true)
       try {
-        const value = await api<AgentDetail>(`/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agent.id)}`, "GET", undefined, controller.signal)
+        const { data: value } = await getSubagent({ path: { session_id: sessionId, run_id: agent.id }, signal: controller.signal })
         if (controller.signal.aborted) return
         setDetail(value); setError("")
         terminal = terminal || value.steps.some(step => ["run_completed", "run_failed"].includes(step.kind))

@@ -4,10 +4,12 @@ import json
 import secrets
 import time
 from dataclasses import dataclass, field
+from typing import Literal
 from urllib.parse import urlencode
 
 from fastapi import HTTPException, Request
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, ConfigDict
 
 from .connector_errors import ConnectorError
 from .db import database
@@ -17,6 +19,23 @@ LIMITATION = 'Personal Slack reads require your private web chat. Start a privat
 FAILURE = 'Personal Slack access failed. Retry, or reconnect personal Slack in Settings > Personal Slack. Organization access was not used.'
 KEYS = ('active_user_id', 'active_message_id', 'owner_id', 'private_owner_id', 'chat_enabled', 'token_hash', 'status', 'plugins', 'parent_run_id', 'deleted_at', 'deletion_requested_at')
 OAUTH_STATE_PREFIX = 'personal-slack:'
+
+
+class PersonalSlackStatus(BaseModel):
+    """The signed-in owner's personal Slack connection; grant material never leaves the server."""
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    available: bool
+    connected: bool
+    oauth_configured: bool
+    label: str
+    health: Literal['healthy', 'error', 'absent']
+    effective_source: Literal['personal', 'organization', 'none']
+    limitation: str
+
+
+class PersonalSlackOAuthStart(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    url: str
 
 
 @dataclass
@@ -228,13 +247,13 @@ class PersonalSlack:
                 raise HTTPException(403, 'Sign in with a verified individual work account.')
             return sid, owner
 
-        @app.get('/api/connections/slack/personal')
-        async def status(request: Request):
+        @app.get('/api/connections/slack/personal', operation_id='getPersonalSlack')
+        async def status(request: Request) -> PersonalSlackStatus:
             _, owner = await database(actor, request, required=False)
             return await database(self.status, owner)
 
-        @app.post('/api/connections/slack/personal/oauth')
-        async def start(request: Request):
+        @app.post('/api/connections/slack/personal/oauth', operation_id='startPersonalSlackOAuth')
+        async def start(request: Request) -> PersonalSlackOAuthStart:
             sid, owner = await database(actor, request, True)
             if not self.connectors.configured_oauth('slack'):
                 raise HTTPException(409, 'Configure the Slack OAuth client first.')
@@ -243,9 +262,9 @@ class PersonalSlack:
             await database(self.store.execute, 'INSERT INTO personal_slack_states VALUES(?,?,?,?,?)',
                 (digest(state), digest(sid), owner, revision, time.time() + 600))
             await flush()
-            return {'url': 'https://slack.com/oauth/v2/authorize?' + urlencode({
+            return PersonalSlackOAuthStart(url='https://slack.com/oauth/v2/authorize?' + urlencode({
                 'client_id': self.settings.slack_client_id, 'redirect_uri': self.redirect_uri(), 'state': state,
-                'user_scope': 'search:read,channels:history,groups:history,im:history,mpim:history'})}
+                'user_scope': 'search:read,channels:history,groups:history,im:history,mpim:history'}))
 
         async def callback(request: Request, state: str = '', code: str = '', error: str = ''):
             sid, owner = await database(actor, request)
@@ -269,15 +288,15 @@ class PersonalSlack:
             await flush()
             return RedirectResponse('/?connection=success#personal-slack', status_code=303)
 
-        @app.delete('/api/connections/slack/personal')
-        async def disconnect(request: Request):
+        @app.delete('/api/connections/slack/personal', operation_id='disconnectPersonalSlack')
+        async def disconnect(request: Request) -> PersonalSlackStatus:
             _, owner = await database(actor, request, True)
             await database(self.disconnect, owner)
             await flush()
             return await database(self.status, owner)
 
-        @app.post('/api/connections/slack/personal/check')
-        async def check(request: Request):
+        @app.post('/api/connections/slack/personal/check', operation_id='checkPersonalSlack')
+        async def check(request: Request) -> PersonalSlackStatus:
             _, owner = await database(actor, request, True)
             revision = None
             try:

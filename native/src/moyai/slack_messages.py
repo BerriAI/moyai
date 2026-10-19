@@ -21,6 +21,11 @@ PR_REFERENCE_LABEL = re.compile(
 PR_TEXT_LINK = re.compile(r"<(https://github\.com/[^\s<>|]+)(?:\|[^>\n]*)?>|(https://github\.com/[^\s<>]+)")
 
 
+def plain_slack_title(text: str) -> str:
+    """Slack's wire link notation is not a readable conversation title."""
+    return re.sub(r"<(https?://[^<>|\s]+)(?:\|([^<>\n]*))?>", lambda match: unescape(match[2] or match[1]), text)
+
+
 def session_url(public_url: str, session_id: str, source_run_id: str = "") -> str:
     if not public_url:
         return ""

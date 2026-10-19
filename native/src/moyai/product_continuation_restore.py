@@ -23,6 +23,7 @@ from sqlalchemy.pool import NullPool
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
+from .coding_image import with_node
 from .contracts import PreparedTurn, RunScope
 from .models import Session, Turn
 from .postgres import create_engine
@@ -62,12 +63,13 @@ def runtime_image(base: Any = None):
     image = base or modal.Image.debian_slim(python_version="3.13")
     image = (
         image.apt_install(
-            "git", "ripgrep", "curl", "jq", "util-linux", "nodejs", "npm", "python3", "python3-pip",
+            "git", "ripgrep", "curl", "jq", "util-linux", "python3", "python3-pip",
             "xvfb", "openbox", "xterm", "xdotool", "chromium", "tint2", "x11vnc",
             "x11-xserver-utils", "fonts-dejavu-core",
         )
         .pip_install("uv", "pytest", "pillow==12.3.0", "websockify==0.13.0", "playwright==1.63.0")
     )
+    image = with_node(image)
     for tool in WORKSPACE_TOOLS:
         image = tool.install(image)
     return (

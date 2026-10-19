@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -17,6 +18,57 @@ from .product_identity import ProductGrant, ProductIdentityAdapter, ProductPrinc
 NOTE = "Select a skill with / in chat. The original library, revisions and supporting files are retained."
 CAPABILITIES = {"read": True, "create": False, "update": False, "delete": False, "load": True}
 METADATA = ("id", "name", "description", "scope", "icon", "revision", "archived", "created_at", "updated_at")
+
+
+class ProductSkillResponse(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class ProductSkillCapabilities(ProductSkillResponse):
+    read: bool
+    create: bool
+    update: bool
+    delete: bool
+    load: bool
+
+
+class ProductSkillSummary(ProductSkillResponse):
+    id: str
+    name: str
+    description: str
+    scope: str
+    icon: str
+    revision: int
+    archived: bool
+    created_at: str
+    updated_at: str
+    reference: str
+    can_manage: bool
+    source: Literal["canonical"]
+
+
+class ProductSkillLibrary(ProductSkillResponse):
+    skills: list[ProductSkillSummary]
+    can_publish: bool
+    capabilities: ProductSkillCapabilities
+    source: Literal["canonical"]
+    note: str
+    has_more: bool
+    next_offset: int | None
+
+
+class ProductSkillFile(ProductSkillResponse):
+    path: str
+    size: int
+    characters: int
+    sha256: str
+
+
+class ProductSkillDetail(ProductSkillSummary):
+    instructions: str
+    files: list[ProductSkillFile]
+    capabilities: ProductSkillCapabilities
+    note: str
 
 
 class ProductSkillCatalog:
@@ -198,18 +250,20 @@ class ProductSkillCatalog:
 def routes(catalog: ProductSkillCatalog) -> APIRouter:
     router = APIRouter(prefix="/api/product/skills")
 
-    @router.get("")
+    @router.get("", operation_id="listProductSkills")
     async def listing(
         request: Request, archived: bool = False,
         offset: int = Query(0, ge=0, le=10000), limit: int = Query(100, ge=1, le=100),
-    ):
+    ) -> ProductSkillLibrary:
         principal = await catalog.identity.authenticate(request)
-        return await catalog.listing(principal.grant, archived=archived, offset=offset, limit=limit)
+        return ProductSkillLibrary.model_validate(
+            await catalog.listing(principal.grant, archived=archived, offset=offset, limit=limit),
+        )
 
-    @router.get("/{skill_id}")
-    async def detail(skill_id: str, request: Request, revision: int | None = Query(None, ge=1)):
+    @router.get("/{skill_id}", operation_id="getProductSkill")
+    async def detail(skill_id: str, request: Request, revision: int | None = Query(None, ge=1)) -> ProductSkillDetail:
         principal = await catalog.identity.authenticate(request)
-        return await catalog.detail(principal.grant, skill_id, revision=revision)
+        return ProductSkillDetail.model_validate(await catalog.detail(principal.grant, skill_id, revision=revision))
 
     @router.get("/{skill_id}/files/{path:path}")
     async def file(skill_id: str, path: str, request: Request, revision: int | None = Query(None, ge=1)):

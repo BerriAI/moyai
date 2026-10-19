@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { api, ApiError, csrfToken } from "./api"
+import { ApiError, csrfToken } from "./api"
+import { getTurnProgress } from "./generated/api"
 import type { Turn } from "./conversation-state"
 import { pollVisible } from "./polling"
-import type { WorkEntry, WorkSnapshot } from "./work-timeline"
+import type { WorkEntry } from "./work-timeline"
 
 /** One shared read per execution, even when steering splits its visible history. */
 export function useWorkProgress(
@@ -36,10 +37,9 @@ export function useWorkProgress(
     update(turn.id, { loading: true })
     const promise = (async () => {
       try {
-        const data = await api<WorkSnapshot>(
-          `/sessions/${encodeURIComponent(sessionId)}/progress/${encodeURIComponent(turn.id)}?include_activity=true`,
-          "GET", undefined, controller.signal,
-        )
+        const { data } = await getTurnProgress({
+          path: { session_id: sessionId, turn_id: turn.id }, query: { include_activity: true }, signal: controller.signal,
+        })
         if (current()) update(turn.id, { data, status: turn.status, error: "", loading: false })
       } catch (error) {
         if (!current()) return

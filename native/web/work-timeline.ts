@@ -1,20 +1,10 @@
 import type { Message, Turn } from "./conversation-state"
 import { progressMessages, type LiveTranscript, type ProgressMessage } from "./live-transcript"
+import type { TurnWorkProgress, WorkAgentProgress, WorkToolProgress } from "./generated/api"
 
-export type ToolProgress = {
-  id: string; name: string; status: "running" | "completed" | "failed" | "interrupted"
-  created_at: string; finished_at: string | null
-}
-export type AgentProgress = {
-  id: string; session_id?: string | null; parent_id: string | null; parent_name: string | null; name: string; avatar: number
-  depth: number; status: string; created_at: string; updated_at: string
-  messages: (Omit<ProgressMessage, "phase"> & { phase: "commentary" | "final_answer" })[]
-  tools: ToolProgress[]; messages_limited: boolean; tools_limited: boolean
-}
-export type WorkSnapshot = {
-  messages: ProgressMessage[]; tools?: ToolProgress[]; subagents?: AgentProgress[]
-  tools_limited?: boolean; subagents_limited?: boolean
-}
+export type ToolProgress = WorkToolProgress
+export type AgentProgress = WorkAgentProgress
+export type WorkSnapshot = TurnWorkProgress
 export type WorkEntry = { data?: WorkSnapshot; status?: string; loading?: boolean; error?: string }
 export type WorkSegment = {
   id: string; turn: Turn; after: number | null; before: number | null
@@ -122,6 +112,31 @@ export function workSegments(messages: Message[], turns: Turn[]): Map<number, Wo
   return segments
 }
 
+/** Approval/login continuations have their own execution but no new user bubble. */
+export function unanchoredWorkSegments(messages: Message[], turns: Turn[]): Map<number | null, WorkSegment[]> {
+  const anchored = new Set([...workSegments(messages, turns).values()].map(segment => segment.turn.id))
+  const result = new Map<number | null, WorkSegment[]>()
+  const roots = turns.filter(turn => !turn.parent_turn && turn.status !== "queued" && !anchored.has(turn.id))
+    .sort((a, b) => (instant(a.created_at) ?? 0) - (instant(b.created_at) ?? 0))
+  for (const turn of roots) {
+    const at = instant(turn.created_at)
+    const next = messages.find(message => message.turn_id === turn.id
+      || (at !== null && (instant(message.created_at) ?? -Infinity) > at))
+    const key = next?.id ?? null
+    const group = result.get(key) ?? []
+    group.push({ id: `${turn.id}:continuation`, turn, after: null, before: null, earlier: false,
+      hasFinalAnswer: messages.some(message => message.id >= 0 && message.turn_id === turn.id && message.role === "assistant" && Boolean(message.content.trim())) })
+    result.set(key, group)
+  }
+  return result
+}
+
+/** A replayed stream is history. Only an authoritative progress read drives current status. */
+export function currentWorkTool(entry?: WorkEntry): ToolProgress | undefined {
+  if (entry?.error) return undefined
+  return entry?.data?.tools?.filter(tool => tool.status === "running").at(-1)
+}
+
 export function mergeProgress(saved: ProgressMessage[], live: ProgressMessage[]): ProgressMessage[] {
   const messages = new Map(saved.map(message => [message.id, message]))
   const legacy = saved.filter(message => !message.id.startsWith("commentary:"))
@@ -146,7 +161,7 @@ export function mergeProgress(saved: ProgressMessage[], live: ProgressMessage[])
 export function liveTools(live?: LiveTranscript): ToolProgress[] {
   const calls = new Map<string, ToolProgress>()
   for (const event of live?.activity ?? []) {
-    if (!event.id || !event.name || !["tool_call", "tool_result"].includes(event.type)) continue
+    if (event.type === "capability" || !event.id || !event.name) continue
     const previous = calls.get(event.id)
     const at = event.created_at ?? previous?.created_at ?? ""
     calls.set(event.id, {

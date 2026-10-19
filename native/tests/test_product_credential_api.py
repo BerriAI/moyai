@@ -154,7 +154,7 @@ async def test_admin_assistance_cannot_answer_another_task_or_open_private_sessi
             (await db.get(Session, f.session.id)).visibility = "shared"
         view = await client.get(f"/api/sessions/{f.session.id}")
         assert view.status_code == 200, view.text
-        assert view.json()["can_answer"] is False and "pending" not in view.json()
+        assert view.json()["can_answer"] is False and view.json().get("pending") is None
         assert view.json()["credential_requests"] == [{"request_id": pending["request_id"]}]
         denied = await client.post(f"/api/sessions/{f.session.id}/answers", json=answers(f.turn.id))
         assert denied.status_code == 403
@@ -239,7 +239,7 @@ async def test_verified_web_slack_reply_keeps_original_grant_and_stale_links_los
         # in for a currently verified Slack/individual relationship.
         view = await client.get(f"/api/sessions/{f.session.id}")
         assert view.status_code == 200 and view.json()["can_answer"] is False
-        assert "pending" not in view.json()
+        assert view.json().get("pending") is None
         denied = await client.post(f"/api/sessions/{f.session.id}/answers", json=answers(f.turn.id))
         assert denied.status_code == 403
 

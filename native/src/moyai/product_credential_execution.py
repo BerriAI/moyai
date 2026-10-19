@@ -87,7 +87,7 @@ class ProductCredentialExecution:
             principal.id != scope.actor_id or turn.actor_id != principal.id or turn.session_id != session.id
             or session.active_turn != turn.id or session.status != "running" or turn.status != "running"
             or session.visibility != scope.visibility or session.surface != scope.surface
-            or (direct and (run_id != turn.id or turn.parent_turn is not None))
+            or (direct and (run_id != scope.root_run_id or turn.parent_turn is not None))
         ):
             raise HTTPException(403, "The original requester no longer owns this execution.")
         grants = await self.database.scope_grants(db, scope, session)

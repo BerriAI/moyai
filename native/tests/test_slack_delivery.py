@@ -174,7 +174,7 @@ async def test_failed_turn_posts_error_then_uploads_debug_file(runtime, active, 
     debug_bytes = base64.b64decode(file_content["upload"]["content"])
 
     assert error in message_content["text"]
-    assert "Debug log attached." in message_content["text"]
+    assert "Debug log attached." not in message_content["text"]
     assert file_content["after"] == message.identity
 
     from agentchat.channels.slack import files
@@ -324,3 +324,23 @@ async def test_sqlite_writer_wait_does_not_block_slack_event_loop(runtime, activ
     assert len(ticks) >= 10
     assert max(b - a for a, b in itertools.pairwise(ticks)) < 0.3
     assert calls == ["/chat.postMessage"]
+
+
+async def test_file_rejection_preserves_safe_provider_error_before_upload():
+    from unittest.mock import AsyncMock
+
+    from agentchat.models import UploadFile
+
+    from moyai.slack_file_delivery import SlackFileDelivery
+
+    before = AsyncMock()
+    for code, expected in [("missing_scope", "missing_scope"), ("invalid_arguments", "invalid_arguments"),
+                           ("private token value", "unknown_error")]:
+        async def handle(request, code=code):
+            assert request.url.path == "/files.getUploadURLExternal"
+            return httpx.Response(200, json={"ok": False, "error": code})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="https://slack.test/") as client:
+            with pytest.raises(ValueError, match=f"files.getUploadURLExternal rejected the upload: {expected}"):
+                await SlackFileDelivery.send(client, SlackFileDelivery.content(
+                    UploadFile(filename="debug.json", content=b"{}"), after="failure"),
+                    {"channel": "CTEST", "thread_ts": "1.2"}, headers=None, before_send=before)

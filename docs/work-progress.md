@@ -8,7 +8,11 @@ Private reasoning, tool arguments and tool results are not part of this feed.
 A **Send now** correction starts a new working section. Earlier sections stay
 visible above that input. Only a saved, nonempty parent answer collapses the
 answered section; stopped or failed work without an answer stays expanded.
-Saved activity remains available after reload. The feed belongs to the original
+Saved activity includes history continuations and remains available after reload.
+Work resumed after a login or approval has its own activity section, even without
+a new user message. The current action label follows the saved running action;
+catching up on old streamed events does not replay them as current work.
+The feed belongs to the original
 requester, including in shared conversations.
 
 Expand an action count, such as **11 actions**, then select a row to open its
@@ -25,15 +29,15 @@ the parent's feed. Activity is bounded and indicates when older entries were
 omitted. Visible active conversations refresh persisted activity every four
 seconds alongside the existing root text stream.
 
-Slack reserves one bot reply for each admitted input segment. Public parent or
-named child updates edit that reply, coalesced to at most one progress revision
+Slack posts its first bot reply only when an admitted input segment has real
+commentary or an answer. Later public parent or named child updates edit that reply, coalesced to at most one progress revision
 every 30 seconds. Steering preserves the prior slot, starts a slot after the new
 input, and routes the final answer into that latest slot—even after accepted
 guidance becomes included in answer settlement. Older queued inputs promoted
 with **Send now** use admission order.
 
-Slack's native **“Moyai is working…”** indicator runs alongside those editable
-replies. It reflects queued, starting, running and saving work, refreshes every
+Slack's native **“Moyai is working…”** indicator replaces canned received, ready,
+working and saving replies and the eyes reaction. It reflects queued, starting, running and saving work, refreshes every
 minute, and is reasserted after attempted or confirmed bot replies. Steering
 keeps the execution's indicator active while preserving the previous reply
 slot. Completion, failure, Stop, pause, deletion and requests for user input
@@ -63,3 +67,15 @@ older deployment retain their existing delivery behavior.
 Stale unsent progress is suppressed. An external write with an unconfirmed
 acknowledgement remains claimed until Slack reconciliation confirms it; it is
 not reposted. Existing requester and installation checks still apply.
+
+If an execution fails, Moyai attempts to save settled conversation and computer
+state before releasing the workspace. A later authorized request can restore
+that checkpoint. Unresolved external writes retain their review barrier. If the
+checkpoint cannot be saved, the conversation shows a recovery warning.
+
+Slack delivery notices distinguish failed file uploads from undelivered messages
+and include a safe provider error code when available. The failure message does
+not claim that a debug attachment was delivered before Slack confirms it.
+
+Debug exports identify omitted teammate activity so their visible token totals
+are not mistaken for the complete session.

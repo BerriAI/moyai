@@ -10,15 +10,15 @@ from __future__ import annotations
 import copy
 import re
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
-from app.credentials import PROVIDERS, Credentials, Resolve, SaveSecret, UpdateSecret
+from app.credentials import PROVIDERS, Credentials, Provider, Resolve, SaveSecret, UpdateSecret
 from app.db import database as source_database
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .product_connections import CommittedSourceWrites
 from .product_identity import ProductPrincipal
@@ -35,6 +35,109 @@ class ProductSaveSecret(SaveSecret):
 
 class ProductUpdateSecret(UpdateSecret):
     root_id: str | None = Field(default=None, pattern=ROOT)
+
+
+class CredentialResponse(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class CredentialProvider(CredentialResponse):
+    id: Provider
+    name: str
+    setup_url: str
+
+
+class CredentialSecretMetadata(CredentialResponse):
+    """Saved credential metadata; the encrypted value is never returned."""
+
+    id: str
+    provider: str
+    label: str
+    scope: str
+    created_at: str
+    name: str
+    format: str
+    env_var: str
+    lifetime: str
+    root_id: str
+    expires_at: str
+    invalid_reason: str
+    revision: int
+    status: str
+    can_manage: bool
+
+
+class CredentialCapabilities(CredentialResponse):
+    create: bool
+    update: bool
+    delete: bool
+    scopes: list[str]
+    lifetimes: list[str]
+    organization: bool
+    native_execution: bool
+    native_formats: list[str]
+    native_provider_http: bool
+    native_aws_login: bool
+
+
+class CredentialInventory(CredentialResponse):
+    providers: list[CredentialProvider]
+    root_id: str
+    secrets: list[CredentialSecretMetadata]
+    capabilities: CredentialCapabilities
+    note: str
+
+
+class CredentialSaveResult(CredentialResponse):
+    id: str
+    saved: bool
+
+
+class CredentialRevokeResult(CredentialResponse):
+    revoked: bool
+
+
+class CredentialAccessInputField(CredentialResponse):
+    name: str
+    label: str
+    secret: bool
+    required: bool
+
+
+class CredentialAccessRequest(CredentialResponse):
+    request_id: str
+    generation: int
+    status: str
+    revision: int
+    session_id: str
+    provider: str
+    name: str
+    format: str
+    env_var: str
+    reason: str
+    setup_url: str
+    setup_instructions: str
+    input_fields: list[CredentialAccessInputField]
+
+
+class CredentialAccessRequestList(CredentialResponse):
+    requests: list[CredentialAccessRequest]
+
+
+class CredentialAccessRequestDetail(CredentialAccessRequest):
+    credentials: list[CredentialSecretMetadata]
+    scopes: list[str]
+    lifetimes: list[str]
+    can_resolve: bool
+    note: str
+
+
+class CredentialResolveResult(CredentialResponse):
+    resolved: bool
+    resumed: bool
+    session_id: str
+    turn_id: str | None = None
+    note: str | None = None
 
 
 class SecretRoute(APIRoute):
@@ -274,42 +377,53 @@ class ProductSecrets:
     def routes(self) -> APIRouter:
         router = APIRouter(route_class=SecretRoute)
 
-        @router.get("/api/credentials")
-        @router.get("/api/settings/secrets")
-        async def inventory(request: Request, run_id: str = ""):
-            return await self.inventory(await self.principal(request), run_id)
+        @router.get("/api/credentials", operation_id="listCredentials")
+        async def inventory(request: Request, run_id: str = "") -> CredentialInventory:
+            return CredentialInventory.model_validate(await self.inventory(await self.principal(request), run_id))
 
-        @router.post("/api/credentials/secrets", status_code=201)
-        async def create(body: ProductSaveSecret, request: Request):
-            return await self.create(request, await self.principal(request, mutation=True), body)
-
-        @router.patch("/api/credentials/secrets/{identity}")
-        async def update(identity: str, body: ProductUpdateSecret, request: Request):
-            return await self.update(request, await self.principal(request, mutation=True), identity, body)
-
-        @router.delete("/api/credentials/secrets/{identity}")
-        async def revoke(identity: str, request: Request):
-            return await self.revoke(request, await self.principal(request, mutation=True), identity)
-
-        @router.post("/api/credentials/requests/{identity}")
-        async def resolve_request(identity: str, body: Resolve, request: Request):
-            return await self.execution.resolve(
-                request, await self.principal(request, mutation=True), identity, body,
+        @router.post("/api/credentials/secrets", status_code=201, operation_id="createCredential")
+        async def create(body: ProductSaveSecret, request: Request) -> CredentialSaveResult:
+            return CredentialSaveResult.model_validate(
+                await self.create(request, await self.principal(request, mutation=True), body),
             )
 
-        @router.get("/api/credentials/requests")
-        async def pending_requests(session_id: str, request: Request):
-            return await self.execution.pending(await self.principal(request), session_id)
+        @router.patch("/api/credentials/secrets/{identity}", operation_id="updateCredential")
+        async def update(identity: str, body: ProductUpdateSecret, request: Request) -> CredentialSecretMetadata:
+            return CredentialSecretMetadata.model_validate(
+                await self.update(request, await self.principal(request, mutation=True), identity, body),
+            )
 
-        @router.get("/api/credentials/requests/{identity}")
-        async def describe_request(identity: str, request: Request):
-            return await self.execution.describe(await self.principal(request), identity)
+        @router.delete("/api/credentials/secrets/{identity}", operation_id="revokeCredential")
+        async def revoke(identity: str, request: Request) -> CredentialRevokeResult:
+            return CredentialRevokeResult.model_validate(
+                await self.revoke(request, await self.principal(request, mutation=True), identity),
+            )
 
-        @router.post("/api/settings/secrets")
-        @router.patch("/api/settings/secrets/{identity}")
-        @router.delete("/api/settings/secrets/{identity}")
-        async def native_secret_mutation(request: Request):
-            await self.principal(request, mutation=True)
-            raise HTTPException(409, "Use canonical credential routes to preserve scope and revision.")
+        @router.post("/api/credentials/requests/{identity}", operation_id="resolveCredentialRequest")
+        async def resolve_request(identity: str, body: Resolve, request: Request) -> CredentialResolveResult:
+            return CredentialResolveResult.model_validate(await self.execution.resolve(
+                request, await self.principal(request, mutation=True), identity, body,
+            ))
+
+        @router.get("/api/credentials/requests", operation_id="listCredentialRequests")
+        async def pending_requests(session_id: str, request: Request) -> CredentialAccessRequestList:
+            return CredentialAccessRequestList.model_validate(
+                await self.execution.pending(await self.principal(request), session_id),
+            )
+
+        @router.get("/api/credentials/requests/{identity}", operation_id="getCredentialRequest")
+        async def describe_request(identity: str, request: Request) -> CredentialAccessRequestDetail:
+            return CredentialAccessRequestDetail.model_validate(
+                await self.execution.describe(await self.principal(request), identity),
+            )
 
         return router
+
+    async def settings_inventory(self, request: Request, run_id: str) -> CredentialInventory:
+        """GET /api/settings/secrets in product mode; settings_api owns the route."""
+        return CredentialInventory.model_validate(await self.inventory(await self.principal(request), run_id))
+
+    async def reject_settings_mutation(self, request: Request) -> NoReturn:
+        """Settings secret writes in product mode: canonical credential routes own scope and revision."""
+        await self.principal(request, mutation=True)
+        raise HTTPException(409, "Use canonical credential routes to preserve scope and revision.")

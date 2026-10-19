@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, TypedDict, TypeGuard
+import re
+from collections.abc import Awaitable, Callable, Iterable
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeGuard
 
 import httpx
 from agentchat.channels.slack import files as slack_files
 from agentchat.models import UploadFile
 from sqlalchemy import select
 
-from .models import Delivery
+from .models import Artifact, Delivery
 
 if TYPE_CHECKING:
     from .runtime import Runtime
+    from .storage import ObjectStore
 
 
 class _UploadContent(TypedDict):
     filename: str
     title: str | None
-    content: str
+    content: NotRequired[str]
+    digest: NotRequired[str]
 
 
 class SlackFileContent(TypedDict):
@@ -39,6 +43,29 @@ class SlackFileDelivery:
         }
 
     @staticmethod
+    def artifact(artifact: Artifact, *, after: str) -> dict[str, object]:
+        filename = PurePosixPath(artifact.name).name
+        return {
+            "upload": {
+                "filename": filename,
+                "title": filename,
+                "digest": artifact.digest,
+            },
+            "after": after,
+        }
+
+    @staticmethod
+    def strip_links(text: str, artifact_ids: Iterable[str], public_url: str) -> str:
+        public_url_prefix = re.escape(public_url.rstrip("/"))
+        for artifact_id in artifact_ids:
+            text = re.sub(
+                rf"!?\[[^\]\n]*\]\((?:{public_url_prefix})?/api/files/{re.escape(artifact_id)}\)",
+                "",
+                text,
+            )
+        return re.sub(r"\n{3,}", "\n\n", text).rstrip()
+
+    @staticmethod
     def is_content(content: object) -> TypeGuard[SlackFileContent]:
         if not isinstance(content, dict):
             return False
@@ -49,7 +76,9 @@ class SlackFileDelivery:
             and isinstance(upload.get("filename"), str)
             and "title" in upload
             and (upload["title"] is None or isinstance(upload["title"], str))
-            and isinstance(upload.get("content"), str)
+            and ("content" not in upload or isinstance(upload["content"], str))
+            and ("digest" not in upload or isinstance(upload["digest"], str))
+            and (isinstance(upload.get("content"), str) != isinstance(upload.get("digest"), str))
         )
 
     @staticmethod
@@ -66,10 +95,19 @@ class SlackFileDelivery:
         content: SlackFileContent,
         destination: dict[str, str],
         *,
+        objects: ObjectStore,
         headers: dict[str, str] | None,
         before_send: Callable[[], Awaitable[None]],
     ) -> dict[str, object]:
         upload = content["upload"]
+        digest = upload.get("digest")
+        if digest is not None:
+            file_content = await objects.get(digest)
+        else:
+            encoded_content = upload.get("content")
+            if encoded_content is None:
+                raise ValueError("Slack file upload content is missing.")
+            file_content = base64.b64decode(encoded_content, validate=True)
 
         async def request(api_method: str, payload: dict[str, object]) -> dict[str, object]:
             response = await client.post(api_method, headers=headers, json=payload)
@@ -77,6 +115,10 @@ class SlackFileDelivery:
             result: object = response.json()
             if not isinstance(result, dict):
                 raise TypeError("Slack file upload API returned a non-object response.")
+            if result.get("ok") is False:
+                code = result.get("error")
+                safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,80}", code) else "unknown_error"
+                raise ValueError(f"Slack {api_method} rejected the upload: {safe_code}.")
             normalized: dict[str, object] = {}
             for key, value in result.items():
                 if not isinstance(key, str):
@@ -87,7 +129,7 @@ class SlackFileDelivery:
         uploaded = await slack_files.upload_slack_files(
             (UploadFile(
                 filename=upload["filename"],
-                content=base64.b64decode(upload["content"], validate=True),
+                content=file_content,
                 title=upload["title"],
             ),),
             request=request,

@@ -25,6 +25,7 @@ from .github_workflow_types import (
     StackList,
     StackRead,
     SubmitReview,
+    WorkspacePublishBranch,
 )
 from .product_github_workflows import Workflows
 
@@ -68,12 +69,17 @@ def register(tools: FunctionToolset[RunScope], publisher: Publications) -> None:
         return await workflows.create_branch(ctx, request)
 
     @tools.tool(metadata=WRITE, sequential=True)
-    async def publish_branch(ctx: RunContext[RunScope], request: PublishBranch) -> dict[str, JsonValue]:
+    async def publish_branch(ctx: RunContext[RunScope], request: PublishBranch | WorkspacePublishBranch) -> dict[str, JsonValue]:
         """Publish files without opening a PR. Omit expected_head_sha to create a new named branch.
 
         Updating an existing branch requires acknowledged Moyai ownership and its exact current
         head as both base_sha and expected_head_sha. The update is atomic and never forced.
+        For local checkout changes, stage the intended files with git add and pass directory
+        instead of files. The worker reads the staged tree; do not copy file contents into the call.
         """
+        if isinstance(request, WorkspacePublishBranch):
+            from .product_github_workspace import staged_request
+            request = await staged_request(publisher, ctx, request)
         return await workflows.publish_branch(ctx, request)
 
     @tools.tool(metadata=WRITE, sequential=True)

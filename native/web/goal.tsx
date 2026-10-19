@@ -6,11 +6,9 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import "./goal.css"
 
-export type Goal = {
-  objective: string; status: "active" | "paused" | "complete" | "blocked" | "budget_limited"
-  owner_id: string; generation: number; tokens_used: number; token_budget: number | null
-  turns: number; blocked_count: number; reason: string; created_at: string
-}
+import type { GoalView } from "./generated/api"
+export type Goal = GoalView
+
 const labels = { active: "Working toward goal", paused: "Goal paused", complete: "Goal complete", blocked: "Goal needs attention", budget_limited: "Goal budget reached" }
 
 export function goalCommandAction(prompt: string): "view" | "set" | "edit" | "pause" | "resume" | "clear" | null {

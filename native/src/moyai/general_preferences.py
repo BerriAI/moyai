@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class GeneralPreferences(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_serialization_defaults_required=True)
 
     delivery_mode: Literal["when_idle", "asap"] = "when_idle"
     connection_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] | None = Field(

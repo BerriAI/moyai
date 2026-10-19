@@ -149,7 +149,6 @@ legend { margin-bottom: 12px; font-weight: 500; }
 .activity-row { border-bottom: 1px solid var(--ui-border); padding: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
 .activity-row summary { cursor: pointer; color: var(--ui-primary); }
 .activity-row pre { max-height: 320px; overflow: auto; }
-.activity-text { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px 0; color: var(--ui-muted); }
 .computer-info { border-top: 1px solid var(--ui-border); margin-top: 32px; padding-top: 16px; font-size: 12px; }
 .computer-info p { color: var(--ui-success); margin: 8px 0; }
 .computer-info code { overflow-wrap: anywhere; font-size: 10px; color: var(--ui-muted); }

@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from .commentary import public_text_parts
 from .delegation_models import DelegatedSession, DelegatedTurn
+from .history_handoff import failed_attempts, turn_events
 from .models import Session, Turn
 from .presentation import private_tool, redact
 from .progress import progress_secrets, turn_progress
@@ -112,10 +113,29 @@ class WorkProgress:
 
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
+        self._attempts: OrderedDict[str, tuple[tuple, list[StepEvent]]] = OrderedDict()
         self._snapshots: OrderedDict[tuple[str, str], _PublicSnapshot] = OrderedDict()
 
     def clear(self) -> None:
         self._snapshots.clear()
+        self._attempts.clear()
+
+    async def _events(self, turn_id: str) -> list[StepEvent]:
+        events = await turn_events(self.runtime, turn_id)
+        if not any(event.kind == "model_request_completed" for event in events):
+            return events
+        last = events[-1]
+        revision = (len(events), last.run_id, last.kind, last.step_index, last.timestamp)
+        cached = self._attempts.get(turn_id)
+        # A model completion can precede snapshot persistence. Keep checking
+        # that frontier until a later event establishes its saved contents.
+        if cached is None or cached[0] != revision or last.kind == "model_request_completed":
+            cached = (revision, await failed_attempts(self.runtime, turn_id, events))
+            self._attempts[turn_id] = cached
+        self._attempts.move_to_end(turn_id)
+        while len(self._attempts) > CACHE_LIMIT:
+            self._attempts.popitem(last=False)
+        return sorted([*events, *cached[1]], key=lambda event: event.timestamp)
 
     async def action(self, turn: Turn, action_id: str, agent_id: str | None) -> tuple[dict, str]:
         """Load one action on demand, entering through requester-scoped progress.
@@ -141,11 +161,12 @@ class WorkProgress:
                 run_id = source.id
                 terminal = source.status in {"completed", "failed", "stopped", "resumed"}
         secrets = progress_secrets(self.runtime, source)
-        events = [event for event in await self.runtime.stores.steps.list_events(run_id=run_id)
+        events = [event for event in await self._events(run_id)
                   if event.tool_call_id == call_id]
         activity, _ = tools(events, terminal=terminal, secrets=secrets)
         if not activity:
             raise HTTPException(404, "Action not found.")
+        run_id = events[-1].run_id
         item = activity[-1]
         result = {**item, "id": action_id, "input": None, "output": None,
                   "restricted": private_tool(item["name"]), "input_truncated": False, "output_truncated": False}
@@ -220,7 +241,7 @@ class WorkProgress:
                 for child in generated:
                     child_messages = await turn_progress(self.runtime, child)
                     messages.extend(child_messages)
-                    events = await self.runtime.stores.steps.list_events(run_id=child.id)
+                    events = await self._events(child.id)
                     child_tools, clipped = tools(
                         events, terminal=child.status in {"completed", "failed", "stopped", "resumed"},
                         secrets=progress_secrets(self.runtime, child),
@@ -358,7 +379,7 @@ class WorkProgress:
                 "messages_limited": messages_limited, "tools_limited": tools_limited,
             }
 
-        root_events = await self.runtime.stores.steps.list_events(run_id=turn.id)
+        root_events = await self._events(turn.id)
         activity, tools_limited = tools(
             root_events, terminal=turn.status in {"completed", "failed", "stopped", "resumed"}, secrets=secrets,
         )

@@ -185,6 +185,8 @@ class CredentialTools(Toolset[RunScope]):
             Pending requests pause via the SDK; the user chooses sharing and session/persistent reuse.
             """
             result = await self.create_request(ctx.deps, ctx.run_id or "", ctx.tool_call_id or "", request)
+            if result.get("status") == "rejected":
+                raise ToolFailed(result["error"])
             if result["status"] == "pending":
                 raise CallDeferred(metadata={"kind": "credential_request", **result})
             return result
@@ -217,7 +219,11 @@ class CredentialTools(Toolset[RunScope]):
         try:
             return await self.service.request(scope, run_id, tool_call_id, request)
         except (HTTPException, PermissionError):
-            raise ToolFailed("This secure credential request is unavailable or changed. Check the current task and saved access.") from None
+            # Expected rejection must cross Temporal as data. Raising ToolFailed
+            # in an activity turns it into ActivityError and kills the whole run.
+            return {"status": "rejected", "error": (
+                "This secure credential request is unavailable or changed. Check the current task and saved access."
+            )}
 
 
 def capability(service: ProductCredentialExecution) -> CredentialTools:

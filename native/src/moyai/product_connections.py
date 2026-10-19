@@ -567,6 +567,63 @@ class PolicyChange(BaseModel):
     read_only: bool
 
 
+class OrganizationConnectionResponse(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class OrganizationConnectionTool(OrganizationConnectionResponse):
+    name: str
+    write: bool
+    requires_approval: bool
+    description: str
+
+
+class OrganizationConnectionRepository(OrganizationConnectionResponse):
+    id: int
+    full_name: str
+
+
+class OrganizationConnectionPolicy(OrganizationConnectionResponse):
+    enabled: bool
+    read_only: bool
+    checked_at: str | None
+    check_status: str | None
+
+
+class OrganizationConnection(OrganizationConnectionPolicy):
+    """One organization account; credentials stay on the server."""
+
+    id: Provider
+    connected: bool
+    scope: Literal["organization"]
+    oauth_configured: bool
+    label: str
+    updated_at: str | None
+    identity: str
+    tools: list[OrganizationConnectionTool]
+    # GitHub only.
+    repositories: list[OrganizationConnectionRepository] | None = None
+    app_registered: bool | None = None
+
+
+class OrganizationConnectionConnected(OrganizationConnectionResponse):
+    connected: bool
+    label: str
+
+
+class OrganizationConnectionDisconnected(OrganizationConnectionResponse):
+    connected: bool
+
+
+class OrganizationConnectionCheck(OrganizationConnectionResponse):
+    healthy: bool
+    label: str
+
+
+class OrganizationConnectionOAuthStart(OrganizationConnectionResponse):
+    url: str
+
+
 class ConnectionRoute(APIRoute):
     def get_route_handler(self):
         from app.connector_errors import ConnectorError
@@ -632,16 +689,18 @@ def routes(service: ProductConnections) -> APIRouter:
             router.add_api_route(
                 route.path, offloaded_github(route.endpoint, route.path), methods=list(route.methods or {"GET"}),
                 name=route.name, status_code=route.status_code,
+                response_model=route.response_model, operation_id=route.operation_id,
+                openapi_extra=route.openapi_extra, include_in_schema=route.include_in_schema,
             )
     personal_callback = connectors.personal_slack.routes(router)
 
-    @router.get("/api/product/connections")
-    async def accounts(request: Request):
+    @router.get("/api/product/connections", operation_id="listOrganizationConnections")
+    async def accounts(request: Request) -> list[OrganizationConnection]:
         await source_database(security.require, request)
-        return await service.accounts()
+        return [OrganizationConnection.model_validate(row) for row in await service.accounts()]
 
-    @router.post("/api/connections/{provider}")
-    async def connect(provider: Provider, body: TokenConnection, request: Request):
+    @router.post("/api/connections/{provider}", operation_id="connectOrganizationConnection")
+    async def connect(provider: Provider, body: TokenConnection, request: Request) -> OrganizationConnectionConnected:
         await source_database(security.require, request, mutation=True, admin=True)
         if provider == "github":
             raise HTTPException(400, "Install the organization GitHub App; raw tokens are not accepted.")
@@ -652,10 +711,10 @@ def routes(service: ProductConnections) -> APIRouter:
         await source_database(save_if_unchanged, store, security, provider, value, label, expected)
         await source_database(connectors.record_check, provider, "healthy")
         await source_database(connectors.audit, provider, "Connected for the organization")
-        return {"connected": True, "label": label}
+        return OrganizationConnectionConnected(connected=True, label=label)
 
-    @router.delete("/api/connections/{provider}")
-    async def disconnect(provider: Provider, request: Request):
+    @router.delete("/api/connections/{provider}", operation_id="disconnectOrganizationConnection")
+    async def disconnect(provider: Provider, request: Request) -> OrganizationConnectionDisconnected:
         await source_database(security.require, request, mutation=True, admin=True)
         async with connectors.locks[provider]:
             def revoke():
@@ -666,19 +725,19 @@ def routes(service: ProductConnections) -> APIRouter:
             await source_database(revoke)
         await source_database(connectors.expire_approvals, provider)
         await source_database(connectors.audit, provider, "Disconnected from the organization")
-        return {"connected": False}
+        return OrganizationConnectionDisconnected(connected=False)
 
-    @router.patch("/api/connections/{provider}/policy")
-    async def policy(provider: Provider, body: PolicyChange, request: Request):
+    @router.patch("/api/connections/{provider}/policy", operation_id="updateOrganizationConnectionPolicy")
+    async def policy(provider: Provider, body: PolicyChange, request: Request) -> OrganizationConnectionPolicy:
         await source_database(security.require, request, mutation=True, admin=True)
         await source_database(set_policy, store, security, provider, body.enabled, body.read_only)
         if not body.enabled or body.read_only:
             await source_database(connectors.expire_approvals, provider)
         await source_database(connectors.audit, provider, "Updated organization connection policy")
-        return await source_database(connectors.policy, provider)
+        return OrganizationConnectionPolicy.model_validate(await source_database(connectors.policy, provider))
 
-    @router.post("/api/connections/{provider}/check")
-    async def check(provider: Provider, request: Request):
+    @router.post("/api/connections/{provider}/check", operation_id="checkOrganizationConnection")
+    async def check(provider: Provider, request: Request) -> OrganizationConnectionCheck:
         await source_database(security.require, request, mutation=True, admin=True)
         try:
             if provider == "github":
@@ -692,10 +751,10 @@ def routes(service: ProductConnections) -> APIRouter:
             await source_database(connectors.record_check, provider, "needs_attention")
             raise
         await source_database(connectors.record_check, provider, "healthy")
-        return {"healthy": True, "label": label}
+        return OrganizationConnectionCheck(healthy=True, label=label)
 
-    @router.post("/api/connections/{provider}/oauth")
-    async def oauth(provider: Provider, request: Request):
+    @router.post("/api/connections/{provider}/oauth", operation_id="startOrganizationConnectionOAuth")
+    async def oauth(provider: Provider, request: Request) -> OrganizationConnectionOAuthStart:
         sid = await source_database(security.require, request, mutation=True, admin=True)
         if not connectors.configured_oauth(provider):
             raise HTTPException(409, "Configure this app's OAuth client or connect using a token.")
@@ -705,7 +764,7 @@ def routes(service: ProductConnections) -> APIRouter:
             store.execute, "INSERT INTO oauth_states VALUES(?,?,?,?)",
             (digest(state), provider, digest(sid), time.time() + 600),
         )
-        return {"url": connectors.authorization_url(provider, state)}
+        return OrganizationConnectionOAuthStart(url=connectors.authorization_url(provider, state))
 
     @router.get("/oauth/{provider}/callback")
     async def callback(provider: Provider, request: Request, state: str = "", code: str = "", error: str = ""):

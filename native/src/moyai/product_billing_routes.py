@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -44,9 +45,206 @@ from .product_billing import (
     exact_sum,
     read_product_billing,
 )
+from .settings_views import AnalyticsReport
 
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 REPORT_TIMEOUT_SECONDS = 15.0
+
+
+class BillingResponse(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class BillingTotals(BillingResponse):
+    """Recorded quantities for a set of charges; amounts are exact decimal strings."""
+
+    requests: int
+    unknown_requests: int
+    observations: int
+    priced_requests: int
+    pending_costs: int
+    missing_costs: int
+    estimated_costs: int
+    spend: str | None
+    cost_usd_exact: str | None
+    estimated: str | None
+    cost_coverage: float | None
+    pricing_status: Literal["partial", "priced", "unpriced", "empty"]
+    sessions: int
+    unattributed_charges: int
+    unpriced_requests: int
+    token_samples: int
+    usage_samples: int
+    token_coverage: float | None
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
+    reasoning_tokens: int | None
+
+
+class BillingModelTotals(BillingTotals):
+    model: str | None
+
+
+class BillingDailyTotals(BillingTotals):
+    date: str
+    active_users: int
+    models: list[BillingModelTotals]
+    cumulative_spend: str | None
+    cumulative_pricing_status: Literal["partial", "priced", "unpriced", "empty"]
+    # Set only when some charges in the range have no timestamp.
+    undated_coverage: int | None = None
+
+
+class BillingUserTotals(BillingTotals):
+    id: str | None
+    name: str
+    email: str
+    kind: str
+
+
+class BillingSessionTotals(BillingTotals):
+    user_id: str | None
+    user_name: str
+    run_id: str | None
+    session_id: str | None
+    title: str
+
+
+class BillingRequestSource(BillingResponse):
+    engine: str
+    id: str
+    cost_state: str
+    reported_amount: str | None
+    cost_source: str | None
+    request_status: str
+    observed_at: str
+    recovery_eligible: bool
+    recovery_due: bool
+    recovery_reason: str
+
+
+class BillingRequestDetail(BillingResponse):
+    id: str
+    user_id: str | None
+    session_id: str | None
+    model: str | None
+    observed_models: list[str]
+    created_at: str | None
+    timestamp_basis: str
+    status: str
+    cost: str | None
+    estimated_cost: str | None
+    cost_status: str
+    requests: int | None
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
+    reasoning_tokens: int | None
+    coverage_issues: list[str]
+    sources: list[BillingRequestSource]
+
+
+class BillingInfrastructureSync(BillingResponse):
+    status: str
+
+
+class BillingInfrastructureProvider(BillingResponse):
+    provider: str | None
+    name: str | None
+    spend: str | None
+    estimated: str | None
+    missing_days: int | None
+    covered_days: int | None
+    last_synced_at: str | None
+    sync_enabled: bool
+    sync: BillingInfrastructureSync | None
+
+
+class BillingInfrastructureBill(BillingResponse):
+    provider: str | None
+    month: str | None
+    amount: str | None
+    kind: str | None
+    revision: int | None
+    updated_at: str | None
+
+
+class BillingInfrastructure(BillingResponse):
+    spend: str | None
+    estimated: str | None
+    providers: list[BillingInfrastructureProvider]
+    bills: list[BillingInfrastructureBill]
+    incomplete: bool
+    pending: bool
+    read_only: bool
+    # Set only when infrastructure spend is unavailable for the selected range.
+    coverage_reason: str | None = None
+
+
+class BillingCostSummary(BillingResponse):
+    llm: str | None
+    infrastructure: str | None
+    total: str | None
+    estimated: str | None
+    incomplete: bool
+
+
+class BillingCoverage(BillingResponse):
+    undated_charges: int
+    private_details_omitted: int
+    source_observations: int
+    legacy_observations: int
+    native_observations: int
+    deduplicated_observations: int
+    unreconciled_native_observations: int
+    mapping_version: str
+    complete: bool
+
+
+class BillingCapabilities(BillingResponse):
+    read_only: bool
+    bill_mutations: bool
+    provider_sync: bool
+    identity_linking: bool
+
+
+class BillingReport(BillingResponse):
+    # Not BillingResponse's defaults-required flag: it would leak into the nested
+    # AnalyticsReport TypedDicts and mark their NotRequired keys required.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=False)
+
+    scope: Literal["personal", "organization"]
+    start: str
+    end: str
+    start_at: str
+    end_before: str
+    preset: str
+    timezone: str
+    currency: str
+    total: BillingTotals
+    priced_requests: int
+    daily: list[BillingDailyTotals]
+    users: list[BillingUserTotals]
+    sessions: list[BillingSessionTotals]
+    models: list[BillingModelTotals]
+    request_details: list[BillingRequestDetail]
+    request_total: int
+    limit: int
+    offset: int
+    root_models: list[str]
+    identities: list[dict[str, Any]]
+    infrastructure: BillingInfrastructure | None
+    cost_summary: BillingCostSummary
+    coverage: BillingCoverage
+    capabilities: BillingCapabilities
+    methodology: dict[str, str]
+    # The activity report (analytics_service) when include_activity=true.
+    activity: AnalyticsReport | None = None
 
 
 class Identity(Protocol):
@@ -146,7 +344,7 @@ class ProductBillingService:
         observation_links: tuple[ObservationLink, ...] = (),
         rules: LegacyBillingRules | None = None,
         infrastructure_reporter: Callable[[date, date], dict[str, Any]] | None = None,
-        max_records: int = MAX_RECORDS,
+        max_records: int | None = None,
     ):
         if source_engine.dialect.name == "sqlite" and not (
             source_engine.url.query.get("mode") == "ro" and source_engine.url.query.get("uri") == "true"
@@ -155,7 +353,7 @@ class ProductBillingService:
         for selected in (schema, native_schema):
             if selected is not None and not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,62}", selected):
                 raise ValueError("Invalid accounting schema.")
-        if not 1 <= max_records <= MAX_RECORDS:
+        if max_records is not None and not 1 <= max_records <= MAX_RECORDS:
             raise ValueError("Invalid accounting read bound.")
         self.identity, self.source_engine, self.native_engine = identity, source_engine, native_engine
         self.schema, self.native_schema = schema, native_schema
@@ -213,14 +411,19 @@ class ProductBillingService:
             if engine.dialect.name == "postgresql":
                 await connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
                 await connection.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+            elif engine.dialect.name == "sqlite":
+                # sqlite3's legacy transaction mode does not begin on SELECT.
+                # Retained period rows and later aliases need one snapshot.
+                await connection.execute(text("BEGIN"))
             # Source SQLite is physically read-only. Native SQLite operations
             # are only SELECTs; do not change pooled writer connection PRAGMAs.
             yield BillingReader(connection, schema=schema, max_records=self.max_records)
 
     async def _labels(self, reader: BillingReader, mappings: IdentityMappings) -> dict[str, dict[str, Any]]:
         users = await reader.table("users", ("id", "kind", "name", "email"), ("id", "kind"))
-        values = list((await reader.connection.execute(select(users).limit(self.max_records + 1))).mappings())
-        if len(values) > self.max_records:
+        bound = self.max_records or MAX_RECORDS
+        values = list((await reader.connection.execute(select(users).limit(bound + 1))).mappings())
+        if len(values) > bound:
             raise BillingReadError("too_many_accounting_identities")
         result = {}
         for row in values:
@@ -342,7 +545,7 @@ class ProductBillingService:
         include_root_cohorts: bool = False,
         identities: ReportIdentities | None = None,
     ) -> dict[str, Any]:
-        if not 1 <= limit <= 500 or not 0 <= offset <= self.max_records * 2:
+        if not 1 <= limit <= 500 or offset < 0:
             raise HTTPException(422, "Choose a valid report page.")
         period = _period(preset, start, end)
         mappings = identities.accounting_mappings(self.mappings) if identities is not None else self.mappings
@@ -387,21 +590,36 @@ class ProductBillingService:
                 else:
                     by_day[charge.occurred_at.date().isoformat()].append(charge)
             total = _totals(charges)
-            daily, accumulated = [], []
+            daily = []
+            cumulative_spend: Decimal | None = None
+            cumulative_partial = cumulative_has_usage = False
             for day, values in by_day.items():
-                accumulated.extend(values)
                 daily_models: dict[str | None, list[BillingCharge]] = defaultdict(list)
                 for value in values:
                     daily_models[value.model].append(value)
-                cumulative = _totals(accumulated)
+                day_total = _totals(values)
+                cumulative_spend = exact_sum(
+                    amount for amount in (
+                        cumulative_spend, Decimal(day_total["spend"]) if day_total["spend"] is not None else None,
+                    ) if amount is not None
+                )
+                cumulative_has_usage = cumulative_has_usage or bool(values)
+                cumulative_partial = cumulative_partial or bool(
+                    day_total["pending_costs"] or day_total["missing_costs"] or day_total["unknown_requests"]
+                    or day_total["estimated"] is not None
+                )
+                cumulative_status = (
+                    ("partial" if cumulative_partial else "priced") if cumulative_spend is not None
+                    else "unpriced" if cumulative_has_usage else "empty"
+                )
                 daily.append({
-                    "date": day, **_totals(values),
+                    "date": day, **day_total,
                     "active_users": len({row.actor_id for row in values if row.actor_id}),
                     "models": [{"model": key, **_totals(items)} for key, items in daily_models.items()],
-                    "cumulative_spend": cumulative["spend"],
+                    "cumulative_spend": _amount(cumulative_spend),
                     "cumulative_pricing_status": (
-                        "partial" if cumulative["spend"] is not None else "unpriced"
-                    ) if undated else cumulative["pricing_status"],
+                        "partial" if cumulative_spend is not None else "unpriced"
+                    ) if undated else cumulative_status,
                 })
                 if undated:
                     daily[-1].update(
@@ -496,9 +714,10 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
     async def actor(request: Request) -> Any:
         return await service.identity.authenticate(request, admin=request.url.path != "/api/spend")
 
-    @router.get("/api/admin/spend")
-    @router.get("/api/settings/billing")
-    @router.get("/api/spend")
+    # format=csv returns a file Response, which bypasses the JSON response model.
+    @router.get("/api/admin/spend", response_model=BillingReport, operation_id="getAdminSpendReport")
+    @router.get("/api/settings/billing", response_model=BillingReport, operation_id="getBillingReport")
+    @router.get("/api/spend", response_model=BillingReport, operation_id="getSpendReport")
     async def report(
         request: Request, response: Response, principal: Any = Depends(actor),
         preset: Literal["24h", "7d", "30d", "custom"] = "7d",
@@ -507,7 +726,7 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
         root_model: str | None = Query(None, max_length=200),
         turn_status: str | None = Query(None, max_length=30),
         include_activity: bool = False,
-        limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=MAX_RECORDS * 2),
+        limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
         format: Literal["json", "csv"] = "json",
         export: Literal["daily", "users", "models", "sessions", "requests", "turns"] = "daily",
     ) -> Any:
@@ -585,11 +804,11 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
             )
         return value
 
-    @router.get("/api/admin/spend/infrastructure")
+    @router.get("/api/admin/spend/infrastructure", operation_id="getAdminInfrastructureSpend")
     async def infrastructure(
         response: Response, principal: Any = Depends(actor), preset: Literal["24h", "7d", "30d", "custom"] = "7d",
         start: str | None = None, end: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> BillingInfrastructure:
         try:
             async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
                 value = await service.infrastructure(_period(preset, start, end))
@@ -599,6 +818,6 @@ def routes(service: ProductBillingService, *, runtime: Any | None = None) -> API
         if not fresh.enabled or fresh.role != "admin":
             raise HTTPException(403, "Your accounting access changed.")
         response.headers["Cache-Control"] = "no-store"
-        return value
+        return BillingInfrastructure.model_validate(value)
 
     return router
