@@ -578,6 +578,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
                 ]
         if include_messages:
             result["messages"] = await runtime.database.messages(user, session_id)
+            mention_names = [(message['id'], message.get('slack_mentions', {})) for message in result['messages']]
+            result['transcript_version'] += ':' + hashlib.sha256(
+                json.dumps(mention_names, sort_keys=True).encode(),
+            ).hexdigest()
         return SessionDetail.model_validate(result)
 
     @app.get("/api/sessions/{session_id}/progress/{turn_id}", operation_id="getTurnProgress")

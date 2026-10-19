@@ -193,6 +193,7 @@ class SessionMessage(ApiView):
     author_name: str | None
     is_self: bool
     content: str
+    slack_mentions: dict[str, str] = Field(default_factory=dict)
     created_at: str
     attachments: list[MessageAttachment]
     source: Literal["slack", "delegation"] | None = None

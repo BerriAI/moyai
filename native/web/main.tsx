@@ -1039,7 +1039,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
-                {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : message.source === "slack" ? <SlackMessage content={message.content} /> : <SkillMessage content={message.content} />}</div>}
+                {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : message.source === "slack" ? <SlackMessage content={message.content} mentions={message.slack_mentions} /> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
                 {message.deleted && <p className="muted">Deleted in Slack.{message.edited_after_start ? " Work that already started may continue." : ""}</p>}
                 {message.edited && <p className="muted">Edited in {message.edited_in === "web" ? "Moyai" : "Slack"}.{message.edited_after_start ? " This task received the original text. Send a follow-up to change the work." : ""}</p>}
@@ -1080,7 +1080,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           {requestAnswered && <p className="question-reply-hint">Your answer was sent. You can send a follow-up.</p>}
           {session.status === "waiting" && view.can_answer && !answeringQuestion && !requestAnswered && <p className="notice">Resolve the requests above to continue. New messages will be queued.</p>}
           {queued.length > 0 && <div className="queued-messages" aria-label="Queued messages">{queued.map(message => <div className="queued-message" key={message.id}>
-            <span><small>Queued after the current task</small><span>{message.content ? <SkillMessage content={message.content} /> : "File message"}</span></span>
+            <span><small>Queued after the current task</small><span>{message.content ? message.source === "slack" ? <SlackMessage content={message.content} mentions={message.slack_mentions} /> : <SkillMessage content={message.content} /> : "File message"}</span></span>
             <Button type="button" size="sm" variant="ghost" disabled={busy || Boolean(editing)} onClick={() => void sendNow(message.turn_id)}>Send now</Button>
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(message); setEditText(message.content); requestAnimationFrame(() => composerInput.current?.focus()) }}>Edit</Button>
             <Button type="button" size="icon-sm" variant="ghost" aria-label="Cancel queued message" disabled={busy} onClick={() => void runConversationAction(
