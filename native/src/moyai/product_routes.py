@@ -287,9 +287,24 @@ class ProductReadService:
         mapped: dict[str, str] = {}
         async with self.runtime.database.sessions() as db:
             await prepare_history_query(db)
-            valid = set(await db.scalars(select(Session.id).where(self.visible(reader, deleted=deleted),
-                                                                Session.id.in_(ids))))
-            for session_id in list(valid):
+            member = aliased(SwarmMember)
+            rows = (await db.execute(select(
+                Session.id, Session.surface, DelegatedSession.session_id.label("delegated"),
+                member.session_id.label("swarm"),
+            ).outerjoin(
+                DelegatedSession, DelegatedSession.session_id == Session.id,
+            ).outerjoin(
+                member, member.session_id == Session.id,
+            ).where(self.visible(reader, deleted=deleted), Session.id.in_(ids)))).mappings().all()
+            valid = {row["id"] for row in rows}
+            for row in rows:
+                # Ordinary web sessions have no inherited/provider audience.
+                # The fresh query already checks their owner, visibility and
+                # deletion state. Keep both revalidation fences, without four
+                # additional lookups per row at each fence.
+                if not deleted and row["surface"] == "web" and row["delegated"] is None and row["swarm"] is None:
+                    continue
+                session_id = row["id"]
                 try:
                     if deleted:
                         session = await db.get(Session, session_id)
@@ -563,11 +578,6 @@ class ProductReadService:
         merged = merge_session_lists(pages.get("native", {}).get("sessions", []),
                                      pages.get("legacy", {}).get("sessions", []))
         chosen = merged[:limit]
-        async with self.runtime.database.sessions() as db:
-            for item in chosen:
-                if item["source"] == "native":
-                    item["can_manage"] = await self.runtime.database.same_person(db, reader.user, item["owner_id"])
-                    item["capabilities"]["rename"] = item["can_manage"] and not item["deleted"]
         has_more = len(merged) > limit or any(page["has_more"] for page in pages.values())
         for selected, page in pages.items():
             consumed = sum(row["source"] == selected for row in chosen)
@@ -598,6 +608,7 @@ class ProductReadService:
                           for owner in {row["owner_id"] for row in native_rows}}
                 for row in native_rows:
                     row["can_manage"] = owners[row["owner_id"]]
+                    row["capabilities"]["rename"] = row["can_manage"] and not row["deleted"]
         return {"sessions": chosen, "ancestors": ancestors, "has_more": has_more, "next_cursor": next_cursor, "sources": states,
                 "partial": "unavailable" in states.values(), "notice": " ".join(notices) or None,
                 "search_limits": {
