@@ -25,12 +25,13 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import load_only
 from temporalio.service import RPCError
 
+from .api_views import Me, MeUser
 from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .debug_trace import debug_trace
 from .file_preview import routes as file_preview_routes
-from .general_preferences import general_preferences
+from .general_preferences import GeneralPreferences, general_preferences
 from .history_handoff import is_turn_run, latest_turn_snapshot
 from .images import routes as image_routes
 from .live_events import PUBLIC_TOPIC
@@ -361,8 +362,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             "access_enabled": bool(product and product.settings.cloudflare_access_login),
         }
 
-    @app.get("/api/me")
-    async def me(request: Request, user: User = Depends(actor)):
+    @app.get("/api/me", operation_id="getMe")
+    async def me(request: Request, user: User = Depends(actor)) -> Me:
         principal = getattr(request.state, "product_principal", None)
         if principal is not None:
             csrf = principal.csrf_token
@@ -371,16 +372,16 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             if identity is None:
                 raise HTTPException(401, "Your session expired.")
             csrf = identity["csrf"]
-        return {
-            "user": {
-                "id": user.id, "name": user.display_name, "role": user.role,
-                "individual": principal.individual if principal is not None else True,
-            },
-            "csrf": csrf, "models": runtime.settings.models,
-            "default_model": runtime.settings.default_model,
-            "preferences": general_preferences(user.preferences),
-            "product_mode": "existing" if runtime.product_identity is not None else "standalone",
-        }
+        return Me(
+            user=MeUser(
+                id=user.id, name=user.display_name, role=user.role,
+                individual=principal.individual if principal is not None else True,
+            ),
+            csrf=csrf, models=runtime.settings.models,
+            default_model=runtime.settings.default_model,
+            preferences=GeneralPreferences.model_validate(general_preferences(user.preferences)),
+            product_mode="existing" if runtime.product_identity is not None else "standalone",
+        )
 
     @app.get("/api/sessions")
     async def sessions(archived: bool = False, deleted: bool = False, user: User = Depends(actor)):

@@ -12,11 +12,11 @@ import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
+import { getMe, type Me } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import slackLogo from "./assets/slack-logo.svg"
 import { Home } from "./home"
-import type { GeneralPreferences } from "./general-preferences"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { initializeAppearance } from "./appearance"
 import { AppearanceToggle } from "./appearance-toggle"
@@ -54,7 +54,6 @@ const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(m
 type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
-type Me = { user: { id: string; name: string; role: string; individual?: boolean }; csrf: string; models: string[]; default_model: string; product_mode?: "standalone" | "existing"; preferences?: GeneralPreferences }
 type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
 type Connection = { id: string; name: string; kind: string; owner_id: string; read_only: boolean; enabled: boolean; shared: boolean; revision?: number }
 type Plan = { id: string; content: string; status: string }
@@ -249,7 +248,7 @@ function App() {
   }, [listView, sessionPageCount, preferences])
 
   useEffect(() => {
-    api<Me>("/me").then(value => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
+    getMe().then(({ data: value }) => { setCsrf(value.csrf); setMe(value) }).catch(() => {}).finally(() => setReady(true))
     const signedOut = () => { ++refreshVersion.current; lastConversation.current = ""; setCsrf(""); setMe(null); setSessions([]); setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" }); setFolders([]); setConnections([]); setWorkspaceRequest(null); setPrStates({}); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false); setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1) }
     const accessChanged = () => {
       const requestCsrf = csrfToken()
@@ -257,7 +256,7 @@ function App() {
       setSessions([]); setConnections([]); setFolders([]); setPrStates({}); setPrRefresh(value => value + 1); setCurrentSession(null); setInitialConversation(null); setPaletteOpen(false)
       setSessionPageCount(1); setInventoryState({ hasMore: false, loading: false, loaded: false, notice: "" })
       setContinued(null); setNativeRoute(null); setRouteRevision(value => value + 1)
-      void api<Me>("/me").then(value => { if (csrfToken() === requestCsrf) { setCsrf(value.csrf); setMe(value) } }, () => {})
+      void getMe().then(({ data: value }) => { if (csrfToken() === requestCsrf) { setCsrf(value.csrf); setMe(value) } }, () => {})
     }
     const navigate = () => {
       const id = currentRoute()
@@ -415,7 +414,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
       try {
         const result = await api<{ csrf?: string }>("/login", "POST", Object.fromEntries(form))
         if (result.csrf) setCsrf(result.csrf)
-        onLogin(await api<Me>("/me"))
+        onLogin((await getMe()).data)
       } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
     }}>
       {config.mode === "standalone" && <label>Username<Input name="username" autoComplete="username" required autoFocus disabled={busy} /></label>}
