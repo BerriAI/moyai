@@ -19,42 +19,50 @@ if TYPE_CHECKING:
 BUILD_REVISION_FILE = Path("/app/build-revision")
 
 
+def service_identity(source_sha: str, *, local_rehearsal: bool) -> tuple[str, str, str]:
+    """Validate the image before either early authorization or role startup."""
+    if os.environ.get("MOYAI_FLEET_REGISTRY_SCHEMA", SCHEMA) != SCHEMA:
+        raise FleetAdmissionError("fleet_admission_registry_cannot_be_redirected")
+    service_id = os.environ.get("RENDER_SERVICE_ID", "")
+    service_name = os.environ.get("RENDER_SERVICE_NAME", "")
+    instance_id = os.environ.get("RENDER_INSTANCE_ID", "")
+    if service_id:
+        try:
+            actual_commit = BUILD_REVISION_FILE.read_text().strip()
+        except OSError:
+            raise FleetAdmissionError("fleet_image_revision_unavailable") from None
+        git_commit = os.environ.get("RENDER_GIT_COMMIT", "")
+        if (
+            not re.fullmatch("[a-f0-9]{40}", actual_commit) or actual_commit != source_sha
+            or git_commit not in {"", actual_commit}
+        ):
+            raise FleetAdmissionError("fleet_image_revision_changed")
+    elif local_rehearsal:
+        # Only the explicit loopback rehearsal mode permits synthetic provider
+        # identities; these never qualify a production provider preflight.
+        service_id = os.environ.get("MOYAI_LOCAL_FLEET_SERVICE_ID", "")
+        instance_id = os.environ.get("MOYAI_LOCAL_FLEET_INSTANCE_ID", "")
+        service_name = os.environ.get("MOYAI_LOCAL_FLEET_SERVICE_NAME", "")
+    return service_id, instance_id, service_name
+
+
 class FleetAdmission:
     def __init__(self, lifecycle: ProductRoleLifecycle):
         self.life = lifecycle
         self.schema = SCHEMA
-        if os.environ.get("MOYAI_FLEET_REGISTRY_SCHEMA", SCHEMA) != SCHEMA:
-            raise FleetAdmissionError("fleet_admission_registry_cannot_be_redirected")
-        self.service_id = os.environ.get("RENDER_SERVICE_ID", "")
-        self.service_name = os.environ.get("RENDER_SERVICE_NAME", "")
-        self.instance_id = os.environ.get("RENDER_INSTANCE_ID", "")
-        if self.service_id:
-            product = lifecycle.runtime.product
-            assert product is not None
-            try:
-                actual_commit = BUILD_REVISION_FILE.read_text().strip()
-            except OSError:
-                raise FleetAdmissionError("fleet_image_revision_unavailable") from None
-            git_commit = os.environ.get("RENDER_GIT_COMMIT", "")
-            if (
-                not re.fullmatch("[a-f0-9]{40}", actual_commit)
-                or actual_commit != product.settings.moyai_build_sha
-                or git_commit not in {"", actual_commit}
-            ):
-                raise FleetAdmissionError("fleet_image_revision_changed")
-        elif getattr(getattr(lifecycle.runtime, "product_config", None), "local_rehearsal", False):
-            # The supported rehearsal mode already requires loopback data and
-            # service endpoints and rejects Render identities. These explicit
-            # synthetic provider IDs let the actual application exercise this
-            # same registry protocol; they never qualify a production preflight.
-            self.service_id = os.environ.get("MOYAI_LOCAL_FLEET_SERVICE_ID", "")
-            self.instance_id = os.environ.get("MOYAI_LOCAL_FLEET_INSTANCE_ID", "")
-            self.service_name = os.environ.get("MOYAI_LOCAL_FLEET_SERVICE_NAME", "")
+        product = lifecycle.runtime.product
+        assert product is not None
+        self.service_id, self.instance_id, self.service_name = service_identity(
+            product.settings.moyai_build_sha,
+            local_rehearsal=getattr(getattr(lifecycle.runtime, "product_config", None), "local_rehearsal", False),
+        )
         self.generation = os.environ.get("MOYAI_RELEASE_GENERATION", "")
         required = os.environ.get("MOYAI_FLEET_REQUIRED", "false")
         if required not in {"true", "false"}:
             raise FleetAdmissionError("fleet_admission_required_invalid")
         self.required = required == "true"
+        self.bridge = bool(getattr(getattr(lifecycle.runtime, "settings", None), "worker_adoption_bridge", False))
+        self.required = self.required or self.bridge
         self.registered = False
         self.current: dict | None = None
         self._startup_lock: int | None = None
@@ -95,6 +103,7 @@ class FleetAdmission:
                 native_schema=config.native_schema, queue=runtime.settings.temporal_queue,
                 deployment=runtime.settings.worker_deployment, build=runtime.settings.worker_build_id,
                 generation=self.generation,
+                bridge=self.bridge, lock=starting,
             )
             if role["service_id"] is not None and role["service_id"] != self.service_id:
                 raise FleetAdmissionError("fleet_admission_service_changed")
@@ -114,6 +123,7 @@ class FleetAdmission:
                 generation=self.generation, identity=self.life.quiescence.identity(),
                 native_schema=config.native_schema, queue=runtime.settings.temporal_queue,
                 deployment=runtime.settings.worker_deployment, build=runtime.settings.worker_build_id,
+                bridge=self.bridge,
             )
             connection.check_owner(lock_compatibility=True)
             return role

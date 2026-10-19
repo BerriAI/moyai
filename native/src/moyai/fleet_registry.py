@@ -67,7 +67,8 @@ class FleetRegistry:
                 tables = {row[0] for row in self.connection.execute(
                     "SELECT tablename FROM pg_tables WHERE schemaname=%s", (self.schema,),
                 )}
-                if tables != {"schema_version", "fleets", "roles", "members"} or not self.installed():
+                base_tables = {"schema_version", "fleets", "roles", "members"}
+                if tables not in (base_tables, base_tables | {"worker_adoption"}) or not self.installed():
                     raise FleetAdmissionError("fleet_admission_schema_adoption_refused")
                 return
             self.connection.execute(self.query("CREATE SCHEMA {schema}"))
@@ -141,24 +142,29 @@ class FleetRegistry:
             "role_policy", "worker_deployment", "worker_build", "state", "drain_request",
         ), rows[0])) if rows else None
 
-    @staticmethod
-    def validate(scope: dict, role: dict, *, identity: dict, native_schema: str,
-                 queue: str, deployment: str, build: str, generation: str) -> None:
+    def validate(self, scope: dict, role: dict, *, identity: dict, native_schema: str,
+                 queue: str, deployment: str, build: str, generation: str,
+                 bridge: bool = False, lock: bool = False) -> None:
         if (
             scope["native_schema"] != native_schema or scope["task_queue"] != queue
             or identity["role"] not in ROLES or identity["schema"] != scope["source_schema"]
             or role["role"] != identity["role"] or role["source_sha"] != identity["build"]
             or role["cluster_policy"] != identity["cluster_policy"] or role["role_policy"] != identity["role_policy"]
             or role["worker_deployment"] != deployment or role["worker_build"] != build
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", deployment)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", build)
+            or bool(deployment) != bool(build)
+            or deployment and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", deployment)
+            or build and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", build)
             or (generation and role["generation"] != generation)
         ):
             raise FleetAdmissionError("fleet_admission_contract_changed")
+        from .worker_adoption import WorkerAdoption
+        WorkerAdoption(self).require(
+            scope, role, identity=identity, deployment=deployment, build=build, bridge=bridge, lock=lock,
+        )
 
     def register(self, *, source_schema: str, service_id: str, instance_id: str,
                  service_name: str, generation: str, identity: dict, native_schema: str,
-                 queue: str, deployment: str, build: str) -> dict:
+                 queue: str, deployment: str, build: str, bridge: bool = False) -> dict:
         """Caller commits this transaction before allowing any role polling.
 
         The shared role-row lock orders registration before or after an operator's
@@ -181,7 +187,7 @@ class FleetRegistry:
             if role is None or role["service_id"] != service_id or role["service_name"] != service_name:
                 raise FleetAdmissionError("fleet_admission_service_unbound")
             self.validate(scope, role, identity=identity, native_schema=native_schema, queue=queue,
-                          deployment=deployment, build=build, generation=generation)
+                          deployment=deployment, build=build, generation=generation, bridge=bridge, lock=True)
             started = datetime.fromisoformat(identity["owner_started"])
             if started.tzinfo is None:
                 raise FleetAdmissionError("fleet_admission_owner_invalid")
@@ -349,7 +355,8 @@ class FleetRegistry:
                     raise ValueError()
                 return
             if (
-                not isinstance(worker, dict)
+                not deployment or not build
+                or not isinstance(worker, dict)
                 or set(worker) != {
                     "deployment", "build", "temporal_drained", "running", "drainage",
                     "drainage_checked", "routing_changed", "routing_fingerprint", "evidence_digest",
