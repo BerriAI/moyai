@@ -248,10 +248,10 @@ function DiscussionList({ section }: { section: Sections["discussion"] }) {
     {!section.items.length && !section.error && <p className="pr-muted">No discussion returned by GitHub.</p>}
     {section.items.map(item => <article key={item.id} className="pr-entry">
       <div className="pr-entry-heading"><strong>{item.author.login}</strong>{item.author.bot && <Badge variant="secondary">Bot</Badge>}
-        <span className="pr-muted">{item.kind}{item.state ? ` · ${item.state.replaceAll("_", " ").toLowerCase()}` : ""}</span>
+        <span>{item.kind}{item.state ? ` · ${item.state.replaceAll("_", " ").toLowerCase()}` : ""}</span>
         <External url={item.url}>{date(item.created_at)}</External>
       </div>
-      {item.path && <p className="pr-muted"><code>{item.path}{item.line ? `:${item.line}` : ""}</code></p>}
+      {item.path && <p><code>{item.path}{item.line ? `:${item.line}` : ""}</code></p>}
       {item.body ? <Prose>{item.body}</Prose> : <p className="pr-muted">No written comment.</p>}
       {item.body_limited && <Notice>Comment shortened. Open in GitHub for the full text.</Notice>}
     </article>)}

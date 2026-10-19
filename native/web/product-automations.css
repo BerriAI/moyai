@@ -1,5 +1,5 @@
 .product-automations .pa-result-count { margin-bottom: 12px; }
-.product-automations .pa-triggers, .pa-dialog .pa-triggers { margin: 8px 0; padding-inline-start: 18px; color: var(--ui-muted); font-size: 13px; overflow-wrap: anywhere; }
+.product-automations .pa-triggers, .pa-dialog .pa-triggers { margin: 8px 0; padding-inline-start: 18px; color: var(--ui-foreground); font-size: 13px; overflow-wrap: anywhere; }
 .product-automations .pa-triggers > li, .pa-dialog .pa-triggers > li { margin-block: 4px; }
 .product-automations .pa-record { padding-block: 20px; }
 .product-automations .pa-load-more { margin-top: 20px; }
@@ -7,18 +7,18 @@
 .pa-dialog[data-slot="dialog-content"] { width: min(800px, calc(100vw - 32px)); max-width: min(800px, calc(100vw - 32px)); gap: 20px; }
 .pa-dialog p { line-height: 1.6; overflow-wrap: anywhere; }
 .pa-dialog .pa-readiness { display: grid; gap: 8px; padding-block: 4px 16px; border-bottom: 1px solid var(--ui-border); }
-.pa-dialog .pa-blockers { margin: 4px 0; padding-inline-start: 20px; color: var(--ui-muted); font-size: 13px; }
+.pa-dialog .pa-blockers { margin: 4px 0; padding-inline-start: 20px; color: var(--ui-foreground); font-size: 13px; }
 .pa-dialog .pa-blockers li { padding-block: 3px; }
 .pa-dialog .pa-actions, .pa-dialog .ns-row-actions, .pa-dialog .ns-record-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.pa-dialog .ns-badge { padding: 3px 8px; border-radius: 4px; background: var(--ui-secondary); color: var(--ui-muted); font-size: 12px; }
-.pa-dialog .ns-notice { margin-bottom: 20px; color: var(--ui-muted); font-size: 13px; }
+.pa-dialog .ns-badge { padding: 3px 8px; border-radius: 4px; background: var(--ui-secondary); color: var(--ui-foreground); font-size: 12px; }
+.pa-dialog .ns-notice { margin-bottom: 20px; color: var(--ui-foreground); font-size: 13px; }
 .pa-dialog .ns-link { color: var(--ui-primary); text-decoration: underline; text-underline-offset: 3px; }
 .pa-dialog .pa-confirm { padding: 16px; border: 1px solid var(--ui-control-border); border-radius: 8px; background: var(--ui-subtle); }
-.pa-dialog .pa-confirm > p { margin-top: 8px; color: var(--ui-muted); font-size: 13px; }
+.pa-dialog .pa-confirm > p { margin-top: 8px; color: var(--ui-foreground); font-size: 13px; }
 .pa-dialog .pa-preserved { margin-block: 16px; padding-block: 16px; border-block: 1px solid var(--ui-border); }
 .pa-dialog .pa-preserved p { margin-top: 8px; color: var(--ui-muted); font-size: 13px; }
 .pa-dialog .pa-preserved dl { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 8px 16px; margin-top: 12px; font-size: 13px; }
-.pa-dialog .pa-preserved dd { margin: 0; overflow-wrap: anywhere; color: var(--ui-muted); }
+.pa-dialog .pa-preserved dd { margin: 0; overflow-wrap: anywhere; color: var(--ui-foreground); }
 .pa-dialog pre { padding: 16px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa-dialog .pa-history { display: grid; gap: 12px; padding-top: 20px; border-top: 1px solid var(--ui-border); }
 .pa-dialog .pa-history h3 { display: flex; align-items: center; gap: 8px; }
@@ -38,7 +38,7 @@
 .pa-dialog .pa-check { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
 .pa-dialog .pa-check > button { flex: none; margin-top: 3px; }
 .pa-dialog .pa-check > label { line-height: 1.5; overflow-wrap: anywhere; cursor: pointer; }
-.pa-dialog .pa-connection > details { margin: 8px 0 0 28px; font-size: 13px; color: var(--ui-muted); }
+.pa-dialog .pa-connection > details { margin: 8px 0 0 28px; font-size: 13px; color: var(--ui-foreground); }
 .pa-dialog .pa-connection ul { padding-inline-start: 20px; overflow-wrap: anywhere; }
 .pa-dialog .pa-metadata { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; }
 .pa-dialog .pa-metadata > button { margin-bottom: 4px; }

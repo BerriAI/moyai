@@ -48,6 +48,9 @@ and purple means merged. Keep sidebar PR statuses as text and icons, without PR 
 Dialogs need names, labels, errors, cancellation and contained scrolling.
 Tables scroll within their own labelled, keyboard-focusable container. Keep normal
 text contrast at 4.5:1 and meaningful boundaries/focus at 3:1.
+Use the primary foreground (black in light mode) for core content, headings,
+navigation, labels, selected values and actionable notices. Reserve muted text
+for secondary metadata, hints and placeholders; preserve semantic status colors.
 
 Preserve API contracts, capabilities, personal/shared scopes, revisions and all
 existing actions. Reject stale async responses after route, actor or scope changes.

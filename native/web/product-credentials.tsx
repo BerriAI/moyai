@@ -85,7 +85,7 @@ export function ProductCredentialRequest({ requestId, onResolved }: { requestId:
       {resource && <form className="ns-fields" onSubmit={event => { event.preventDefault(); event.stopPropagation(); void resolve(false) }}>
         <p>{resource.reason}</p>
         {resource.note && <p className="ns-muted">{resource.note}</p>}
-        {resource.setup_instructions && <p className="ns-muted">{resource.setup_instructions}</p>}
+        {resource.setup_instructions && <p>{resource.setup_instructions}</p>}
         {!resource.can_resolve ? <p role="status">Request status: {resource.status}. Complete any other current questions or approvals to continue.</p> : <>
           {resource.credentials.length > 0 && <div className="ns-field"><label>Credential source</label>{choice("Credential source", selected, next => { clearValues(); setSelected(next) }, [
             ...(resource.scopes.length ? [{ value: "__new__", label: "Provide new access" }] : []),

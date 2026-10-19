@@ -86,11 +86,11 @@ html[data-theme="light"] {
   --ui-canvas: #ffffff;
   --ui-background: #ffffff;
   --ui-subtle: #f8f8f8;
-  --ui-foreground: #242426;
+  --ui-foreground: #000000;
   --ui-primary: #7145b8;
   --ui-primary-foreground: #ffffff;
   --ui-secondary: #f0f0f2;
-  --ui-muted: #5c5e67;
+  --ui-muted: #4b4b50;
   --ui-control-border: #87878e;
   --ui-border: #e2e2e5;
   --ui-selection: #eeeaf4;
@@ -102,8 +102,8 @@ html[data-theme="light"] {
   --ui-home-grid: #5b606008;
   --ui-home-editor-border: #d2d2d7;
   --ui-backdrop: #ededf0;
-  --ui-prompt-muted: #5c5e67;
-  --ui-code-foreground: #28282c;
+  --ui-prompt-muted: var(--ui-muted);
+  --ui-code-foreground: var(--ui-foreground);
   --ui-code-keyword: #7348a0;
   --ui-code-string: #326744;
   --ui-code-title: #315e8c;
@@ -112,7 +112,7 @@ html[data-theme="light"] {
   --ui-code-gutter: #74747b;
   --ui-chart-teal: #25746e;
   --ui-chart-violet: #795aa5;
-  --ui-headline-accent: #242426;
+  --ui-headline-accent: var(--ui-foreground);
   --ui-destructive: #a33040;
   --ui-danger: #b43939;
   --ui-danger-bg: #fff0f0;

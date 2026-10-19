@@ -20,7 +20,7 @@
 .product-history .ph-continuation p { margin: 0; }
 .product-history .ph-continuation textarea { min-height: 100px; resize: vertical; }
 .product-history-prefix { min-width: 0; flex: none; border-bottom: 1px solid var(--ui-border); }
-.product-history-prefix > summary { cursor: pointer; padding: 12px var(--chat-gutter, 16px); font-size: 13px; color: var(--ui-muted); }
+.product-history-prefix > summary { cursor: pointer; padding: 12px var(--chat-gutter, 16px); font-size: 13px; color: var(--ui-foreground); }
 .product-history-prefix > summary:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: -2px; }
 .product-history-prefix > .product-history { height: auto; max-height: min(45dvh, 380px); border-top: 1px solid var(--ui-border); }
 .product-history .ph-section + .ph-section { border-top: 1px solid var(--ui-border); padding-top: 20px; }
@@ -29,7 +29,7 @@
 .product-history .ph-message-meta strong { font-weight: 500; color: var(--ui-foreground); }
 .product-history .ph-user { justify-self: end; width: fit-content; max-width: min(100%, 660px); border: 1px solid var(--ui-border); border-radius: 12px; padding: 12px 16px; background: var(--ui-subtle); }
 .product-history .ph-user-text { white-space: pre-wrap; }
-.product-history .ph-notice { display: block; padding: 12px; border: 1px solid var(--ui-border); color: var(--ui-muted); background: var(--ui-subtle); font-size: 13px; }
+.product-history .ph-notice { display: block; padding: 12px; border: 1px solid var(--ui-border); color: var(--ui-foreground); background: var(--ui-subtle); font-size: 13px; }
 .product-history .ph-notice [data-slot="alert-description"] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: inherit; }
 .product-history .ph-notice[role="alert"] { color: var(--ui-danger); border-color: var(--ui-danger-border); background: var(--ui-danger-bg); }
 .product-history .ph-files { display: grid; gap: 8px; min-width: 0; }
@@ -47,7 +47,7 @@
 .product-history .ph-prose h3 { font-size: 16px; }
 .product-history .ph-prose ul, .product-history details ul { list-style: disc; padding-inline-start: 24px; }
 .product-history .ph-prose ol { list-style: decimal; padding-inline-start: 24px; }
-.product-history .ph-prose blockquote { padding-inline-start: 12px; border-left: 2px solid var(--ui-control-border); color: var(--ui-muted); }
+.product-history .ph-prose blockquote { padding-inline-start: 12px; border-left: 2px solid var(--ui-control-border); color: var(--ui-foreground); }
 .product-history .ph-prose pre, .product-history .ph-source { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; padding: 12px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); font: 12px/1.65 var(--ui-font-mono); tab-size: 4; }
 .product-history .ph-source code { font: inherit; white-space: inherit; overflow-wrap: inherit; }
 .product-history .ph-table { max-width: 100%; overflow-x: auto; }

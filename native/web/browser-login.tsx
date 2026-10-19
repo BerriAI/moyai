@@ -12,7 +12,7 @@ export function BrowserLoginCard({ metadata, outcome, disabled, onOpen, onAnswer
     <h3><Monitor size={16} aria-hidden="true" />Browser sign-in needed</h3>
     {metadata?.site && <p className="browser-login-site">{metadata.site}</p>}
     <p>{metadata?.reason || "Moyai needs you to sign in before it can continue."}</p>
-    <p className="muted">In Computer, take control and sign in. Release control when you’re done, then confirm below. Keep passwords and verification codes in the browser.</p>
+    <p>In Computer, take control and sign in. Release control when you’re done, then confirm below. Keep passwords and verification codes in the browser.</p>
     <div className="browser-login-actions">
       <Button type="button" variant="outline" onClick={onOpen}>Open Computer</Button>
       <Button type="button" disabled={disabled} aria-pressed={outcome === "signed_in"} onClick={() => onAnswer("signed_in")}>I’ve signed in</Button>
