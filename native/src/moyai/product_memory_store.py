@@ -179,7 +179,10 @@ class ProductMemoryStore:
             # do not repeat the same live identity reads in this boundary.
             await self.service.database._check_product_turn_binding(db, turn, self.grant)
             await self._connections(db, session)
-            if session.visibility != "shared":
+            # _connections validates a child's saved execution context. Ordinary
+            # chats must still honor a live change of their own privacy setting.
+            visibility = self.scope.execution_context.visibility if self.scope.execution_context else session.visibility
+            if visibility != "shared":
                 return {
                     "enabled": False, "auto_save": False,
                     "reason": "Private conversations do not export personal context.",

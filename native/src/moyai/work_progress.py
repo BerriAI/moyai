@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from .commentary import public_text_parts
 from .delegation_models import DelegatedSession, DelegatedTurn
+from .failure_diagnostics import failure_summary
 from .history_handoff import failed_attempts, turn_events
 from .models import Session, Turn
 from .presentation import private_tool, redact
@@ -257,6 +258,13 @@ class WorkProgress:
                                 self.runtime.security.unseal(child.result).decode(),
                                 progress_secrets(self.runtime, child),
                             )),
+                        })
+                    if child.status == "failed":
+                        async with self.runtime.database.sessions() as db:
+                            summary = await failure_summary(self.runtime.database, db, child)
+                        messages.append({
+                            "id": f"failure:{child.id}", "phase": "commentary", "created_at": updated,
+                            "text": summary,
                         })
                     if depth < 12:
                         queue.append((child.id, link.name, depth + 1))

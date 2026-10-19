@@ -16,6 +16,9 @@ from .presentation import private_tool, redact
 from .progress import progress_secrets
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from .database import Database
     from .runtime import Runtime
 
 FAILURE_KIND = "failure_diagnostics"
@@ -59,6 +62,20 @@ def capture_failure(error: BaseException) -> dict[str, Any] | None:
             cause = current.__context__
         current = cause if isinstance(cause, BaseException) else None
     return safe_failure_metadata({"exception_chain": chain})
+
+
+async def failure_summary(database: Database, db: AsyncSession, turn: Turn) -> str:
+    """Only whitelisted runtime identifiers cross into parent context and cards."""
+    recorded = await db.scalar(select(Event).where(
+        Event.turn_id == turn.id, Event.kind == FAILURE_KIND,
+    ).order_by(Event.id).limit(1))
+    metadata = safe_failure_metadata(json.loads(database.security.unseal(recorded.content))) if recorded else None
+    if not metadata:
+        return "The subagent failed before completing its assignment. Open its conversation for failure details."
+    chain = metadata["exception_chain"]
+    cause = chain[-1].get("application_type", chain[-1]["type"])
+    activity = next((item["activity_type"] for item in chain if item.get("activity_type")), None)
+    return f"Subagent failed: {cause}" + (f" during {activity}" if activity else "") + ". Open its conversation for failure details."
 
 
 async def failure_details(runtime: Runtime, turn: Turn) -> dict[str, Any]:
