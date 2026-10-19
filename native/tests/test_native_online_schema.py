@@ -137,10 +137,15 @@ async def test_contention_aborts_without_changing_receipts_or_waiting_behind_wri
             blocker.execute(sql.SQL("LOCK TABLE {} IN ROW EXCLUSIVE MODE").format(
                 sql.Identifier(product.schema, "moyai_sessions"),
             ))
-        started = time.monotonic()
-        with pytest.raises(OnlineSchemaError):
+        with pytest.raises(OnlineSchemaError) as caught:
             await asyncio.to_thread(apply, connection, value, guard=lambda _: None)
-        assert time.monotonic() - started < 1
+        if lock == "busy-parent":
+            # Prove NOWAIT lock rejection while the writer is still held,
+            # rather than timing metadata compilation on a loaded CI runner.
+            assert isinstance(caught.value.__context__, psycopg.errors.LockNotAvailable)
+        else:
+            reason = "offline_owner_present" if lock == "offline-owner" else "migration_busy"
+            assert str(caught.value) == "native_online_" + reason
         assert_missing(connection, product.schema, *ADDED, LEDGER)
         # Independent reads continue despite the held writer lock and rejected DDL.
         assert blocker.execute("SELECT count(*) FROM moyai.users").fetchone() == (1,)
@@ -199,9 +204,16 @@ async def test_unknown_or_modified_schema_is_never_adopted_or_repaired(expansion
 
 async def test_guard_queries_share_the_migration_deadline(expansion):
     product, value, connection, _ = expansion
-    started = time.monotonic()
+    started = None
+
+    def guard(budget):
+        nonlocal started
+        started = time.monotonic()
+        budget.execute("SELECT pg_sleep(4)")
+
     with pytest.raises(OnlineSchemaError, match="unconfirmed"):
-        await asyncio.to_thread(apply, connection, value, guard=lambda budget: budget.execute("SELECT pg_sleep(4)"))
+        await asyncio.to_thread(apply, connection, value, guard=guard)
+    assert started is not None
     assert time.monotonic() - started < 3
     assert_missing(connection, product.schema, *ADDED, LEDGER)
 
@@ -258,4 +270,24 @@ async def test_committed_ledger_requires_its_original_primary_key(expansion):
         sql.Identifier(product.schema, LEDGER), sql.Identifier(LEDGER + "_pkey"),
     ))
     with pytest.raises(OnlineSchemaError, match="receipt_structure_changed"):
+        inspect(connection, value)
+
+
+@pytest.mark.parametrize("target", ["moyai_app_schema_versions", LEDGER, "moyai_goals"])
+async def test_postgres18_unvalidated_not_null_is_not_accepted_as_a_verified_table(expansion, target):
+    product, value, connection, _ = expansion
+    if connection.info.server_version < 180000:
+        pytest.skip("NOT NULL catalog constraints require PostgreSQL 18.")
+    apply(connection, value, guard=lambda _: None)
+    table = sql.Identifier(product.schema, target)
+    column = "objective" if target == "moyai_goals" else "manifest" if target == "moyai_app_schema_versions" else "protocol"
+    connection.execute(sql.SQL("ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL").format(table, sql.Identifier(column)))
+    connection.execute(sql.SQL("ALTER TABLE {} ADD CONSTRAINT unvalidated NOT NULL {} NOT VALID").format(
+        table, sql.Identifier(column),
+    ))
+    # attnotnull is still true. Ignoring every 'n' row would miss the drift.
+    assert connection.execute("""
+        SELECT attnotnull FROM pg_attribute WHERE attrelid=%s::regclass AND attname=%s
+    """, (product.schema + "." + target, column)).fetchone() == (True,)
+    with pytest.raises(OnlineSchemaError, match="structure_changed"):
         inspect(connection, value)

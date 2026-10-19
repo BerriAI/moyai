@@ -193,6 +193,18 @@ def _table(schema: str, name: str):
     return sql.Identifier(schema, name)
 
 
+def _verify_not_null_constraints(connection, relation: str, reason: str) -> None:
+    # PostgreSQL 18 records NOT NULL in pg_constraint as well as attnotnull.
+    # Keep validating column nullability on every supported server, and reject
+    # unvalidated/unenforced catalog entries rather than ignoring all 'n' rows.
+    valid = connection.execute("""
+        SELECT coalesce(bool_and(convalidated AND
+            coalesce((to_jsonb(c)->>'conenforced')::boolean,true)),true)
+        FROM pg_constraint c WHERE conrelid=%s::regclass AND contype='n'
+    """, (relation,)).fetchone()
+    require(valid == (True,), reason)
+
+
 def _receipt_relation(connection, schema: str, name: str) -> None:
     """A matching receipt value cannot qualify a view or unexpected write hook."""
     relation = schema + "." + name
@@ -221,6 +233,7 @@ def _receipt_relation(connection, schema: str, name: str) -> None:
          ("applied_at", "timestamp with time zone", False, "clock_timestamp()")]
     )
     require(columns == expected, "receipt_structure_changed")
+    _verify_not_null_constraints(connection, relation, "receipt_structure_changed")
     primary = connection.execute("""
         SELECT c.contype,ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(id,n)
             JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.id ORDER BY k.n),
@@ -253,8 +266,7 @@ def _ledger(connection, schema: str) -> dict | None:
     return rows[0][3]
 
 
-def _verify_added(connection, schema: str) -> None:
-    metadata = _metadata(schema)
+def _verify_added(connection, schema: str, metadata: MetaData) -> None:
     dialect = postgresql.dialect()
     for name in sorted(ADDED):
         table = metadata.tables[f"{schema}.{name}"]
@@ -272,6 +284,7 @@ def _verify_added(connection, schema: str) -> None:
         expected = [(column.name, str(column.type.compile(dialect=dialect)).lower().replace(
             "varchar", "character varying"), column.nullable) for column in table.columns]
         require(columns == expected, "target_structure_changed")
+        _verify_not_null_constraints(connection, relation, "target_structure_changed")
         constraints = connection.execute("""
             SELECT c.contype,
                 ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(id,n)
@@ -282,7 +295,8 @@ def _verify_added(connection, schema: str) -> None:
                 c.convalidated,c.condeferrable,
                 CASE WHEN c.contype='f' THEN c.confupdtype::text||c.confdeltype::text||c.confmatchtype::text ELSE '' END
             FROM pg_constraint c LEFT JOIN pg_class r ON r.oid=c.confrelid
-            LEFT JOIN pg_namespace n ON n.oid=r.relnamespace WHERE c.conrelid=%s::regclass
+            LEFT JOIN pg_namespace n ON n.oid=r.relnamespace
+            WHERE c.conrelid=%s::regclass AND c.contype!='n'
         """, (relation,)).fetchall()
         actual = {(kind, tuple(cols), ns, ref, tuple(refcols), valid, deferred, actions)
                   for kind, cols, ns, ref, refcols, valid, deferred, actions in constraints}
@@ -312,12 +326,12 @@ def _verify_added(connection, schema: str) -> None:
         )
 
 
-def _status(connection, value: dict) -> str:
+def _status(connection, value: dict, metadata: MetaData) -> str:
     schema = value["native_schema"]
     current, saved = _receipts(connection, schema), _ledger(connection, schema)
     if saved is not None:
         require(saved == value and current == value["target"]["app"], "committed_plan_changed")
-        _verify_added(connection, schema)
+        _verify_added(connection, schema, metadata)
         return "applied"
     require(current == value["before"]["app"], "source_receipts_changed")
     for name in ADDED:
@@ -332,12 +346,13 @@ def _receipt(value: dict, status: str) -> dict:
 
 def inspect(connection: psycopg.Connection, value: dict) -> dict:
     value = validate(value)
+    metadata = _metadata(value["native_schema"])
     require(connection.autocommit and connection.info.transaction_status == TransactionStatus.IDLE,
             "connection_not_idle")
     with connection.transaction():
         connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         connection.execute("SET LOCAL statement_timeout='3s'")
-        return _receipt(value, _status(Budget(connection, 3), value))
+        return _receipt(value, _status(Budget(connection, 3), value, metadata))
 
 
 def apply(
@@ -350,6 +365,10 @@ def apply(
     It runs before and after DDL; it may not pause or replace any application.
     """
     value = validate(value)
+    # Compile immutable metadata/DDL before holding any database locks. All
+    # database verification and operator guards still share the short budget.
+    metadata = _metadata(value["native_schema"])
+    statements = _ddl(metadata)
     require(connection.autocommit and connection.info.transaction_status == TransactionStatus.IDLE,
             "connection_not_idle")
     source, native = value["source_schema"], value["native_schema"]
@@ -364,7 +383,7 @@ def apply(
             require(bounded.execute(
                 "SELECT pg_try_advisory_xact_lock(hashtext(%s))", (f"moyai-native-migration:{native}",),
             ).fetchone() == (True,), "migration_busy")
-            status = _status(bounded, value)
+            status = _status(bounded, value, metadata)
             guard(bounded)
             if status == "applied":
                 return _receipt(value, "already_applied")
@@ -372,8 +391,8 @@ def apply(
             # waiter in front of live writes while an unrelated transaction runs.
             relations = sql.SQL(",").join(_table(native, name) for name in (*PARENTS, "moyai_app_schema_versions"))
             bounded.execute(sql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE NOWAIT").format(relations))
-            require(_status(bounded, value) == "planned", "source_receipts_changed")
-            for statement in _ddl(_metadata(native)):
+            require(_status(bounded, value, metadata) == "planned", "source_receipts_changed")
+            for statement in statements:
                 bounded.execute(statement)
             bounded.execute(sql.SQL("""
                 CREATE TABLE {} (
@@ -387,7 +406,7 @@ def apply(
             bounded.execute(sql.SQL("INSERT INTO {}(version,manifest) VALUES(%s,%s)").format(
                 _table(native, "moyai_app_schema_versions"),
             ), (TO_VERSION, value["target"]["app"][TO_VERSION]))
-            _verify_added(bounded, native)
+            _verify_added(bounded, native, metadata)
             guard(bounded)
             bounded.execute("SELECT 1")  # Check the remaining budget before COMMIT.
         return _receipt(value, "applied")
