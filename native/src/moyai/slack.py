@@ -278,7 +278,7 @@ async def deliver_one(runtime: Runtime, client: httpx.AsyncClient, delivery: Del
 
         try:
             receipt = await SlackFileDelivery.send(
-                client, content, destination, headers=None, before_send=before_send,
+                client, content, destination, objects=runtime.objects, headers=None, before_send=before_send,
             )
         except asyncio.CancelledError as exc:
             await _settle_delivery(runtime, delivery, "rejected", {"error": str(exc)})

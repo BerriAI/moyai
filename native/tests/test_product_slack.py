@@ -375,12 +375,122 @@ async def test_long_answers_and_artifacts_are_staged_atomically_without_broadcas
     await slack.service.stage()
     async with slack.runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Delivery).order_by(Delivery.identity)))
-    values = [json.loads(slack.runtime.security.unseal(row.content))["text"] for row in rows]
-    assert len(rows) == 2  # Web input mirror and final answer, no acknowledgement.
-    assert sum("(from Moyai)" in value for value in values) == 1
-    assert all("<!channel>" not in value for value in values)
-    assert any("/api/files/" in value and "report.txt" in value for value in values)
+    values = [json.loads(slack.runtime.security.unseal(row.content)) for row in rows]
+    text_values = [value["text"] for value in values if "text" in value]
+    artifact_value = next(value for value in values if "upload" in value)
+    assert len(rows) == 3  # Web input mirror, final revision, and artifact.
+    assert len(text_values) == 2
+    assert sum("(from Moyai)" in value for value in text_values) == 1
+    assert all("<!channel>" not in value for value in text_values)
+    assert all("/api/files/" not in value for value in text_values)
+    assert artifact_value["upload"]["filename"] == "report.txt"
+    assert artifact_value["upload"]["digest"] == "synthetic"
+    assert "content" not in artifact_value["upload"]
+    assert artifact_value["after"] == f"product-slack:{active[1].id}:completed:0"
     assert len({row.identity for row in rows}) == len(rows)
+
+
+def test_strip_links_removes_only_matching_artifact_links():
+    from moyai.slack_file_delivery import SlackFileDelivery
+
+    value = SlackFileDelivery.strip_links(
+        "![relative](/api/files/relative)\n"
+        "[absolute](https://moyai.test/api/files/absolute)\n"
+        "[plain](/api/files/plain)\n"
+        "[keep](/api/files/other)\n\n\n",
+        ["relative", "absolute", "plain"],
+        "https://moyai.test/",
+    )
+
+    assert value == "\n\n[keep](/api/files/other)"
+
+
+async def test_completed_artifact_upload_waits_for_message_then_uses_slack_file_helper(
+    slack, active, monkeypatch,
+):
+    from moyai.models import Artifact
+
+    thread = await bind(slack, active)
+    png_bytes = b"\x89PNG\r\n\x1a\nsynthetic-png-data"
+    digest = await slack.runtime.objects.put(png_bytes)
+    artifact_id = new_id()
+    async with slack.runtime.database.sessions.begin() as db:
+        turn = await db.get(Turn, active[1].id)
+        turn.status = "completed"
+        turn.finished_at = datetime.now(UTC).isoformat()
+        turn.result = slack.runtime.security.seal(
+            f"Here is the sidebar.\n\n![Updated sidebar](/api/files/{artifact_id})",
+        )
+        db.add(Artifact(
+            id=artifact_id, turn_id=turn.id, session_id=turn.session_id,
+            name=".moyai/browser-captures/abc.png", digest=digest,
+            content_hash="0" * 64, media_type="image/png", size=len(png_bytes),
+        ))
+    await slack.service.stage()
+    async with slack.runtime.database.sessions() as db:
+        rows = list(await db.scalars(select(Delivery).where(Delivery.turn_id == active[1].id)))
+    deliveries = {row.identity.rsplit(":", 1)[-1]: row for row in rows}
+    text_delivery = deliveries["0"]
+    artifact_delivery = deliveries[artifact_id]
+    text_content = json.loads(slack.runtime.security.unseal(text_delivery.content))
+    upload_content = json.loads(slack.runtime.security.unseal(artifact_delivery.content))
+    assert "Here is the sidebar." in text_content["text"]
+    assert "![" not in text_content["text"]
+    assert "/api/files/" not in text_content["text"]
+    assert upload_content["upload"] == {
+        "filename": "abc.png", "title": "abc.png", "digest": digest,
+    }
+    assert "content" not in upload_content["upload"]
+    assert upload_content["after"] == text_delivery.identity
+    events = []
+
+    async def upload_bytes(url, raw):
+        events.append(("upload_bytes", url, raw))
+
+    from agentchat.channels.slack import files
+
+    monkeypatch.setattr(files, "upload_bytes", upload_bytes)
+
+    async def handle(request):
+        method = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content)
+        events.append((method, payload))
+        assert request.headers["authorization"] == "Bearer synthetic-bot-token"
+        if method in {"chat.postMessage", "chat.update"}:
+            return httpx.Response(200, json={
+                "ok": True, "channel": thread.channel_id, "ts": "1792100000.001",
+            })
+        if method == "files.getUploadURLExternal":
+            return httpx.Response(200, json={
+                "ok": True, "file_id": "FARTIFACT001",
+                "upload_url": "https://files.slack.com/upload/FARTIFACT001",
+            })
+        if method == "files.completeUploadExternal":
+            return httpx.Response(200, json={
+                "ok": True,
+                "files": [{"id": "FARTIFACT001", "permalink": "https://slack.test/files/FARTIFACT001"}],
+            })
+        raise AssertionError(f"Unexpected Slack API method: {method}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="https://slack.test/api/",
+    ) as client:
+        await slack.service.deliver(client, artifact_delivery)
+        assert not events
+        await slack.service.deliver(client, text_delivery)
+        await slack.service.deliver(client, artifact_delivery)
+
+    assert events[0][0] in {"chat.postMessage", "chat.update"}
+    assert [event[0] for event in events[1:]] == [
+        "files.getUploadURLExternal", "upload_bytes", "files.completeUploadExternal",
+    ]
+    assert events[1][1] == {"filename": "abc.png", "length": len(png_bytes)}
+    assert events[2][2] == png_bytes
+    assert events[3][1]["channel_id"] == thread.channel_id
+    assert events[3][1]["thread_ts"] == thread.thread_ts
+    async with slack.runtime.database.sessions() as db:
+        sent = await db.get(Delivery, artifact_delivery.id)
+    assert sent.status == "sent"
 
 
 async def test_failed_turn_stages_error_and_requester_debug_trace(slack, active):
