@@ -12,7 +12,7 @@ from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from app.db import database as source_database
 from app.slack_format import ASIDE_PREFIXES
 from fastapi import HTTPException
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from .contracts import NewMessage
@@ -190,8 +190,18 @@ class SlackEvents:
     ) -> Turn:
         async def admit() -> Turn:
             async with self.slack.runtime.database.sessions.begin() as db:
+                # Continue the computer's existing account selection, including
+                # older bot-only threads. Admission still checks every grant
+                # against this sender's current authority and workspace scope.
+                saved = await db.scalar(select(Turn.connections).join(
+                    Session, Session.id == Turn.session_id,
+                ).where(
+                    Turn.session_id == thread.session_id, Turn.preparation.is_not(None),
+                    Session.workspace.is_not(None),
+                ).order_by(Turn.created_at.desc(), Turn.id.desc()).limit(1))
+                submission = body.model_copy(update={"connections": json.loads(saved)}) if saved is not None else body
                 turn = await self.slack.runtime.database.submit(
-                    actor, thread.session_id, body, db=db,
+                    actor, thread.session_id, submission, db=db,
                 )
                 source = await db.get(SlackTurnSource, turn.id)
                 if source is None:

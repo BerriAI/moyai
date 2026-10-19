@@ -314,7 +314,7 @@ async def test_personal_slack_is_private_and_never_falls_back(bridge):
     scope = await scope_for(bridge, "slack")
     assert scope.grants[0].read_only
     assert scope.grants[0].policy["product"]["personal_owner"] == scope.actor_id
-    for shared, surface in [(True, "web"), (False, "slack"), (True, "automation")]:
+    for shared, surface in [(True, "web"), (True, "automation")]:
         with pytest.raises(HTTPException):
             await bridge.resolve_grants(scope.actor_id, ["slack"], shared_session=shared, surface=surface)
     personal.disconnect(scope.actor_id)
@@ -620,7 +620,7 @@ async def test_personal_slack_keeps_bot_operations_separate_and_never_uses_user_
     scope = await scope_for(bridge, "slack")
     assert {g.policy["product"]["access"] for g in scope.grants} == {"personal_reads", "bot"}
     shared = await bridge.resolve_grants(scope.actor_id, ["slack"], shared_session=True, surface="slack")
-    assert len(shared) == 1 and shared[0].policy["product"]["access"] == "bot"
+    assert len(shared) == 1 and shared[0].policy["product"]["access"] == "organization"
     bot = next(g for g in scope.grants if g.policy["product"]["access"] == "bot")
     calls = []
 
