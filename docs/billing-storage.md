@@ -32,10 +32,22 @@ uses array parameters for admission lookups. All retained evidence belongs to
 one report's snapshots; subsequent requests read current costs and permissions.
 
 Reconciliation retains the report's evidence in memory; batching bounds the
-database fetch buffer, not total report memory. The 15-second report timeout,
-database statement timeout, reconciliation-round limit and ambiguous-identity
-checks still fail visibly without substituting partial totals. Explicit
-`max_records` bounds remain available for diagnostic readers.
+database fetch buffer, not total report memory. PostgreSQL resolves all requested
+historical session families with one array-bound query, so the recursive ancestry
+view is expanded once rather than once per 200 sessions.
+
+Accounting reports have no fixed execution deadline. Billing read transactions
+disable the inherited five-second PostgreSQL statement timeout and JIT compilation;
+those settings revert when the transaction ends. Caller cancellation still
+releases readers. The previous fixed 15-second report and five-second statement
+limits no longer apply to these billing reads. Connection-pool acquisition,
+authentication and other application queries retain their own limits.
+
+Database timeouts return a distinct message suggesting a retry. Server logs
+contain phase timings and the exception type, without query text, parameters,
+account IDs or credentials. The reconciliation-round limit and ambiguous-identity
+checks still fail visibly without substituting partial totals. Explicit `max_records` bounds remain
+available for diagnostic readers.
 
 ## Provision
 

@@ -832,11 +832,18 @@ class BillingReader:
         ) for row in rows)
 
     async def families(self, run_ids: Iterable[str]) -> dict[str, str]:
-        roots = await self.table("run_roots", ("run_id", "root_id"), ("run_id", "root_id"))
         ids, result, read = sorted(set(run_ids)), {}, 0
-        for offset in range(0, len(ids), LOOKUP_CHUNK):
+        if not ids:
+            return result
+        roots = await self.table("run_roots", ("run_id", "root_id"), ("run_id", "root_id"))
+        # run_roots expands the recursive ancestry view. Repeating it per 200
+        # sessions re-expands the entire history for every batch. PostgreSQL's
+        # single array bind lets one statement resolve the requested population
+        # without a parameter-count limit or caching authorization across reads.
+        chunk = len(ids) if self.connection.dialect.name == "postgresql" else LOOKUP_CHUNK
+        for offset in range(0, len(ids), chunk):
             async for row in self.records(
-                select(roots).where(roots.c.run_id.in_(ids[offset:offset + LOOKUP_CHUNK])),
+                select(roots).where(self._matching(roots, ("run_id",), ids[offset:offset + chunk])),
             ):
                 read += 1
                 if self.max_records is not None and read > self.max_records:

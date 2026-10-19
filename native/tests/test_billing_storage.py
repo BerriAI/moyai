@@ -30,6 +30,7 @@ from moyai.product_billing import (
     RecoveryPolicy,
     read_product_billing,
 )
+from moyai.product_billing_routes import ProductBillingService
 from moyai.product_inference import ProductInferenceRequest
 
 pytestmark = pytest.mark.skipif(
@@ -94,6 +95,115 @@ async def projection(ctx):
             old, new, PERIOD, rules=LegacyBillingRules.from_product(), mappings=MAPPINGS,
             policy=RecoveryPolicy(True, SCOPE), clock=CLOCK,
         )
+
+
+async def test_family_lookup_expands_recursive_history_once_and_preserves_roots(billing):
+    ctx = billing
+    async with ctx.engine.begin() as db:
+        await db.execute(text("DROP TABLE moyai.run_roots"))
+        await db.execute(text("CREATE TABLE moyai.runs(id TEXT PRIMARY KEY,parent_run_id TEXT)"))
+        await db.execute(text("""
+            INSERT INTO moyai.runs
+            SELECT 'root-' || n,'' FROM generate_series(1,501) n
+            UNION ALL
+            SELECT 'child-' || n,'root-' || n FROM generate_series(1,501) n
+            UNION ALL
+            SELECT 'leaf-' || n,'child-' || n FROM generate_series(1,501) n
+        """))
+        await db.execute(text("""
+            INSERT INTO moyai.runs VALUES
+            ('orphan','missing'),('cycle-a','cycle-b'),('cycle-b','cycle-a')
+        """))
+        await db.execute(text("""
+            CREATE VIEW moyai.run_roots AS
+            WITH RECURSIVE ancestry(ancestor_id,run_id) AS (
+                SELECT id,id FROM moyai.runs UNION
+                SELECT ancestry.ancestor_id,r.id FROM ancestry
+                JOIN moyai.runs r ON r.parent_run_id=ancestry.run_id
+            )
+            SELECT ancestry.run_id,r.id AS root_id FROM ancestry
+            JOIN moyai.runs r ON r.id=ancestry.ancestor_id WHERE r.parent_run_id=''
+        """))
+    queries = []
+
+    def observe(_conn, _cursor, statement, _parameters, _context, _many):
+        if "FROM moyai.run_roots" in statement:
+            queries.append(statement)
+
+    event.listen(ctx.engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        async with ctx.engine.connect() as db:
+            reader = BillingReader(db, schema="moyai")
+            assert await reader.families([]) == {}
+            assert not queries
+            wanted = [f"leaf-{n}" for n in range(1, 502)] + ["leaf-1", "orphan", "cycle-a", "missing"]
+            result = await reader.families(wanted)
+            assert result == {f"leaf-{n}": f"root-{n}" for n in range(1, 502)}
+            assert len(queries) == 1
+            assert "= ANY" in queries[0]
+            with pytest.raises(BillingReadError, match="too_many_session_family_records"):
+                await BillingReader(db, schema="moyai", max_records=2).families(wanted)
+    finally:
+        event.remove(ctx.engine.sync_engine, "before_cursor_execute", observe)
+
+
+async def test_accounting_queries_exceed_old_cap_without_changing_pool_defaults(billing):
+    ctx = billing
+    service = ProductBillingService(
+        None, ctx.engine, ctx.native, schema=ctx.storage.source_schema,
+        native_schema=ctx.storage.native_schema,
+    )
+    async with ctx.engine.connect() as db:
+        await db.execute(text("SET statement_timeout='5s'"))
+        await db.execute(text("SET jit=on"))
+        await db.commit()
+    async with service._report_read(), service._reader(ctx.engine, ctx.storage.source_schema) as reader:
+        assert await reader.connection.scalar(text("SHOW statement_timeout")) == "0"
+        assert await reader.connection.scalar(text("SHOW jit")) == "off"
+        assert await reader.connection.scalar(text("SHOW transaction_read_only")) == "on"
+        # SHOW alone would miss a driver-side cap; execute a real longer query.
+        await reader.connection.execute(text("SELECT pg_sleep(5.1)"))
+    async with ctx.engine.connect() as db:
+        assert await db.scalar(text("SHOW statement_timeout")) == "5s"
+        assert await db.scalar(text("SHOW jit")) == "on"
+        assert await db.scalar(text("SHOW transaction_read_only")) == "off"
+
+
+async def test_caller_cancellation_stops_postgres_work_and_releases_the_pool(billing):
+    ctx = billing
+    service = ProductBillingService(
+        None, ctx.engine, ctx.native, schema=ctx.storage.source_schema,
+        native_schema=ctx.storage.native_schema,
+    )
+    async def blocked_query():
+        async with service._report_read(), service._reader(ctx.engine, ctx.storage.source_schema) as reader:
+            await reader.connection.execute(text("SELECT pg_sleep(30) /* accounting_cancel_test */"))
+
+    task = asyncio.create_task(blocked_query())
+    try:
+        # Observe actual server execution before cancelling the owning task.
+        async with ctx.native.connect() as observer, asyncio.timeout(10):
+            while not await observer.scalar(text("""
+                SELECT count(*) FROM pg_stat_activity
+                WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'
+                  AND query LIKE '%accounting_cancel_test%'
+            """)):
+                await observer.rollback()  # Refresh PostgreSQL's activity snapshot.
+                await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert ctx.engine.pool.checkedout() == 0
+    async with ctx.engine.connect() as db:
+        assert await db.scalar(text("""
+            SELECT count(*) FROM pg_stat_activity
+            WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'
+              AND query LIKE '%accounting_cancel_test%'
+        """)) == 0
+        assert await db.scalar(text("SELECT 1")) == 1
 
 
 async def test_batched_counterpart_lookup_keeps_aliases_namespaces_and_exact_rows(billing):

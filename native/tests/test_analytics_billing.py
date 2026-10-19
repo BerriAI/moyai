@@ -175,7 +175,9 @@ async def test_billing_failure_never_falls_back_to_native_subtotal(runtime, acto
     async with client_for(runtime, actor) as client:
         response = await client.get("/api/settings/usage", params=params())
         assert response.status_code == 503
-        assert response.json() == {"detail": "Product accounting is temporarily unavailable."}
+        assert response.json() == {
+            "detail": "The accounting database did not respond. Please try again.",
+        }
     ordinary = await member(runtime)
     async with client_for(runtime, ordinary) as client:
         assert (await client.get("/api/settings/usage", params=params())).status_code == 403
