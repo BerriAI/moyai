@@ -206,7 +206,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 2px 8px;
+  gap: 2px 0;
   min-width: 0;
   padding: 0 6px;
   padding-inline-start: calc(6px + var(--session-leading-width) + 8px);
@@ -215,10 +215,13 @@
   color: var(--ui-muted);
 }
 
-.sidebar .session-meta-status:empty { display: none; }
+.sidebar .session-meta-item { display: inline-flex; align-items: center; min-width: 0; gap: 8px; }
+.sidebar .session-meta-separator { color: var(--ui-muted); }
+.sidebar .session-meta-item + .session-meta-item .session-meta-separator { margin-inline-start: 8px; }
 .sidebar .session-meta-status.needs-input { color: var(--ui-warning); }
 .sidebar .session-meta-status.failed, .sidebar .session-indicator.failed { color: var(--ui-danger); }
 .sidebar .session-indicator.failed { background: var(--ui-danger); }
+.sidebar .session-indicator.quiet { visibility: hidden; }
 .sidebar .session-slack-logo { display: block; flex: none; width: 14px; height: 14px; }
 .sidebar .session-pr-indicator,
 .sidebar .session-pr-content {
@@ -304,38 +307,4 @@
   .sidebar .rail-palette-trigger { min-width: 44px; min-height: 44px; }
 }
 
-/* Status groups make the next useful action scannable without a second row. */
-.sidebar .sidebar-grouping-trigger { width: 28px; min-width: 28px; height: 28px; padding: 6px; border: 0; background: transparent; box-shadow: none; color: var(--ui-muted); }
-.sidebar .sidebar-grouping-trigger > svg:last-child:not(:first-child) { display: none; }
-.sidebar .sidebar-grouping-trigger svg { width: 15px; height: 15px; }
-.sidebar .status-view .session-group { margin-bottom: 10px; }
-.sidebar .status-view .session-group-toggle { font-family: var(--ui-font); font-size: 13px; font-weight: 500; gap: 8px; padding-inline: 6px; color: var(--ui-foreground); }
-.sidebar .status-view .session-group-toggle small { font-size: 11px; font-weight: 400; color: var(--ui-muted); }
-.sidebar [data-status-group="needs-you"] .session-group-toggle > svg:first-child { color: var(--ui-warning); }
-.sidebar [data-status-group="in-review"] .session-group-toggle > svg:first-child { color: var(--ui-primary); }
-.sidebar .status-view .session-row { --session-leading-width: 22px; min-height: 32px; margin-block: 1px; padding: 1px 6px; grid-template-columns: minmax(0, 1fr) auto; border-radius: 6px; }
-.sidebar .status-view .session-row > a { min-height: 30px; padding-inline: 0; gap: 0; font-size: 13px; line-height: 20px; }
-.sidebar .status-view .session-row .session-indicator { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.sidebar .status-view .session-row-time { grid-column: 2; grid-row: 1; padding-inline: 5px; color: var(--ui-muted); font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; }
-.sidebar .status-view .session-row-time svg { vertical-align: middle; color: var(--ui-muted); }
-.sidebar .status-view .session-row-meta { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); padding: 0; }
-.sidebar .status-view .session-row-actions { grid-column: 2; grid-row: 1; }
-.sidebar .status-view .session-row:is(:hover, :has(:focus-visible), :has([data-state="open"])) .session-row-time { display: none; }
-.sidebar .status-view .session-row.selected { background: var(--ui-selection); }
-.sidebar .status-view .session-children-toggle { inset-inline-start: 6px; top: 5px; width: var(--session-leading-width); }
-.sidebar .status-view .session-pr-indicator { font-size: 10px; }
 .app.sidebar-collapsed .sidebar .rail-palette-trigger { display: none; }
-@media (hover: none), (pointer: coarse), (max-width: 600px) {
-  .sidebar .sidebar-grouping-trigger { width: 44px; min-height: 44px; }
-  .sidebar .status-view .session-row { --session-leading-width: 44px; min-height: 44px; }
-  .sidebar .status-view .session-row > a { min-height: 44px; grid-column: 1; }
-  .sidebar .status-view .session-row-actions { grid-row: 2; grid-column: 1 / -1; }
-  .sidebar .status-view .session-row-time { grid-column: 2; }
-  .sidebar .status-view .session-children-toggle { top: 1px; }
-}
-
-/* Narrow mouse layouts reserve the action strip only while it is revealed. */
-@media (max-width: 600px) and (hover: hover) and (pointer: fine) {
-  .sidebar .status-view .session-row-actions { height: 0; }
-  .sidebar .status-view .session-row:is(:hover, :has(:focus-visible), :has([data-state="open"])) .session-row-actions { height: auto; }
-}

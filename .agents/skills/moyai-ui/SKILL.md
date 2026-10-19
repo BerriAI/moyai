@@ -15,9 +15,8 @@ fallback, and Geist Mono for code. Do not commit the restricted General Sans
 font binaries to this public repository.
 Home and chat share a sparse static dot grid with faint guide lines and translucent glass composers.
 Home includes compact draft starters; code and message bubbles retain solid reading surfaces. Use 6–8px rounded controls within
-an edge-to-edge workspace without an outer gutter or rounded frame. The default sidebar groups current work by Needs you,
-In progress, In review and Backlog; preserve the alternate folder view and
-its existing actions. Keep chat entry compact, with attachment/model tools below. Use monospace for code,
+an edge-to-edge workspace without an outer gutter or rounded frame. The sidebar lists Recent and Participated sessions
+alongside pins and folders, newest first, with each session’s status or PR state on a second line under the title. Keep chat entry compact, with attachment/model tools below. Use monospace for code,
 paths and technical metadata, with General Sans for prose. Keep review diffs prominent
 and expose repository/commit metadata through the Review details disclosure.
 The workspace menu floats without reflowing chat; only the independent side
