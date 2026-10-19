@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const {test,before,after} = require('node:test');
 const path = require('node:path');
+const fs = require('node:fs/promises');
 const {chromium} = require('playwright');
 let server,browser,base,state;
 const sessionId='a'.repeat(32), legacyId='b'.repeat(32), turnId='turn-root';
@@ -755,6 +756,14 @@ for(const width of [1440,768,320])test(`home keeps the draft and controls reacha
   const heading=page.getByRole('heading',{name:'What are we building?',exact:true});
   await heading.waitFor();
   await page.evaluate(()=>document.fonts.ready);
+  if(process.env.MOYAI_UI_CAPTURE_DIR){
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`home-${width}-dark.png`)});
+    if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+    await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
+    if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`home-${width}-light.png`)});
+  }
   const geometry=await heading.boundingBox();
   const input=page.getByRole('textbox',{name:'Message Moyai'});
   await input.fill('A draft that must stay ready to edit.');
