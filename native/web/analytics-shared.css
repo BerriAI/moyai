@@ -9,10 +9,10 @@
 }
 .native-analytics .analytics-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 24px; margin: 0 0 24px; }
 .native-analytics .analytics-metrics > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.native-analytics .analytics-metrics span { color: var(--ui-muted); font-size: 13px; }
+.native-analytics .analytics-metrics span { color: var(--ui-foreground); font-size: 13px; }
 .native-analytics .analytics-metrics strong { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .native-analytics .analytics-metrics small { color: var(--ui-muted); font-size: 11px; }
-.native-analytics .analytics-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0; color: var(--ui-muted); font-size: 11px; }
+.native-analytics .analytics-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0; color: var(--ui-foreground); font-size: 11px; }
 .native-analytics .analytics-legend > span { display: flex; align-items: center; gap: 6px; }
 .native-analytics .analytics-legend i { width: 8px; height: 8px; display: inline-block; border-radius: 2px; }
 .native-analytics .analytics-color-0 { fill: var(--chart-blue); background: var(--chart-blue); }
@@ -22,7 +22,7 @@
 .native-analytics .analytics-color-4 { fill: var(--chart-violet); background: var(--chart-violet); }
 .native-analytics .analytics-chart { width: 100%; overflow-x: auto; }
 .native-analytics .analytics-chart svg { display: block; width: 100%; min-width: 540px; height: auto; }
-.native-analytics .analytics-chart text { fill: var(--ui-muted); font-size: 11px; font-family: inherit; }
+.native-analytics .analytics-chart text { fill: var(--ui-foreground); font-size: 11px; font-family: inherit; }
 .native-analytics .analytics-grid { stroke: var(--ui-border); stroke-dasharray: 3 4; stroke-width: 1; }
 .native-analytics .analytics-area { fill: var(--chart-blue); opacity: .07; }
 .native-analytics .analytics-trend { fill: none; stroke: var(--chart-blue); stroke-width: 2; stroke-linejoin: round; }
@@ -42,7 +42,7 @@
 .native-analytics .analytics-table-frame > [data-slot="table-container"] { overflow: visible; }
 .native-analytics .analytics-table-frame table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .native-analytics .analytics-table-frame :is(th, td) { padding: 12px 16px; border-bottom: 1px solid var(--ui-border); font-variant-numeric: tabular-nums; text-align: end; vertical-align: top; white-space: normal; }
-.native-analytics .analytics-table-frame th { color: var(--ui-muted); font-size: 12px; font-weight: 500; background: var(--ui-subtle); }
+.native-analytics .analytics-table-frame th { color: var(--ui-foreground); font-size: 12px; font-weight: 500; background: var(--ui-subtle); }
 .native-analytics .analytics-table-frame :is(th, td):first-child { text-align: start; }
 .native-analytics .analytics-table-frame tr:last-child td { border-bottom: 0; }
 .native-analytics .analytics-table-frame small { display: block; color: var(--ui-muted); font-size: 11px; margin-top: 4px; }

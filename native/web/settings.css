@@ -22,20 +22,20 @@
 }
 .native-settings .ns-brand-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 28px; }
 .native-settings .ns-brand-row > .moyai-brand { flex: 1; }
-.native-settings .ns-back { justify-content: flex-start; padding-inline: 8px; color: var(--ui-muted); }
+.native-settings .ns-back { justify-content: flex-start; padding-inline: 8px; color: var(--ui-foreground); }
 .native-settings .ns-navigation { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding-bottom: 12px; }
 .native-settings .ns-nav-title { padding: 0 8px 12px; font-size: 11px; font-weight: 400; letter-spacing: .18em; text-transform: uppercase; }
-.native-settings .ns-navigation a { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 7px 8px; border-radius: 7px; color: var(--ui-muted); }
+.native-settings .ns-navigation a { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 7px 8px; border-radius: 7px; color: var(--ui-foreground); }
 .native-settings .ns-navigation a svg { flex: none; }
 .native-settings .ns-navigation a:hover { background: var(--ui-secondary); color: var(--ui-foreground); }
 .native-settings .ns-navigation a[aria-current="page"] { background: var(--ui-secondary); color: var(--ui-foreground); font-weight: 500; box-shadow: inset 2px 0 var(--ui-primary); }
 .native-settings .ns-nav-group { margin-top: 20px; }
-.native-settings .ns-nav-group h2 { margin: 0 8px 6px; color: var(--ui-muted); font-size: 11px; font-weight: 400; letter-spacing: .14em; text-transform: uppercase; }
+.native-settings .ns-nav-group h2 { margin: 0 8px 6px; color: var(--ui-foreground); font-size: 11px; font-weight: 400; letter-spacing: .14em; text-transform: uppercase; }
 .native-settings .ns-account { margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--ui-border); overflow-wrap: anywhere; }
 .native-settings .ns-account small { font-size: 11px; }
 .native-settings .ns-nav-toggle { display: none; }
 .native-settings .ns-main { background: var(--ui-reading-surface); min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.native-settings .ns-breadcrumb { display: flex; align-items: center; gap: 10px; min-height: 64px; flex: none; padding: 16px 32px; border-bottom: 1px solid var(--ui-border); color: var(--ui-muted); font-size: 13px; background: var(--ui-glass-chrome); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); box-shadow: var(--ui-glass-inset); }
+.native-settings .ns-breadcrumb { display: flex; align-items: center; gap: 10px; min-height: 64px; flex: none; padding: 16px 32px; border-bottom: 1px solid var(--ui-border); color: var(--ui-foreground); font-size: 13px; background: var(--ui-glass-chrome); background-image: var(--ui-glass-sheen); -webkit-backdrop-filter: var(--ui-glass-blur); backdrop-filter: var(--ui-glass-blur); box-shadow: var(--ui-glass-inset); }
 .native-settings .ns-content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-padding-block: 24px; padding: 40px max(32px, calc((100% - 1056px) / 2)) 64px; }
 .native-settings .ns-page-heading { margin-bottom: 32px; }
 .native-settings .ns-page-heading h1 { margin: 0 0 8px; font-size: 28px; font-weight: 450; line-height: 1.25; letter-spacing: -.035em; overflow-wrap: anywhere; }
@@ -61,7 +61,7 @@
 .native-settings .check-label + :is(.ns-records, .ns-empty) { margin-top: 16px; }
 .native-settings-dialog .ns-help + .ns-fields,
 .native-settings-dialog .ns-fields + :is(.ns-help, .ns-muted) { margin-top: 16px; }
-.native-settings .ns-notice, .native-settings-dialog .ns-notice { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; padding: 12px 16px; margin-bottom: 20px; border-inline-start: 2px solid var(--ui-border); color: var(--ui-muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.native-settings .ns-notice, .native-settings-dialog .ns-notice { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; padding: 12px 16px; margin-bottom: 20px; border-inline-start: 2px solid var(--ui-border); color: var(--ui-foreground); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .native-settings .ns-notice > svg { flex: none; margin-top: 2px; }
 .native-settings .ns-error, .native-settings-dialog .ns-error { margin-block: 16px; padding: 12px 16px; background: var(--ui-subtle); color: var(--ui-foreground); border-inline-start: 2px solid var(--ui-danger); border-radius: 0 6px 6px 0; overflow-wrap: anywhere; }
 .native-settings .ns-error > button, .native-settings-dialog .ns-error > button { margin-inline-start: 8px; }
@@ -73,12 +73,12 @@
 .native-settings .ns-provider-icon { display: grid; place-items: center; flex: none; width: 48px; height: 48px; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-reading-surface); }
 .native-settings .ns-connection-identity { min-width: 0; }
 .native-settings .ns-connection-identity h2 { overflow-wrap: anywhere; }
-.native-settings .ns-connection-status { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--ui-muted); font-size: 12px; }
+.native-settings .ns-connection-status { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--ui-foreground); font-size: 12px; }
 .native-settings .ns-connection-status > span { width: 6px; height: 6px; border-radius: 50%; background: var(--ui-muted); }
 .native-settings .ns-connection-status.is-connected > span { background: var(--ui-success); }
 .native-settings .ns-connection-card > :is(.ns-notice, .ns-error) { margin-block: 0; }
 .native-settings .ns-connection-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--ui-border); padding-top: 16px; }
-.native-settings .ns-connection-footer button { color: var(--ui-muted); }
+.native-settings .ns-connection-footer button { color: var(--ui-foreground); }
 .native-settings .ns-connection-card button { white-space: normal; height: auto; min-height: 32px; }
 .native-settings .ns-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-block: 24px; }
 .native-settings .ns-search { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; padding-inline-start: 12px; border: 1px solid var(--ui-control-border); border-radius: 8px; color: var(--ui-muted); }
@@ -94,11 +94,11 @@
 .native-settings .ns-record { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 16px; padding: 20px 0; border-bottom: 1px solid var(--ui-border); }
 .native-settings .ns-record-icon { flex: none; width: 20px; height: 20px; margin-top: 2px; color: var(--ui-muted); }
 .native-settings .ns-record-copy { min-width: 0; flex: 1 1 200px; }
-.native-settings .ns-record-copy > p { margin-block: 6px; color: var(--ui-muted); overflow-wrap: anywhere; }
+.native-settings .ns-record-copy > p { margin-block: 6px; color: var(--ui-foreground); overflow-wrap: anywhere; }
 .native-settings .ns-record-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .native-settings .ns-record h2 { overflow-wrap: anywhere; }
 .native-settings .ns-record small { display: block; color: var(--ui-muted); margin-top: 6px; font-size: 12px; }
-.native-settings .ns-badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 400; padding: 2px 8px; border-radius: 4px; background: var(--ui-secondary); color: var(--ui-muted); }
+.native-settings .ns-badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 400; padding: 2px 8px; border-radius: 4px; background: var(--ui-secondary); color: var(--ui-foreground); }
 .native-settings .ns-badge.ns-success { background: var(--ui-success-bg); color: var(--ui-success); }
 .native-settings .ns-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: none; }
 .native-settings details > summary, .native-settings-dialog details > summary { cursor: pointer; min-height: 36px; padding-block: 8px; color: var(--ui-primary); font-size: 13px; }
@@ -107,7 +107,7 @@
 .native-settings .ns-table > [data-slot="table-container"], .native-settings-dialog .ns-table > [data-slot="table-container"] { overflow: visible; }
 .native-settings .ns-table table, .native-settings-dialog .ns-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .native-settings .ns-table :is(th, td), .native-settings-dialog .ns-table :is(th, td) { padding: 12px 16px; vertical-align: top; white-space: normal; text-align: start; border-bottom: 1px solid var(--ui-border); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.native-settings .ns-table th, .native-settings-dialog .ns-table th { background: var(--ui-subtle); color: var(--ui-muted); font-size: 12px; font-weight: 500; }
+.native-settings .ns-table th, .native-settings-dialog .ns-table th { background: var(--ui-subtle); color: var(--ui-foreground); font-size: 12px; font-weight: 500; }
 .native-settings .ns-table tr:last-child td, .native-settings-dialog .ns-table tr:last-child td { border-bottom: 0; }
 .native-settings .ns-table small, .native-settings-dialog .ns-table small { display: block; margin-top: 4px; font-size: 11px; }
 .native-settings .ns-table strong { font-weight: 500; }

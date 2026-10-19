@@ -481,7 +481,7 @@ function MemoryPage() {
       return <><CapabilityNote {...data} />{data.truncated && <p className="ns-notice">Showing the first {count(data.memories.length)} memory files in this namespace. Additional files are not included in this list.</p>}<Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
         action={data.capabilities?.create && <Button onClick={() => setEditor("new")}><Plus />Add memory</Button>} />
         {rows.length ? <div className="ns-records">{rows.map(row => <article key={`${row.namespace}/${row.path}`} className="ns-record">
-          <div className="ns-record-copy"><h2>{row.path}</h2><details><summary>View memory</summary><pre>{row.content}</pre></details>{row.truncated && <p className="ns-muted">This preview is truncated. Editing is unavailable to avoid overwriting unseen content.</p>}</div>
+          <div className="ns-record-copy"><h2>{row.path}</h2><details><summary>View memory</summary><pre>{row.content}</pre></details>{row.truncated && <p>This preview is truncated. Editing is unavailable to avoid overwriting unseen content.</p>}</div>
           <div className="ns-row-actions">{data.capabilities?.update && !row.truncated && <Button size="sm" variant="outline" onClick={() => setEditor(row)}>Edit<span className="visually-hidden"> {row.path}</span></Button>}
             {data.capabilities?.delete && <Button size="icon-sm" variant="ghost" aria-label={`Delete ${row.path}`} onClick={() => setRemove(row)}><Trash2 /></Button>}</div>
         </article>)}</div> : <Empty filtered={Boolean(search)} noun="memories" onClear={() => setSearch("")} />}
@@ -516,7 +516,7 @@ export function ProductMemoryNotes({ notes, capabilities, onEdit, onRemove }: {
       <details><summary>View memory</summary><pre>{note.content}</pre></details>
       <p>{note.repo_url || "Across your sessions"}</p><small>Updated {dateTime(note.updated_at)}{note.expires_at ? ` · Expires ${dateTime(note.expires_at)}` : ""}</small>
       {(note.source?.quote || note.source?.evidence || sourceLink) && <details><summary>Why this was saved</summary>{(note.source?.quote || note.source?.evidence) && <pre>{note.source.quote || note.source.evidence}</pre>}{note.source?.scope && <p>{note.source.scope}</p>}{sourceLink && <a className="ns-link" href={sourceLink}>Open original session</a>}</details>}
-      {note.truncated && <p className="ns-muted">The preview is incomplete. Editing is unavailable to protect unseen content.</p>}
+      {note.truncated && <p>The preview is incomplete. Editing is unavailable to protect unseen content.</p>}
     </div><div className="ns-row-actions">
       {capabilities?.update && !note.truncated && <Button variant="outline" size="sm" onClick={() => onEdit(note)}>Review & edit<span className="visually-hidden"> {note.title}</span></Button>}
       {capabilities?.delete && <Button variant="ghost" size="sm" onClick={() => onRemove(note)}>Delete<span className="visually-hidden"> {note.title}</span></Button>}
@@ -712,7 +712,7 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
           <div className="ns-field"><label>Allowed actions<Choice label="Allowed connection actions" value={readOnly ? "read" : "write"} onChange={value => setReadOnly(value === "read")} disabled={mutation.busy} options={[{ value: "read", label: "Read only" }, { value: "write", label: "Read and write" }]} /></label></div>
           <p className="ns-field-hint">Pausing access or changing it to read only blocks new writes. Actions already sent cannot be recalled.</p></div>
         <div className="ns-dialog-actions"><Button type="submit" disabled={mutation.busy}>{mutation.busy ? "Saving…" : "Save access"}</Button></div>
-      </form> : <p className="ns-muted">{connection.enabled ? "Available to sessions." : "Paused for organization sessions."} Ask an administrator to change this policy.</p>}
+      </form> : <p>{connection.enabled ? "Available to sessions." : "Paused for organization sessions."} Ask an administrator to change this policy.</p>}
       {admin && <div className="ns-row-actions">
         <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("connect")}>{connection.connected ? "Reconnect" : "Connect"} {name}</Button>
         {connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => checkOrganizationConnection({ path: { provider: connection.id } }), () => setNotice("The provider confirmed this connection."))}>Check connection</Button>}
@@ -765,7 +765,7 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
       </>}
     </> : <>
       {connection.oauth_configured ? <Button disabled={mutation.busy} onClick={() => void redirect(() => startOrganizationConnectionOAuth({ path: { provider: connection.id } }).then(({ data }) => data))}>Continue with {name}</Button>
-        : <p className="ns-muted">OAuth is not configured for this provider. An administrator can connect using a supported access token.</p>}
+        : <p>OAuth is not configured for this provider. An administrator can connect using a supported access token.</p>}
       <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(() => connectOrganizationConnection({ path: { provider: connection.id }, body: { token } }), () => { setToken(""); onDone() }) }}>
         <div className="ns-field"><label>Access token<Input type="password" autoComplete="off" required minLength={1} maxLength={100000} disabled={mutation.busy} value={token} onChange={event => setToken(event.target.value)} /></label><p className="ns-field-hint">The provider validates the token. It is stored encrypted and is never returned to this page.</p></div>
         <Button type="submit" disabled={mutation.busy}>Connect {name} using token</Button>

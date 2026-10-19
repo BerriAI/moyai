@@ -443,8 +443,8 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
       <label>{config.mode === "existing" ? "Workspace password" : "Password"}<Input name="password" type="password" autoComplete="current-password" required autoFocus={config.mode === "existing" && !config.google_enabled} disabled={busy} /></label>
       <Button type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Button>
     </form>}
-    {config?.access_enabled && <><p className="muted">Your organization uses Cloudflare Access. Continue through your organization’s sign-in to open Moyai.</p><Button onClick={() => location.reload()}>Continue to workspace</Button></>}
-    {config && !config.password_enabled && !config.google_enabled && !config.access_enabled && <p className="muted">No sign-in method is enabled. Contact your workspace administrator.</p>}
+    {config?.access_enabled && <><p>Your organization uses Cloudflare Access. Continue through your organization’s sign-in to open Moyai.</p><Button onClick={() => location.reload()}>Continue to workspace</Button></>}
+    {config && !config.password_enabled && !config.google_enabled && !config.access_enabled && <p>No sign-in method is enabled. Contact your workspace administrator.</p>}
     {error && <p className="error" role="alert">{error}</p>}
     {!config && error && <Button variant="outline" onClick={() => setRetry(value => value + 1)}>Retry sign-in options</Button>}
   </section></main>
@@ -1036,16 +1036,16 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
                 {message.source_timestamp && <time className="message-source-time" dateTime={new Date(Number(message.source_timestamp) * 1000).toISOString()} title={new Date(Number(message.source_timestamp) * 1000).toLocaleString()}>{new Date(Number(message.source_timestamp) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>}
                 {message.source_url && <a className="message-source-link" href={message.source_url} target="_blank" rel="noreferrer" aria-label="Open message in Slack" title="Open message in Slack"><ExternalLink size={12} /></a>}
                 {message.role === "user" && turn && waitsBehindActive(turn, active, sendingNow.has(turn.id)) && <span className="status">Queued</span>}
-                {message.role === "user" && turn?.status === "stopped" && <span className="muted">Stopped</span>}
+                {message.role === "user" && turn?.status === "stopped" && <span>Stopped</span>}
               </div>
               <div className={message.role === "user" ? "user-bubble" : undefined}>
                 {message.content && <div className="message-content">{message.role === "assistant" ? <SkillMarkdown>{message.content}</SkillMarkdown> : message.source === "slack" ? <SlackMessage content={message.content} mentions={message.slack_mentions} /> : <SkillMessage content={message.content} />}</div>}
                 <AttachmentPreviews files={message.attachments ?? []} />
-                {message.deleted && <p className="muted">Deleted in Slack.{message.edited_after_start ? " Work that already started may continue." : ""}</p>}
-                {message.edited && <p className="muted">Edited in {message.edited_in === "web" ? "Moyai" : "Slack"}.{message.edited_after_start ? " This task received the original text. Send a follow-up to change the work." : ""}</p>}
-                {message.attachments_changed && <p className="muted">Attachments changed in Slack. This task keeps the original files; send a follow-up to use the updated files.</p>}
-                {message.legacy_review_required && <p className="muted">Open this older message in Slack to review its files and text.</p>}
-                {message.attachment_status?.filter(file => file.error || file.preview_error).map((file, index) => <p className="muted" role="status" key={file.file_id ?? index}>{file.name || "Slack attachment"}: {file.error ? "File unavailable. Open the message in Slack to retry or share it again." : "Preview unavailable. The original file is attached."}</p>)}
+                {message.deleted && <p>Deleted in Slack.{message.edited_after_start ? " Work that already started may continue." : ""}</p>}
+                {message.edited && <p>Edited in {message.edited_in === "web" ? "Moyai" : "Slack"}.{message.edited_after_start ? " This task received the original text. Send a follow-up to change the work." : ""}</p>}
+                {message.attachments_changed && <p>Attachments changed in Slack. This task keeps the original files; send a follow-up to use the updated files.</p>}
+                {message.legacy_review_required && <p>Open this older message in Slack to review its files and text.</p>}
+                {message.attachment_status?.filter(file => file.error || file.preview_error).map((file, index) => <p role="status" key={file.file_id ?? index}>{file.name || "Slack attachment"}: {file.error ? "File unavailable. Open the message in Slack to retry or share it again." : "Preview unavailable. The original file is attached."}</p>)}
               </div>
 
             </article>{segment && renderProgress(segment)}</React.Fragment>
@@ -1334,7 +1334,7 @@ function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, on
         }} />
     }))}
     {pending.approvals.map(call => <fieldset key={call.tool_call_id} className={questions.length ? "question-approval" : undefined}><legend>Allow {call.tool_name.replaceAll("_", " ")}?</legend><pre>{JSON.stringify(typeof call.args === "string" ? JSON.parse(call.args) : call.args, null, 2)}</pre><div className="question-options">{[true, false].map(value => <Button key={String(value)} type="button" disabled={disabled} variant={approvals[call.tool_call_id] === value ? "secondary" : "outline"} onClick={() => setApprovals(previous => ({ ...previous, [call.tool_call_id]: value }))}>{value ? "Allow this action" : "Decline"}</Button>)}</div></fieldset>)}
-    {credentials.length > 0 && <p className="muted">Resolve secure access above before continuing with these answers.</p>}
+    {credentials.length > 0 && <p>Resolve secure access above before continuing with these answers.</p>}
     {error && <p className="error" role="alert">{error}</p>}
     {submitted && <div className={questions.length ? "question-form-actions" : undefined}><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refreshSubmitted()}>Refresh conversation</Button></div>}
     {requiresContinue && <div className={questions.length ? "question-form-actions" : undefined}><Button type="submit" disabled={disabled || unknown || !isComplete(values, custom)}>{submitted ? "Submitted" : busy ? "Submitting…" : "Continue"}</Button></div>}

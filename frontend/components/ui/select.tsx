@@ -43,7 +43,7 @@ function SelectItem({ className, children, ...props }: React.ComponentProps<type
 const SelectValue = SelectPrimitive.Value
 const SelectGroup = SelectPrimitive.Group
 function SelectLabel(props: React.ComponentProps<typeof SelectPrimitive.Label>) {
-  return <SelectPrimitive.Label data-slot="select-label" className="px-2 py-1.5 text-xs text-muted-foreground" {...props} />
+  return <SelectPrimitive.Label data-slot="select-label" className="px-2 py-1.5 text-xs text-foreground" {...props} />
 }
 
 export { Select, SelectTrigger, SelectContent, SelectItem, SelectValue, SelectGroup, SelectLabel }

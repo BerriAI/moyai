@@ -8,7 +8,7 @@
 .file-preview span { padding: 8px 0 0; font-size: 12px; color: var(--ui-foreground); }
 .file-preview small { display: block; margin-top: 4px; color: var(--ui-muted); font-size: 11px; }
 .image-preview > a:focus-visible { display: block; outline: 2px solid var(--ui-primary); outline-offset: -2px; }
-.image-preview .attachment-upload-status { display: flex; align-items: center; gap: 6px; padding: 4px 10px 10px; color: var(--ui-muted); font-size: 11px; }
+.image-preview .attachment-upload-status { display: flex; align-items: center; gap: 6px; padding: 4px 10px 10px; color: var(--ui-foreground); font-size: 11px; }
 .image-preview .attachment-upload-error { padding: 4px 10px 10px; color: var(--ui-danger); }
 .image-preview .attachment-upload-error > span { padding: 0; font-size: 11px; color: inherit; white-space: normal; overflow-wrap: anywhere; }
 .image-preview.upload-failed { border-color: var(--ui-danger-border); }

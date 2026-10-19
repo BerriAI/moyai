@@ -7,14 +7,14 @@
 .failure-body{padding:16px;background:var(--ui-background);color:var(--ui-foreground);border-top:1px solid var(--ui-danger-border);font-size:12px}
 .failure-metadata{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 20px;margin:0}
 .failure-metadata>div{min-width:0}
-.failure-metadata dt{color:var(--ui-muted);margin-bottom:3px}
+.failure-metadata dt{color:var(--ui-foreground);margin-bottom:3px}
 .failure-metadata dd{margin:0;overflow-wrap:anywhere}
 .failure-body code{font-family:var(--ui-font-mono);font-size:11px;overflow-wrap:anywhere}
 .failure-body h3{font-size:12px;font-weight:600;margin:18px 0 8px}
-.failure-body .muted{font-size:12px;line-height:1.6}
+.failure-body .muted{color:var(--ui-foreground);font-size:12px;line-height:1.6}
 .failure-causes{margin:0;padding-inline-start:18px}
 .failure-causes li{margin-block:8px}
-.failure-causes li>span{display:block;margin-top:3px;color:var(--ui-muted);overflow-wrap:anywhere}
+.failure-causes li>span{display:block;margin-top:3px;color:var(--ui-foreground);overflow-wrap:anywhere}
 .failure-last-action{margin-block:16px;overflow-wrap:anywhere}
 .failure-tool{margin-top:12px;min-width:0}
 .failure-tool header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}

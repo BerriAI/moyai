@@ -65,7 +65,7 @@ export function ProductAutomationList({ rows, onReview }: { rows: ProductAutomat
     <CalendarClock className="ns-record-icon" aria-hidden="true" /><div className="ns-record-copy">
       <div className="ns-record-title"><h2>{row.name}</h2><span className="ns-badge">{automationStatus(row)}</span></div>
       <ul className="pa-triggers">{row.triggers.map(trigger => <li key={trigger.id}><TriggerSummary trigger={trigger} /></li>)}</ul>
-      {!row.native && <p className="ns-muted">Review migration before this workflow can run on the new runtime.</p>}
+      {!row.native && <p>Review migration before this workflow can run on the new runtime.</p>}
       {row.owned === false && <p className="ns-muted">Shared definition · Owner-managed</p>}
       {row.native?.last_error && <p className="pa-warning" role="status">{row.native.last_error}</p>}
     </div><div className="ns-row-actions"><Button variant="outline" size="sm" onClick={() => onReview(row.id)}>Review<span className="visually-hidden"> {row.name}</span></Button></div>
@@ -138,8 +138,8 @@ export function AutomationReadiness({ preview }: { preview: AutomationPreview })
     <p>{preview.sharing_notice || "Definitions and scheduled sessions are shared workspace resources."}</p>
     {preview.blockers.length > 0 && <ul className="pa-blockers">{preview.blockers.map(code => <li key={code}>{automationBlocker(code)}</li>)}</ul>}
     {preview.native?.last_error && <p className="pa-warning" role="status">{preview.native.last_error}</p>}
-    {preview.native && <p className="ns-muted">{automationStatus(preview)}{preview.native.sync_state !== "ready" ? " · Refresh to check scheduler synchronization." : ""}</p>}
-    <p className="ns-muted">Readiness checks the saved triggers, account access, repository and environment setup, and permissions. Resolve reported blockers before activation.</p>
+    {preview.native && <p>{automationStatus(preview)}{preview.native.sync_state !== "ready" ? " · Refresh to check scheduler synchronization." : ""}</p>}
+    <p>Readiness checks the saved triggers, account access, repository and environment setup, and permissions. Resolve reported blockers before activation.</p>
   </div>
 }
 function HistoryRows({ id, version }: { id: string; version: number }) {

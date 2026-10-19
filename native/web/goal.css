@@ -10,7 +10,7 @@
 }
 .goal-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
 .goal-heading svg { color: var(--ui-primary); }
-.goal-usage, .goal-reason { color: var(--ui-muted); font-size: 12px; }
+.goal-usage, .goal-reason { color: var(--ui-foreground); font-size: 12px; }
 .goal-usage { margin-left: auto; }
 .goal-objective { margin: 8px 0; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 120px; overflow: auto; }
 .goal-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }

@@ -1,11 +1,11 @@
 .action-panel{padding:20px;min-width:0;font-size:13px}
 .action-panel>header{display:flex;align-items:center;gap:10px;margin-bottom:24px}
-.action-panel>header>svg{flex-shrink:0;color:var(--ui-muted)}
+.action-panel>header>svg{flex-shrink:0;color:var(--ui-foreground)}
 .action-panel>header>div{min-width:0;flex:1}
 .action-panel h2{margin:0;font-size:15px;font-weight:500;overflow-wrap:anywhere}
 .action-panel header p{margin:4px 0 0;font-size:12px}
 .action-value{min-width:0;margin-top:20px}
-.action-value h3{margin:0 0 8px;color:var(--ui-muted);font-size:12px;font-weight:500}
+.action-value h3{margin:0 0 8px;color:var(--ui-foreground);font-size:12px;font-weight:500}
 .action-value pre{max-width:100%;padding:14px;border:1px solid var(--ui-border);border-radius:8px;background:var(--ui-subtle);color:var(--ui-foreground);font-family:var(--ui-font-mono);font-size:13px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
 .action-value pre:focus-visible{outline:2px solid var(--ui-primary);outline-offset:2px}
 .action-value>p{font-size:12px;margin-top:8px}

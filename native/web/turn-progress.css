@@ -1,28 +1,28 @@
-.turn-progress{margin-block:20px 12px;min-width:0;color:var(--ui-muted)}
-.turn-progress-toggle{justify-content:flex-start;gap:8px;height:auto;min-height:36px;padding:6px 0;color:var(--ui-muted);font-weight:400;white-space:normal;text-align:left}
+.turn-progress{margin-block:20px 12px;min-width:0;color:var(--ui-foreground)}
+.turn-progress-toggle{justify-content:flex-start;gap:8px;height:auto;min-height:36px;padding:6px 0;color:var(--ui-foreground);font-weight:400;white-space:normal;text-align:left}
 .turn-progress-toggle:hover{background:transparent;color:var(--ui-foreground)}
 .turn-progress-toggle svg{flex-shrink:0}
 .turn-progress-latest,.turn-progress-history{border-top:1px solid var(--ui-border);margin-top:8px;padding-top:14px}
 .turn-progress-latest{color:var(--ui-foreground)}
 .turn-progress-history{padding-left:20px}
-.turn-progress-entry{color:var(--ui-muted);padding:0 0 12px;overflow-wrap:anywhere}
+.turn-progress-entry{color:var(--ui-foreground);padding:0 0 12px;overflow-wrap:anywhere}
 .turn-progress-entry:last-of-type{padding-bottom:0}
 .turn-progress-action{font-size:12px;margin-top:12px}
 .turn-progress-history{display:flex;flex-direction:column;gap:8px}
 .turn-progress-history[data-state="closed"]{display:none}
 .work-tool-group{min-width:0;margin-block:0 10px}
-.work-detail-toggle{display:flex;align-items:center;justify-content:flex-start;gap:8px;width:100%;height:auto;min-height:32px;padding:4px 0;text-align:left;font-size:12px;color:var(--ui-muted);white-space:normal}
+.work-detail-toggle{display:flex;align-items:center;justify-content:flex-start;gap:8px;width:100%;height:auto;min-height:32px;padding:4px 0;text-align:left;font-size:12px;color:var(--ui-foreground);white-space:normal}
 .work-detail-toggle:hover{background:transparent;color:var(--ui-foreground)}
 .work-detail-toggle>svg,.work-detail-toggle>.running-dot{flex-shrink:0}
 .work-detail-toggle>span{min-width:0;overflow-wrap:anywhere}
 .work-detail-toggle>small{flex-shrink:0;font-size:11px}
 .work-tool-list{list-style:none;margin:6px 0 6px 20px;padding:0;display:flex;flex-direction:column;gap:6px}
 .work-tool-list li{min-width:0}
-.work-tool-action{display:flex;align-items:center;justify-content:flex-start;gap:8px;width:100%;height:auto;min-height:32px;padding:6px 8px;text-align:left;font-size:12px;font-weight:400;white-space:normal;color:var(--ui-muted)}
+.work-tool-action{display:flex;align-items:center;justify-content:flex-start;gap:8px;width:100%;height:auto;min-height:32px;padding:6px 8px;text-align:left;font-size:12px;font-weight:400;white-space:normal;color:var(--ui-foreground)}
 .work-tool-action:is(:hover,[aria-pressed="true"]){background:var(--ui-secondary);color:var(--ui-foreground)}
 .work-tool-action>svg{flex-shrink:0}
 .work-tool-action>span{min-width:0;overflow-wrap:anywhere}
-.work-tool-action small{margin-left:auto;flex-shrink:0;font-size:11px;color:var(--ui-muted)}
+.work-tool-action small{margin-left:auto;flex-shrink:0;font-size:11px;color:var(--ui-foreground)}
 .work-tool-action small.error{color:var(--ui-destructive)}
 .work-agent{min-width:0;margin-block:2px 12px;padding:8px 12px;border-left:2px solid var(--ui-border)}
 .work-agent-heading{display:flex;align-items:center;gap:8px;min-width:0}
@@ -30,11 +30,11 @@
 .work-agent-heading .workspace-agent-avatar{width:24px;height:24px;flex-shrink:0}
 .work-agent-heading strong{color:var(--ui-foreground)}
 .work-agent-state{font-size:11px}
-.work-agent-parent,.work-agent-action{margin:3px 0 8px;font-size:11px;color:var(--ui-muted)}
+.work-agent-parent,.work-agent-action{margin:3px 0 8px;font-size:11px;color:var(--ui-foreground)}
 .work-agent-preview{font-size:13px;line-height:1.65;overflow-wrap:anywhere}
 .work-agent-preview.message-content{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
 .work-agent-history{margin-top:8px}
-.work-result-label{display:block;margin-bottom:6px;color:var(--ui-muted);font-size:11px}
+.work-result-label{display:block;margin-bottom:6px;color:var(--ui-foreground);font-size:11px}
 .turn-progress .message-content>:first-child{margin-top:0}
 .turn-progress .message-content>:last-child{margin-bottom:0}
 @media(max-width:600px){.turn-progress-toggle,.work-detail-toggle{min-height:44px}.turn-progress-history{padding-left:10px}.work-agent{padding-inline:8px}.work-agent-state{flex-basis:100%}.work-agent-heading .work-detail-toggle{flex-wrap:wrap}.work-tool-list{margin-left:8px}.work-tool-action{min-height:44px;flex-wrap:wrap}.work-tool-action small{margin-left:auto}}

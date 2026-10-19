@@ -16,7 +16,7 @@
 .moyai-brand:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; border-radius: 2px; }
 .sidebar-brand-row { display: flex; align-items: center; gap: 4px; min-height: 28px; }
 .sidebar-brand-row > .moyai-brand { flex: 1; }
-.sidebar-toggle { flex: none; color: var(--ui-muted); }
+.sidebar-toggle { flex: none; color: var(--ui-foreground); }
 @media (max-width: 600px) { .sidebar > .sidebar-brand-row > .sidebar-toggle { display: none; } }
 @media (hover: none), (pointer: coarse), (max-width: 600px) {
   .moyai-brand { min-height: 44px; }

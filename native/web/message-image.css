@@ -41,7 +41,7 @@ button.message-image {
   transition: opacity 120ms ease;
 }
 .message-image:hover .message-image-expand, .message-image:focus-visible .message-image-expand { opacity: 1; }
-.message-image-unavailable { display: inline-flex; align-items: center; gap: 10px; padding: 16px; color: var(--ui-muted); text-align: left; overflow-wrap: anywhere; }
+.message-image-unavailable { display: inline-flex; align-items: center; gap: 10px; padding: 16px; color: var(--ui-foreground); text-align: left; overflow-wrap: anywhere; }
 .message-image-unavailable small { display: block; font-size: 11px; }
 .message-image-dialog[data-slot="dialog-content"] {
   display: block;
