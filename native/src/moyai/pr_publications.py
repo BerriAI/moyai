@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import BigInteger, Integer, String, Text
+from sqlalchemy import BigInteger, Integer, String, Text, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Mapped, mapped_column
@@ -62,13 +62,14 @@ def positive_id(value: Any) -> int | None:
 
 def creation_receipt(
     scope: RunScope, tool_name: str, args: dict[str, Any], result: Any, confirmed_at: str,
+    *, connection_id: str | None = None,
 ) -> CreationReceipt | None:
     """Only a successful exact creation tool and its selected grant can attest creation."""
     selected = [
         grant for grant in scope.grants
-        if grant.kind == "github" and tool_name in {
+        if grant.kind == "github" and (tool_name in {
             f"github_{grant.id[:8]}_create_pull_request", f"github_{grant.id[:8]}_open_pull_request",
-        }
+        } or grant.id == connection_id and tool_name in {"github_create_pull_request", "github_open_pull_request"})
     ]
     if len(selected) != 1 or selected[0].read_only:
         return None
@@ -128,9 +129,25 @@ async def persist_publication(database: Any, scope: RunScope, identity: str, rec
             or effect.tool_name not in {
                 f"github_{receipt.connection_id[:8]}_create_pull_request",
                 f"github_{receipt.connection_id[:8]}_open_pull_request",
+                "github_create_pull_request", "github_open_pull_request",
             }
         ):
             raise ValueError("A matching confirmed native effect is required.")
+        if effect.tool_name in {"github_create_pull_request", "github_open_pull_request"}:
+            from .product_github_models import ProductGitOperation
+
+            operation = await db.scalar(select(ProductGitOperation).where(
+                ProductGitOperation.original_effect_id == identity,
+                ProductGitOperation.actor_id == scope.actor_id,
+                ProductGitOperation.session_id == scope.session_id,
+                ProductGitOperation.turn_id == scope.turn_id,
+                ProductGitOperation.kind == effect.tool_name.removeprefix("github_"),
+                ProductGitOperation.connection_id == receipt.connection_id,
+                ProductGitOperation.connection_revision == receipt.connection_revision,
+                ProductGitOperation.repository_id == receipt.repository_id,
+            ))
+            if operation is None:
+                raise ValueError("A shared creation receipt requires its matching GitHub operation.")
         fields = asdict(receipt)
         target = {"url": fields.pop("url"), "repository": fields.pop("repository")}
         insert = postgres_insert if database.settings.postgres_url else sqlite_insert

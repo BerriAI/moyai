@@ -29,9 +29,11 @@ If authentication is needed, use the configured native GitHub connection.
 Never write account tokens into repository files, URLs, shell history, or output.
 Do not replace a missing integration with a mock and call it live verification.
 
-Discover `github_checkout` and pass the requested repository name or ID; the
-server selects its authorized connection. Discover that connection's publication
-tools. Preserve the requested repository, source ref, PR base and head. Use `publish_branch` for
+Discover the shared `github_<operation>` tools and pass the requested repository
+name or ID to checkout and publication operations; the server selects its
+authorized connection. Provider reads use their documented owner/repo fields;
+searches require an explicit repository and plain search terms. Preserve the
+requested repository, source ref, PR base and head. Use `publish_branch` for
 branch-only delivery and `open_pull_request` for an existing head; opening a PR
 does not grant ownership of that branch. New PRs are ready for review.
 For checkout changes, stage only the intended files and pass `directory` to

@@ -25,7 +25,12 @@ from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
-async def test_shared_checkout_routes_in_activity_and_replays_without_provider_access(runtime, actor, monkeypatch):
+@pytest.mark.parametrize(("operation", "reject_first"), [
+    ("checkout", False), ("create_branch", False), ("create_branch", True),
+])
+async def test_shared_github_routes_in_activity_and_replays_without_provider_access(
+    runtime, actor, monkeypatch, operation, reject_first,
+):
     calls, discoveries = [], []
     replaying = False
 
@@ -62,26 +67,47 @@ async def test_shared_checkout_routes_in_activity_and_replays_without_provider_a
 
     monkeypatch.setattr(ProductGitHubToolset, "_native", native)
     monkeypatch.setattr("moyai.product_github_checkout.checkout", install)
+
+    async def branch(workflows, ctx, request):
+        publisher = workflows.publisher
+        assert not replaying and activity.in_activity() and not workflow.in_workflow()
+        await publisher.check_target(request)
+        await service.check(ctx.deps, publisher.grant)
+        calls.append(publisher.target)
+        return {"repository_id": publisher.target, "branch": request.branch}
+
+    monkeypatch.setattr("moyai.product_github_workflows.Workflows.create_branch", branch)
     async with runtime.database.sessions.begin() as db:
         connections = [Connection(
             id=new_id(), owner_id=actor.id, kind="github", name=f"Repository {identity}",
-            credential="", read_only=True, policy=json.dumps({"product": {"repository_id": identity}}),
+            credential="", read_only=operation == "checkout",
+            policy=json.dumps({"require_approval": False, "product": {"repository_id": identity}}),
         ) for identity in (7, 8)]
         db.add_all(connections)
 
     async def stream(messages, info):
+        name = f"github_{operation}"
         names = {tool.name for tool in info.function_tools}
-        if "github_checkout" not in names:
-            yield {0: DeltaToolCall(name="search_tools", json_args=json.dumps({"queries": ["github checkout"]}),
+        returns = [part for message in messages for part in message.parts
+                   if isinstance(part, ToolReturnPart) and part.tool_name == name]
+        if name not in names:
+            yield {0: DeltaToolCall(name="search_tools", json_args=json.dumps({"queries": [name]}),
                                    tool_call_id="discover-checkout")}
-        elif not any(isinstance(part, ToolReturnPart) and part.tool_name == "github_checkout"
-                     for message in messages for part in message.parts):
+        elif len(returns) < (2 if reject_first else 1):
+            if returns:
+                assert "no unique selected" in str(returns[0].content)
+                assert calls == []
             assert not any(name.startswith("github_") and name.endswith("_checkout")
                            and name != "github_checkout" for name in names)
             yield {0: DeltaToolCall(
-                name="github_checkout",
-                json_args=json.dumps({"repository": "test/second", "directory": "/workspace/second"}),
-                tool_call_id="checkout-second",
+                name=name,
+                json_args=json.dumps({
+                    **({"repository_id": 999} if reject_first and not returns else {"repository": "test/second"}),
+                    **(
+                    {"directory": "/workspace/second"} if operation == "checkout" else
+                    {"branch": "feature", "commit_sha": "a" * 40, "request_key": "temporal-branch"}
+                )}),
+                tool_call_id=f"selected-operation-{len(returns)}",
             )}
         else:
             yield "Checkout completed."
@@ -105,6 +131,14 @@ async def test_shared_checkout_routes_in_activity_and_replays_without_provider_a
             assert (await asyncio.wait_for(handle.result(), 60))["status"] == "completed"
             history = await handle.fetch_history()
         assert calls == [8]
+        if operation == "create_branch":
+            from sqlalchemy import select
+
+            from moyai.models import Effect
+
+            async with runtime.database.sessions() as db:
+                effects = list(await db.scalars(select(Effect).where(Effect.turn_id == turn.id)))
+            assert [(effect.tool_name, effect.state) for effect in effects] == [("github_create_branch", "confirmed")]
         assert len(discoveries) == 2
         assert all(name.endswith("__get_tools") for name in discoveries)
         replaying = True
@@ -138,13 +172,15 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         if activity.info().activity_type.endswith("__get_tools"):
             discovery_activities.add(activity.info().activity_id)
 
-    def provider_tools():
+    def provider_tools(identity=None):
         tools = FunctionToolset(id="provider")
 
         @tools.tool_plain(metadata={"annotations": {"readOnlyHint": True}})
         async def read_repository(owner: str, repo: str) -> str:
             """Read the selected repository."""
             assert activity.in_activity() and not workflow.in_workflow()
+            if identity is not None:
+                dispatched_connections.append(identity)
             calls.append(f"{owner}/{repo}")
             return "Repository read completed."
 
@@ -158,25 +194,25 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         service = SimpleNamespace(
             database=runtime.database,
             connectors=SimpleNamespace(github=SimpleNamespace(
-                target=lambda name: 7, repository_name=lambda identity: "test/selected",
+                target=lambda name: 7 if name == "test/selected" else 8,
+                repository_name=lambda identity: "test/selected" if identity == 7 else "test/other",
             )),
             check=check,
         )
 
         def resolve(scope, grant):
             require_activity()
-            if activity.info().activity_type.endswith("__call_tool"):
-                dispatched_connections.append(grant.id)
             # Exercise the real canonical publication adapter's lazy import and schemas.
             return ProductGitHubToolset(service, scope, grant)
 
         async def native(self, *, write=False):
             require_activity()
             assert not write
-            return provider_tools()
+            return provider_tools(self.grant.id)
 
         monkeypatch.setattr(ProductGitHubToolset, "_native", native)
-        runtime.product_connections = SimpleNamespace(toolset=resolve, check=check)
+        service.toolset = resolve
+        runtime.product_connections = service
     else:
         class Provider:
             def __init__(self, **kwargs):
@@ -208,12 +244,13 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
         db.add(connection)
         unrelated = Connection(
             id=new_id(), owner_id=actor.id, kind="github", name="Another selected repository",
-            credential=credential, read_only=read_only, policy=connection.policy,
+            credential=credential, read_only=read_only,
+            policy=json.dumps({"product": {"repository_id": 8}}) if product else connection.policy,
         )
         db.add(unrelated)
 
-    tool_name = f"github_{connection.id[:8]}_read_repository"
-    prefix = f"github_{connection.id[:8]}_"
+    prefix = "github_" if product else f"github_{connection.id[:8]}_"
+    tool_name = prefix + "read_repository"
     publication_writes = ("create_pull_request", "update_pull_request", "request_pull_request_write_access")
     required_tools = {
         tool_name, *(
@@ -238,7 +275,7 @@ async def test_connections_resolve_in_activities_and_replay_without_provider_acc
             )}
             return
         if product:
-            assert "test/selected" in next(
+            assert "explicitly requested repository" in next(
                 tool.description for tool in info.function_tools if tool.name == tool_name
             )
             assert prefix + "publication_status" in names

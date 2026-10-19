@@ -30,10 +30,11 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic_ai import RunContext, Tool
 from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 
-from .connection_catalog import CatalogToolset, ConnectionCatalog
+from .connection_catalog import CatalogToolset, ConnectionCatalog, ConnectionDefinitionChanged
 from .contracts import Grant, RunScope
 from .product_connector_execution import CanonicalConnectorExecution
 
@@ -494,8 +495,9 @@ class ProductCatalogToolset(CatalogToolset):
     def __init__(
         self, catalog: ConnectionCatalog, ctx: RunContext[RunScope],
         factory: Callable[[str | None], AbstractToolset[RunScope]],
+        *, reconstruct: Callable[[ToolDefinition], AbstractToolset[RunScope] | None] | None = None,
     ):
-        super().__init__(catalog, ctx, factory)
+        super().__init__(catalog, ctx, factory, reconstruct=reconstruct)
         self.key = catalog.key(replace(ctx, deps=replace(ctx.deps, turn_id="")))
 
     async def get_tools(self, ctx: RunContext[RunScope]) -> dict[str, ToolsetTool[RunScope]]:
@@ -602,10 +604,14 @@ class ProductGitHubToolset(AbstractToolset[RunScope]):
         async with native:
             definitions = await native.get_tools(ctx)
             current = definitions.get(name)
-            if current is None or read_only_tool(current.tool_def) != read_only_tool(tool.tool_def):
-                raise ToolFailed("The provider tool definition changed. No action was sent.")
+            if current is None or (
+                read_only_tool(current.tool_def) != read_only_tool(tool.tool_def)
+                or current.tool_def.parameters_json_schema != tool.tool_def.parameters_json_schema
+            ):
+                raise ConnectionDefinitionChanged("The provider tool definition changed. Discover its tools again; no action was sent.")
             await self.service.check(self.scope, self.grant)
-            result = await native.call_tool(name, tool_args, ctx, current)
+            arguments = current.args_validator.validate_python(tool_args)
+            result = await native.call_tool(name, arguments, ctx, current)
             if not write:
                 await self.service.check(self.scope, self.grant)
             return result

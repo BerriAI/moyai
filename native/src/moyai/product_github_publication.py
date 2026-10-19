@@ -151,7 +151,7 @@ class Publications:
         if not ctx.tool_call_id:
             raise ToolFailed("Publication needs a native tool identity.")
         await self.check_target(request)
-        name = f"github_{self.grant.id[:8]}_{kind}"
+        name = f"github_{kind}" if ctx.tool_name == f"github_{kind}" else f"github_{self.grant.id[:8]}_{kind}"
         stored_kind = {
             "request_pull_request_write_access": "pr_write_access",
             "request_pr_lifecycle_access": "pr_lifecycle_access",
@@ -252,11 +252,14 @@ class Publications:
             confirmed = effect.settled_at or now()
             if row.kind in {"create_pull_request", "open_pull_request"}:
                 original = replace(self.scope, turn_id=row.turn_id, model=original_turn.model)
-                name = f"github_{self.grant.id[:8]}_{row.kind}"
+                name = effect.tool_name
                 base = result.get("base")
                 repository = (base.get("repo") or {}).get("full_name", "") if isinstance(base, dict) else ""
                 owner, _, repo = repository.partition("/") if isinstance(repository, str) else ("", "", "")
-                receipt = creation_receipt(original, name, {"owner": owner, "repo": repo}, result, confirmed)
+                receipt = creation_receipt(
+                    original, name, {"owner": owner, "repo": repo}, result, confirmed,
+                    connection_id=row.connection_id,
+                )
                 if receipt is None or receipt.repository_id != self.target:
                     raise ToolFailed("GitHub returned no verifiable creation receipt.")
             document = self.document(current)

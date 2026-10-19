@@ -26,6 +26,10 @@ from pydantic_core import SchemaValidator, core_schema
 from .contracts import RunScope
 
 
+class ConnectionDefinitionChanged(ToolFailed):
+    """Provider discovery must refresh before another dispatch."""
+
+
 def connection_search(
     _ctx: RunContext[RunScope], queries: Sequence[str], tools: Sequence[ToolDefinition],
 ) -> list[str]:
@@ -175,10 +179,12 @@ class CatalogToolset(AbstractToolset[RunScope]):
     def __init__(
         self, catalog: ConnectionCatalog, ctx: RunContext[RunScope],
         factory: Callable[[str | None], AbstractToolset[RunScope]],
+        *, reconstruct: Callable[[ToolDefinition], AbstractToolset[RunScope] | None] | None = None,
     ):
         self.catalog = catalog
         self.key = catalog.key(ctx)
         self.factory = factory
+        self.reconstruct = reconstruct
         self.native: AbstractToolset[RunScope] | None = None
         self.selection: str | None = None
         self.live_tools: dict[str, ToolsetTool[RunScope]] | None = None
@@ -193,13 +199,14 @@ class CatalogToolset(AbstractToolset[RunScope]):
         return None
 
     async def _live(
-        self, ctx: RunContext[RunScope], name: str | None = None,
+        self, ctx: RunContext[RunScope], name: str | None = None, definition: ToolDefinition | None = None,
     ) -> dict[str, ToolsetTool[RunScope]]:
         if self.native is not None and self.selection is not None and self.selection != name:
             await self.native.__aexit__(None, None, None)
             self.native, self.live_tools = None, None
         if self.native is None:
-            native = await self.factory(name).for_run(ctx)
+            reconstructed = self.reconstruct(definition) if self.reconstruct and definition else None
+            native = await (reconstructed if reconstructed is not None else self.factory(name)).for_run(ctx)
             await native.__aenter__()
             self.native = native
             self.selection = name
@@ -237,7 +244,7 @@ class CatalogToolset(AbstractToolset[RunScope]):
     async def get_tool_for_tool_def(
         self, tool_def: ToolDefinition, ctx: RunContext[RunScope],
     ) -> ToolsetTool[RunScope]:
-        current = (await self._live(ctx, tool_def.name)).get(tool_def.name)
+        current = (await self._live(ctx, tool_def.name, tool_def)).get(tool_def.name)
         if current is None or (
             current.tool_def.parameters_json_schema != tool_def.parameters_json_schema
             or current.tool_def.kind != tool_def.kind
@@ -255,4 +262,8 @@ class CatalogToolset(AbstractToolset[RunScope]):
         # listing. Durable calls already validated against this native validator.
         args = current.args_validator.validate_python(tool_args)
         assert self.native is not None
-        return await self.native.call_tool(name, args, ctx, current)
+        try:
+            return await self.native.call_tool(name, args, ctx, current)
+        except ConnectionDefinitionChanged:
+            self.catalog.discard(self.key)
+            raise
