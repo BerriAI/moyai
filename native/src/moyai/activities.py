@@ -100,8 +100,8 @@ async def settle_answer(turn_id: str) -> None:
 
 
 @activity.defn(name="moyai_fail_turn_v1")
-async def fail_turn(turn_id: str, message: str) -> None:
-    await current().database.fail(turn_id, message)
+async def fail_turn(turn_id: str, message: str, diagnostics: dict | None = None) -> None:
+    await current().database.fail(turn_id, message, diagnostics=diagnostics)
 
 
 @activity.defn(name="moyai_preserve_failed_workspace_v1")

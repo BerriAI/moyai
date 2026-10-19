@@ -3724,6 +3724,112 @@ export type EventTriggerOutput = {
 };
 
 /**
+ * FailureActionView
+ */
+export type FailureActionView = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Status
+     */
+    status: 'completed' | 'failed' | 'interrupted';
+    /**
+     * Timestamp
+     */
+    timestamp: string | null;
+    /**
+     * Tool
+     */
+    tool: string;
+};
+
+/**
+ * FailureCauseView
+ */
+export type FailureCauseView = {
+    /**
+     * Activity Id
+     */
+    activity_id?: string;
+    /**
+     * Activity Type
+     */
+    activity_type?: string;
+    /**
+     * Application Type
+     */
+    application_type?: string;
+    /**
+     * Type
+     */
+    type: string;
+};
+
+/**
+ * FailureRuntimeView
+ */
+export type FailureRuntimeView = {
+    /**
+     * Exception Chain
+     */
+    exception_chain: Array<FailureCauseView>;
+};
+
+/**
+ * FailureToolErrorView
+ */
+export type FailureToolErrorView = {
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Restricted
+     */
+    restricted: boolean;
+    /**
+     * Status
+     */
+    status: 'completed' | 'failed' | 'interrupted';
+    /**
+     * Timestamp
+     */
+    timestamp: string | null;
+    /**
+     * Tool
+     */
+    tool: string;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+};
+
+/**
+ * FailureUsageView
+ */
+export type FailureUsageView = {
+    /**
+     * Input Tokens
+     */
+    input_tokens?: number | number;
+    /**
+     * Output Tokens
+     */
+    output_tokens?: number | number;
+    /**
+     * Requests
+     */
+    requests?: number | number;
+};
+
+/**
  * FolderName
  */
 export type FolderName = {
@@ -10156,6 +10262,59 @@ export type TriggerOutput = {
 };
 
 /**
+ * TurnFailureDetails
+ */
+export type TurnFailureDetails = {
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Failures Limited
+     */
+    failures_limited: boolean;
+    /**
+     * Finished At
+     */
+    finished_at: string | null;
+    last_action: FailureActionView | null;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Notes
+     */
+    notes: Array<string>;
+    /**
+     * Recent Failures
+     */
+    recent_failures: Array<FailureToolErrorView>;
+    runtime: FailureRuntimeView | null;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Summary
+     */
+    summary: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string;
+    usage: FailureUsageView;
+    /**
+     * Workflow Id
+     */
+    workflow_id: string;
+};
+
+/**
  * TurnView
  */
 export type TurnView = {
@@ -14445,6 +14604,40 @@ export type GetSwarmResponses = {
 };
 
 export type GetSwarmResponse = GetSwarmResponses[keyof GetSwarmResponses];
+
+export type GetTurnFailureDetailsData = {
+    body?: never;
+    path: {
+        /**
+         * Session Id
+         */
+        session_id: string;
+        /**
+         * Turn Id
+         */
+        turn_id: string;
+    };
+    query?: never;
+    url: '/api/sessions/{session_id}/turns/{turn_id}/failure';
+};
+
+export type GetTurnFailureDetailsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetTurnFailureDetailsError = GetTurnFailureDetailsErrors[keyof GetTurnFailureDetailsErrors];
+
+export type GetTurnFailureDetailsResponses = {
+    /**
+     * Successful Response
+     */
+    200: TurnFailureDetails;
+};
+
+export type GetTurnFailureDetailsResponse = GetTurnFailureDetailsResponses[keyof GetTurnFailureDetailsResponses];
 
 export type GetWorkspaceData = {
     body?: never;

@@ -14,6 +14,11 @@ from moyai.coding_image import NODE_VERSION
 
 from scripts.lambda_image import ROOT, package
 
+BASE_IMAGES = (
+    "public.ecr.aws/docker/library/python:3.13-slim",
+    "docker.io/library/python:3.13-slim",
+)
+
 INSTALL_HOOK = """\
 const fs = require("node:fs");
 fs.writeFileSync("installed-runtime.json", JSON.stringify({
@@ -95,9 +100,25 @@ const preview = spawn("npm", ["run", "preview"], {stdio: "inherit", detached: tr
 """
 
 
+def pull_base_image(platform: str) -> str:
+    """Try the official image's alternate registry when a pull is unavailable."""
+    for image in BASE_IMAGES:
+        try:
+            result = subprocess.run(
+                ["docker", "pull", "--platform", platform, image], check=False, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"Timed out pulling {image}; trying the alternate registry", flush=True)
+            continue
+        if result.returncode == 0:
+            return image
+    raise RuntimeError("Could not pull the Python base image from ECR Public or Docker Hub")
+
+
 def verify(platform: str) -> None:
     identity = uuid4().hex
     tag = f"moyai-node-smoke:{identity}"
+    base_tag = f"moyai-node-base:{identity}"
     container = f"moyai-node-smoke-{identity}"
     with tempfile.TemporaryDirectory(prefix="moyai-node-smoke-") as directory:
         root = Path(directory)
@@ -116,8 +137,11 @@ def verify(platform: str) -> None:
         (probe / "preview.cjs").write_text(PREVIEW)
         (probe / "check.cjs").write_text(CHECK)
         try:
+            base = pull_base_image(platform)
+            subprocess.run(["docker", "tag", base, base_tag], check=True)
             subprocess.run([
                 "docker", "build", "--platform", platform,
+                "--build-arg", f"PYTHON_IMAGE={base_tag}",
                 "--tag", tag, str(context),
             ], check=True)
             subprocess.run([
@@ -130,6 +154,7 @@ def verify(platform: str) -> None:
         finally:
             subprocess.run(["docker", "rm", "--force", container], capture_output=True, check=False)
             subprocess.run(["docker", "image", "rm", tag], capture_output=True, check=False)
+            subprocess.run(["docker", "image", "rm", base_tag], capture_output=True, check=False)
 
 
 if __name__ == "__main__":

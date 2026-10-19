@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import "./brand.css"
 
 export function MoyaiBrand({ onClick }: { onClick?: React.MouseEventHandler<HTMLAnchorElement> }) {
-  return <a href="#" className="moyai-brand" onClick={onClick}><span className="moyai-brand-name"><i className="moyai-brand-mark" aria-hidden="true" />Moyai</span><small>LiteLLM</small></a>
+  return <a href="#" className="moyai-brand" onClick={onClick}><span className="moyai-brand-name">Moyai <small>by LiteLLM</small></span></a>
 }
 
 export function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {

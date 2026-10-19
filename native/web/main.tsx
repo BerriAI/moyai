@@ -15,9 +15,10 @@ import "./style.css"
 import "./product-shell.css"
 import { ApiError, csrfToken, setCsrf } from "./api"
 import { getMe, listPullRequestStatuses, startGoogleSignIn, listSessionFolders, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
-import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, getSessionActivity, getSessionPlan, listConnections, listSessionMessages, listSessions, loginWithPassword, logout, resolveEffect, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending, type PlanStep, type SessionDetail, type SessionEffect } from "./generated/api"
+import { cancelQueuedTurn, createSession, createSessionAnswer, createSessionMessage, getAuthConfig, getSession, getSessionActivity, getSessionPlan, listConnections, listSessionMessages, listSessions, loginWithPassword, logout, retrySlackDelivery, steerQueuedTurn, stopSession, updateQueuedTurn, type AuthConfig, type ConnectionView, type PendingRequests as Pending, type PlanStep, type SessionDetail } from "./generated/api"
 import { listHistorySessions, searchHistory, type HistorySessionList, type SourcedHistorySession } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
+import { FailureBanner } from "./failure-banner"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import slackLogo from "./assets/slack-logo.svg"
 import { Home } from "./home"
@@ -862,7 +863,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
   const segments = workSegments(visibleMessages.filter(message => message !== liveMessage), view.turns)
   const unanchored = unanchoredWorkSegments(visibleMessages, view.turns)
   const currentTool = active ? currentWorkTool(work.entries[active.id]) : undefined
-  const starting = !active && !view.has_unsettled_effects && view.turns.some(turn => turn.status === "queued")
+  const starting = !active && view.turns.some(turn => turn.status === "queued")
   const displayStatus = starting || active?.status === "starting" ? "starting" : session.status
   function openTab(tab: WorkspaceTab) { setWorkspaceOpen(false); dispatchPanel({ type: "open", tab }) }
   function openAction(action: ActionSelection) {
@@ -880,9 +881,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
     const titles = { "side-chat": "Side chat", computer: "Computer", files: "Files", activity: "Activity", plan: "Plan" }
     openTab({ id: kind === "side-chat" ? `side-chat:new:${crypto.randomUUID()}` : kind, kind, title: titles[kind] })
   }
-  // Questions and effect reviews remain in the conversation where they can be answered.
+  // Questions remain in the conversation where they can be answered.
   const space = Boolean(session.swarm_id && !sideMode && (swarmSpace ?? session.swarm_id === id)
-    && !view.pending && !view.credential_requests?.length && !view.has_unsettled_effects)
+    && !view.pending && !view.credential_requests?.length)
   function renderProgress(segment: WorkSegment) {
     if (!(segment.turn.is_self ?? segment.turn.actor_id === me.user.id)) return null
     return <TurnProgress
@@ -955,9 +956,9 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
           </>}
           {session.status === "waiting" && !view.can_answer && !view.pending && <p className="notice">Waiting for the original requester’s response. New messages will be queued.</p>}
           {view.credential_requests?.map(request => <div className="pending" key={request.request_id}><p>This task needs organization access.</p><ProductCredentialRequest requestId={request.request_id} onResolved={load} /></div>)}
-          {view.turns[0]?.error && <p className="error" role="alert">{view.turns[0].error}</p>}
-          {!session.active_turn && view.effects?.map(effect => <EffectReview key={effect.id} effect={effect} onDone={load} />)}
-          {!session.active_turn && view.has_unsettled_effects && !view.effects?.length && <p className="notice">An earlier action needs review by its requester before more changes can be made.</p>}
+          {view.turns[0]?.error && <FailureBanner key={`${id}:${view.turns[0].id}`}
+            sessionId={id} turn={view.turns[0]} canInspect={view.turns[0].is_self ?? view.turns[0].actor_id === me.user.id}
+            onDenied={() => clearSensitiveNow.current()} />}
           {session.save_warning && <p className="notice" role="status">{session.save_warning}</p>}
         </div>
         <form className="composer-wrap" onSubmit={e => { e.preventDefault(); void send() }}>
@@ -1133,24 +1134,6 @@ function SideChatPicker({ parentId, defaultModel, individual, onCreated, onSelec
 
 function ActivityRow({ item }: { item: Activity }) {
   return <details className="activity-row"><summary>{item.type === "tool_result" ? "Finished" : item.type === "tool_call" ? "Using" : "Updated"} {item.name?.replaceAll("_", " ")}</summary><pre>{item.type === "tool_result" ? item.content ?? "{}" : JSON.stringify((item.type === "tool_call" ? item.arguments : item.data) ?? {}, null, 2)}</pre></details>
-}
-
-function EffectReview({ effect, onDone }: { effect: SessionEffect; onDone: () => Promise<void> }) {
-  const [outcome, setOutcome] = useState<"completed" | "not_executed">("completed")
-  const [evidence, setEvidence] = useState("")
-  const [error, setError] = useState("")
-  const [busy, setBusy] = useState(false)
-  return <form className="pending" onSubmit={async event => {
-    event.preventDefault(); setBusy(true); setError("")
-    try { await resolveEffect({ path: { effect_id: effect.id }, body: { outcome, evidence } }); await onDone() }
-    catch (error) { setError(String(error)) } finally { setBusy(false) }
-  }}>
-    <h3>An action needs review</h3><p>Its outcome was not confirmed. Inspect the command or destination before allowing more changes.</p>
-    <details><summary>{effect.tool_name.replaceAll("_", " ")}</summary><pre>{JSON.stringify(effect.arguments, null, 2)}</pre></details>
-    <label>What did you verify?<Choice label="Verified outcome" value={outcome} onChange={value => setOutcome(value === "not_executed" ? "not_executed" : "completed")} options={[{ value: "completed", label: "The action completed" }, { value: "not_executed", label: "The action did not run" }]} /></label>
-    <label>Evidence<Textarea value={evidence} onChange={event => setEvidence(event.target.value)} placeholder="Describe what you checked and what you found." minLength={10} required /></label>
-    {error && <p className="error" role="alert">{error}</p>}<Button disabled={busy || evidence.trim().length < 10} type="submit">Record verified outcome</Button>
-  </form>
 }
 
 function PendingRequests({ pending, turnId, sessionId, submitted, onAccepted, onDone, onOpenComputer }: { pending: Pending; turnId: string; sessionId: string; submitted: boolean; onAccepted: () => void; onDone: () => Promise<void>; onOpenComputer: () => void }) {

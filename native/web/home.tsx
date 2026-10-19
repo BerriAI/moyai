@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react"
-import { ArrowUpRight, Bug, Code2, FileCode2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
+import { ArrowUpRight, Bug, Code2, Globe, ListChecks, LockKeyhole, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SkillComposer } from "./skill-composer"
 import { GoalDialog, goalCommandAction } from "./goal"
@@ -118,12 +118,9 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
     <GoalDialog open={goalDialog} onOpenChange={setGoalDialog} onSubmit={async command => { setDraft(command); await submit(command) }} />
     {fileDrop.dragging && <FileDropOverlay />}
     <SpaceBackdrop />
-    <div className="home-workbench-bar"><span><FileCode2 size={14} />Workspace<span className="home-path-separator">/</span><strong>New session</strong></span><span className="home-workbench-context"><Code2 size={13} />Moyai</span></div>
     <div className="home-content">
       <header className="home-header">
-        <p className="home-eyebrow">Workspace</p>
         <h1>What are we <span>building?</span></h1>
-        <p className="home-subtitle">A feature. A stubborn bug. A better way to do it.</p>
       </header>
       <form className="home-form" onSubmit={event => { event.preventDefault(); void send() }}>
         {error && <p className="error" role="alert">{error}</p>}
@@ -133,7 +130,6 @@ export function Home({ models, defaultModel, initiallyPrivate = false, individua
           <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setSkippedScope(accountScope)}>Continue without connections</Button>
         </div>}
         <div className="composer home-composer">
-          <div className="home-editor-heading"><span><FileCode2 size={14} />New session</span><span className="home-editor-mode">Draft</span></div>
           <AttachmentPreviews files={pictures.files} remove={busy ? undefined : pictures.remove} retry={busy ? undefined : pictures.retry} draft />
           <div className="home-editor-input"><SkillComposer focusRequest={composerFocus} value={draft} onChange={setDraft} onSend={prompt => void send(prompt)} shared={!isPrivate} disabled={busy} placeholder="Describe a change, paste an error, or ask a question…" onPaste={pictures.paste} /></div>
           <div className="composer-actions">

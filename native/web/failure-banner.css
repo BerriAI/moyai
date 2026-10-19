@@ -1,0 +1,25 @@
+.failure-banner{min-width:0;margin-block:12px;border:1px solid var(--ui-danger-border);border-radius:6px;background:var(--ui-danger-bg);color:var(--ui-danger);overflow:hidden}
+.failure-summary{width:100%;height:auto;min-height:44px;justify-content:flex-start;gap:10px;padding:12px 16px;text-align:left;white-space:normal;color:inherit;font-weight:400}
+.failure-summary>span{min-width:0;flex:1;overflow-wrap:anywhere}
+.failure-summary>svg{flex-shrink:0}
+.failure-summary>small{font-size:11px}
+.failure-expanded{transform:rotate(180deg)}
+.failure-body{padding:16px;background:var(--ui-background);color:var(--ui-foreground);border-top:1px solid var(--ui-danger-border);font-size:12px}
+.failure-metadata{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 20px;margin:0}
+.failure-metadata>div{min-width:0}
+.failure-metadata dt{color:var(--ui-muted);margin-bottom:3px}
+.failure-metadata dd{margin:0;overflow-wrap:anywhere}
+.failure-body code{font-family:var(--ui-font-mono);font-size:11px;overflow-wrap:anywhere}
+.failure-body h3{font-size:12px;font-weight:600;margin:18px 0 8px}
+.failure-body .muted{font-size:12px;line-height:1.6}
+.failure-causes{margin:0;padding-inline-start:18px}
+.failure-causes li{margin-block:8px}
+.failure-causes li>span{display:block;margin-top:3px;color:var(--ui-muted);overflow-wrap:anywhere}
+.failure-last-action{margin-block:16px;overflow-wrap:anywhere}
+.failure-tool{margin-top:12px;min-width:0}
+.failure-tool header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.failure-tool time{font-size:11px;color:var(--ui-muted)}
+.failure-tool pre{max-height:240px;margin:7px 0 0;padding:12px;border:1px solid var(--ui-border);border-radius:6px;background:var(--ui-subtle);font-family:var(--ui-font-mono);font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}
+.failure-tool pre:focus-visible{outline:2px solid var(--ui-primary);outline-offset:2px}
+.failure-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+@media(max-width:600px){.failure-metadata{grid-template-columns:1fr}.failure-summary{padding:12px}.failure-body{padding:12px}.failure-summary>small{display:none}}

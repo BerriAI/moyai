@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const {test,before,after} = require('node:test');
 const path = require('node:path');
+const fs = require('node:fs/promises');
 const {chromium} = require('playwright');
 let server,browser,base,state;
 const sessionId='a'.repeat(32), legacyId='b'.repeat(32), turnId='turn-root';
@@ -108,6 +109,13 @@ async function handle(req,res,next) {
     if(url.pathname.endsWith('/workspace'))return json(state.workspace||state.workspaceData||{links:[],files:[],sources:[],subagents:[],subagents_limited:false});
     if(url.pathname.endsWith('/computer'))return json({available:false,has_workspace:true,controlled:false,busy:false});
     if(url.pathname.endsWith('/swarm'))return json(state.swarm);
+    const failure=url.pathname.match(/^\/api\/sessions\/([^/]+)\/turns\/([^/]+)\/failure$/);
+    if(failure) {
+      const value=state.failureDetailsBySession?.[failure[1]]||state.failureDetails;
+      if(state.failureHolds?.[failure[1]])await state.failureHolds[failure[1]];
+      if(state.failureError)return json({detail:'Failure details temporarily unavailable.'},state.failureError);
+      return value?json(value):json({detail:'Failure not found.'},404);
+    }
     if(url.pathname.includes('/actions/')) {
       const key=decodeURIComponent(url.pathname.split('/actions/')[1]);
       if(state.actionHolds?.[key])await state.actionHolds[key];
@@ -720,23 +728,114 @@ test('swarm Space and Chat retain drafts and worker navigation opens the full co
   await space.waitFor();
 });
 
-for(const attention of ['question','effect'])test(`swarm reveals a pending ${attention} instead of hiding it behind Space`,async t=>{
+test('swarm reveals a pending question instead of hiding it behind Space',async t=>{
   reset({swarm:swarm()});const page=await pageFor(t);
   await page.getByRole('region',{name:'Live swarm space',exact:true}).waitFor();
-  if(attention==='question') {
-    state.status='waiting';
-    state.pending={calls:[{tool_call_id:'question',tool_name:'ask_user_question',args:{questions:[{
-      header:'Approach',question:'Which method should I use?',options:[{label:'Iterative addition'},{label:'Pairing'}],
-    }]}}],approvals:[]};
-  } else {
-    state.status='idle';
-    state.effects=[{id:'effect-one',turn_id:turnId,tool_name:'shell',arguments:{command:'example requiring review'}}];
-  }
-  await page.getByRole('heading',{name:attention==='question'?'Question':'An action needs review',exact:true}).waitFor();
+  state.status='waiting';
+  state.pending={calls:[{tool_call_id:'question',tool_name:'ask_user_question',args:{questions:[{
+    header:'Approach',question:'Which method should I use?',options:[{label:'Iterative addition'},{label:'Pairing'}],
+  }]}}],approvals:[]};
+  await page.getByRole('heading',{name:'Question',exact:true}).waitFor();
   assert.equal(await page.locator('.transcript').isVisible(),true);
   await page.getByRole('button',{name:'Space',exact:true}).click();
   assert.equal(await page.locator('.transcript').isVisible(),true);
   assert.equal(await page.getByRole('region',{name:'Live swarm space',exact:true}).count(),0);
+});
+
+for(const tool of ['browser_open','shell','github_create_pull_request','slack_post_message'])test(`failed ${tool} shows its error without an outcome-review form`,async t=>{
+  reset({status:'failed',turns:[{id:turnId,actor_id:'viewer',status:'failed',error:'The action failed.',connections:[],usage:{}}],
+    effects:[{id:'effect-one',turn_id:turnId,tool_name:tool,arguments:{}}]});
+  const page=await pageFor(t);
+  await page.getByText('The action failed.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:'An action needs review',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'Record verified outcome',exact:true}).count(),0);
+  await page.getByRole('textbox',{name:'Message Moyai',exact:true}).fill('Continue with the task.');
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isEnabled(),true);
+});
+
+function failureFixture(overrides={}) {
+  return {status:'failed',turns:[{id:turnId,actor_id:'viewer',is_self:true,status:'failed',
+    error:'The agent could not complete this turn.',model:'test-model',connections:[],usage:{},
+    created_at:'2026-10-19T17:10:55Z',finished_at:'2026-10-19T17:15:02Z'}],
+  failureDetails:{session_id:sessionId,turn_id:turnId,workflow_id:'moyai-turn-'+turnId,status:'failed',
+    model:'test-model',summary:'The agent could not complete this turn.',
+    created_at:'2026-10-19T17:10:55Z',finished_at:'2026-10-19T17:15:02Z',
+    runtime:{exception_chain:[{type:'ActivityError',activity_type:'moyai_effects_reserve',activity_id:'16'},
+      {type:'ApplicationError',application_type:'PendingEffectError'}]},
+    last_action:{id:'read',tool:'browser_read',status:'completed',timestamp:'2026-10-19T17:14:45Z'},
+    recent_failures:[{id:'open',tool:'browser_open',timestamp:'2026-10-19T17:14:32Z',
+      error:'net::ERR_CONNECTION_REFUSED at http://localhost:8840/reference.png\n<script>not executable</script>',
+      restricted:false,truncated:false}],failures_limited:false,notes:[],usage:{input_tokens:521914,output_tokens:1693}},
+  ...overrides};
+}
+
+for(const width of [1440,768,320])test(`failure details open on demand, copy diagnostics and download the trace at ${width}px`,async t=>{
+  reset(failureFixture());
+  const page=await pageFor(t,'#'+sessionId,width,async page=>page.addInitScript(()=>{
+    window.failureCopy='';navigator.clipboard.writeText=async value=>{window.failureCopy=value;};
+  }));
+  const toggle=page.getByRole('button',{name:'Show failure details',exact:true});
+  await toggle.waitFor();
+  assert.equal(state.requests.some(row=>row.path.endsWith('/failure')),false);
+  await toggle.focus();
+  await toggle.press('Enter');
+  await page.getByText('PendingEffectError',{exact:true}).waitFor();
+  assert.match(await page.locator('.failure-tool pre').innerText(),/ERR_CONNECTION_REFUSED/);
+  assert.equal(await page.locator('.failure-tool script').count(),0);
+  assert.equal(await page.getByRole('heading',{name:'An action needs review',exact:true}).count(),0);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await page.getByRole('button',{name:'Copy details',exact:true}).click();
+  await page.getByRole('button',{name:'Copied details',exact:true}).waitFor();
+  const copied=JSON.parse(await page.evaluate(()=>window.failureCopy));
+  assert.equal(copied.turn_id,turnId);assert.equal(copied.recent_failures[0].tool,'browser_open');
+  const download=page.waitForEvent('download');
+  await page.getByRole('button',{name:'Download debug trace',exact:true}).click();
+  assert.equal((await download).suggestedFilename(),`moyai-trace-${sessionId}.json`);
+  await page.getByRole('button',{name:'Hide failure details',exact:true}).click();
+  await page.locator('.failure-body').waitFor({state:'hidden'});
+  assert.equal(await page.locator('.failure-body').isVisible(),false);
+});
+
+test('failure details retry a read failure and preserve diagnostics after a copy failure',async t=>{
+  reset(failureFixture({failureError:503}));
+  const page=await pageFor(t,'#'+sessionId,1440,async page=>page.addInitScript(()=>{
+    navigator.clipboard.writeText=async()=>{throw new Error('Clipboard unavailable');};
+  }));
+  await page.getByRole('button',{name:'Show failure details',exact:true}).click();
+  await page.getByRole('button',{name:'Retry details',exact:true}).waitFor();
+  state.failureError=undefined;
+  await page.getByRole('button',{name:'Retry details',exact:true}).click();
+  await page.getByText('PendingEffectError',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Copy details',exact:true}).click();
+  await page.getByText('Could not copy details. Try downloading the debug trace.',{exact:true}).waitFor();
+  assert.equal(await page.getByText('PendingEffectError',{exact:true}).isVisible(),true);
+});
+
+test('failure details for another requester show only public context without a private read',async t=>{
+  const fixture=failureFixture();fixture.turns[0]={...fixture.turns[0],actor_id:'teammate',is_self:false};
+  reset(fixture);const page=await pageFor(t);
+  await page.getByRole('button',{name:'Show failure details',exact:true}).click();
+  await page.getByText('Detailed tool activity is visible only to the requester.',{exact:true}).waitFor();
+  assert.equal(state.requests.some(row=>row.path.endsWith('/failure')),false);
+  assert.equal(await page.getByRole('button',{name:'Copy details',exact:true}).count(),0);
+});
+
+test('failure details discard a late response after switching conversations',async t=>{
+  let release;const hold=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  const other='c'.repeat(32),fixture=failureFixture();
+  reset({...fixture,createdSession:true,failureHolds:{[sessionId]:hold},
+    failureDetailsBySession:{[other]:{...fixture.failureDetails,session_id:other,turn_id:'other-turn',
+      workflow_id:'moyai-other-turn',runtime:null,recent_failures:[],notes:['No exception details were recorded.']}},
+    turnsBySession:{[other]:[{...fixture.turns[0],id:'other-turn'}]}});
+  const page=await pageFor(t);
+  await page.getByRole('button',{name:'Show failure details',exact:true}).click();
+  await waitFor(()=>state.requests.some(row=>row.path.endsWith('/failure')),'held failure request');
+  await page.goto(base+'/#'+other);
+  await page.getByRole('button',{name:'Show failure details',exact:true}).click();
+  await page.getByText('moyai-other-turn',{exact:true}).waitFor();
+  release();
+  assert.equal(await page.getByText('PendingEffectError',{exact:true}).count(),0);
+  assert.equal(await page.getByText('moyai-other-turn',{exact:true}).isVisible(),true);
 });
 
 test('home and inventory render while account and folder reads are held',async t=>{
@@ -755,6 +854,14 @@ for(const width of [1440,768,320])test(`home keeps the draft and controls reacha
   const heading=page.getByRole('heading',{name:'What are we building?',exact:true});
   await heading.waitFor();
   await page.evaluate(()=>document.fonts.ready);
+  if(process.env.MOYAI_UI_CAPTURE_DIR){
+    await fs.mkdir(process.env.MOYAI_UI_CAPTURE_DIR,{recursive:true});
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`home-${width}-dark.png`)});
+    if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+    await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
+    if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+    await page.screenshot({path:path.join(process.env.MOYAI_UI_CAPTURE_DIR,`home-${width}-light.png`)});
+  }
   const geometry=await heading.boundingBox();
   const input=page.getByRole('textbox',{name:'Message Moyai'});
   await input.fill('A draft that must stay ready to edit.');
@@ -767,8 +874,14 @@ for(const width of [1440,768,320])test(`home keeps the draft and controls reacha
   assert.equal(await page.getByText('Drop files or paste images · Enter to send',{exact:true}).isVisible(),true);
   assert.equal(await page.locator('.home-composer').getByRole('button',{name:'Private session',exact:true}).isVisible(),true);
   await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'hidden'});
-  await input.fill('');
+  // Let Lexical handle selection and deletion through real keyboard commands.
+  // fill('') can race its selection listener and leave the old draft intact.
+  await input.press('ControlOrMeta+A');
+  await input.press('Backspace');
+  assert.equal(await input.textContent(),'');
   await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'visible'});
+  assert.equal(await page.getByRole('button',{name:'Review code',exact:true}).isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
 });
 
 for(const [label,prompt] of [

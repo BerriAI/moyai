@@ -38,6 +38,7 @@ from .contracts import (
 from .delegation_authority import DelegatedAuthority, saved_authority, session_context
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .dispatch_wakeups import notify_dispatch
+from .failed_action_attempts import settle_failed_action_attempts
 from .goal_models import Goal
 from .goals import Goals
 from .goals import dispatchable as goal_dispatchable
@@ -493,6 +494,7 @@ class Database:
             if locked is None:
                 raise HTTPException(404, "Conversation not found.")
             await transaction.refresh(session)
+            await settle_failed_action_attempts(transaction, session_id)
             existing = await transaction.scalar(select(Turn).where(
                 Turn.session_id == session_id, Turn.actor_id == actor.id,
                 Turn.request_key == body.request_key,
@@ -1019,8 +1021,11 @@ class Database:
     async def settle(self, turn_id: str, *, snapshot: str | None = None, warning: str | None = None) -> None:
         await self.answers.settle(turn_id, snapshot=snapshot, warning=warning)
 
-    async def fail(self, turn_id: str, message: str, *, only_unsettled: bool = False) -> None:
-        await self.answers.fail(turn_id, message, only_unsettled=only_unsettled)
+    async def fail(
+        self, turn_id: str, message: str, *, only_unsettled: bool = False,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        await self.answers.fail(turn_id, message, only_unsettled=only_unsettled, diagnostics=diagnostics)
 
     async def stop(self, actor: User, session_id: str) -> str | None:
         if await self.swarms.stop_session(actor, session_id):
