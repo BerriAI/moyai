@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -32,6 +33,7 @@ from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 
+from .connection_catalog import CatalogToolset, ConnectionCatalog
 from .contracts import Grant, RunScope
 from .product_connector_execution import CanonicalConnectorExecution
 
@@ -461,6 +463,47 @@ class CommittedSourceWrites:
 
     async def flush(self) -> None:
         return None
+
+
+class ProductCatalogToolset(CatalogToolset):
+    """Reuse canonical definitions across turns, never a turn's execution state.
+
+    Only Moyai's canonical adapters opt in. Their schemas depend on the selected
+    grants (including read/write policy), not the turn ID: REST tools come from
+    fixed schemas; GitHub reads come from the admitted account's MCP catalog;
+    publication definitions are fixed even though their closures enforce the
+    current turn's approval/effect receipts. Those closures are never cached.
+
+    Keep session, actor, product identity, provenance and the complete grant
+    snapshot in the key. Arbitrary provider/context-dependent toolsets continue
+    to use CatalogToolset's full-turn key.
+    """
+
+    def __init__(
+        self, catalog: ConnectionCatalog, ctx: RunContext[RunScope],
+        factory: Callable[[str | None], AbstractToolset[RunScope]],
+    ):
+        super().__init__(catalog, ctx, factory)
+        self.key = catalog.key(replace(ctx, deps=replace(ctx.deps, turn_id="")))
+
+    async def get_tools(self, ctx: RunContext[RunScope]) -> dict[str, ToolsetTool[RunScope]]:
+        from .runtime import current
+
+        service = current().product_connections
+        if service is None or not ctx.deps.grants or any(
+            not grant.policy.get("product") for grant in ctx.deps.grants
+        ):
+            raise PermissionError("Canonical product connections are required for schema reuse.")
+        try:
+            tools = await super().get_tools(ctx)
+            # A cache entry is not proof that this turn is still running or that
+            # its requester/account is still authorized. Check the full current
+            # scope at the release boundary, including on hits and after awaits.
+            await service.check(ctx.deps, ctx.deps.grants[0])
+            return tools
+        except (PermissionError, HTTPException):
+            self.catalog.discard(self.key)
+            raise
 
 
 class ProductGitHubToolset(AbstractToolset[RunScope]):

@@ -967,16 +967,10 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             yield 'event: finished\ndata: {}\n\n'
 
         async def authorize_viewer():
-            cast(Any, user).slack_read_cache = {}
-            fresh = await runtime.database.user(user.id)
-            if fresh.auth_version != user.auth_version:
-                raise HTTPException(401, "Your access changed.")
-            if runtime.product_identity is not None:
-                await runtime.product_identity.require_request_current(request)
-            await runtime.database.session(user, session_id)
-            async with runtime.database.sessions() as db:
-                if not await runtime.database.same_person(db, user, turn.actor_id):
-                    raise HTTPException(403, "Requester access changed.")
+            from .stream_authority import authorize_stream_viewer
+            await authorize_stream_viewer(
+                runtime.database, runtime.product_identity, request, user, session_id, turn.actor_id,
+            )
 
         return StreamingResponse(
             authorized_events(

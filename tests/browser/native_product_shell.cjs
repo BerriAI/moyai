@@ -2503,12 +2503,22 @@ test('chat links remain accented and underlined while plain inline code stays ne
   reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:'[BerriAI/moyai](https://github.com/BerriAI/moyai) contains the workspace.\n\n| Path | Description |\n| --- | --- |\n| `native/web/` | Frontend |\n\nStart with [`docs/architecture.md`](https://github.com/BerriAI/moyai/blob/main/docs/architecture.md).'}]});
   const page=await pageFor(t);
   const link=page.getByRole('link',{name:'BerriAI/moyai',exact:true});await link.waitFor();
-  const code=page.locator('.message-content td code');
-  const linkedCode=page.locator('.message-content a code');
-  const linkColor=await link.evaluate(el=>getComputedStyle(el).color);
-  assert.notEqual(await code.evaluate(el=>getComputedStyle(el).color),linkColor);
-  assert.equal(await linkedCode.evaluate(el=>getComputedStyle(el).color),linkColor);
-  assert.equal(await link.evaluate(el=>getComputedStyle(el).textDecorationLine),'underline');
+  // Read all styles in one browser turn. A session refresh can replace the
+  // Markdown between locator resolution and evaluate, detaching the old link.
+  const snapshot=await page.waitForFunction(()=>{
+    const message=document.querySelector('.message-content');
+    const link=message?.querySelector('a[href="https://github.com/BerriAI/moyai"]');
+    const code=message?.querySelector('td code');
+    const linkedCode=message?.querySelector('a code');
+    if(!link||!code||!linkedCode)return false;
+    return {linkColor:getComputedStyle(link).color,codeColor:getComputedStyle(code).color,
+      linkedCodeColor:getComputedStyle(linkedCode).color,decoration:getComputedStyle(link).textDecorationLine};
+  });
+  const styles=await snapshot.jsonValue();
+  assert.notEqual(styles.linkColor,'');
+  assert.notEqual(styles.codeColor,styles.linkColor);
+  assert.equal(styles.linkedCodeColor,styles.linkColor);
+  assert.equal(styles.decoration,'underline');
 });
 
 // Large synthetic screenshots reproduce the overflowing assistant image report.
