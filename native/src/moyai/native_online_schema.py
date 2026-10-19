@@ -193,7 +193,46 @@ def _table(schema: str, name: str):
     return sql.Identifier(schema, name)
 
 
+def _receipt_relation(connection, schema: str, name: str) -> None:
+    """A matching receipt value cannot qualify a view or unexpected write hook."""
+    relation = schema + "." + name
+    # Bind inspection to this relation for the rest of the transaction. This
+    # lock is read-only compatible and prevents a verify/use DDL race.
+    connection.execute(sql.SQL("LOCK TABLE {} IN ACCESS SHARE MODE NOWAIT").format(_table(schema, name)))
+    kind = connection.execute("""
+        SELECT relkind,relrowsecurity,relforcerowsecurity,relhasrules,
+            EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=pg_class.oid AND NOT tgisinternal),
+            EXISTS(SELECT 1 FROM pg_inherits WHERE inhrelid=pg_class.oid OR inhparent=pg_class.oid),
+            EXISTS(SELECT 1 FROM pg_index WHERE indrelid=pg_class.oid AND NOT indisprimary)
+        FROM pg_class WHERE oid=to_regclass(%s)
+    """, (relation,)).fetchone()
+    require(kind == ("r", False, False, False, False, False, False), "receipt_structure_changed")
+    columns = connection.execute("""
+        SELECT a.attname,format_type(a.atttypid,a.atttypmod),NOT a.attnotnull,
+            pg_get_expr(d.adbin,d.adrelid)
+        FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+        WHERE a.attrelid=%s::regclass AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum
+    """, (relation,)).fetchall()
+    expected = (
+        [("version", "text", False, None), ("protocol", "text", False, None),
+         ("plan_digest", "character(64)", False, None), ("plan", "jsonb", False, None)]
+        if name == LEDGER else
+        [("version", "character varying(100)", False, None), ("manifest", "character varying(64)", False, None),
+         ("applied_at", "timestamp with time zone", False, "clock_timestamp()")]
+    )
+    require(columns == expected, "receipt_structure_changed")
+    primary = connection.execute("""
+        SELECT c.contype,ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(id,n)
+            JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.id ORDER BY k.n),
+            i.indisvalid,i.indisready,c.condeferrable
+        FROM pg_constraint c LEFT JOIN pg_index i ON i.indexrelid=c.conindid
+        WHERE c.conrelid=%s::regclass AND c.contype!='n'
+    """, (relation,)).fetchall()
+    require(primary == [("p", ["version"], True, True, False)], "receipt_structure_changed")
+
+
 def _receipts(connection, schema: str) -> dict:
+    _receipt_relation(connection, schema, "moyai_app_schema_versions")
     return dict(connection.execute(sql.SQL("SELECT version,manifest FROM {}").format(
         _table(schema, "moyai_app_schema_versions"),
     )).fetchall())
@@ -203,15 +242,7 @@ def _ledger(connection, schema: str) -> dict | None:
     relation = connection.execute("SELECT to_regclass(%s)", (schema + "." + LEDGER,)).fetchone()[0]
     if relation is None:
         return None
-    kind = connection.execute("SELECT relkind FROM pg_class WHERE oid=%s::regclass", (relation,)).fetchone()
-    columns = connection.execute("""
-        SELECT column_name,udt_name,is_nullable FROM information_schema.columns
-        WHERE table_schema=%s AND table_name=%s ORDER BY ordinal_position
-    """, (schema, LEDGER)).fetchall()
-    require(kind == ("r",) and columns == [
-        ("version", "text", "NO"), ("protocol", "text", "NO"),
-        ("plan_digest", "bpchar", "NO"), ("plan", "jsonb", "NO"),
-    ], "ledger_changed")
+    _receipt_relation(connection, schema, LEDGER)
     rows = connection.execute(sql.SQL("SELECT version,protocol,plan_digest,plan FROM {}").format(
         _table(schema, LEDGER),
     )).fetchall()
@@ -333,8 +364,8 @@ def apply(
             require(bounded.execute(
                 "SELECT pg_try_advisory_xact_lock(hashtext(%s))", (f"moyai-native-migration:{native}",),
             ).fetchone() == (True,), "migration_busy")
-            guard(bounded)
             status = _status(bounded, value)
+            guard(bounded)
             if status == "applied":
                 return _receipt(value, "already_applied")
             # These are the existing FK parents. NOWAIT avoids placing a DDL

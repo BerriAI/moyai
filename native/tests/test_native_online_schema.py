@@ -204,3 +204,58 @@ async def test_guard_queries_share_the_migration_deadline(expansion):
         await asyncio.to_thread(apply, connection, value, guard=lambda budget: budget.execute("SELECT pg_sleep(4)"))
     assert time.monotonic() - started < 3
     assert_missing(connection, product.schema, *ADDED, LEDGER)
+
+
+@pytest.mark.parametrize("change", ["view", "trigger", "rule", "check", "default", "index", "rls", "primary"])
+async def test_matching_receipt_values_do_not_authorize_unknown_write_behavior(expansion, change):
+    product, value, connection, _ = expansion
+    table = sql.Identifier(product.schema, "moyai_app_schema_versions")
+    if change == "view":
+        connection.execute(sql.SQL("ALTER TABLE {} RENAME TO saved_receipts").format(table))
+        connection.execute(sql.SQL("CREATE VIEW {} AS SELECT * FROM {}").format(
+            table, sql.Identifier(product.schema, "saved_receipts"),
+        ))
+    elif change == "trigger":
+        function = sql.Identifier(product.schema, "unreviewed_receipt")
+        connection.execute(sql.SQL("""
+            CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS
+            $$ BEGIN DELETE FROM moyai.users; RETURN NEW; END $$
+        """).format(function))
+        connection.execute(sql.SQL("CREATE TRIGGER unreviewed BEFORE INSERT ON {} FOR EACH ROW EXECUTE FUNCTION {}()")
+                           .format(table, function))
+    elif change == "rule":
+        connection.execute(sql.SQL("CREATE RULE unreviewed AS ON INSERT TO {} DO ALSO DELETE FROM moyai.users")
+                           .format(table))
+    elif change == "check":
+        function = sql.Identifier(product.schema, "unreviewed_check")
+        connection.execute(sql.SQL("""
+            CREATE FUNCTION {}() RETURNS boolean LANGUAGE plpgsql AS
+            $$ BEGIN DELETE FROM moyai.users; RETURN true; END $$
+        """).format(function))
+        connection.execute(sql.SQL("ALTER TABLE {} ADD CONSTRAINT unreviewed CHECK ({}()) NOT VALID")
+                           .format(table, function))
+    elif change == "default":
+        connection.execute(sql.SQL("ALTER TABLE {} ALTER COLUMN applied_at SET DEFAULT now()").format(table))
+    elif change == "index":
+        connection.execute(sql.SQL("CREATE INDEX unreviewed ON {} (lower(version))").format(table))
+    elif change == "rls":
+        connection.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(table))
+    else:
+        connection.execute(sql.SQL("ALTER TABLE {} DROP CONSTRAINT moyai_app_schema_versions_pkey").format(table))
+    # None of these DDL changes altered the existing manifest rows. The old
+    # INSERT would execute the unreviewed write hooks despite matching values.
+    for action in (lambda: inspect(connection, value), lambda: apply(connection, value, guard=lambda _: None)):
+        with pytest.raises(OnlineSchemaError, match="receipt_structure_changed"):
+            action()
+    assert connection.execute("SELECT count(*) FROM moyai.users").fetchone() == (1,)
+    assert_missing(connection, product.schema, *ADDED, LEDGER)
+
+
+async def test_committed_ledger_requires_its_original_primary_key(expansion):
+    product, value, connection, _ = expansion
+    apply(connection, value, guard=lambda _: None)
+    connection.execute(sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(
+        sql.Identifier(product.schema, LEDGER), sql.Identifier(LEDGER + "_pkey"),
+    ))
+    with pytest.raises(OnlineSchemaError, match="receipt_structure_changed"):
+        inspect(connection, value)
