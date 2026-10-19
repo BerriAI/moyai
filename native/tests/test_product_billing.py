@@ -378,6 +378,69 @@ async def test_read_bound_and_missing_schema_raise_without_creating_bridge_rows(
         assert (await conn.exec_driver_sql("SELECT count(*) FROM sqlite_master WHERE name='missing_source'")).scalar_one() == 0
 
 
+async def test_report_exceeds_old_record_ceiling_without_losing_totals_or_detail_pages(billing_product):
+    context = billing_product
+    count = 50_001
+    base = old_row(user_id="google:admin-sub", cost="0.000000000000000001")
+    await seed(context.writer, old=[base], new=[new_row(cost_usd=base["cost"])])
+    async with context.writer.begin() as connection:
+        await connection.execute(text("""
+            WITH RECURSIVE numbers(n) AS (
+                SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<:count
+            )
+            INSERT INTO model_requests(
+                id,run_id,user_id,model,created_at,status,cost,key_hash,gateway_scope,gateway_id,
+                prompt_tokens,completion_tokens,total_tokens
+            )
+            SELECT 'bulk-' || n,'historical-child','google:admin-sub','route',
+                   '2026-10-03T00:00:00+00:00','complete','0.000000000000000001',
+                   :key,:scope,'bulk-call-' || n,12,4,16
+            FROM numbers
+        """), {"count": count - 1, "key": KEY, "scope": GATEWAY})
+    result = await context.service.report(
+        start="2026-10-01", end="2026-10-31", viewer_id="google:admin-sub", offset=50_000,
+    )
+    assert result["total"]["requests"] == count
+    assert Decimal(result["total"]["spend"]) == Decimal("0.000000000000050001")
+    assert result["total"]["total_tokens"] == count * 16
+    assert result["coverage"]["deduplicated_observations"] == 1
+    assert result["request_total"] == count and len(result["request_details"]) == 1
+    assert sum(Decimal(row["spend"] or "0") for row in result["daily"]) == Decimal(result["total"]["spend"])
+    assert result["daily"][-1]["cumulative_spend"] == result["total"]["spend"]
+    assert result["users"][0]["spend"] == result["models"][0]["spend"] == result["total"]["spend"]
+
+
+def test_reconciliation_population_is_not_limited_by_fetch_bounds(rules, monkeypatch):
+    import moyai.product_billing as billing
+
+    monkeypatch.setattr(billing, "MAX_RECORDS", 2)
+    observations = [
+        legacy_observation(
+            old_row(id=f"request-{index}", gateway_id=f"call-{index}"),
+            rules, MAPPINGS, {}, policy=RecoveryPolicy(), clock=CLOCK,
+        ) for index in range(5)
+    ]
+    assert len(reconcile(observations, period=PERIOD)) == 5
+
+
+async def test_daily_cumulative_totals_preserve_missing_costs_and_exact_precision(billing_product):
+    context = billing_product
+    await seed(context.writer, old=[
+        old_row(id="missing", gateway_id="missing-call", cost=None, cost_next_attempt_at="",
+                user_id="google:admin-sub", created_at="2026-10-02T00:00:00+00:00"),
+        old_row(id="priced", gateway_id="priced-call", cost="0.000000000000000001",
+                user_id="google:admin-sub", created_at="2026-10-03T00:00:00+00:00"),
+        old_row(id="zero", gateway_id="zero-call", cost="0.00",
+                user_id="google:admin-sub", created_at="2026-10-04T00:00:00+00:00"),
+    ])
+    value = await context.service.report(start="2026-10-01", end="2026-10-05")
+    assert [row["cumulative_pricing_status"] for row in value["daily"]] == [
+        "empty", "unpriced", "partial", "partial", "partial",
+    ]
+    assert [row["cumulative_spend"] for row in value["daily"]] == [None, None, "1E-18", "1E-18", "1E-18"]
+    assert value["daily"][-1]["cumulative_spend"] == value["total"]["spend"]
+
+
 async def test_infrastructure_sources_preserve_credits_estimates_overrides_scope_and_exclusive_end(store, rules):
     async with store.begin() as conn:
         await conn.exec_driver_sql("""
