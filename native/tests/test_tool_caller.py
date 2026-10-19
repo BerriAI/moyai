@@ -13,6 +13,8 @@ from pydantic_ai.exceptions import (
     SkipToolExecution,
     SkipToolValidation,
     ToolFailed,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
 )
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.tools import ToolDefinition
@@ -152,6 +154,8 @@ async def test_escalated_errors_are_reraised_unchanged(error_factory):
         SkipModelRequest(ModelResponse(parts=[TextPart("skip model")])),
         SkipToolExecution("skip tool"),
         SkipToolValidation({}),
+        UsageLimitExceeded("x"),
+        UnexpectedModelBehavior("Tool 'x' exceeded max retries count of 2"),
     ],
     ids=[
         "tool-failed",
@@ -161,6 +165,8 @@ async def test_escalated_errors_are_reraised_unchanged(error_factory):
         "skip-model-request",
         "skip-tool-execution",
         "skip-tool-validation",
+        "usage-limit-exceeded",
+        "unexpected-model-behavior",
     ],
 )
 @pytest.mark.asyncio

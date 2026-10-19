@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic_ai.capabilities.abstract import WrapToolExecuteHandler
 from pydantic_ai.exceptions import (
+    AgentRunError,
     ApprovalRequired,
     CallDeferred,
     ModelRetry,
@@ -75,7 +76,7 @@ class ToolCaller:
                 ApprovalRequired,
                 CallDeferred,
                 ModelRetry,
-                RunCancelled,
+                AgentRunError,
                 SkipModelRequest,
                 SkipToolExecution,
                 SkipToolValidation,
