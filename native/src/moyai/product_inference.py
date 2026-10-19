@@ -25,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .inference_usage import InferenceUsage
 from .models import Base, Session, Turn, User, now
+from .product_inference_transport import BrokerUpstream
 
 if TYPE_CHECKING:
     from app.config import Settings as ProductSettings
@@ -119,6 +120,7 @@ class ProductInferenceService:
         self.started = False
         self.active: set[asyncio.Task[Any]] = set()
         self.memory_review: ProductMemoryReviewService | None = None
+        self.upstream: BrokerUpstream | None = None
 
     @property
     def remote(self) -> bool:
@@ -157,6 +159,7 @@ class ProductInferenceService:
         self.slots = PostgresModelSlots(self.settings.max_concurrent_model_requests, self.store.database)
         await asyncio.to_thread(self.slots.check)
         self.recovery = ProductInferenceRecovery(self)
+        self.upstream = BrokerUpstream(self.slots.capacity)
         self.started = True
         if recovery:
             self.recovery.start()
@@ -170,9 +173,19 @@ class ProductInferenceService:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        if self.slots is not None:
-            await asyncio.to_thread(self.slots.close)
-            self.slots = None
+        try:
+            if self.upstream is not None:
+                await drain(asyncio.create_task(self.upstream.aclose()))
+                self.upstream = None
+        finally:
+            if self.slots is not None:
+                await asyncio.to_thread(self.slots.close)
+                self.slots = None
+
+    def upstream_client(self) -> httpx.AsyncClient:
+        if not self.started or self.upstream is None:
+            raise InferenceAdmissionError("Product inference admission is not running.")
+        return self.upstream.client(self.database.settings.model_timeout_seconds)
 
     def validate_request(self, request: httpx.Request, capture: UsageCapture) -> tuple[str, str]:
         if not self.started or (not self.remote and self.slots is None):
