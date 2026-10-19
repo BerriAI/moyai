@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from .models import Event, Session, Turn, User
 from .product_requester import answer_actor
+from .slack_questions import SlackQuestions
 
 
 def question_results(pending, value: str | dict[str, Any]) -> dict[str, Any]:
@@ -129,3 +130,22 @@ async def answer(slack, sender: User, thread, value: str, *, continuing: bool = 
     if not continuing:
         await record_replies(slack.runtime, actor, turn, calls=question_results(deferred(slack.runtime, turn), value))
     return await resume_replies(slack.runtime, actor, turn)
+
+
+async def submit_choices(runtime, actor: User, turn: Turn, pending, state: dict[str, Any]) -> str | None:
+    try:
+        requests = SlackQuestions.requests(pending)
+        if not requests:
+            raise HTTPException(409, "There is no question to answer.")
+        answers = SlackQuestions.answers(requests, state)
+        calls = question_results(pending, answers)
+        actor = await answer_actor(runtime, actor, turn)
+        await record_replies(runtime, actor, turn, calls=calls)
+        resumed = await resume_replies(runtime, actor, turn)
+    except HTTPException as error:
+        if error.status_code >= 500:
+            raise
+        return str(error.detail)
+    if resumed:
+        return None
+    return "Your answer was saved. Complete the remaining approval or secure request to continue."

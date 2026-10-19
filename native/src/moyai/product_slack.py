@@ -25,7 +25,6 @@ from app.db import database as source_database
 from app.slack_format import ID, STAMP
 from fastapi import APIRouter, HTTPException, Request
 from pydantic_ai import ConversationTypeAdapter
-from pydantic_ai_harness.ask_user import AskUserRequest
 from sqlalchemy import String, cast, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
@@ -61,6 +60,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 DELIVERY_POLL_SECONDS = 3.0
 MIN_DELIVERY_INTERVAL = 1.0
+
+
+def interaction_key(action: dict[str, Any], message_ts: str) -> str:
+    action_ts = action.get("action_ts")
+    return action_ts if isinstance(action_ts, str) and action_ts else message_ts
 
 
 class SlackInstallationUnavailable(HTTPException):
@@ -481,7 +485,7 @@ class ProductSlack:
             if turn.status == "waiting" and turn.conversation:
                 conversation = ConversationTypeAdapter.validate_json(self.runtime.security.unseal(turn.conversation))
                 pending = conversation.deferred_tool_requests
-                requests = []
+                requests = SlackQuestions.requests(pending)
                 if pending and pending.approvals:
                     content["text"] += "\nRequested actions: " + ", ".join(
                         html.escape(call.tool_name, quote=False) for call in pending.approvals
@@ -494,9 +498,7 @@ class ProductSlack:
                     ]
                 if pending and pending.calls:
                     for call in pending.calls:
-                        if call.tool_name == "ask_user_question":
-                            requests.append(AskUserRequest.from_tool_call(call))
-                        elif call.tool_name == "credentials_request":
+                        if call.tool_name == "credentials_request":
                             content["text"] += "\nProvide organization access through the secure form in Moyai. Never post secret values in Slack."
                 if requests:
                     question_blocks = SlackQuestions.blocks(requests)
@@ -626,14 +628,11 @@ class ProductSlack:
             raise HTTPException(403, "Invalid Slack interaction identity.")
         if navigation_action(payload):
             return
-        if (
-            isinstance(actions, list) and len(actions) == 1 and isinstance(actions[0], dict)
-            and actions[0].get("action_id") == CHOICE_ACTION
-        ):
-            return
         if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
             raise HTTPException(422, "Choose one current approval.")
         action, turn_id = actions[0].get("action_id"), actions[0].get("value")
+        if action == CHOICE_ACTION:
+            return
         if action not in {"moyai_native_approve", "moyai_native_deny", SUBMIT_ACTION} or not isinstance(turn_id, str):
             raise HTTPException(409, "This Slack action requires the Moyai session.")
         message_ts = (payload.get("message") or {}).get("ts")
@@ -675,36 +674,11 @@ class ProductSlack:
             if action in {"moyai_native_approve", "moyai_native_deny"} and not approval_calls:
                 raise HTTPException(409, "Answer the current request in Moyai.")
         from .product_requester import answer_actor
-        from .product_slack_controls import record_replies, resume_replies
+        from .product_slack_controls import record_replies, resume_replies, submit_choices
         if action == SUBMIT_ACTION:
-            try:
-                from .product_slack_controls import question_results
-
-                if pending is None or not any(call.tool_name == "ask_user_question" for call in pending.calls):
-                    raise HTTPException(409, "There is no question to answer.")
-                requests = [
-                    AskUserRequest.from_tool_call(call)
-                    for call in pending.calls if call.tool_name == "ask_user_question"
-                ]
-                answers = SlackQuestions.answers(requests, payload.get("state") or {})
-                calls = question_results(pending, answers)
-                resumed_actor = await answer_actor(self.runtime, actor, turn)
-                await record_replies(self.runtime, resumed_actor, turn, calls=calls)
-                resumed = await resume_replies(self.runtime, resumed_actor, turn)
-            except HTTPException as error:
-                if error.status_code >= 500:
-                    raise
-                action_ts = actions[0].get("action_ts")
-                key = action_ts if isinstance(action_ts, str) and action_ts else message_ts
-                await self.notice(actor, thread, "answer:" + key, str(error.detail))
-                return
-            if not resumed:
-                action_ts = actions[0].get("action_ts")
-                key = action_ts if isinstance(action_ts, str) and action_ts else message_ts
-                await self.notice(
-                    actor, thread, "answer:" + key,
-                    "Your answer was saved. Complete the remaining approval or secure request to continue.",
-                )
+            text = await submit_choices(self.runtime, actor, turn, pending, payload.get("state") or {})
+            if text:
+                await self.notice(actor, thread, "answer:" + interaction_key(actions[0], message_ts), text)
             return
         resumed_actor = await answer_actor(self.runtime, actor, turn)
         await record_replies(self.runtime, resumed_actor, turn, approvals={
