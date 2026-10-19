@@ -193,7 +193,10 @@ def _historical_columns(metadata: MetaData, *, version: str) -> None:
                 or column.server_default is not None or column.server_onupdate is not None
                 or column.computed is not None or column.identity is not None or column.constraints
                 or type(column.type) not in {String, Text, Integer, Boolean}
-                or any(column_name in index.columns for index in table.indexes)
+                or any(column_name in index.columns or any(
+                    re.search(r"\b" + re.escape(column_name) + r"\b", str(expression))
+                    for expression in index.expressions
+                ) for index in table.indexes)
                 or any(column_name in getattr(constraint, "columns", ()) or (
                     isinstance(constraint, CheckConstraint)
                     and re.search(r"\b" + re.escape(column_name) + r"\b", str(constraint.sqltext))

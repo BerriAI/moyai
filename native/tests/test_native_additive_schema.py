@@ -103,6 +103,23 @@ def test_frozen_prefixes_and_compiled_batches_are_stable(installed):
     assert "reviewed" not in inventories[V23].tables[f"native_online.{NOTES}"].columns
 
 
+@pytest.mark.parametrize("dependency", ["index", "check"])
+def test_historical_column_filter_rejects_textual_dependencies(installed, dependency):
+    table = product.Base.metadata.tables["moyai_sessions"]
+    if dependency == "index":
+        item = Index("unregistered_textual_index", text("lower(online_note)"), _table=table)
+        collection = table.indexes
+    else:
+        item = CheckConstraint("online_note IS NULL")
+        table.append_constraint(item)
+        collection = table.constraints
+    try:
+        with pytest.raises(product.ProductSchemaError, match="plain nullable"):
+            product.application_metadata("native_online", version=online.TO_VERSION)
+    finally:
+        collection.remove(item)
+
+
 @pytest.mark.parametrize("change", ["default", "check", "fk", "type", "nullable", "index", "drop", "column-default"])
 def test_semantic_verifier_rejects_edits_disguised_as_additions(monkeypatch, change):
     def unsafe(metadata, schema):
@@ -187,11 +204,18 @@ async def test_sequential_batches_preserve_original_native_and_online_receipts(e
     original = rows(connection, database.schema, product.RECEIPTS)
     online.apply(connection, legacy, guard=lambda _: None)
     legacy_ledger = rows(connection, database.schema, online.LEDGER)
+    batches = [legacy]
     for before, after in ((online.TO_VERSION, V23), (V23, V24)):
         value = online.plan("moyai", database.schema, "native-online-test", from_version=before, to_version=after)
         assert online.inspect(connection, value)["status"] == "planned"
         assert online.apply(connection, value, guard=lambda _: None)["status"] == "applied"
         assert online.inspect(connection, value)["status"] == "applied"
+        batches.append(value)
+    for batch in batches:
+        assert online.inspect(connection, batch) == {
+            "protocol": online.PROTOCOL, "status": "applied", "digest": batch["digest"], "target": batch["target"],
+        }
+        assert online.apply(connection, batch, guard=lambda _: None)["status"] == "already_applied"
     assert set(original) <= set(rows(connection, database.schema, product.RECEIPTS))
     assert rows(connection, database.schema, online.LEDGER)[0] == legacy_ledger[0]
     assert len(rows(connection, database.schema, online.LEDGER)) == 3
@@ -203,6 +227,13 @@ async def test_sequential_batches_preserve_original_native_and_online_receipts(e
     assert rows(connection, database.schema, online.LEDGER) == before
     await product.verify_product_schema(database.source, schema=database.schema, version=online.FROM_VERSION)
     await product.verify_product_schema(database.source, schema=database.schema, version=online.TO_VERSION)
+
+    # Historical inspection still validates the actual latest structure.
+    connection.execute(sql.SQL("ALTER TABLE {} ALTER COLUMN reviewed SET DEFAULT false").format(
+        sql.Identifier(database.schema, NOTES),
+    ))
+    with pytest.raises(online.OnlineSchemaError, match="target_structure_changed"):
+        online.inspect(connection, legacy)
 
 
 @PG
@@ -226,6 +257,32 @@ async def test_atomic_multi_step_receipts_and_rollback(expansion, registered, ta
     assert {row[0] for row in saved} == set(value["target"]["app"]) - set(value["before"]["app"])
     assert all(row[2:] == (value["digest"], value) for row in saved)
     assert online.apply(connection, deepcopy(value), guard=lambda _: None)["status"] == "already_applied"
+
+
+@PG
+@pytest.mark.parametrize("change", ["unknown", "gap", "manifest"])
+async def test_historical_inspection_requires_an_exact_known_receipt_prefix(expansion, registered, change):
+    database, legacy, connection, _ = expansion
+    online.apply(connection, legacy, guard=lambda _: None)
+    later_batch = online.plan("moyai", database.schema, "native-online-test", from_version=online.TO_VERSION)
+    online.apply(connection, later_batch, guard=lambda _: None)
+    receipt_table = sql.Identifier(database.schema, product.RECEIPTS)
+    if change == "unknown":
+        connection.execute(sql.SQL("INSERT INTO {}(version,manifest) VALUES('unknown',%s)").format(receipt_table),
+                           ("f" * 64,))
+    elif change == "gap":
+        connection.execute(sql.SQL("DELETE FROM {} WHERE version=%s").format(receipt_table), (V23,))
+    else:
+        connection.execute(sql.SQL("UPDATE {} SET manifest=%s WHERE version=%s").format(receipt_table),
+                           ("f" * 64, V23))
+    saved = rows(connection, database.schema, online.LEDGER)
+    current = rows(connection, database.schema, product.RECEIPTS)
+    with pytest.raises(online.OnlineSchemaError, match="source_receipts_changed"):
+        online.inspect(connection, legacy)
+    with pytest.raises(online.OnlineSchemaError, match="source_receipts_changed"):
+        online.apply(connection, legacy, guard=lambda _: None)
+    assert rows(connection, database.schema, online.LEDGER) == saved
+    assert rows(connection, database.schema, product.RECEIPTS) == current
 
 
 @PG

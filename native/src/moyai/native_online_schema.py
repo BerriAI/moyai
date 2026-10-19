@@ -335,7 +335,7 @@ def plan(
 
 def _plan(
     source_schema: str, native_schema: str, task_queue: str, from_version: str, to_version: str,
-    inventories: dict[str, MetaData],
+    inventories: dict[str, MetaData], manifests: dict[str, str] | None = None,
 ) -> dict:
     from app.native_contract import FRAMEWORK_VERSIONS
 
@@ -343,7 +343,8 @@ def _plan(
 
     steps = _steps(from_version, to_version)
     versions = _versions()
-    manifests = {version: _manifest(metadata) for version, metadata in inventories.items()}
+    if manifests is None:
+        manifests = {version: _manifest(metadata) for version, metadata in inventories.items()}
     before = {version: manifests[version] for version in versions[:versions.index(from_version) + 1]}
     target = {version: manifests[version] for version in versions[:versions.index(to_version) + 1]}
     harness = {"sdk_version": FRAMEWORK_VERSIONS["pydantic-ai"],
@@ -380,9 +381,12 @@ def validate(value: dict) -> dict:
         raise OnlineSchemaError("native_online_plan_invalid") from None
 
 
-def _prepared(value: dict) -> tuple[dict[str, MetaData], dict[tuple[str, str], dict]]:
+def _prepared(value: dict) -> tuple[dict[str, MetaData], dict[tuple[str, str], dict], dict[str, str]]:
     """Compile possible historical batch receipts before the SQL deadline."""
+    from .product_schema import _manifest
+
     inventories = _inventory(value["native_schema"])
+    manifests = {version: _manifest(metadata) for version, metadata in inventories.items()}
     versions = _versions()
     edges = {(step.before, step.after) for step in EXPANSIONS}
     plans = {}
@@ -393,9 +397,9 @@ def _prepared(value: dict) -> tuple[dict[str, MetaData], dict[tuple[str, str], d
                 break
             plans[before, after] = _plan(
                 value["source_schema"], value["native_schema"], value["task_queue"],
-                before, after, inventories,
+                before, after, inventories, manifests,
             )
-    return inventories, plans
+    return inventories, plans, manifests
 
 
 class Budget:
@@ -614,9 +618,17 @@ def _verify_added(
         require(actual == expected, "target_structure_changed")
 
 
-def _status(connection, value: dict, inventories: dict[str, MetaData], plans: dict[tuple[str, str], dict]) -> str:
+def _status(
+    connection, value: dict, inventories: dict[str, MetaData], plans: dict[tuple[str, str], dict],
+    manifests: dict[str, str],
+) -> str:
     schema = value["native_schema"]
     current, saved = _receipts(connection, schema), _ledger(connection, value, plans)
+    versions = _versions()
+    require(bool(current) and set(current) <= set(manifests), "source_receipts_changed")
+    observed = max(current, key=versions.index)
+    require(current == {version: manifests[version] for version in versions[:versions.index(observed) + 1]},
+            "source_receipts_changed")
     steps = _steps(value["from_version"], value["to_version"])
     created = frozenset().union(*(step.tables for step in steps))
     for name in {name for step in steps for name, _ in step.columns} - created:
@@ -633,7 +645,10 @@ def _status(connection, value: dict, inventories: dict[str, MetaData], plans: di
         status = "current"
     elif new_versions.intersection(saved):
         require(all(saved.get(version) == value for version in new_versions)
-                and current == value["target"]["app"], "committed_plan_changed")
+                and versions.index(observed) >= versions.index(value["to_version"]), "committed_plan_changed")
+        # A historical batch remains applied after later registered additions.
+        # Never adopt an unknown/unregistered suffix or change its saved plan.
+        _steps(value["to_version"], observed)
         status = "applied"
     else:
         require(current == value["before"]["app"], "source_receipts_changed")
@@ -649,13 +664,11 @@ def _status(connection, value: dict, inventories: dict[str, MetaData], plans: di
     for document in saved.values():
         require(all(current.get(version) == manifest for version, manifest in document["target"]["app"].items()),
                 "committed_plan_changed")
-    version = value["from_version"] if status == "planned" else value["to_version"]
     # Offline provisioning legitimately has no online ledger. A no-op must
     # still verify all registered structures already covered by its receipts.
-    versions = _versions()
-    historical = [step for step in EXPANSIONS if versions.index(step.after) <= versions.index(version)]
+    historical = [step for step in EXPANSIONS if versions.index(step.after) <= versions.index(observed)]
     _verify_added(
-        connection, schema, inventories[version],
+        connection, schema, inventories[observed],
         frozenset().union(*(step.tables for step in historical)),
         tuple(column for step in historical for column in step.columns),
     )
@@ -668,13 +681,13 @@ def _receipt(value: dict, status: str) -> dict:
 
 def inspect(connection: psycopg.Connection, value: dict) -> dict:
     value = validate(value)
-    inventories, plans = _prepared(value)
+    inventories, plans, manifests = _prepared(value)
     require(connection.autocommit and connection.info.transaction_status == TransactionStatus.IDLE,
             "connection_not_idle")
     with connection.transaction():
         connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         connection.execute("SET LOCAL statement_timeout='3s'")
-        return _receipt(value, _status(Budget(connection, 3), value, inventories, plans))
+        return _receipt(value, _status(Budget(connection, 3), value, inventories, plans, manifests))
 
 
 def apply(
@@ -689,7 +702,7 @@ def apply(
     value = validate(value)
     # Compile immutable metadata/DDL before holding any database locks. All
     # database verification and operator guards still share the short budget.
-    inventories, plans = _prepared(value)
+    inventories, plans, manifests = _prepared(value)
     metadata = inventories[value["to_version"]]
     steps = _steps(value["from_version"], value["to_version"])
     statements = _ddl(metadata, steps)
@@ -717,7 +730,7 @@ def apply(
             require(bounded.execute(
                 "SELECT pg_try_advisory_xact_lock(hashtext(%s))", (f"moyai-native-migration:{native}",),
             ).fetchone() == (True,), "migration_busy")
-            status = _status(bounded, value, inventories, plans)
+            status = _status(bounded, value, inventories, plans, manifests)
             guard(bounded)
             if status == "applied":
                 return _receipt(value, "already_applied")
@@ -734,7 +747,7 @@ def apply(
                 locked.add(LEDGER)
             relations = sql.SQL(",").join(_table(native, name) for name in sorted(locked))
             bounded.execute(sql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE NOWAIT").format(relations))
-            require(_status(bounded, value, inventories, plans) == "planned", "source_receipts_changed")
+            require(_status(bounded, value, inventories, plans, manifests) == "planned", "source_receipts_changed")
             for statement in statements:
                 bounded.execute(statement)
             if not ledger_exists:
@@ -751,7 +764,7 @@ def apply(
                 bounded.execute(sql.SQL("INSERT INTO {}(version,manifest) VALUES(%s,%s)").format(
                     _table(native, "moyai_app_schema_versions"),
                 ), (step.after, value["target"]["app"][step.after]))
-            require(_status(bounded, value, inventories, plans) == "applied", "target_structure_changed")
+            require(_status(bounded, value, inventories, plans, manifests) == "applied", "target_structure_changed")
             guard(bounded)
             bounded.execute("SELECT 1")  # Check the remaining budget before COMMIT.
         return _receipt(value, "applied")

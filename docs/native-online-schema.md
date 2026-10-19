@@ -74,6 +74,13 @@ the exact approved batch, application receipts, and new structures are present. 
 or modified state is rejected instead of repaired. An explicit repeat of the
 same committed plan returns `already_applied`.
 
+A historical committed batch remains `applied` after later registered batches.
+Inspection validates the entire exact known receipt prefix and the actual latest
+structure, while returning the original batch's digest and target. Unknown or
+unregistered suffixes are rejected. Operator runtime guards still bind the
+approved source/target and owners; this historical receipt check does not extend
+an old deployment approval to a later runtime state.
+
 An exact current-version plan returns `current`; its `apply` returns
 `already_current`. Both verify receipts and all previously registered additions.
 They do not create a ledger, add rows or repair drift. This also supports a
