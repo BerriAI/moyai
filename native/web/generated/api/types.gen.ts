@@ -3368,21 +3368,75 @@ export type SwarmPostView = {
 };
 
 /**
+ * SwarmSession
+ */
+export type SwarmSession = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Archived
+     */
+    archived: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Owner Id
+     */
+    owner_id: string;
+    /**
+     * Save Warning
+     */
+    save_warning: string | null;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Surface
+     */
+    surface: string;
+    /**
+     * Swarm Id
+     */
+    swarm_id: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Visibility
+     */
+    visibility: string;
+    /**
+     * Workspace
+     */
+    workspace: {
+        [key: string]: JsonValue;
+    } | null;
+};
+
+/**
  * SwarmStarted
  */
 export type SwarmStarted = {
-    /**
-     * Session
-     */
-    session: {
-        [key: string]: unknown;
-    };
-    /**
-     * Turn
-     */
-    turn: {
-        [key: string]: unknown;
-    };
+    session: SwarmSession;
+    turn: TurnView;
 };
 
 /**

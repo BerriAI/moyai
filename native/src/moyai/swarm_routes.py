@@ -1,11 +1,11 @@
 """Authenticated product entrypoints for native swarm missions."""
 
 from types import SimpleNamespace
-from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict
 
+from .api_views import SessionSummary, TurnView
 from .models import User
 from .runtime import Runtime
 from .swarm_contracts import NewSwarm, SwarmControl
@@ -54,11 +54,14 @@ class SwarmBoard(BaseModel):
     next_after: int
 
 
+class SwarmSession(SessionSummary):
+    swarm_id: str
+
+
 class SwarmStarted(BaseModel):
     model_config = ConfigDict(json_schema_serialization_defaults_required=True)
-    # session_view()/turn_view() live in api.py; their shared models are owned there.
-    session: dict[str, Any]
-    turn: dict[str, Any]
+    session: SwarmSession
+    turn: TurnView
 
 
 def routes(runtime: Runtime, actor) -> APIRouter:

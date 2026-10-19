@@ -6399,17 +6399,115 @@
         "title": "SwarmPostView",
         "type": "object"
       },
+      "SwarmSession": {
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "save_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Warning"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "surface": {
+            "title": "Surface",
+            "type": "string"
+          },
+          "swarm_id": {
+            "title": "Swarm Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "visibility": {
+            "title": "Visibility",
+            "type": "string"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "owner_id",
+          "visibility",
+          "surface",
+          "model",
+          "status",
+          "active_turn",
+          "archived",
+          "deleted",
+          "workspace",
+          "save_warning",
+          "updated_at",
+          "swarm_id"
+        ],
+        "title": "SwarmSession",
+        "type": "object"
+      },
       "SwarmStarted": {
         "properties": {
           "session": {
-            "additionalProperties": true,
-            "title": "Session",
-            "type": "object"
+            "$ref": "#/components/schemas/SwarmSession"
           },
           "turn": {
-            "additionalProperties": true,
-            "title": "Turn",
-            "type": "object"
+            "$ref": "#/components/schemas/TurnView"
           }
         },
         "required": [
