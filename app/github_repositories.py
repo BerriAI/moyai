@@ -3,12 +3,13 @@ import asyncio
 import hashlib
 import json
 import re
+from typing import TypeGuard
 
 from .connector_errors import ConnectorError
 from .db import now
 
 
-def positive_id(value):
+def positive_id(value: object) -> TypeGuard[int]:
     return type(value) is int and value > 0
 
 
@@ -44,7 +45,7 @@ class GitHubRepositories:
     def connected_targets(self, credentials):
         return self.connected_ids(credentials)
 
-    def target(self, repository='', credentials=None, *, connection=None):
+    def target(self, repository: int | str | None = '', credentials=None, *, connection=None) -> int:
         credentials = credentials if credentials is not None else self.saved_credentials(connection=connection)
         ids = self.connected_ids(credentials)
         if repository in ('', None):

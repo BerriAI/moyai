@@ -25,6 +25,96 @@ from moyai.worker_capacity import ActivityCapacity
 from moyai.workflow import TurnWorkflow
 
 
+async def test_shared_checkout_routes_in_activity_and_replays_without_provider_access(runtime, actor, monkeypatch):
+    calls, discoveries = [], []
+    replaying = False
+
+    async def check(scope, grant):
+        assert not replaying and activity.in_activity() and not workflow.in_workflow()
+        await runtime.database.authorize_scope(scope)
+
+    def target(value):
+        assert not replaying
+        return {"test/first": 7, "test/second": 8}.get(value, value)
+
+    service = SimpleNamespace(
+        database=runtime.database,
+        connectors=SimpleNamespace(github=SimpleNamespace(
+            target=target, repository_name=lambda identity: "test/first" if identity == 7 else "test/second",
+        )),
+        check=check,
+    )
+    service.toolset = lambda scope, grant: ProductGitHubToolset(service, scope, grant)
+    runtime.product_connections = service
+
+    async def native(self, *, write=False):
+        assert not replaying and activity.in_activity() and not workflow.in_workflow()
+        discoveries.append(activity.info().activity_type)
+        return FunctionToolset(id="empty-provider")
+
+    async def install(publisher, ctx, request):
+        assert not replaying and activity.in_activity() and not workflow.in_workflow()
+        await publisher.check_target(request)
+        await service.check(ctx.deps, publisher.grant)
+        assert ctx.workspace.ref is not None
+        calls.append(publisher.target)
+        return {"repository_id": publisher.target, "directory": request.directory}
+
+    monkeypatch.setattr(ProductGitHubToolset, "_native", native)
+    monkeypatch.setattr("moyai.product_github_checkout.checkout", install)
+    async with runtime.database.sessions.begin() as db:
+        connections = [Connection(
+            id=new_id(), owner_id=actor.id, kind="github", name=f"Repository {identity}",
+            credential="", read_only=True, policy=json.dumps({"product": {"repository_id": identity}}),
+        ) for identity in (7, 8)]
+        db.add_all(connections)
+
+    async def stream(messages, info):
+        names = {tool.name for tool in info.function_tools}
+        if "github_checkout" not in names:
+            yield {0: DeltaToolCall(name="search_tools", json_args=json.dumps({"queries": ["github checkout"]}),
+                                   tool_call_id="discover-checkout")}
+        elif not any(isinstance(part, ToolReturnPart) and part.tool_name == "github_checkout"
+                     for message in messages for part in message.parts):
+            assert not any(name.startswith("github_") and name.endswith("_checkout")
+                           and name != "github_checkout" for name in names)
+            yield {0: DeltaToolCall(
+                name="github_checkout",
+                json_args=json.dumps({"repository": "test/second", "directory": "/workspace/second"}),
+                tool_call_id="checkout-second",
+            )}
+        else:
+            yield "Checkout completed."
+
+    runtime.models["test"].stream_function = stream
+    session = await runtime.database.create_session(actor, NewSession(visibility="private"))
+    turn = await runtime.database.submit(actor, session.id, NewMessage(
+        prompt="Check out test/second.", request_key="shared-checkout",
+        connections=[connection.id for connection in connections],
+    ))
+    await runtime.database.claim_next()
+    converter = encrypted_converter(runtime.security, runtime.objects)
+    async with await WorkflowEnvironment.start_local(
+        plugins=[PydanticAIPlugin()], data_converter=converter,
+    ) as environment:
+        runtime.client = environment.client
+        async with make_worker(runtime):
+            handle = await runtime.client.start_workflow(
+                TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
+            )
+            assert (await asyncio.wait_for(handle.result(), 60))["status"] == "completed"
+            history = await handle.fetch_history()
+        assert calls == [8]
+        assert len(discoveries) == 2
+        assert all(name.endswith("__get_tools") for name in discoveries)
+        replaying = True
+        await Replayer(
+            interceptors=[ActivityCapacity()], workflows=[TurnWorkflow],
+            plugins=[PydanticAIPlugin()], data_converter=converter,
+        ).replay_workflow(history)
+        assert calls == [8]
+
+
 @pytest.mark.parametrize(("product", "read_only"), [
     pytest.param(False, True, id="encrypted-account"),
     pytest.param(True, True, id="canonical-github-read"),

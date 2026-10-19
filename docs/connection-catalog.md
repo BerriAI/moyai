@@ -5,6 +5,10 @@ capability. Selected connections remain available, but their full schemas are
 deferred until a search reveals matching tools. The model can discover additional
 tools later in the same turn. GitHub definitions identify their selected repository
 so a search can distinguish otherwise identical tools from different connections.
+Checkout is shared across the selected GitHub repositories: `github_checkout`
+routes its explicit repository argument to the matching admitted grant. Its
+dispatch reconstructs only the local checkout schema, without GitHub MCP
+discovery. Other GitHub operations remain scoped to their selected connection.
 
 The local search path is intentional. Provider-native search can still upload the
 entire deferred corpus on every inference request. Moyai sends the local search
