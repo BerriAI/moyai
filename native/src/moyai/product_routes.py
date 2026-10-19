@@ -659,12 +659,14 @@ class ProductReadService:
                 ).order_by(Message.id).offset(offset).limit(limit + 1)))
                 from .message_sources import public_message, source_view
                 messages = []
+                origins = {}
                 for row in rows[:limit]:
                     item = {key: getattr(row, key) for key in ("id", "turn_id", "role", "author_id", "created_at")}
                     try:
                         if len(row.content) > CIPHER_CHARS:
                             raise ValueError("Message exceeds display budget")
                         decoded, origin = await public_message(self.runtime.database, db, row)
+                        origins[row.id] = origin
                         author = await db.get(User, row.author_id) if row.author_id else None
                         item.update(content=decoded[:MAX_MESSAGE_CHARS], content_truncated=len(decoded) > MAX_MESSAGE_CHARS,
                                     author_name=author.display_name if author else None,
@@ -675,6 +677,8 @@ class ProductReadService:
                     messages.append(item)
                 result = {"messages": messages, "has_more": len(rows) > limit,
                           "next_offset": offset + limit if len(rows) > limit else None}
+            if self.runtime.database.slack_mentions is not None:
+                await self.runtime.database.slack_mentions(messages, origins)
         await self.detail(reader, run_id, source)
         return result
 

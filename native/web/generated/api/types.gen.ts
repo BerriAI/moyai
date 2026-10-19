@@ -4338,6 +4338,12 @@ export type HistoryMessage = {
      */
     session_id?: string;
     /**
+     * Slack Mentions
+     */
+    slack_mentions?: {
+        [key: string]: string;
+    };
+    /**
      * Source
      */
     source?: 'slack';
@@ -8710,6 +8716,12 @@ export type SessionMessage = {
      * Role
      */
     role: string;
+    /**
+     * Slack Mentions
+     */
+    slack_mentions: {
+        [key: string]: string;
+    };
     /**
      * Source
      */

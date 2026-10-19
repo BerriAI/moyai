@@ -155,6 +155,9 @@ class ProductSlack:
         self.connectors = self.connections.connectors
         self.files = ProductSlackFiles(self)
         self.events = SlackEvents(self)
+        from .slack_mentions import SlackMentionNames
+        self.mention_names = SlackMentionNames(self)
+        runtime.database.slack_mentions = self.mention_names.decorate
         from .slack_audience import can_read, historical_access, historical_messages
         runtime.database.slack_access = lambda db, session, actor: can_read(self, db, session, actor)
         if runtime.product_history is not None:

@@ -89,6 +89,7 @@ class Database:
         self.dispatch_timings = DispatchRecorder(self)
         self.product_identity: ProductIdentityAdapter | None = None
         self.slack_access: Any = None
+        self.slack_mentions: Any = None
         self.product_connections: ProductConnections | None = None
         self.product_drain: ProductDrainService | None = None
         self.product_inference: ProductInferenceService | None = None
@@ -414,7 +415,13 @@ class Database:
                     **({"source": "delegation"} if row.identity.startswith("delegation:") else {}),
                     "attachments": files if row.role == "user" or row.identity.startswith("delegation:") else [],
                 })
-            return result
+        # Release the transcript connection before consulting the product
+        # cache/provider, then recheck access after the asynchronous lookup.
+        if self.slack_mentions is not None and await self.slack_mentions(
+            result, {key: value[1] for key, value in projected.items()},
+        ):
+            await self.session(actor, session_id)
+        return result
 
     async def same_person(self, db: AsyncSession, actor: User, author_id: str | None) -> bool:
         """Presentation/capability relationship, never a replacement execution grant."""

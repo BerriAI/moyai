@@ -1425,6 +1425,39 @@ test('editing a queued message retains its inline token and restores the unsent 
   assert.equal(await input.innerText(),'Keep this unsent draft.');
 });
 
+test('Slack queued mentions display names while editing preserves original IDs',async t=>{
+  const original='make an IMG of <@U0B1TDTHL4Q>’s face and send it here';
+  reset({messages:[{id:1,turn_id:'queued',role:'user',author_id:'viewer',source:'slack',
+    content:original,slack_mentions:{U0B1TDTHL4Q:'Jordan Lee'}}],
+    turns:[{id:turnId,actor_id:'viewer',status:'running',connections:[]},{id:'queued',actor_id:'viewer',status:'queued',mode:'when_idle',connections:[]}]});
+  const page=await pageFor(t),input=page.getByRole('textbox',{name:'Message Moyai'});
+  await page.locator('.queued-message').getByText('make an IMG of @Jordan Lee’s face and send it here',{exact:true}).waitFor();
+  await page.locator('.queued-message').getByRole('button',{name:'Edit',exact:true}).click();
+  assert.equal(await input.innerText(),original);
+  await input.press('End');await input.pressSequentially(' Please.');
+  await page.getByRole('button',{name:'Save queued message'}).click();
+  await waitFor(()=>state.requests.some(row=>row.path==='/api/turns/queued'&&row.method==='PATCH'));
+  assert.equal(state.requests.find(row=>row.path==='/api/turns/queued'&&row.method==='PATCH').body.prompt,original+' Please.');
+});
+
+test('Slack mention names are literal text and preserve code, links, and non-Slack input',async t=>{
+  const content='Hi <@U0B1TDTHL4Q|old label> and <@W12345678>. Unknown <@UUNKNOWN1>. Code `<@U0B1TDTHL4Q>`\n```<@U0B1TDTHL4Q>```\n<https://example.test/?a=1&amp;b=2|repository> &lt;@U0B1TDTHL4Q&gt;';
+  reset({status:'completed',messages:[
+    {id:1,turn_id:turnId,role:'user',author_id:'viewer',source:'slack',content,
+      slack_mentions:{U0B1TDTHL4Q:'Jordan Lee',W12345678:'<img src=x onerror=alert(1)> & <https://evil.test|click>'}},
+    {id:2,turn_id:turnId,role:'user',author_id:'viewer',content:'Web text <@U0B1TDTHL4Q>',slack_mentions:{U0B1TDTHL4Q:'Jordan Lee'}},
+  ]});
+  const page=await pageFor(t),body=page.locator('.message-content').first();
+  await body.getByRole('link',{name:'repository'}).waitFor();
+  assert.match(await body.innerText(),/^Hi @Jordan Lee and @<img src=x onerror=alert\(1\)> & <https:\/\/evil.test\|click>/);
+  assert.match(await body.innerText(),/Unknown <@UUNKNOWN1>/);
+  assert.match(await body.innerText(),/Code `<@U0B1TDTHL4Q>`\n```<@U0B1TDTHL4Q>```/);
+  assert.equal(await body.locator('img').count(),0);
+  assert.equal(await body.locator('a').count(),1);
+  assert.equal(await body.getByRole('link',{name:'repository'}).getAttribute('href'),'https://example.test/?a=1&b=2');
+  await page.getByText('Web text <@U0B1TDTHL4Q>',{exact:true}).waitFor();
+});
+
 test('skill catalog retries and excludes personal skills in shared sessions',async t=>{
   reset({skillError:true,individual:false,skills:[{id:'p',name:'private-only',description:'Private',scope:'personal',reference:'personal:private-only'}]});
   const page=await pageFor(t,'#'),input=page.getByRole('textbox',{name:'Message Moyai'});
@@ -2782,13 +2815,15 @@ for(const width of [1440,768,320])test(`Slack attribution, original files and de
     sessionOverrides:{[sessionId]:{surface:'slack',visibility:'shared',can_manage:true}},
     slackDelivery:{pending:0,sending:1,rejected:0},
     messages:[{id:1,turn_id:turnId,role:'user',author_id:'slack:TTEST:UME',author_name:'Avery Chen',is_self:true,
-      source:'slack',source_timestamp:'1792281607.232469',source_url:'/api/sessions/source-test',content:'Please review the launch notes.',
+      source:'slack',source_timestamp:'1792281607.232469',source_url:'/api/sessions/source-test',content:'Please review <@U0B1TDTHL4Q>’s launch notes.',
+      slack_mentions:{U0B1TDTHL4Q:'Jordan Lee'},
       attachments:[{id:'original-pdf',name:'Launch notes.pdf',media_type:'application/pdf',size:321}]},
       {id:2,turn_id:'other',role:'user',author_id:'slack:TTEST:UOTHER',author_name:'Jordan Lee',is_self:false,
        source:'slack',content:'The updated dates are ready.',edited:true,edited_after_start:true}]});
   const page=await pageFor(t,'#'+sessionId,width);
   await page.locator('.message-author').filter({hasText:'Avery Chen · You'}).waitFor();
   await page.getByText('Jordan Lee',{exact:true}).waitFor();
+  await page.getByText('Please review @Jordan Lee’s launch notes.',{exact:true}).waitFor();
   await page.getByText('Launch notes.pdf',{exact:true}).waitFor();
   assert.equal(await page.locator('.message-author img[alt="Slack"]').count(),2);
   assert.equal(await page.getByRole('link',{name:'Open message in Slack'}).count(),1);
@@ -2798,6 +2833,11 @@ for(const width of [1440,768,320])test(`Slack attribution, original files and de
   assert.equal(await page.getByRole('button',{name:'Retry delivery'}).count(),0);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
   await page.screenshot({path:`/tmp/moyai-slack-ui-${width}.png`});
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.getByText('Please review @Jordan Lee’s launch notes.',{exact:true}).waitFor();
+  await page.screenshot({path:`/tmp/moyai-slack-ui-${width}-light.png`});
   state.slackDelivery={pending:0,sending:0,rejected:1};
   await page.reload();
   await page.getByRole('button',{name:'Retry delivery'}).waitFor();
