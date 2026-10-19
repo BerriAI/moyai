@@ -2299,6 +2299,85 @@ test('chat links remain accented and underlined while plain inline code stays ne
   assert.equal(await link.evaluate(el=>getComputedStyle(el).textDecorationLine),'underline');
 });
 
+// Large synthetic screenshots reproduce the overflowing assistant image report.
+async function imageConversation(t,width=1440) {
+  reset({status:'completed',messages:[{id:1,turn_id:turnId,role:'assistant',content:
+    'Here is the updated workspace preview.\n\n![Workspace preview](/test-images/wide.svg)\n\nThe complete screenshot is available above.\n\n![Mobile preview](/test-images/tall.svg)\n\n[![Linked preview](/test-images/small.svg)](https://example.test/design)\n\n![Missing preview](/test-images/missing.svg)'}]});
+  return pageFor(t,'#'+sessionId,width,async page=>{
+    await page.route('**/test-images/*',route=>{
+      const name=new URL(route.request().url()).pathname.split('/').pop();
+      if(name==='missing.svg')return route.fulfill({status:404,body:'Missing image'});
+      const [w,h]=name==='wide.svg'?[2400,1400]:name==='tall.svg'?[600,1800]:[80,40];
+      return route.fulfill({contentType:'image/svg+xml',body:`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 1200 700" preserveAspectRatio="none">
+        <rect width="1200" height="700" fill="#161619"/><rect width="230" height="700" fill="#222226"/>
+        <g fill="#aaa8b0" font-family="sans-serif" font-size="20"><text x="28" y="50">Workspace</text><text x="28" y="120">New conversation</text><text x="28" y="175">Recent work</text></g>
+        <text x="280" y="90" fill="#ededf0" font-family="sans-serif" font-size="30">Your workspace, in focus</text>
+        <rect x="280" y="130" width="870" height="380" rx="12" fill="#25252a" stroke="#45454c"/>
+        <path d="M320 440L450 360L560 395L690 240L820 290L960 180L1110 210" fill="none" stroke="#b39aef" stroke-width="8"/>
+        <text x="280" y="575" fill="#aaa8b0" font-family="sans-serif" font-size="22">Synthetic preview for layout verification</text></svg>`});
+    });
+  });
+}
+
+for(const width of [1440,768,320])test(`chat image previews fit the conversation at ${width}px`,async t=>{
+  const page=await imageConversation(t,width);
+  const image=page.getByRole('img',{name:'Workspace preview',exact:true});await image.waitFor();
+  await image.evaluate(el=>el.decode());
+  await image.scrollIntoViewIfNeeded();
+  if(process.env.MOYAI_IMAGE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.MOYAI_IMAGE_SCREENSHOTS,`chat-images-${width}-dark.png`)});
+  const geometry=await image.evaluate(el=>{
+    const box=el.getBoundingClientRect(),column=el.closest('.message-content').getBoundingClientRect();
+    return {left:box.left,right:box.right,width:box.width,height:box.height,columnLeft:column.left,columnRight:column.right,ratio:el.naturalWidth/el.naturalHeight};
+  });
+  assert(geometry.left>=geometry.columnLeft&&geometry.right<=geometry.columnRight+1,JSON.stringify(geometry));
+  assert(geometry.height<=280&&geometry.width<=480,JSON.stringify(geometry));
+  assert(Math.abs(geometry.width/geometry.height-geometry.ratio)<0.01,'Keep the entire screenshot in its original proportions');
+  const trigger=await page.getByRole('button',{name:'Enlarge image: Workspace preview',exact:true}).boundingBox();
+  const preview=await image.boundingBox();
+  assert(preview.y>=trigger.y&&preview.y+preview.height<=trigger.y+trigger.height,'The preview must fit its clickable card without overlapping following text');
+  const tall=page.getByRole('img',{name:'Mobile preview',exact:true});await tall.evaluate(el=>el.decode());
+  assert((await tall.boundingBox()).height<=280);
+  assert.equal(await page.locator('.transcript').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
+  if(width<760)await page.getByRole('button',{name:'Toggle conversations',exact:true}).click();
+  await image.scrollIntoViewIfNeeded();
+  if(process.env.MOYAI_IMAGE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.MOYAI_IMAGE_SCREENSHOTS,`chat-images-${width}-light.png`)});
+});
+
+for(const width of [1440,320])test(`chat image viewer supports keyboard and fits at ${width}px`,async t=>{
+  const page=await imageConversation(t,width);
+  const trigger=page.getByRole('button',{name:'Enlarge image: Workspace preview',exact:true});await trigger.waitFor();
+  await trigger.focus();await page.keyboard.press('Enter');
+  const dialog=page.getByRole('dialog',{name:'Workspace preview',exact:true});await dialog.waitFor();
+  const image=dialog.getByRole('img',{name:'Workspace preview',exact:true});await image.evaluate(el=>el.decode());
+  const box=await dialog.boundingBox();assert(box.x>=0&&box.x+box.width<=width&&box.y>=0&&box.y+box.height<=1000);
+  assert(box.width>=Math.min(1120,width-32)-1,'The viewer should use the available screen width');
+  assert.equal(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  const original=dialog.getByRole('link',{name:'Open original',exact:true});
+  assert.equal(await original.getAttribute('href'),'/test-images/wide.svg');assert.equal(await original.getAttribute('target'),'_blank');
+  if(process.env.MOYAI_IMAGE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.MOYAI_IMAGE_SCREENSHOTS,`chat-image-viewer-${width}.png`)});
+  await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
+  assert.equal(await trigger.evaluate(el=>el===document.activeElement),true);
+  await trigger.click();await dialog.waitFor();await dialog.getByRole('button',{name:'Close',exact:true}).click();
+  await dialog.waitFor({state:'detached'});
+});
+
+test('chat images preserve image links, small originals, and readable failures',async t=>{
+  const page=await imageConversation(t);
+  const link=page.getByRole('link',{name:'Linked preview',exact:true});await link.waitFor();
+  assert.equal(await link.getAttribute('href'),'https://example.test/design');
+  assert.equal(await link.locator('button, a').count(),0,'Linked images must not contain nested interactive elements');
+  const small=link.locator('img');await small.evaluate(el=>el.decode());
+  assert.equal((await small.boundingBox()).width,80,'Small originals should not be upscaled');
+  await page.getByText('Image unavailable',{exact:true}).waitFor();
+  const missing=page.getByRole('button',{name:'Enlarge image: Missing preview',exact:true});
+  await missing.click();
+  const dialog=page.getByRole('dialog',{name:'Missing preview',exact:true});await dialog.waitFor();
+  assert.equal(await dialog.getByRole('link',{name:'Open original',exact:true}).getAttribute('href'),'/test-images/missing.svg');
+});
+
 test('highlighted code preserves literal markup and copies the original text',async t=>{
   const source=[
     `const markup = '<img src=x onerror="window.__codeExecuted=true">';`,

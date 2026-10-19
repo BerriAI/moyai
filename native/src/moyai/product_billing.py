@@ -25,10 +25,11 @@ from decimal import MAX_EMAX, MIN_EMIN, Decimal, localcontext
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from sqlalchemy import MetaData, Table, and_, false, inspect, or_, select
+from sqlalchemy import MetaData, Table, Text, and_, any_, bindparam, false, inspect, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.sql import Executable
+from sqlalchemy.sql import ColumnElement, Executable
 
 from .analytics import ReportRange, actual_cost, integer, utc
 
@@ -41,7 +42,7 @@ MAX_RECORDS = 50_000
 READ_BATCH_SIZE = 2_000
 MAX_RECONCILIATION_ROUNDS = 4
 LOOKUP_CHUNK = 200
-LEDGER_LOOKUP_CHUNK = 2_000
+LEDGER_LOOKUP_CHUNK = 10_000
 
 
 class BillingReadError(ValueError):
@@ -671,9 +672,25 @@ class BillingReader:
             )
         return await self.connection.run_sync(reflect)
 
+    def _matching(
+        self, table: Table, names: Iterable[str], values: list[str],
+    ) -> ColumnElement[bool]:
+        columns = [table.c[name] for name in names if name in table.c]
+        if self.connection.dialect.name == "postgresql":
+            # One array parameter avoids recompiling thousands of scalar binds
+            # for every admission/counterpart batch.
+            wanted = bindparam("billing_identities", value=values, type_=ARRAY(Text))
+            return or_(*(column == any_(wanted) for column in columns))
+        return or_(*(column.in_(values) for column in columns))
+
     async def rows(
         self, engine: Engine, period: ReportRange, *, matching: Iterable[str] = (),
+        outside_period: bool = False,
     ) -> list[dict[str, Any]]:
+        """Read the period and its aliases, or only aliases outside that period."""
+        candidates = sorted(set(matching))
+        if outside_period and not candidates:
+            return []
         fields = LEGACY_FIELDS if engine == "legacy" else NATIVE_FIELDS
         table = None
         if self.storage is None:
@@ -685,34 +702,41 @@ class BillingReader:
         admissions = None
         if engine == "native":
             admissions = await self.admission_table()
-        candidates = sorted(set(matching))
+        # PostgreSQL has room for larger parameter batches. Keep SQLite below
+        # its bind limit (three identity columns per lookup).
+        lookup_chunk = LEDGER_LOOKUP_CHUNK if self.connection.dialect.name == "postgresql" else LOOKUP_CHUNK
         if admissions is not None and candidates:
-            for offset in range(0, len(candidates), LOOKUP_CHUNK):
-                values = candidates[offset:offset + LOOKUP_CHUNK]
-                async for row in self.records(select(admissions.c.request_key).where(or_(
-                    admissions.c.id.in_(values), admissions.c.gateway_id.in_(values),
-                    admissions.c.cost_receipt_id.in_(values),
+            for offset in range(0, len(candidates), lookup_chunk):
+                values = candidates[offset:offset + lookup_chunk]
+                async for row in self.records(select(admissions.c.request_key).where(self._matching(
+                    admissions, ("id", "gateway_id", "cost_receipt_id"), values,
                 ))):
                     candidates.append(row["request_key"])
             candidates = sorted(set(candidates))
         if self.max_records is not None and len(candidates) > self.max_records * 4:
             raise BillingReadError("too_many_accounting_identities")
         if self.storage is not None:
-            result = await self._consolidated_rows(engine, period, candidates, fields)
+            result = await self._consolidated_rows(
+                engine, period, candidates, fields, outside_period=outside_period,
+            )
         else:
             assert table is not None
-            statements = [select(table).where(
+            statements = [] if outside_period else [select(table).where(
                 table.c.created_at >= period.start.isoformat(), table.c.created_at < period.end.isoformat(),
             )]
             names = (
                 ("id", "gateway_id", "cost_receipt_id") if engine == "legacy"
                 else ("id", "request_key", "provider_request_id")
             )
-            for offset in range(0, len(candidates), LOOKUP_CHUNK):
-                values = candidates[offset:offset + LOOKUP_CHUNK]
-                statements.append(select(table).where(or_(
-                    *(table.c[name].in_(values) for name in names if name in table.c)
-                )))
+            for offset in range(0, len(candidates), lookup_chunk):
+                values = candidates[offset:offset + lookup_chunk]
+                statement = select(table).where(self._matching(table, names, values))
+                if outside_period:
+                    statement = statement.where(or_(
+                        table.c.created_at < period.start.isoformat(),
+                        table.c.created_at >= period.end.isoformat(), table.c.created_at.is_(None),
+                    ))
+                statements.append(statement)
             result: dict[str, dict[str, Any]] = {}
             for statement in statements:
                 if self.max_records is not None:
@@ -723,15 +747,16 @@ class BillingReader:
                         raise BillingReadError("too_many_accounting_records")
         if admissions is not None:
             identifiers = list(result)
-            for offset in range(0, len(identifiers), LOOKUP_CHUNK):
-                for row in (await self.connection.execute(select(admissions).where(
-                    admissions.c.request_key.in_(identifiers[offset:offset + LOOKUP_CHUNK]),
-                ))).mappings():
+            for offset in range(0, len(identifiers), lookup_chunk):
+                for row in (await self.connection.execute(select(admissions).where(self._matching(
+                    admissions, ("request_key",), identifiers[offset:offset + lookup_chunk],
+                )))).mappings():
                     result[row["request_key"]]["_admission"] = dict(row)
         return list(result.values())
 
     async def _consolidated_rows(
         self, engine: Engine, period: ReportRange, candidates: list[str], fields: tuple[str, ...],
+        *, outside_period: bool = False,
     ) -> dict[str, dict[str, Any]]:
         from sqlalchemy import text
 
@@ -741,7 +766,7 @@ class BillingReader:
         parameters: dict[str, Any] = {
             "source": engine, "start": period.start.isoformat(), "end": period.end.isoformat(),
         }
-        predicates = [("created_at>=:start AND created_at<:end", parameters)]
+        predicates = [] if outside_period else [("created_at>=:start AND created_at<:end", parameters)]
         for offset in range(0, len(candidates), LEDGER_LOOKUP_CHUNK):
             identities = (
                 ("id", "gateway_id", "cost_receipt_id") if engine == "legacy"
@@ -758,8 +783,11 @@ class BillingReader:
                 "WHERE matched.source=:source"
                 for name in identities
             )
+            predicate = f"source_id IN ({matches})"
+            if outside_period:
+                predicate += " AND (created_at<:start OR created_at>=:end OR created_at IS NULL)"
             predicates.append((
-                f"source_id IN ({matches})",
+                predicate,
                 {**parameters, "identities": candidates[offset:offset + LEDGER_LOOKUP_CHUNK]},
             ))
         result: dict[str, dict[str, Any]] = {}
@@ -890,11 +918,26 @@ async def read_product_billing(
         raise BillingReadError("invalid_native_binding_source")
     explicit = tuple(links)
     wanted = {ref.id for link in explicit for ref in (link.left, link.right)}
-    previous: set[SourceRef] = set()
-    for _ in range(MAX_RECONCILIATION_ROUNDS):
+    # Keep evidence only for this projection and its caller-owned snapshots.
+    # Subsequent rounds fetch new aliases outside the already-complete period,
+    # rather than materializing the same period and aliases again.
+    old_by_id: dict[str, dict[str, Any]] = {}
+    new_by_id: dict[str, dict[str, Any]] = {}
+    old_searched: set[str] = set()
+    new_searched: set[str] = set()
+    for round_index in range(MAX_RECONCILIATION_ROUNDS):
         native_ids = {ref.id for ref, binding in bindings.items() if binding.identity.value in wanted}
-        old = await legacy.rows("legacy", period, matching=wanted)
-        new = await native.rows("native", period, matching=wanted | native_ids)
+        old_matching, new_matching = wanted - old_searched, (wanted | native_ids) - new_searched
+        previous = len(old_by_id) + len(new_by_id)
+        old = await legacy.rows("legacy", period, matching=old_matching, outside_period=round_index > 0)
+        new = await native.rows("native", period, matching=new_matching, outside_period=round_index > 0)
+        old_searched.update(old_matching)
+        new_searched.update(new_matching)
+        old_by_id.update((row["id"], row) for row in old)
+        new_by_id.update((row["id"], row) for row in new)
+        if any(reader.max_records is not None and len(rows) > reader.max_records
+               for reader, rows in ((legacy, old_by_id), (native, new_by_id))):
+            raise BillingReadError("too_many_accounting_records")
         for row in new:
             admission = row.get("_admission")
             if isinstance(admission, Mapping):
@@ -907,10 +950,8 @@ async def read_product_billing(
                 if ref in bindings and bindings[ref] != saved:
                     raise BillingReadError("conflicting_native_admission_binding")
                 bindings[ref] = saved
-        current = {SourceRef("legacy", row["id"]) for row in old} | {SourceRef("native", row["id"]) for row in new}
-        if current == previous:
+        if len(old_by_id) + len(new_by_id) == previous:
             break
-        previous = current
         for row in old:
             wanted.update(value for name in ("id", "gateway_id", "cost_receipt_id") if (value := _text(row.get(name))))
         for row in new:
@@ -919,6 +960,7 @@ async def read_product_billing(
                 wanted.add(binding.identity.value)
     else:
         raise BillingReadError("accounting_counterpart_bound_exceeded")
+    old, new = list(old_by_id.values()), list(new_by_id.values())
     identities = await legacy.identity_links()
     identity_map = {row.source.id: row for row in identities}
     roots = await legacy.families(row["run_id"] for row in old)
