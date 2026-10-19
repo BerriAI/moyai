@@ -12,7 +12,7 @@ import "@/theme.css"
 import "./style.css"
 import "./product-shell.css"
 import { api, ApiError, csrfToken, setCsrf } from "./api"
-import { getMe, type Me } from "./generated/api"
+import { getMe, listPullRequestStatuses, listSessionFolders, markSessionRead, type Me, type PullRequestStatus } from "./generated/api"
 import { downloadDebugTrace } from "./debug-trace"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import slackLogo from "./assets/slack-logo.svg"
@@ -51,7 +51,6 @@ const SettingsPage = React.lazy(() => import("./settings").then(module => ({ def
 const ProductHistory = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistory })))
 const ProductHistoryPrefix = React.lazy(() => import("./product-history").then(module => ({ default: module.ProductHistoryPrefix })))
 
-type PRSummary = NonNullable<SidebarSession["pull_requests"]>[number]
 type WorkspaceRequest = { sessionId: string; sequence: number; tab: "computer" | "pull-request" | "side-chat"; url?: string; child?: { id: string; title: string } }
 
 type SessionInventory = { sessions: Session[]; ancestors?: Session[]; has_more: boolean; next_cursor?: string | null; notice?: string | null }
@@ -117,7 +116,7 @@ function App() {
   const [inventoryState, setInventoryState] = useState({ hasMore: false, loading: false, loaded: false, notice: "" })
   const [selected, setSelected] = useState(currentRoute)
   const [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceRequest | null>(null)
-  const [prStates, setPrStates] = useState<Record<string, PRSummary[]>>({})
+  const [prStates, setPrStates] = useState<Record<string, PullRequestStatus[]>>({})
   const [prRefresh, setPrRefresh] = useState(0)
   const [connections, setConnections] = useState<Connection[]>([])
   const [listView, setListView] = useState<SessionListView>("active")
@@ -230,7 +229,7 @@ function App() {
           throw reason
         }),
         api<Connection[]>("/connections", "GET", undefined, signal).then(accounts => { if (current()) setConnections(accounts) }),
-        api<SessionFolder[]>("/session-folders", "GET", undefined, signal).then(groups => { if (current()) setFolders(groups) }),
+        listSessionFolders({ signal }).then(({ data: groups }) => { if (current()) setFolders(groups) }),
       ])
       if (!current()) return
       const failure = results.find(result => result.status === "rejected")
@@ -298,9 +297,9 @@ function App() {
     return pollVisible(async signal => {
         const ids = prSessionIds.split(",")
         const batches = await Promise.all(Array.from({ length: Math.ceil(ids.length / 100) }, (_, index) =>
-          api<Record<string, PRSummary[]>>("/pull-requests/statuses", "POST", { session_ids: ids.slice(index * 100, (index + 1) * 100) }, signal),
+          listPullRequestStatuses({ body: { session_ids: ids.slice(index * 100, (index + 1) * 100) }, signal }).then(({ data }) => data),
         ))
-        const states = Object.assign({}, ...batches) as Record<string, PRSummary[]>
+        const states: Record<string, PullRequestStatus[]> = Object.assign({}, ...batches)
         if (!signal.aborted) setPrStates(states)
     }, () => 20000, () => setPrStates({}))
   }, [me?.user.id, prSessionIds, connectionVersion, prRefresh])
@@ -428,7 +427,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   </section></main>
 }
 
-function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PRSummary[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
+function Conversation({ id, me, connections, connectionVersion, refreshList, workspaceRequest, pullRequests, onPRUpdated, sideMode = false, visible = true, onTitle, onSession, onOpenFile, onOpenAction, initial, resolved, originalSessionId, authorityKey }: { id: string; me: Me; connections: Connection[]; connectionVersion: string; refreshList: () => Promise<void>; workspaceRequest: WorkspaceRequest | null; pullRequests: PullRequestStatus[]; onPRUpdated: () => void; sideMode?: boolean; visible?: boolean; onTitle?: (title: string) => void; onSession?: (session: Session | null) => void; onOpenFile?: OpenFile; onOpenAction?: (action: ActionSelection) => void; initial?: NewConversation; resolved?: View; originalSessionId?: string; authorityKey?: string }) {
   const [view, setView] = useState<View | null>(() => initial ? { session: initial.session, turns: [initial.turn] } : resolved?.messages !== undefined ? resolved : null)
   const [messages, setMessages] = useState<Message[]>(() => initial ? [firstMessage(initial)] : resolved?.messages ?? [])
   const [plan, setPlan] = useState<Plan[]>([])
@@ -553,7 +552,7 @@ function Conversation({ id, me, connections, connectionVersion, refreshList, wor
       sessionCallback.current?.(next.session)
       const latestMessage = history.at(-1)?.id ?? 0
       if (visibleNow.current && readThrough.current !== latestMessage) {
-        await api(`/sessions/${id}/read`, "POST", { message_id: latestMessage }, signal)
+        await markSessionRead({ path: { session_id: id }, body: { message_id: latestMessage }, signal })
         if (signal?.aborted || version !== loadVersion.current) return
         readThrough.current = latestMessage
       }

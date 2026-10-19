@@ -16,13 +16,13 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, or_, select
 
 from .contracts import ExecutionContext
@@ -518,7 +518,153 @@ class PullRequestService:
         return {**detail, "tab": tab}
 
 
-class StatusRequest(BaseModel):
+class PullRequestSummary(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    url: str
+    title: str
+    repository: str
+    number: int
+    state: Literal["open", "closed", "merged", "unknown"]
+    draft: bool
+    accessible: bool
+    error: str | None = None
+
+
+class PullRequestStatus(PullRequestSummary):
+    origin: Literal["attached", "mentioned"]
+
+
+class PullRequestAuthor(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    login: str
+    bot: bool
+
+
+class PullRequestFileChange(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    filename: str
+    previous_filename: str
+    status: str
+    additions: int
+    deletions: int
+    patch: str
+    patch_status: Literal["available", "partial", "unavailable"]
+
+
+class PullRequestDiscussionItem(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    kind: Literal["comment", "review", "inline"]
+    author: PullRequestAuthor
+    body: str
+    body_limited: bool
+    state: str
+    path: str
+    line: int | None
+    created_at: str
+    url: str | None
+
+
+class PullRequestCommit(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    sha: str
+    message: str
+    author: PullRequestAuthor
+    created_at: str
+    url: str | None
+
+
+class PullRequestCheck(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    name: str
+    status: str
+    url: str | None
+    title: str
+    summary: str
+    text: str
+    annotations: int
+    output_limited: bool
+
+
+class PullRequestFilesSection(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    items: list[PullRequestFileChange]
+    limited: bool
+    error: str | None
+    notice: str | None = None
+
+
+class PullRequestDiscussionSection(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    items: list[PullRequestDiscussionItem]
+    limited: bool
+    error: str | None
+
+
+class PullRequestCommitsSection(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    items: list[PullRequestCommit]
+    limited: bool
+    error: str | None
+
+
+class PullRequestChecksSection(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    items: list[PullRequestCheck]
+    limited: bool
+    error: str | None
+    head_sha: str | None = None
+
+
+class PullRequestMetadata(PullRequestSummary):
+    # Present only when GitHub returned a complete PR record (accessible).
+    description: str | None = None
+    description_limited: bool | None = None
+    author: PullRequestAuthor | None = None
+    base: str | None = None
+    head: str | None = None
+    head_sha: str | None = None
+    base_sha: str | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    changed_files: int | None = None
+    commits: int | None = None
+    updated_at: str | None = None
+    merged_at: str | None = None
+
+
+class PullRequestOverview(PullRequestMetadata):
+    tab: Literal["overview"]
+
+
+class PullRequestFiles(PullRequestMetadata):
+    tab: Literal["files"]
+    section: PullRequestFilesSection | None = None
+
+
+class PullRequestDiscussion(PullRequestMetadata):
+    tab: Literal["discussion"]
+    section: PullRequestDiscussionSection | None = None
+
+
+class PullRequestCommits(PullRequestMetadata):
+    tab: Literal["commits"]
+    section: PullRequestCommitsSection | None = None
+
+
+class PullRequestChecks(PullRequestMetadata):
+    tab: Literal["checks"]
+    section: PullRequestChecksSection | None = None
+
+
+PullRequestDetail = Annotated[
+    PullRequestOverview | PullRequestFiles | PullRequestDiscussion | PullRequestCommits | PullRequestChecks,
+    Field(discriminator="tab"),
+]
+
+
+class PullRequestStatusRequest(BaseModel):
     session_ids: list[str] = Field(max_length=100)
 
 
@@ -526,16 +672,18 @@ def routes(runtime: Runtime, actor, *, service: PullRequestService | None = None
     router = APIRouter()
     service = service or PullRequestService(runtime)
 
-    @router.post("/api/pull-requests/statuses")
-    async def statuses(body: StatusRequest, response: Response, user: User = Depends(actor)):
+    @router.post("/api/pull-requests/statuses", operation_id="listPullRequestStatuses")
+    async def statuses(
+        body: PullRequestStatusRequest, response: Response, user: User = Depends(actor),
+    ) -> dict[str, list[PullRequestStatus]]:
         response.headers["Cache-Control"] = "no-store"
         return await service.statuses(user, list(dict.fromkeys(body.session_ids)))
 
-    @router.get("/api/sessions/{session_id}/pull-request")
+    @router.get("/api/sessions/{session_id}/pull-request", operation_id="getPullRequest")
     async def detail(
         session_id: str, response: Response, url: str = Query(max_length=2048),
         refresh: bool = False, tab: Tab = "overview", user: User = Depends(actor),
-    ):
+    ) -> PullRequestDetail:
         response.headers["Cache-Control"] = "no-store"
         return await service.detail(user, session_id, url, tab, refresh)
 

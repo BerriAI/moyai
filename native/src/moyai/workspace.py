@@ -6,10 +6,10 @@ import asyncio
 import hashlib
 import re
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai_harness.step_persistence import RunRecord
 from sqlalchemy import delete, select, update
@@ -20,6 +20,77 @@ from .models import Artifact, Message, Session, SessionLink, SubagentLabel, Turn
 
 if TYPE_CHECKING:
     from .runtime import Runtime
+
+
+class WorkspaceLink(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    # Mentioned links come from public transcript text and have no stored row.
+    id: str | None = None
+    kind: Literal["pull_request", "output", "source"]
+    url: str
+    title: str
+    origin: Literal["attached", "mentioned"]
+    can_remove: bool
+
+
+class WorkspaceFile(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    name: str
+    size: int
+    url: str
+
+
+class WorkspaceSource(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    name: str
+    media_type: str
+    url: str
+
+
+class WorkspaceSubagent(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    parent_id: str | None
+    # Present for delegated sessions only; null when the viewer cannot open it.
+    session_id: str | None = None
+    turn_id: str | None = None
+    name: str
+    avatar: int
+    status: str
+    started_at: str
+    can_inspect: bool
+    depth: int
+
+
+class SessionWorkspace(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    links: list[WorkspaceLink]
+    files: list[WorkspaceFile]
+    sources: list[WorkspaceSource]
+    subagents: list[WorkspaceSubagent]
+    subagents_limited: bool
+
+
+class SubagentStep(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    kind: str
+    tool: str | None
+    timestamp: str
+
+
+class SubagentDetail(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    name: str
+    output: str
+    steps: list[SubagentStep]
+
+
+class WorkspaceLinkRemoved(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    removed: Literal[True]
 
 
 AGENT_NAMES = (
@@ -141,8 +212,8 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             raise HTTPException(401, "Your session expired.")
         await runtime.database.session(user, session_id)
 
-    @router.get("/api/sessions/{session_id}/workspace")
-    async def overview(session_id: str, user: User = Depends(actor)):
+    @router.get("/api/sessions/{session_id}/workspace", operation_id="getWorkspace")
+    async def overview(session_id: str, user: User = Depends(actor)) -> SessionWorkspace:
         async with runtime.database.sessions() as db:
             session = await runtime.database.allowed_session(db, session_id, user)
             turns = list(await db.scalars(select(Turn).where(
@@ -206,13 +277,13 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             } for link, child in children[:100]] + subagents
             truncated = truncated or len(children) > 100
         await recheck(user, session_id)
-        return {
+        return SessionWorkspace.model_validate({
             "links": attached + mentioned, "files": files, "sources": sources,
             "subagents": subagents, "subagents_limited": truncated or recent_limited,
-        }
+        })
 
-    @router.get("/api/sessions/{session_id}/subagents/{run_id}")
-    async def subagent(session_id: str, run_id: str, user: User = Depends(actor)):
+    @router.get("/api/sessions/{session_id}/subagents/{run_id}", operation_id="getSubagent")
+    async def subagent(session_id: str, run_id: str, user: User = Depends(actor)) -> SubagentDetail:
         await runtime.database.session(user, session_id)
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,250}", run_id) or ".." in run_id:
             raise HTTPException(404, "Subagent not found.")
@@ -242,22 +313,22 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         ]
         labels = await agent_labels(runtime, session_id, [record])
         await recheck(user, session_id)
-        return {
+        return SubagentDetail.model_validate({
             "id": run_id, "name": labels[run_id].name,
             "output": "\n\n".join(replies[-3:])[-30_000:],
             "steps": [{
                 "kind": event.kind, "tool": event.tool_name, "timestamp": event.timestamp.isoformat(),
             } for event in events[-60:]],
-        }
+        })
 
-    @router.post("/api/sessions/{session_id}/links", status_code=201)
-    async def attach(session_id: str, body: LinkInput, user: User = Depends(actor)):
+    @router.post("/api/sessions/{session_id}/links", status_code=201, operation_id="attachSessionLink")
+    async def attach(session_id: str, body: LinkInput, user: User = Depends(actor)) -> WorkspaceLink:
         row = await save_link(runtime.database, user, session_id, body)
         session = await runtime.database.session(user, session_id)
-        return link_view(row, user, session.owner_id)
+        return WorkspaceLink.model_validate(link_view(row, user, session.owner_id))
 
-    @router.delete("/api/sessions/{session_id}/links/{link_id}")
-    async def remove(session_id: str, link_id: str, user: User = Depends(actor)):
+    @router.delete("/api/sessions/{session_id}/links/{link_id}", operation_id="removeSessionLink")
+    async def remove(session_id: str, link_id: str, user: User = Depends(actor)) -> WorkspaceLinkRemoved:
         async with runtime.database.sessions.begin() as db:
             session = await runtime.database.allowed_session(db, session_id, user)
             row = await db.get(SessionLink, link_id)
@@ -266,6 +337,6 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             if user.id not in {row.actor_id, session.owner_id}:
                 raise HTTPException(403, "Only the person who added this link or the session owner can remove it.")
             await db.execute(delete(SessionLink).where(SessionLink.id == link_id))
-        return {"removed": True}
+        return WorkspaceLinkRemoved(removed=True)
 
     return router

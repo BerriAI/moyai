@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, ConfigDict
 from pydantic_ai import ConversationTypeAdapter
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
@@ -86,11 +87,25 @@ async def hydrate(runtime: Runtime, value: PreparedTurn | SteeringInput) -> None
             value.conversation = ConversationTypeAdapter.dump_json(conversation).decode()
 
 
+class UploadedFile(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    name: str
+    media_type: str
+    size: int
+
+
+# The handler streams the raw request body; declare it so the client sends bytes.
+UPLOAD_BODY = {"requestBody": {"required": True, "content": {
+    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
+}}}
+
+
 def routes(runtime: Runtime, actor) -> APIRouter:
     router = APIRouter()
 
-    @router.post("/api/uploads", status_code=201)
-    async def upload(request: Request, name: str = "clipboard.png", user: User = Depends(actor)):
+    @router.post("/api/uploads", status_code=201, operation_id="uploadFile", openapi_extra=UPLOAD_BODY)
+    async def upload(request: Request, name: str = "clipboard.png", user: User = Depends(actor)) -> UploadedFile:
         if not name or name in {".", ".."} or len(name) > 200 or any(ord(char) < 32 or ord(char) == 127 for char in name) or "/" in name or "\\" in name:
             raise HTTPException(422, "Use a filename up to 200 characters without directories or control characters.")
         declared = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
@@ -120,7 +135,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
             row = Upload(owner_id=user.id, name=name, digest=digest, media_type=media_type, size=len(raw))
             db.add(row)
             await db.flush()
-            return {"id": row.id, "name": row.name, "media_type": row.media_type, "size": row.size}
+            return UploadedFile(id=row.id, name=row.name, media_type=row.media_type, size=row.size)
 
     @router.get("/api/uploads/{upload_id}")
     async def content(upload_id: str, user: User = Depends(actor)):

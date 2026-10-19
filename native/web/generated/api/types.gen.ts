@@ -149,6 +149,39 @@ export type AutomationInput = {
 };
 
 /**
+ * BrowserActionResult
+ */
+export type BrowserActionResult = {
+    navigation_error: BrowserNavigationError | null;
+    /**
+     * Tab Id
+     */
+    tab_id: string | null;
+    /**
+     * Tabs
+     */
+    tabs: Array<BrowserTab>;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+};
+
+/**
+ * BrowserNavigationError
+ */
+export type BrowserNavigationError = {
+    /**
+     * Code
+     */
+    code: string;
+    /**
+     * Message
+     */
+    message: string;
+};
+
+/**
  * BrowserRequest
  */
 export type BrowserRequest = {
@@ -215,6 +248,46 @@ export type BrowserRequest = {
 };
 
 /**
+ * BrowserTab
+ */
+export type BrowserTab = {
+    /**
+     * Active
+     */
+    active: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * BrowserTabs
+ */
+export type BrowserTabs = {
+    /**
+     * Available
+     */
+    available: boolean | null;
+    /**
+     * Tabs
+     */
+    tabs: Array<BrowserTab>;
+    /**
+     * Truncated
+     */
+    truncated: boolean;
+};
+
+/**
  * ComputerCommand
  */
 export type ComputerCommand = {
@@ -270,6 +343,54 @@ export type ComputerCommand = {
      * Y
      */
     y?: number;
+};
+
+/**
+ * ComputerControlResult
+ */
+export type ComputerControlResult = {
+    /**
+     * Available
+     */
+    available: boolean | null;
+    /**
+     * Controlled
+     */
+    controlled: boolean;
+    /**
+     * Height
+     */
+    height: number | null;
+    /**
+     * Width
+     */
+    width: number | null;
+};
+
+/**
+ * ComputerState
+ */
+export type ComputerState = {
+    /**
+     * Available
+     */
+    available: boolean;
+    /**
+     * Busy
+     */
+    busy: boolean;
+    /**
+     * Controlled
+     */
+    controlled: boolean;
+    /**
+     * Controller
+     */
+    controller: string | null;
+    /**
+     * Has Workspace
+     */
+    has_workspace: boolean;
 };
 
 /**
@@ -914,6 +1035,753 @@ export type ProductUpdateSecret = {
 };
 
 /**
+ * PullRequestAuthor
+ */
+export type PullRequestAuthor = {
+    /**
+     * Bot
+     */
+    bot: boolean;
+    /**
+     * Login
+     */
+    login: string;
+};
+
+/**
+ * PullRequestCheck
+ */
+export type PullRequestCheck = {
+    /**
+     * Annotations
+     */
+    annotations: number;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Output Limited
+     */
+    output_limited: boolean;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Summary
+     */
+    summary: string;
+    /**
+     * Text
+     */
+    text: string;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Url
+     */
+    url: string | null;
+};
+
+/**
+ * PullRequestChecks
+ */
+export type PullRequestChecks = {
+    /**
+     * Accessible
+     */
+    accessible: boolean;
+    /**
+     * Additions
+     */
+    additions: number | null;
+    author: PullRequestAuthor | null;
+    /**
+     * Base
+     */
+    base: string | null;
+    /**
+     * Base Sha
+     */
+    base_sha: string | null;
+    /**
+     * Changed Files
+     */
+    changed_files: number | null;
+    /**
+     * Commits
+     */
+    commits: number | null;
+    /**
+     * Deletions
+     */
+    deletions: number | null;
+    /**
+     * Description
+     */
+    description: string | null;
+    /**
+     * Description Limited
+     */
+    description_limited: boolean | null;
+    /**
+     * Draft
+     */
+    draft: boolean;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Head
+     */
+    head: string | null;
+    /**
+     * Head Sha
+     */
+    head_sha: string | null;
+    /**
+     * Merged At
+     */
+    merged_at: string | null;
+    /**
+     * Number
+     */
+    number: number;
+    /**
+     * Repository
+     */
+    repository: string;
+    section: PullRequestChecksSection | null;
+    /**
+     * State
+     */
+    state: 'open' | 'closed' | 'merged' | 'unknown';
+    /**
+     * Tab
+     */
+    tab: 'checks';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PullRequestChecksSection
+ */
+export type PullRequestChecksSection = {
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Head Sha
+     */
+    head_sha: string | null;
+    /**
+     * Items
+     */
+    items: Array<PullRequestCheck>;
+    /**
+     * Limited
+     */
+    limited: boolean;
+};
+
+/**
+ * PullRequestCommit
+ */
+export type PullRequestCommit = {
+    author: PullRequestAuthor;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Message
+     */
+    message: string;
+    /**
+     * Sha
+     */
+    sha: string;
+    /**
+     * Url
+     */
+    url: string | null;
+};
+
+/**
+ * PullRequestCommits
+ */
+export type PullRequestCommits = {
+    /**
+     * Accessible
+     */
+    accessible: boolean;
+    /**
+     * Additions
+     */
+    additions: number | null;
+    author: PullRequestAuthor | null;
+    /**
+     * Base
+     */
+    base: string | null;
+    /**
+     * Base Sha
+     */
+    base_sha: string | null;
+    /**
+     * Changed Files
+     */
+    changed_files: number | null;
+    /**
+     * Commits
+     */
+    commits: number | null;
+    /**
+     * Deletions
+     */
+    deletions: number | null;
+    /**
+     * Description
+     */
+    description: string | null;
+    /**
+     * Description Limited
+     */
+    description_limited: boolean | null;
+    /**
+     * Draft
+     */
+    draft: boolean;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Head
+     */
+    head: string | null;
+    /**
+     * Head Sha
+     */
+    head_sha: string | null;
+    /**
+     * Merged At
+     */
+    merged_at: string | null;
+    /**
+     * Number
+     */
+    number: number;
+    /**
+     * Repository
+     */
+    repository: string;
+    section: PullRequestCommitsSection | null;
+    /**
+     * State
+     */
+    state: 'open' | 'closed' | 'merged' | 'unknown';
+    /**
+     * Tab
+     */
+    tab: 'commits';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PullRequestCommitsSection
+ */
+export type PullRequestCommitsSection = {
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Items
+     */
+    items: Array<PullRequestCommit>;
+    /**
+     * Limited
+     */
+    limited: boolean;
+};
+
+/**
+ * PullRequestDiscussion
+ */
+export type PullRequestDiscussion = {
+    /**
+     * Accessible
+     */
+    accessible: boolean;
+    /**
+     * Additions
+     */
+    additions: number | null;
+    author: PullRequestAuthor | null;
+    /**
+     * Base
+     */
+    base: string | null;
+    /**
+     * Base Sha
+     */
+    base_sha: string | null;
+    /**
+     * Changed Files
+     */
+    changed_files: number | null;
+    /**
+     * Commits
+     */
+    commits: number | null;
+    /**
+     * Deletions
+     */
+    deletions: number | null;
+    /**
+     * Description
+     */
+    description: string | null;
+    /**
+     * Description Limited
+     */
+    description_limited: boolean | null;
+    /**
+     * Draft
+     */
+    draft: boolean;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Head
+     */
+    head: string | null;
+    /**
+     * Head Sha
+     */
+    head_sha: string | null;
+    /**
+     * Merged At
+     */
+    merged_at: string | null;
+    /**
+     * Number
+     */
+    number: number;
+    /**
+     * Repository
+     */
+    repository: string;
+    section: PullRequestDiscussionSection | null;
+    /**
+     * State
+     */
+    state: 'open' | 'closed' | 'merged' | 'unknown';
+    /**
+     * Tab
+     */
+    tab: 'discussion';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PullRequestDiscussionItem
+ */
+export type PullRequestDiscussionItem = {
+    author: PullRequestAuthor;
+    /**
+     * Body
+     */
+    body: string;
+    /**
+     * Body Limited
+     */
+    body_limited: boolean;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: 'comment' | 'review' | 'inline';
+    /**
+     * Line
+     */
+    line: number | null;
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * State
+     */
+    state: string;
+    /**
+     * Url
+     */
+    url: string | null;
+};
+
+/**
+ * PullRequestDiscussionSection
+ */
+export type PullRequestDiscussionSection = {
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Items
+     */
+    items: Array<PullRequestDiscussionItem>;
+    /**
+     * Limited
+     */
+    limited: boolean;
+};
+
+/**
+ * PullRequestFileChange
+ */
+export type PullRequestFileChange = {
+    /**
+     * Additions
+     */
+    additions: number;
+    /**
+     * Deletions
+     */
+    deletions: number;
+    /**
+     * Filename
+     */
+    filename: string;
+    /**
+     * Patch
+     */
+    patch: string;
+    /**
+     * Patch Status
+     */
+    patch_status: 'available' | 'partial' | 'unavailable';
+    /**
+     * Previous Filename
+     */
+    previous_filename: string;
+    /**
+     * Status
+     */
+    status: string;
+};
+
+/**
+ * PullRequestFiles
+ */
+export type PullRequestFiles = {
+    /**
+     * Accessible
+     */
+    accessible: boolean;
+    /**
+     * Additions
+     */
+    additions: number | null;
+    author: PullRequestAuthor | null;
+    /**
+     * Base
+     */
+    base: string | null;
+    /**
+     * Base Sha
+     */
+    base_sha: string | null;
+    /**
+     * Changed Files
+     */
+    changed_files: number | null;
+    /**
+     * Commits
+     */
+    commits: number | null;
+    /**
+     * Deletions
+     */
+    deletions: number | null;
+    /**
+     * Description
+     */
+    description: string | null;
+    /**
+     * Description Limited
+     */
+    description_limited: boolean | null;
+    /**
+     * Draft
+     */
+    draft: boolean;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Head
+     */
+    head: string | null;
+    /**
+     * Head Sha
+     */
+    head_sha: string | null;
+    /**
+     * Merged At
+     */
+    merged_at: string | null;
+    /**
+     * Number
+     */
+    number: number;
+    /**
+     * Repository
+     */
+    repository: string;
+    section: PullRequestFilesSection | null;
+    /**
+     * State
+     */
+    state: 'open' | 'closed' | 'merged' | 'unknown';
+    /**
+     * Tab
+     */
+    tab: 'files';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PullRequestFilesSection
+ */
+export type PullRequestFilesSection = {
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Items
+     */
+    items: Array<PullRequestFileChange>;
+    /**
+     * Limited
+     */
+    limited: boolean;
+    /**
+     * Notice
+     */
+    notice: string | null;
+};
+
+/**
+ * PullRequestOverview
+ */
+export type PullRequestOverview = {
+    /**
+     * Accessible
+     */
+    accessible: boolean;
+    /**
+     * Additions
+     */
+    additions: number | null;
+    author: PullRequestAuthor | null;
+    /**
+     * Base
+     */
+    base: string | null;
+    /**
+     * Base Sha
+     */
+    base_sha: string | null;
+    /**
+     * Changed Files
+     */
+    changed_files: number | null;
+    /**
+     * Commits
+     */
+    commits: number | null;
+    /**
+     * Deletions
+     */
+    deletions: number | null;
+    /**
+     * Description
+     */
+    description: string | null;
+    /**
+     * Description Limited
+     */
+    description_limited: boolean | null;
+    /**
+     * Draft
+     */
+    draft: boolean;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Head
+     */
+    head: string | null;
+    /**
+     * Head Sha
+     */
+    head_sha: string | null;
+    /**
+     * Merged At
+     */
+    merged_at: string | null;
+    /**
+     * Number
+     */
+    number: number;
+    /**
+     * Repository
+     */
+    repository: string;
+    /**
+     * State
+     */
+    state: 'open' | 'closed' | 'merged' | 'unknown';
+    /**
+     * Tab
+     */
+    tab: 'overview';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Updated At
+     */
+    updated_at: string | null;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PullRequestStatus
+ */
+export type PullRequestStatus = {
+    /**
+     * Accessible
+     */
+    accessible: boolean;
+    /**
+     * Draft
+     */
+    draft: boolean;
+    /**
+     * Error
+     */
+    error: string | null;
+    /**
+     * Number
+     */
+    number: number;
+    /**
+     * Origin
+     */
+    origin: 'attached' | 'mentioned';
+    /**
+     * Repository
+     */
+    repository: string;
+    /**
+     * State
+     */
+    state: 'open' | 'closed' | 'merged' | 'unknown';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * PullRequestStatusRequest
+ */
+export type PullRequestStatusRequest = {
+    /**
+     * Session Ids
+     */
+    session_ids: Array<string>;
+};
+
+/**
  * QueuedEdit
  */
 export type QueuedEdit = {
@@ -1091,6 +1959,66 @@ export type SessionEdit = {
 };
 
 /**
+ * SessionFolderRemoved
+ */
+export type SessionFolderRemoved = {
+    /**
+     * Removed
+     */
+    removed: true;
+};
+
+/**
+ * SessionFolderView
+ */
+export type SessionFolderView = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+};
+
+/**
+ * SessionReadResult
+ */
+export type SessionReadResult = {
+    /**
+     * Read
+     */
+    read: true;
+};
+
+/**
+ * SessionWorkspace
+ */
+export type SessionWorkspace = {
+    /**
+     * Files
+     */
+    files: Array<WorkspaceFile>;
+    /**
+     * Links
+     */
+    links: Array<WorkspaceLink>;
+    /**
+     * Sources
+     */
+    sources: Array<WorkspaceSource>;
+    /**
+     * Subagents
+     */
+    subagents: Array<WorkspaceSubagent>;
+    /**
+     * Subagents Limited
+     */
+    subagents_limited: boolean;
+};
+
+/**
  * SignInStart
  */
 export type SignInStart = {
@@ -1127,13 +2055,113 @@ export type SkillInput = {
 };
 
 /**
- * StatusRequest
+ * SubagentDetail
  */
-export type StatusRequest = {
+export type SubagentDetail = {
     /**
-     * Session Ids
+     * Id
      */
-    session_ids: Array<string>;
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Output
+     */
+    output: string;
+    /**
+     * Steps
+     */
+    steps: Array<SubagentStep>;
+};
+
+/**
+ * SubagentStep
+ */
+export type SubagentStep = {
+    /**
+     * Kind
+     */
+    kind: string;
+    /**
+     * Timestamp
+     */
+    timestamp: string;
+    /**
+     * Tool
+     */
+    tool: string | null;
+};
+
+/**
+ * SwarmBoard
+ */
+export type SwarmBoard = {
+    /**
+     * Budget Seconds
+     */
+    budget_seconds: number;
+    /**
+     * Can Control
+     */
+    can_control: boolean;
+    /**
+     * Ends At
+     */
+    ends_at: string | null;
+    /**
+     * Generation
+     */
+    generation: number;
+    /**
+     * Goal
+     */
+    goal: string;
+    /**
+     * Has More
+     */
+    has_more: boolean;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Leader Id
+     */
+    leader_id: string | null;
+    /**
+     * Members
+     */
+    members: Array<SwarmMemberView>;
+    /**
+     * Next After
+     */
+    next_after: number;
+    /**
+     * Posts
+     */
+    posts: Array<SwarmPostView>;
+    /**
+     * Reason
+     */
+    reason: string;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Round
+     */
+    round: number;
+    /**
+     * Sequence
+     */
+    sequence: number;
+    /**
+     * Status
+     */
+    status: string;
 };
 
 /**
@@ -1152,6 +2180,96 @@ export type SwarmControl = {
      * Revision
      */
     revision: number;
+};
+
+/**
+ * SwarmMemberView
+ */
+export type SwarmMemberView = {
+    /**
+     * Active Turn
+     */
+    active_turn: string | null;
+    /**
+     * Assignment
+     */
+    assignment: string;
+    /**
+     * Coordinator
+     */
+    coordinator: boolean;
+    /**
+     * Deleted
+     */
+    deleted: boolean;
+    /**
+     * Model
+     */
+    model: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Session Id
+     */
+    session_id: string;
+    /**
+     * Status
+     */
+    status: string;
+};
+
+/**
+ * SwarmPostView
+ */
+export type SwarmPostView = {
+    /**
+     * Author
+     */
+    author: string;
+    /**
+     * Author Session Id
+     */
+    author_session_id: string | null;
+    /**
+     * Content
+     */
+    content: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: string;
+    /**
+     * Sequence
+     */
+    sequence: number;
+};
+
+/**
+ * SwarmStarted
+ */
+export type SwarmStarted = {
+    /**
+     * Session
+     */
+    session: {
+        [key: string]: unknown;
+    };
+    /**
+     * Turn
+     */
+    turn: {
+        [key: string]: unknown;
+    };
 };
 
 /**
@@ -1224,6 +2342,28 @@ export type Trigger = {
      */
     id?: string;
     schedule?: Timing | null;
+};
+
+/**
+ * UploadedFile
+ */
+export type UploadedFile = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Size
+     */
+    size: number;
 };
 
 /**
@@ -1314,6 +2454,136 @@ export type WebhookSetup = {
      * Revision
      */
     revision: number;
+};
+
+/**
+ * WorkspaceFile
+ */
+export type WorkspaceFile = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Size
+     */
+    size: number;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * WorkspaceLink
+ */
+export type WorkspaceLink = {
+    /**
+     * Can Remove
+     */
+    can_remove: boolean;
+    /**
+     * Id
+     */
+    id: string | null;
+    /**
+     * Kind
+     */
+    kind: 'pull_request' | 'output' | 'source';
+    /**
+     * Origin
+     */
+    origin: 'attached' | 'mentioned';
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * WorkspaceLinkRemoved
+ */
+export type WorkspaceLinkRemoved = {
+    /**
+     * Removed
+     */
+    removed: true;
+};
+
+/**
+ * WorkspaceSource
+ */
+export type WorkspaceSource = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Media Type
+     */
+    media_type: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * WorkspaceSubagent
+ */
+export type WorkspaceSubagent = {
+    /**
+     * Avatar
+     */
+    avatar: number;
+    /**
+     * Can Inspect
+     */
+    can_inspect: boolean;
+    /**
+     * Depth
+     */
+    depth: number;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Parent Id
+     */
+    parent_id: string | null;
+    /**
+     * Session Id
+     */
+    session_id: string | null;
+    /**
+     * Started At
+     */
+    started_at: string;
+    /**
+     * Status
+     */
+    status: string;
+    /**
+     * Turn Id
+     */
+    turn_id: string | null;
 };
 
 /**
@@ -3580,28 +4850,34 @@ export type FileApiProductSkillsSkillIdFilesPathGetResponses = {
     200: unknown;
 };
 
-export type StatusesApiPullRequestsStatusesPostData = {
-    body: StatusRequest;
+export type ListPullRequestStatusesData = {
+    body: PullRequestStatusRequest;
     path?: never;
     query?: never;
     url: '/api/pull-requests/statuses';
 };
 
-export type StatusesApiPullRequestsStatusesPostErrors = {
+export type ListPullRequestStatusesErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type StatusesApiPullRequestsStatusesPostError = StatusesApiPullRequestsStatusesPostErrors[keyof StatusesApiPullRequestsStatusesPostErrors];
+export type ListPullRequestStatusesError = ListPullRequestStatusesErrors[keyof ListPullRequestStatusesErrors];
 
-export type StatusesApiPullRequestsStatusesPostResponses = {
+export type ListPullRequestStatusesResponses = {
     /**
+     * Response Listpullrequeststatuses
+     *
      * Successful Response
      */
-    200: unknown;
+    200: {
+        [key: string]: Array<PullRequestStatus>;
+    };
 };
+
+export type ListPullRequestStatusesResponse = ListPullRequestStatusesResponses[keyof ListPullRequestStatusesResponses];
 
 export type OriginalArchiveApiRunsRunIdArtifactGetData = {
     body?: never;
@@ -3636,44 +4912,50 @@ export type OriginalArchiveApiRunsRunIdArtifactGetResponses = {
     200: unknown;
 };
 
-export type FoldersApiSessionFoldersGetData = {
+export type ListSessionFoldersData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/session-folders';
 };
 
-export type FoldersApiSessionFoldersGetResponses = {
+export type ListSessionFoldersResponses = {
     /**
+     * Response Listsessionfolders
+     *
      * Successful Response
      */
-    200: unknown;
+    200: Array<SessionFolderView>;
 };
 
-export type CreateFolderApiSessionFoldersPostData = {
+export type ListSessionFoldersResponse = ListSessionFoldersResponses[keyof ListSessionFoldersResponses];
+
+export type CreateSessionFolderData = {
     body: FolderName;
     path?: never;
     query?: never;
     url: '/api/session-folders';
 };
 
-export type CreateFolderApiSessionFoldersPostErrors = {
+export type CreateSessionFolderErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateFolderApiSessionFoldersPostError = CreateFolderApiSessionFoldersPostErrors[keyof CreateFolderApiSessionFoldersPostErrors];
+export type CreateSessionFolderError = CreateSessionFolderErrors[keyof CreateSessionFolderErrors];
 
-export type CreateFolderApiSessionFoldersPostResponses = {
+export type CreateSessionFolderResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: SessionFolderView;
 };
 
-export type RemoveFolderApiSessionFoldersFolderIdDeleteData = {
+export type CreateSessionFolderResponse = CreateSessionFolderResponses[keyof CreateSessionFolderResponses];
+
+export type DeleteSessionFolderData = {
     body?: never;
     path: {
         /**
@@ -3685,23 +4967,25 @@ export type RemoveFolderApiSessionFoldersFolderIdDeleteData = {
     url: '/api/session-folders/{folder_id}';
 };
 
-export type RemoveFolderApiSessionFoldersFolderIdDeleteErrors = {
+export type DeleteSessionFolderErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RemoveFolderApiSessionFoldersFolderIdDeleteError = RemoveFolderApiSessionFoldersFolderIdDeleteErrors[keyof RemoveFolderApiSessionFoldersFolderIdDeleteErrors];
+export type DeleteSessionFolderError = DeleteSessionFolderErrors[keyof DeleteSessionFolderErrors];
 
-export type RemoveFolderApiSessionFoldersFolderIdDeleteResponses = {
+export type DeleteSessionFolderResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionFolderRemoved;
 };
 
-export type RenameFolderApiSessionFoldersFolderIdPatchData = {
+export type DeleteSessionFolderResponse = DeleteSessionFolderResponses[keyof DeleteSessionFolderResponses];
+
+export type RenameSessionFolderData = {
     body: FolderName;
     path: {
         /**
@@ -3713,21 +4997,23 @@ export type RenameFolderApiSessionFoldersFolderIdPatchData = {
     url: '/api/session-folders/{folder_id}';
 };
 
-export type RenameFolderApiSessionFoldersFolderIdPatchErrors = {
+export type RenameSessionFolderErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RenameFolderApiSessionFoldersFolderIdPatchError = RenameFolderApiSessionFoldersFolderIdPatchErrors[keyof RenameFolderApiSessionFoldersFolderIdPatchErrors];
+export type RenameSessionFolderError = RenameSessionFolderErrors[keyof RenameSessionFolderErrors];
 
-export type RenameFolderApiSessionFoldersFolderIdPatchResponses = {
+export type RenameSessionFolderResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionFolderView;
 };
+
+export type RenameSessionFolderResponse = RenameSessionFolderResponses[keyof RenameSessionFolderResponses];
 
 export type SessionsApiSessionsGetData = {
     body?: never;
@@ -3937,7 +5223,7 @@ export type AnswerApiSessionsSessionIdAnswersPostResponses = {
     202: unknown;
 };
 
-export type StateApiSessionsSessionIdBrowserGetData = {
+export type GetBrowserData = {
     body?: never;
     path: {
         /**
@@ -3949,23 +5235,25 @@ export type StateApiSessionsSessionIdBrowserGetData = {
     url: '/api/sessions/{session_id}/browser';
 };
 
-export type StateApiSessionsSessionIdBrowserGetErrors = {
+export type GetBrowserErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type StateApiSessionsSessionIdBrowserGetError = StateApiSessionsSessionIdBrowserGetErrors[keyof StateApiSessionsSessionIdBrowserGetErrors];
+export type GetBrowserError = GetBrowserErrors[keyof GetBrowserErrors];
 
-export type StateApiSessionsSessionIdBrowserGetResponses = {
+export type GetBrowserResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: BrowserTabs;
 };
 
-export type ControlApiSessionsSessionIdBrowserPostData = {
+export type GetBrowserResponse = GetBrowserResponses[keyof GetBrowserResponses];
+
+export type ControlBrowserData = {
     body: BrowserRequest;
     path: {
         /**
@@ -3977,23 +5265,25 @@ export type ControlApiSessionsSessionIdBrowserPostData = {
     url: '/api/sessions/{session_id}/browser';
 };
 
-export type ControlApiSessionsSessionIdBrowserPostErrors = {
+export type ControlBrowserErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ControlApiSessionsSessionIdBrowserPostError = ControlApiSessionsSessionIdBrowserPostErrors[keyof ControlApiSessionsSessionIdBrowserPostErrors];
+export type ControlBrowserError = ControlBrowserErrors[keyof ControlBrowserErrors];
 
-export type ControlApiSessionsSessionIdBrowserPostResponses = {
+export type ControlBrowserResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: BrowserActionResult;
 };
 
-export type StateApiSessionsSessionIdComputerGetData = {
+export type ControlBrowserResponse = ControlBrowserResponses[keyof ControlBrowserResponses];
+
+export type GetComputerData = {
     body?: never;
     path: {
         /**
@@ -4010,23 +5300,25 @@ export type StateApiSessionsSessionIdComputerGetData = {
     url: '/api/sessions/{session_id}/computer';
 };
 
-export type StateApiSessionsSessionIdComputerGetErrors = {
+export type GetComputerErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type StateApiSessionsSessionIdComputerGetError = StateApiSessionsSessionIdComputerGetErrors[keyof StateApiSessionsSessionIdComputerGetErrors];
+export type GetComputerError = GetComputerErrors[keyof GetComputerErrors];
 
-export type StateApiSessionsSessionIdComputerGetResponses = {
+export type GetComputerResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ComputerState;
 };
 
-export type ControlApiSessionsSessionIdComputerPostData = {
+export type GetComputerResponse = GetComputerResponses[keyof GetComputerResponses];
+
+export type ControlComputerData = {
     body: ComputerCommand;
     path: {
         /**
@@ -4038,21 +5330,23 @@ export type ControlApiSessionsSessionIdComputerPostData = {
     url: '/api/sessions/{session_id}/computer';
 };
 
-export type ControlApiSessionsSessionIdComputerPostErrors = {
+export type ControlComputerErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ControlApiSessionsSessionIdComputerPostError = ControlApiSessionsSessionIdComputerPostErrors[keyof ControlApiSessionsSessionIdComputerPostErrors];
+export type ControlComputerError = ControlComputerErrors[keyof ControlComputerErrors];
 
-export type ControlApiSessionsSessionIdComputerPostResponses = {
+export type ControlComputerResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: ComputerControlResult;
 };
+
+export type ControlComputerResponse = ControlComputerResponses[keyof ControlComputerResponses];
 
 export type SessionDebugTraceApiSessionsSessionIdDebugTraceGetData = {
     body?: never;
@@ -4283,7 +5577,7 @@ export type FilesApiSessionsSessionIdFilesGetResponses = {
     200: unknown;
 };
 
-export type AttachApiSessionsSessionIdLinksPostData = {
+export type AttachSessionLinkData = {
     body: LinkInput;
     path: {
         /**
@@ -4295,23 +5589,25 @@ export type AttachApiSessionsSessionIdLinksPostData = {
     url: '/api/sessions/{session_id}/links';
 };
 
-export type AttachApiSessionsSessionIdLinksPostErrors = {
+export type AttachSessionLinkErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type AttachApiSessionsSessionIdLinksPostError = AttachApiSessionsSessionIdLinksPostErrors[keyof AttachApiSessionsSessionIdLinksPostErrors];
+export type AttachSessionLinkError = AttachSessionLinkErrors[keyof AttachSessionLinkErrors];
 
-export type AttachApiSessionsSessionIdLinksPostResponses = {
+export type AttachSessionLinkResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: WorkspaceLink;
 };
 
-export type RemoveApiSessionsSessionIdLinksLinkIdDeleteData = {
+export type AttachSessionLinkResponse = AttachSessionLinkResponses[keyof AttachSessionLinkResponses];
+
+export type RemoveSessionLinkData = {
     body?: never;
     path: {
         /**
@@ -4327,21 +5623,23 @@ export type RemoveApiSessionsSessionIdLinksLinkIdDeleteData = {
     url: '/api/sessions/{session_id}/links/{link_id}';
 };
 
-export type RemoveApiSessionsSessionIdLinksLinkIdDeleteErrors = {
+export type RemoveSessionLinkErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RemoveApiSessionsSessionIdLinksLinkIdDeleteError = RemoveApiSessionsSessionIdLinksLinkIdDeleteErrors[keyof RemoveApiSessionsSessionIdLinksLinkIdDeleteErrors];
+export type RemoveSessionLinkError = RemoveSessionLinkErrors[keyof RemoveSessionLinkErrors];
 
-export type RemoveApiSessionsSessionIdLinksLinkIdDeleteResponses = {
+export type RemoveSessionLinkResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: WorkspaceLinkRemoved;
 };
+
+export type RemoveSessionLinkResponse = RemoveSessionLinkResponses[keyof RemoveSessionLinkResponses];
 
 export type MessagesApiSessionsSessionIdMessagesGetData = {
     body?: never;
@@ -4542,7 +5840,7 @@ export type ActionDetailApiSessionsSessionIdProgressTurnIdActionsActionIdGetResp
     200: unknown;
 };
 
-export type DetailApiSessionsSessionIdPullRequestGetData = {
+export type GetPullRequestData = {
     body?: never;
     path: {
         /**
@@ -4567,23 +5865,37 @@ export type DetailApiSessionsSessionIdPullRequestGetData = {
     url: '/api/sessions/{session_id}/pull-request';
 };
 
-export type DetailApiSessionsSessionIdPullRequestGetErrors = {
+export type GetPullRequestErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type DetailApiSessionsSessionIdPullRequestGetError = DetailApiSessionsSessionIdPullRequestGetErrors[keyof DetailApiSessionsSessionIdPullRequestGetErrors];
+export type GetPullRequestError = GetPullRequestErrors[keyof GetPullRequestErrors];
 
-export type DetailApiSessionsSessionIdPullRequestGetResponses = {
+export type GetPullRequestResponses = {
     /**
+     * Response Getpullrequest
+     *
      * Successful Response
      */
-    200: unknown;
+    200: ({
+        tab: 'overview';
+    } & PullRequestOverview) | ({
+        tab: 'files';
+    } & PullRequestFiles) | ({
+        tab: 'discussion';
+    } & PullRequestDiscussion) | ({
+        tab: 'commits';
+    } & PullRequestCommits) | ({
+        tab: 'checks';
+    } & PullRequestChecks);
 };
 
-export type ReadSessionApiSessionsSessionIdReadPostData = {
+export type GetPullRequestResponse = GetPullRequestResponses[keyof GetPullRequestResponses];
+
+export type MarkSessionReadData = {
     body: ReadThrough;
     path: {
         /**
@@ -4595,21 +5907,23 @@ export type ReadSessionApiSessionsSessionIdReadPostData = {
     url: '/api/sessions/{session_id}/read';
 };
 
-export type ReadSessionApiSessionsSessionIdReadPostErrors = {
+export type MarkSessionReadErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ReadSessionApiSessionsSessionIdReadPostError = ReadSessionApiSessionsSessionIdReadPostErrors[keyof ReadSessionApiSessionsSessionIdReadPostErrors];
+export type MarkSessionReadError = MarkSessionReadErrors[keyof MarkSessionReadErrors];
 
-export type ReadSessionApiSessionsSessionIdReadPostResponses = {
+export type MarkSessionReadResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionReadResult;
 };
+
+export type MarkSessionReadResponse = MarkSessionReadResponses[keyof MarkSessionReadResponses];
 
 export type RestoreSessionApiSessionsSessionIdRestorePostData = {
     body?: never;
@@ -4695,7 +6009,7 @@ export type StopApiSessionsSessionIdStopPostResponses = {
     202: unknown;
 };
 
-export type SubagentApiSessionsSessionIdSubagentsRunIdGetData = {
+export type GetSubagentData = {
     body?: never;
     path: {
         /**
@@ -4711,23 +6025,25 @@ export type SubagentApiSessionsSessionIdSubagentsRunIdGetData = {
     url: '/api/sessions/{session_id}/subagents/{run_id}';
 };
 
-export type SubagentApiSessionsSessionIdSubagentsRunIdGetErrors = {
+export type GetSubagentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SubagentApiSessionsSessionIdSubagentsRunIdGetError = SubagentApiSessionsSessionIdSubagentsRunIdGetErrors[keyof SubagentApiSessionsSessionIdSubagentsRunIdGetErrors];
+export type GetSubagentError = GetSubagentErrors[keyof GetSubagentErrors];
 
-export type SubagentApiSessionsSessionIdSubagentsRunIdGetResponses = {
+export type GetSubagentResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SubagentDetail;
 };
 
-export type BoardApiSessionsSessionIdSwarmGetData = {
+export type GetSubagentResponse = GetSubagentResponses[keyof GetSubagentResponses];
+
+export type GetSwarmData = {
     body?: never;
     path: {
         /**
@@ -4744,23 +6060,27 @@ export type BoardApiSessionsSessionIdSwarmGetData = {
     url: '/api/sessions/{session_id}/swarm';
 };
 
-export type BoardApiSessionsSessionIdSwarmGetErrors = {
+export type GetSwarmErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type BoardApiSessionsSessionIdSwarmGetError = BoardApiSessionsSessionIdSwarmGetErrors[keyof BoardApiSessionsSessionIdSwarmGetErrors];
+export type GetSwarmError = GetSwarmErrors[keyof GetSwarmErrors];
 
-export type BoardApiSessionsSessionIdSwarmGetResponses = {
+export type GetSwarmResponses = {
     /**
+     * Response Getswarm
+     *
      * Successful Response
      */
-    200: unknown;
+    200: SwarmBoard | null;
 };
 
-export type OverviewApiSessionsSessionIdWorkspaceGetData = {
+export type GetSwarmResponse = GetSwarmResponses[keyof GetSwarmResponses];
+
+export type GetWorkspaceData = {
     body?: never;
     path: {
         /**
@@ -4772,21 +6092,23 @@ export type OverviewApiSessionsSessionIdWorkspaceGetData = {
     url: '/api/sessions/{session_id}/workspace';
 };
 
-export type OverviewApiSessionsSessionIdWorkspaceGetErrors = {
+export type GetWorkspaceErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type OverviewApiSessionsSessionIdWorkspaceGetError = OverviewApiSessionsSessionIdWorkspaceGetErrors[keyof OverviewApiSessionsSessionIdWorkspaceGetErrors];
+export type GetWorkspaceError = GetWorkspaceErrors[keyof GetWorkspaceErrors];
 
-export type OverviewApiSessionsSessionIdWorkspaceGetResponses = {
+export type GetWorkspaceResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SessionWorkspace;
 };
+
+export type GetWorkspaceResponse = GetWorkspaceResponses[keyof GetWorkspaceResponses];
 
 export type AutomationsApiSettingsAutomationsGetData = {
     body?: never;
@@ -5674,30 +6996,32 @@ export type ReportApiSpendGetResponses = {
     200: unknown;
 };
 
-export type StartApiSwarmsPostData = {
+export type StartSwarmData = {
     body: NewSwarm;
     path?: never;
     query?: never;
     url: '/api/swarms';
 };
 
-export type StartApiSwarmsPostErrors = {
+export type StartSwarmErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type StartApiSwarmsPostError = StartApiSwarmsPostErrors[keyof StartApiSwarmsPostErrors];
+export type StartSwarmError = StartSwarmErrors[keyof StartSwarmErrors];
 
-export type StartApiSwarmsPostResponses = {
+export type StartSwarmResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: SwarmStarted;
 };
 
-export type ControlApiSwarmsMissionIdControlPostData = {
+export type StartSwarmResponse = StartSwarmResponses[keyof StartSwarmResponses];
+
+export type ControlSwarmData = {
     body: SwarmControl;
     path: {
         /**
@@ -5709,21 +7033,25 @@ export type ControlApiSwarmsMissionIdControlPostData = {
     url: '/api/swarms/{mission_id}/control';
 };
 
-export type ControlApiSwarmsMissionIdControlPostErrors = {
+export type ControlSwarmErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ControlApiSwarmsMissionIdControlPostError = ControlApiSwarmsMissionIdControlPostErrors[keyof ControlApiSwarmsMissionIdControlPostErrors];
+export type ControlSwarmError = ControlSwarmErrors[keyof ControlSwarmErrors];
 
-export type ControlApiSwarmsMissionIdControlPostResponses = {
+export type ControlSwarmResponses = {
     /**
+     * Response Controlswarm
+     *
      * Successful Response
      */
-    200: unknown;
+    200: SwarmBoard | null;
 };
+
+export type ControlSwarmResponse = ControlSwarmResponses[keyof ControlSwarmResponses];
 
 export type CancelQueuedApiTurnsTurnIdDeleteData = {
     body?: never;
@@ -5809,8 +7137,8 @@ export type SteerQueuedApiTurnsTurnIdSteerPostResponses = {
     202: unknown;
 };
 
-export type UploadApiUploadsPostData = {
-    body?: never;
+export type UploadFileData = {
+    body: Blob | File;
     path?: never;
     query?: {
         /**
@@ -5821,21 +7149,23 @@ export type UploadApiUploadsPostData = {
     url: '/api/uploads';
 };
 
-export type UploadApiUploadsPostErrors = {
+export type UploadFileErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type UploadApiUploadsPostError = UploadApiUploadsPostErrors[keyof UploadApiUploadsPostErrors];
+export type UploadFileError = UploadFileErrors[keyof UploadFileErrors];
 
-export type UploadApiUploadsPostResponses = {
+export type UploadFileResponses = {
     /**
      * Successful Response
      */
-    201: unknown;
+    201: UploadedFile;
 };
+
+export type UploadFileResponse = UploadFileResponses[keyof UploadFileResponses];
 
 export type ContentApiUploadsUploadIdGetData = {
     body?: never;

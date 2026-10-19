@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api } from "./api"
+import { createSessionFolder, deleteSessionFolder, renameSessionFolder, type PullRequestStatus, type SessionFolderView } from "./generated/api"
 import { preferencePatch, type SessionPreferenceUpdates } from "./session-preferences"
 import { downloadDebugTrace } from "./debug-trace"
 
@@ -14,12 +15,12 @@ export type SidebarSession = {
   surface?: string
   parent_session_id?: string | null
   source?: "native" | "legacy"; key?: string; url?: string; read_only?: boolean; deleting?: boolean; folder_id?: string | null
-  pull_requests?: { url: string; title: string; repository: string; number: number; state: "open" | "closed" | "merged" | "unknown"; draft: boolean; accessible: boolean; error?: string }[]
+  pull_requests?: PullRequestStatus[]
 }
 export const sessionIsReadOnly = (row: SidebarSession) => row.source === "legacy" || row.read_only === true
 export const sessionKey = (row: SidebarSession) => row.key ?? `${row.source ?? "native"}:${row.id}`
 export const sessionHash = (row: SidebarSession) => `${row.source === "legacy" ? "run=" : ""}${encodeURIComponent(row.id)}`
-export type SessionFolder = { id: string; name: string }
+export type SessionFolder = SessionFolderView
 type Action = "rename" | "move" | "archive" | "delete" | "restore" | "folder-create" | "folder-rename" | "folder-remove"
 type Editor = { action: Action; session?: SidebarSession; folder?: SessionFolder }
 type Actions = {
@@ -178,10 +179,10 @@ export function SessionActionsProvider({ userId, folders, refresh, preferences, 
         else if (editor.action === "archive") void edit(editor.session!, { archived: !editor.session!.archived }, editor.session!.archived ? "Session restored." : "Session archived.")
         else if (editor.action === "delete") void mutate(async () => { await api(`/sessions/${editor.session!.id}`, "DELETE"); onDeleted(editor.session!.id) }, "Moved to Deleted sessions.")
         else if (editor.action === "restore") void mutate(() => api(`/sessions/${editor.session!.id}/restore`, "POST"), "Restored to active sessions.")
-        else if (editor.action === "folder-remove") void mutate(() => api(`/session-folders/${editor.folder!.id}`, "DELETE"), "Folder removed. Sessions are still saved.")
-        else if (editor.action === "folder-rename") void mutate(() => api(`/session-folders/${editor.folder!.id}`, "PATCH", { name }), "Folder renamed.")
+        else if (editor.action === "folder-remove") void mutate(() => deleteSessionFolder({ path: { folder_id: editor.folder!.id } }), "Folder removed. Sessions are still saved.")
+        else if (editor.action === "folder-rename") void mutate(() => renameSessionFolder({ path: { folder_id: editor.folder!.id }, body: { name } }), "Folder renamed.")
         else void mutate(async () => {
-          const created = await api<SessionFolder>("/session-folders", "POST", { name })
+          const { data: created } = await createSessionFolder({ body: { name } })
           if (editor.session) {
             setEditor({ action: "move", session: editor.session }); await refresh()
             await api(`/sessions/${editor.session.id}`, "PATCH", { folder: created.name })

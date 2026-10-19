@@ -247,6 +247,68 @@
         "title": "AutomationInput",
         "type": "object"
       },
+      "BrowserActionResult": {
+        "properties": {
+          "navigation_error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserNavigationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tab_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tab Id"
+          },
+          "tabs": {
+            "items": {
+              "$ref": "#/components/schemas/BrowserTab"
+            },
+            "title": "Tabs",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tabs",
+          "truncated",
+          "tab_id",
+          "navigation_error"
+        ],
+        "title": "BrowserActionResult",
+        "type": "object"
+      },
+      "BrowserNavigationError": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "BrowserNavigationError",
+        "type": "object"
+      },
       "BrowserRequest": {
         "additionalProperties": false,
         "properties": {
@@ -386,6 +448,67 @@
         "title": "BrowserRequest",
         "type": "object"
       },
+      "BrowserTab": {
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "url",
+          "active"
+        ],
+        "title": "BrowserTab",
+        "type": "object"
+      },
+      "BrowserTabs": {
+        "properties": {
+          "available": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available"
+          },
+          "tabs": {
+            "items": {
+              "$ref": "#/components/schemas/BrowserTab"
+            },
+            "title": "Tabs",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tabs",
+          "truncated",
+          "available"
+        ],
+        "title": "BrowserTabs",
+        "type": "object"
+      },
       "ComputerCommand": {
         "properties": {
           "action": {
@@ -488,6 +611,95 @@
           "action"
         ],
         "title": "ComputerCommand",
+        "type": "object"
+      },
+      "ComputerControlResult": {
+        "properties": {
+          "available": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available"
+          },
+          "controlled": {
+            "title": "Controlled",
+            "type": "boolean"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          }
+        },
+        "required": [
+          "controlled",
+          "available",
+          "width",
+          "height"
+        ],
+        "title": "ComputerControlResult",
+        "type": "object"
+      },
+      "ComputerState": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "busy": {
+            "title": "Busy",
+            "type": "boolean"
+          },
+          "controlled": {
+            "title": "Controlled",
+            "type": "boolean"
+          },
+          "controller": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Controller"
+          },
+          "has_workspace": {
+            "title": "Has Workspace",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "available",
+          "has_workspace",
+          "controlled",
+          "busy",
+          "controller"
+        ],
+        "title": "ComputerState",
         "type": "object"
       },
       "ConnectionInput": {
@@ -1696,6 +1908,1644 @@
         "title": "ProductUpdateSecret",
         "type": "object"
       },
+      "PullRequestAuthor": {
+        "properties": {
+          "bot": {
+            "title": "Bot",
+            "type": "boolean"
+          },
+          "login": {
+            "title": "Login",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "bot"
+        ],
+        "title": "PullRequestAuthor",
+        "type": "object"
+      },
+      "PullRequestCheck": {
+        "properties": {
+          "annotations": {
+            "title": "Annotations",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "output_limited": {
+            "title": "Output Limited",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "url",
+          "title",
+          "summary",
+          "text",
+          "annotations",
+          "output_limited"
+        ],
+        "title": "PullRequestCheck",
+        "type": "object"
+      },
+      "PullRequestChecks": {
+        "properties": {
+          "accessible": {
+            "title": "Accessible",
+            "type": "boolean"
+          },
+          "additions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Additions"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestAuthor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          },
+          "base_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "changed_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed Files"
+          },
+          "commits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commits"
+          },
+          "deletions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletions"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "description_limited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description Limited"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "merged_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged At"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestChecksSection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "merged",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tab": {
+            "const": "checks",
+            "title": "Tab",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "repository",
+          "number",
+          "state",
+          "draft",
+          "accessible",
+          "error",
+          "description",
+          "description_limited",
+          "author",
+          "base",
+          "head",
+          "head_sha",
+          "base_sha",
+          "additions",
+          "deletions",
+          "changed_files",
+          "commits",
+          "updated_at",
+          "merged_at",
+          "tab",
+          "section"
+        ],
+        "title": "PullRequestChecks",
+        "type": "object"
+      },
+      "PullRequestChecksSection": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PullRequestCheck"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limited": {
+            "title": "Limited",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "limited",
+          "error",
+          "head_sha"
+        ],
+        "title": "PullRequestChecksSection",
+        "type": "object"
+      },
+      "PullRequestCommit": {
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/PullRequestAuthor"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "sha": {
+            "title": "Sha",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "sha",
+          "message",
+          "author",
+          "created_at",
+          "url"
+        ],
+        "title": "PullRequestCommit",
+        "type": "object"
+      },
+      "PullRequestCommits": {
+        "properties": {
+          "accessible": {
+            "title": "Accessible",
+            "type": "boolean"
+          },
+          "additions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Additions"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestAuthor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          },
+          "base_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "changed_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed Files"
+          },
+          "commits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commits"
+          },
+          "deletions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletions"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "description_limited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description Limited"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "merged_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged At"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestCommitsSection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "merged",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tab": {
+            "const": "commits",
+            "title": "Tab",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "repository",
+          "number",
+          "state",
+          "draft",
+          "accessible",
+          "error",
+          "description",
+          "description_limited",
+          "author",
+          "base",
+          "head",
+          "head_sha",
+          "base_sha",
+          "additions",
+          "deletions",
+          "changed_files",
+          "commits",
+          "updated_at",
+          "merged_at",
+          "tab",
+          "section"
+        ],
+        "title": "PullRequestCommits",
+        "type": "object"
+      },
+      "PullRequestCommitsSection": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PullRequestCommit"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limited": {
+            "title": "Limited",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "limited",
+          "error"
+        ],
+        "title": "PullRequestCommitsSection",
+        "type": "object"
+      },
+      "PullRequestDiscussion": {
+        "properties": {
+          "accessible": {
+            "title": "Accessible",
+            "type": "boolean"
+          },
+          "additions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Additions"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestAuthor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          },
+          "base_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "changed_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed Files"
+          },
+          "commits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commits"
+          },
+          "deletions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletions"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "description_limited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description Limited"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "merged_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged At"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestDiscussionSection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "merged",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tab": {
+            "const": "discussion",
+            "title": "Tab",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "repository",
+          "number",
+          "state",
+          "draft",
+          "accessible",
+          "error",
+          "description",
+          "description_limited",
+          "author",
+          "base",
+          "head",
+          "head_sha",
+          "base_sha",
+          "additions",
+          "deletions",
+          "changed_files",
+          "commits",
+          "updated_at",
+          "merged_at",
+          "tab",
+          "section"
+        ],
+        "title": "PullRequestDiscussion",
+        "type": "object"
+      },
+      "PullRequestDiscussionItem": {
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/PullRequestAuthor"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "body_limited": {
+            "title": "Body Limited",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "comment",
+              "review",
+              "inline"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "author",
+          "body",
+          "body_limited",
+          "state",
+          "path",
+          "line",
+          "created_at",
+          "url"
+        ],
+        "title": "PullRequestDiscussionItem",
+        "type": "object"
+      },
+      "PullRequestDiscussionSection": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PullRequestDiscussionItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limited": {
+            "title": "Limited",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "limited",
+          "error"
+        ],
+        "title": "PullRequestDiscussionSection",
+        "type": "object"
+      },
+      "PullRequestFileChange": {
+        "properties": {
+          "additions": {
+            "title": "Additions",
+            "type": "integer"
+          },
+          "deletions": {
+            "title": "Deletions",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "patch": {
+            "title": "Patch",
+            "type": "string"
+          },
+          "patch_status": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ],
+            "title": "Patch Status",
+            "type": "string"
+          },
+          "previous_filename": {
+            "title": "Previous Filename",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "previous_filename",
+          "status",
+          "additions",
+          "deletions",
+          "patch",
+          "patch_status"
+        ],
+        "title": "PullRequestFileChange",
+        "type": "object"
+      },
+      "PullRequestFiles": {
+        "properties": {
+          "accessible": {
+            "title": "Accessible",
+            "type": "boolean"
+          },
+          "additions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Additions"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestAuthor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          },
+          "base_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "changed_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed Files"
+          },
+          "commits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commits"
+          },
+          "deletions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletions"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "description_limited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description Limited"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "merged_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged At"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestFilesSection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "merged",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tab": {
+            "const": "files",
+            "title": "Tab",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "repository",
+          "number",
+          "state",
+          "draft",
+          "accessible",
+          "error",
+          "description",
+          "description_limited",
+          "author",
+          "base",
+          "head",
+          "head_sha",
+          "base_sha",
+          "additions",
+          "deletions",
+          "changed_files",
+          "commits",
+          "updated_at",
+          "merged_at",
+          "tab",
+          "section"
+        ],
+        "title": "PullRequestFiles",
+        "type": "object"
+      },
+      "PullRequestFilesSection": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PullRequestFileChange"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limited": {
+            "title": "Limited",
+            "type": "boolean"
+          },
+          "notice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice"
+          }
+        },
+        "required": [
+          "items",
+          "limited",
+          "error",
+          "notice"
+        ],
+        "title": "PullRequestFilesSection",
+        "type": "object"
+      },
+      "PullRequestOverview": {
+        "properties": {
+          "accessible": {
+            "title": "Accessible",
+            "type": "boolean"
+          },
+          "additions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Additions"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestAuthor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          },
+          "base_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "changed_files": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed Files"
+          },
+          "commits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commits"
+          },
+          "deletions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletions"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "description_limited": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description Limited"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "merged_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged At"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "merged",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tab": {
+            "const": "overview",
+            "title": "Tab",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "repository",
+          "number",
+          "state",
+          "draft",
+          "accessible",
+          "error",
+          "description",
+          "description_limited",
+          "author",
+          "base",
+          "head",
+          "head_sha",
+          "base_sha",
+          "additions",
+          "deletions",
+          "changed_files",
+          "commits",
+          "updated_at",
+          "merged_at",
+          "tab"
+        ],
+        "title": "PullRequestOverview",
+        "type": "object"
+      },
+      "PullRequestStatus": {
+        "properties": {
+          "accessible": {
+            "title": "Accessible",
+            "type": "boolean"
+          },
+          "draft": {
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "origin": {
+            "enum": [
+              "attached",
+              "mentioned"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "merged",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "repository",
+          "number",
+          "state",
+          "draft",
+          "accessible",
+          "error",
+          "origin"
+        ],
+        "title": "PullRequestStatus",
+        "type": "object"
+      },
+      "PullRequestStatusRequest": {
+        "properties": {
+          "session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Session Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_ids"
+        ],
+        "title": "PullRequestStatusRequest",
+        "type": "object"
+      },
       "QueuedEdit": {
         "properties": {
           "prompt": {
@@ -2062,6 +3912,97 @@
         "title": "SessionEdit",
         "type": "object"
       },
+      "SessionFolderRemoved": {
+        "properties": {
+          "removed": {
+            "const": true,
+            "title": "Removed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "removed"
+        ],
+        "title": "SessionFolderRemoved",
+        "type": "object"
+      },
+      "SessionFolderView": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "SessionFolderView",
+        "type": "object"
+      },
+      "SessionReadResult": {
+        "properties": {
+          "read": {
+            "const": true,
+            "title": "Read",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read"
+        ],
+        "title": "SessionReadResult",
+        "type": "object"
+      },
+      "SessionWorkspace": {
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceLink"
+            },
+            "title": "Links",
+            "type": "array"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "subagents": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceSubagent"
+            },
+            "title": "Subagents",
+            "type": "array"
+          },
+          "subagents_limited": {
+            "title": "Subagents Limited",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "links",
+          "files",
+          "sources",
+          "subagents",
+          "subagents_limited"
+        ],
+        "title": "SessionWorkspace",
+        "type": "object"
+      },
       "SignInStart": {
         "properties": {
           "return_to": {
@@ -2118,21 +4059,173 @@
         "title": "SkillInput",
         "type": "object"
       },
-      "StatusRequest": {
+      "SubagentDetail": {
         "properties": {
-          "session_ids": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "output": {
+            "title": "Output",
+            "type": "string"
+          },
+          "steps": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/SubagentStep"
             },
-            "maxItems": 100,
-            "title": "Session Ids",
+            "title": "Steps",
             "type": "array"
           }
         },
         "required": [
-          "session_ids"
+          "id",
+          "name",
+          "output",
+          "steps"
         ],
-        "title": "StatusRequest",
+        "title": "SubagentDetail",
+        "type": "object"
+      },
+      "SubagentStep": {
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "tool": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool"
+          }
+        },
+        "required": [
+          "kind",
+          "tool",
+          "timestamp"
+        ],
+        "title": "SubagentStep",
+        "type": "object"
+      },
+      "SwarmBoard": {
+        "properties": {
+          "budget_seconds": {
+            "title": "Budget Seconds",
+            "type": "integer"
+          },
+          "can_control": {
+            "title": "Can Control",
+            "type": "boolean"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "leader_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Id"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/SwarmMemberView"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "next_after": {
+            "title": "Next After",
+            "type": "integer"
+          },
+          "posts": {
+            "items": {
+              "$ref": "#/components/schemas/SwarmPostView"
+            },
+            "title": "Posts",
+            "type": "array"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "round": {
+            "title": "Round",
+            "type": "integer"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "reason",
+          "revision",
+          "generation",
+          "round",
+          "goal",
+          "budget_seconds",
+          "ends_at",
+          "leader_id",
+          "can_control",
+          "sequence",
+          "members",
+          "posts",
+          "has_more",
+          "next_after"
+        ],
+        "title": "SwarmBoard",
         "type": "object"
       },
       "SwarmControl": {
@@ -2171,6 +4264,131 @@
           "revision"
         ],
         "title": "SwarmControl",
+        "type": "object"
+      },
+      "SwarmMemberView": {
+        "properties": {
+          "active_turn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Turn"
+          },
+          "assignment": {
+            "title": "Assignment",
+            "type": "string"
+          },
+          "coordinator": {
+            "title": "Coordinator",
+            "type": "boolean"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "name",
+          "model",
+          "coordinator",
+          "status",
+          "active_turn",
+          "deleted",
+          "assignment"
+        ],
+        "title": "SwarmMemberView",
+        "type": "object"
+      },
+      "SwarmPostView": {
+        "properties": {
+          "author": {
+            "title": "Author",
+            "type": "string"
+          },
+          "author_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Session Id"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "kind",
+          "author",
+          "author_session_id",
+          "content",
+          "created_at"
+        ],
+        "title": "SwarmPostView",
+        "type": "object"
+      },
+      "SwarmStarted": {
+        "properties": {
+          "session": {
+            "additionalProperties": true,
+            "title": "Session",
+            "type": "object"
+          },
+          "turn": {
+            "additionalProperties": true,
+            "title": "Turn",
+            "type": "object"
+          }
+        },
+        "required": [
+          "session",
+          "turn"
+        ],
+        "title": "SwarmStarted",
         "type": "object"
       },
       "TestEvent": {
@@ -2305,6 +4523,34 @@
           }
         },
         "title": "Trigger",
+        "type": "object"
+      },
+      "UploadedFile": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "media_type",
+          "size"
+        ],
+        "title": "UploadedFile",
         "type": "object"
       },
       "UserEdit": {
@@ -2487,6 +4733,209 @@
           "provider"
         ],
         "title": "WebhookSetup",
+        "type": "object"
+      },
+      "WorkspaceFile": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "size",
+          "url"
+        ],
+        "title": "WorkspaceFile",
+        "type": "object"
+      },
+      "WorkspaceLink": {
+        "properties": {
+          "can_remove": {
+            "title": "Can Remove",
+            "type": "boolean"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "kind": {
+            "enum": [
+              "pull_request",
+              "output",
+              "source"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "origin": {
+            "enum": [
+              "attached",
+              "mentioned"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "url",
+          "title",
+          "origin",
+          "can_remove"
+        ],
+        "title": "WorkspaceLink",
+        "type": "object"
+      },
+      "WorkspaceLinkRemoved": {
+        "properties": {
+          "removed": {
+            "const": true,
+            "title": "Removed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "removed"
+        ],
+        "title": "WorkspaceLinkRemoved",
+        "type": "object"
+      },
+      "WorkspaceSource": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "media_type",
+          "url"
+        ],
+        "title": "WorkspaceSource",
+        "type": "object"
+      },
+      "WorkspaceSubagent": {
+        "properties": {
+          "avatar": {
+            "title": "Avatar",
+            "type": "integer"
+          },
+          "can_inspect": {
+            "title": "Can Inspect",
+            "type": "boolean"
+          },
+          "depth": {
+            "title": "Depth",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          }
+        },
+        "required": [
+          "id",
+          "parent_id",
+          "session_id",
+          "turn_id",
+          "name",
+          "avatar",
+          "status",
+          "started_at",
+          "can_inspect",
+          "depth"
+        ],
+        "title": "WorkspaceSubagent",
         "type": "object"
       }
     }
@@ -5726,12 +8175,12 @@
     },
     "/api/pull-requests/statuses": {
       "post": {
-        "operationId": "statuses_api_pull_requests_statuses_post",
+        "operationId": "listPullRequestStatuses",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StatusRequest"
+                "$ref": "#/components/schemas/PullRequestStatusRequest"
               }
             }
           },
@@ -5741,7 +8190,16 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "$ref": "#/components/schemas/PullRequestStatus"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Listpullrequeststatuses",
+                  "type": "object"
+                }
               }
             },
             "description": "Successful Response"
@@ -5810,12 +8268,18 @@
     },
     "/api/session-folders": {
       "get": {
-        "operationId": "folders_api_session_folders_get",
+        "operationId": "listSessionFolders",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionFolderView"
+                  },
+                  "title": "Response Listsessionfolders",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -5824,7 +8288,7 @@
         "summary": "Folders"
       },
       "post": {
-        "operationId": "create_folder_api_session_folders_post",
+        "operationId": "createSessionFolder",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5839,7 +8303,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionFolderView"
+                }
               }
             },
             "description": "Successful Response"
@@ -5860,7 +8326,7 @@
     },
     "/api/session-folders/{folder_id}": {
       "delete": {
-        "operationId": "remove_folder_api_session_folders__folder_id__delete",
+        "operationId": "deleteSessionFolder",
         "parameters": [
           {
             "in": "path",
@@ -5876,7 +8342,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionFolderRemoved"
+                }
               }
             },
             "description": "Successful Response"
@@ -5895,7 +8363,7 @@
         "summary": "Remove Folder"
       },
       "patch": {
-        "operationId": "rename_folder_api_session_folders__folder_id__patch",
+        "operationId": "renameSessionFolder",
         "parameters": [
           {
             "in": "path",
@@ -5921,7 +8389,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionFolderView"
+                }
               }
             },
             "description": "Successful Response"
@@ -6255,7 +8725,7 @@
     },
     "/api/sessions/{session_id}/browser": {
       "get": {
-        "operationId": "state_api_sessions__session_id__browser_get",
+        "operationId": "getBrowser",
         "parameters": [
           {
             "in": "path",
@@ -6271,7 +8741,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserTabs"
+                }
               }
             },
             "description": "Successful Response"
@@ -6290,7 +8762,7 @@
         "summary": "State"
       },
       "post": {
-        "operationId": "control_api_sessions__session_id__browser_post",
+        "operationId": "controlBrowser",
         "parameters": [
           {
             "in": "path",
@@ -6316,7 +8788,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserActionResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -6337,7 +8811,7 @@
     },
     "/api/sessions/{session_id}/computer": {
       "get": {
-        "operationId": "state_api_sessions__session_id__computer_get",
+        "operationId": "getComputer",
         "parameters": [
           {
             "in": "path",
@@ -6363,7 +8837,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ComputerState"
+                }
               }
             },
             "description": "Successful Response"
@@ -6382,7 +8858,7 @@
         "summary": "State"
       },
       "post": {
-        "operationId": "control_api_sessions__session_id__computer_post",
+        "operationId": "controlComputer",
         "parameters": [
           {
             "in": "path",
@@ -6408,7 +8884,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ComputerControlResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -6773,7 +9251,7 @@
     },
     "/api/sessions/{session_id}/links": {
       "post": {
-        "operationId": "attach_api_sessions__session_id__links_post",
+        "operationId": "attachSessionLink",
         "parameters": [
           {
             "in": "path",
@@ -6799,7 +9277,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceLink"
+                }
               }
             },
             "description": "Successful Response"
@@ -6820,7 +9300,7 @@
     },
     "/api/sessions/{session_id}/links/{link_id}": {
       "delete": {
-        "operationId": "remove_api_sessions__session_id__links__link_id__delete",
+        "operationId": "removeSessionLink",
         "parameters": [
           {
             "in": "path",
@@ -6845,7 +9325,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceLinkRemoved"
+                }
               }
             },
             "description": "Successful Response"
@@ -7168,7 +9650,7 @@
     },
     "/api/sessions/{session_id}/pull-request": {
       "get": {
-        "operationId": "detail_api_sessions__session_id__pull_request_get",
+        "operationId": "getPullRequest",
         "parameters": [
           {
             "in": "path",
@@ -7221,7 +9703,36 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "checks": "#/components/schemas/PullRequestChecks",
+                      "commits": "#/components/schemas/PullRequestCommits",
+                      "discussion": "#/components/schemas/PullRequestDiscussion",
+                      "files": "#/components/schemas/PullRequestFiles",
+                      "overview": "#/components/schemas/PullRequestOverview"
+                    },
+                    "propertyName": "tab"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/PullRequestOverview"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PullRequestFiles"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PullRequestDiscussion"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PullRequestCommits"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PullRequestChecks"
+                    }
+                  ],
+                  "title": "Response Getpullrequest"
+                }
               }
             },
             "description": "Successful Response"
@@ -7242,7 +9753,7 @@
     },
     "/api/sessions/{session_id}/read": {
       "post": {
-        "operationId": "read_session_api_sessions__session_id__read_post",
+        "operationId": "markSessionRead",
         "parameters": [
           {
             "in": "path",
@@ -7268,7 +9779,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionReadResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -7400,7 +9913,7 @@
     },
     "/api/sessions/{session_id}/subagents/{run_id}": {
       "get": {
-        "operationId": "subagent_api_sessions__session_id__subagents__run_id__get",
+        "operationId": "getSubagent",
         "parameters": [
           {
             "in": "path",
@@ -7425,7 +9938,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SubagentDetail"
+                }
               }
             },
             "description": "Successful Response"
@@ -7446,7 +9961,7 @@
     },
     "/api/sessions/{session_id}/swarm": {
       "get": {
-        "operationId": "board_api_sessions__session_id__swarm_get",
+        "operationId": "getSwarm",
         "parameters": [
           {
             "in": "path",
@@ -7480,7 +9995,17 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SwarmBoard"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Getswarm"
+                }
               }
             },
             "description": "Successful Response"
@@ -7501,7 +10026,7 @@
     },
     "/api/sessions/{session_id}/workspace": {
       "get": {
-        "operationId": "overview_api_sessions__session_id__workspace_get",
+        "operationId": "getWorkspace",
         "parameters": [
           {
             "in": "path",
@@ -7517,7 +10042,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWorkspace"
+                }
               }
             },
             "description": "Successful Response"
@@ -9317,7 +11844,7 @@
     },
     "/api/swarms": {
       "post": {
-        "operationId": "start_api_swarms_post",
+        "operationId": "startSwarm",
         "requestBody": {
           "content": {
             "application/json": {
@@ -9332,7 +11859,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SwarmStarted"
+                }
               }
             },
             "description": "Successful Response"
@@ -9353,7 +11882,7 @@
     },
     "/api/swarms/{mission_id}/control": {
       "post": {
-        "operationId": "control_api_swarms__mission_id__control_post",
+        "operationId": "controlSwarm",
         "parameters": [
           {
             "in": "path",
@@ -9379,7 +11908,17 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SwarmBoard"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Controlswarm"
+                }
               }
             },
             "description": "Successful Response"
@@ -9519,7 +12058,7 @@
     },
     "/api/uploads": {
       "post": {
-        "operationId": "upload_api_uploads_post",
+        "operationId": "uploadFile",
         "parameters": [
           {
             "in": "query",
@@ -9532,11 +12071,24 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UploadedFile"
+                }
               }
             },
             "description": "Successful Response"

@@ -164,7 +164,7 @@ async def test_http_browser_viewer_cannot_write_and_stale_browser_cannot_steal_c
     calls = []
     async def guest(_runtime, _session, body):
         calls.append(body)
-        return {"tabs": []}
+        return {"tabs": [], "truncated": False}
     monkeypatch.setattr("moyai.browser.request", guest)
     first, other = new_id(), new_id()
     async with sign_in(runtime) as client:

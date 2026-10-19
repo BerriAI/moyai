@@ -283,11 +283,42 @@ def browser_capability(database: Database) -> Capability[RunScope]:
     ])
 
 
+class BrowserTab(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    id: str
+    title: str
+    url: str
+    active: bool
+
+
+class BrowserTabs(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    tabs: list[BrowserTab]
+    truncated: bool
+    # False when the shared browser or display is not running.
+    available: bool | None = None
+
+
+class BrowserNavigationError(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    code: str
+    message: str
+
+
+class BrowserActionResult(BaseModel):
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    tabs: list[BrowserTab]
+    truncated: bool
+    # Absent after closing a tab.
+    tab_id: str | None = None
+    navigation_error: BrowserNavigationError | None = None
+
+
 def routes(runtime: Runtime, actor) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/api/sessions/{session_id}/browser")
-    async def state(session_id: str, user: User = Depends(actor)):
+    @router.get("/api/sessions/{session_id}/browser", operation_id="getBrowser")
+    async def state(session_id: str, user: User = Depends(actor)) -> BrowserTabs:
         session = await authorize(runtime, session_id, user)
         value = await request(runtime, session, {
             "action": "browser", "command": {"action": "tabs"}, "deadline": time.time() + 25,
@@ -295,8 +326,8 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         await authorize(runtime, session_id, user)
         return value
 
-    @router.post("/api/sessions/{session_id}/browser")
-    async def control(session_id: str, body: BrowserRequest, user: User = Depends(actor)):
+    @router.post("/api/sessions/{session_id}/browser", operation_id="controlBrowser")
+    async def control(session_id: str, body: BrowserRequest, user: User = Depends(actor)) -> BrowserActionResult:
         identity = await lease(runtime, session_id, user, "browser", body.client_id)
         assert identity is not None
         session = await authorize(runtime, session_id, user)

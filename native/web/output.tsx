@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api, ApiError } from "./api"
+import { attachSessionLink, getWorkspace, removeSessionLink, type SessionWorkspace } from "./generated/api"
 import type { OutputResource } from "./workspace-types"
 import { fileReference, previewFileLink, type OpenFile } from "./file-links"
 import "./output.css"
@@ -21,11 +22,7 @@ type Preview = {
   text: string | null; language: string | null; truncated: boolean; notice: string | null
   text_byte_limit: number; text_line_limit: number; download_url: string; content_url: string | null
 }
-type Workspace = {
-  files: { id: string; name: string; url: string; size: number; media_type?: string }[]
-  sources: { id: string; name: string; url: string; size?: number; media_type: string }[]
-  links: { id?: string; kind: string; title: string; url: string; can_remove?: boolean }[]
-}
+type Workspace = SessionWorkspace
 
 function externalUrl(value: string): string | undefined {
   if (/[\u0000-\u0020\u007f]/.test(value)) return
@@ -197,7 +194,7 @@ function Files({ sessionId, onOpen, active = true }: FilesProps) {
     const load = async () => {
       setLoading(true)
       try {
-        const value = await api<Workspace>(`/sessions/${encodeURIComponent(sessionId)}/workspace`, "GET", undefined, controller.signal)
+        const { data: value } = await getWorkspace({ path: { session_id: sessionId }, signal: controller.signal })
         if (!controller.signal.aborted) { setData(value); setError("") }
       } catch (reason) {
         if (!controller.signal.aborted) {
@@ -214,13 +211,13 @@ function Files({ sessionId, onOpen, active = true }: FilesProps) {
   const outputs: OutputResource[] = data ? [
     ...data.files.map(file => ({ ...file, kind: "artifact" as const })),
     ...data.links.filter(link => link.kind === "output").map(link => ({
-      kind: "link" as const, id: link.id, name: link.title || link.url, url: link.url,
+      kind: "link" as const, id: link.id ?? undefined, name: link.title || link.url, url: link.url,
     })),
   ] : []
   const sources: OutputResource[] = data ? [
     ...data.sources.map(file => ({ ...file, kind: "upload" as const })),
     ...data.links.filter(link => link.kind === "source").map(link => ({
-      kind: "link" as const, id: link.id, name: link.title || link.url, url: link.url,
+      kind: "link" as const, id: link.id ?? undefined, name: link.title || link.url, url: link.url,
     })),
   ] : []
   const matching = (items: OutputResource[]) => items.filter(item => `${item.name} ${item.kind === "link" ? item.url : ""}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
@@ -229,7 +226,7 @@ function Files({ sessionId, onOpen, active = true }: FilesProps) {
     if (!active || pendingRemoval.current || !resource.id) return
     pendingRemoval.current = true; setRemoving(true); setActionError(""); setNotice("")
     try {
-      await api(`/sessions/${encodeURIComponent(sessionId)}/links/${encodeURIComponent(resource.id)}`, "DELETE")
+      await removeSessionLink({ path: { session_id: sessionId, link_id: resource.id } })
       if (mounted.current) { setRevision(value => value + 1); setNotice("Source link removed.") }
     } catch (reason) {
       if (mounted.current) setActionError(String(reason))
@@ -303,7 +300,7 @@ function SourceLinkDialog({ sessionId, active, open, onOpenChange, onSaved, onFa
         try {
           // Once submitted, let this idempotent native write settle even if the
           // panel is hidden. Abort only reads; hiding must not imply an undo.
-          await api(`/sessions/${encodeURIComponent(sessionId)}/links`, "POST", { kind: "source", url: value, title: title.trim() })
+          await attachSessionLink({ path: { session_id: sessionId }, body: { kind: "source", url: value, title: title.trim() } })
           if (mounted.current) { setUrl(""); setTitle(""); onOpenChange(false); onSaved() }
         } catch (reason) {
           if (mounted.current) { setError(String(reason)); onFailure(String(reason)) }
