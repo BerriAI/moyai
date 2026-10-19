@@ -28,6 +28,8 @@ function load(relative) {
     // UsersReport does not render charts/date controls. Their Vite-only legacy
     // adapter is outside this test; table/Input/Button are the real shared components.
     if (request === './analytics-shared' || request === './analytics-render.js') return {};
+    // The generated SDK only fetches reports, which UsersReport receives as props.
+    if (request === './generated/api') return {};
     if (request.startsWith('@/')) return load(path.join(root, 'frontend', request.slice(2)));
     if (request.startsWith('.')) return load(path.resolve(path.dirname(filename), request));
     return requireFromFile(request);

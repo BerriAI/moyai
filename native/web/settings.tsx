@@ -14,14 +14,19 @@ import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
 import type { GeneralPreferences } from "./general-preferences"
+import {
+  createSettingsAutomation, createSettingsSecret, createSettingsSkill, createSettingsUser, deleteSettingsAutomation, deleteSettingsMemory,
+  deleteSettingsSecret, deleteSettingsSkill, deleteSettingsUser, getSettingsGeneral, getSettingsOverview, listSettingsAutomationLogs,
+  listSettingsAutomations, listSettingsMemory, listSettingsSecrets, listSettingsSkills, updateSettingsAutomation, updateSettingsGeneral,
+  updateSettingsSecret, updateSettingsSkill, updateSettingsUser, writeSettingsMemory,
+  type SecretEditWritable, type SettingsAutomation, type SettingsMemoryFile, type SettingsSecret, type SettingsSkill, type UserEditWritable,
+} from "./generated/api"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
 type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void; sidebarCollapsed: boolean; onToggleSidebar: () => void; onPreferences: (preferences: GeneralPreferences) => void }
 type Capabilities = { read?: boolean; create?: boolean; update?: boolean; delete?: boolean; roles?: boolean; preferences?: boolean; review?: boolean; reason?: string; runtime_available?: boolean; shared?: boolean; run?: boolean; agent_access?: boolean }
 type Collection = { capabilities?: Capabilities; reason?: string }
-type Skill = { id: string; name: string; description: string; content: string; scope: string; enabled: boolean; editable: boolean; updated_at?: string }
-type Secret = { id: string; name: string; description: string; scope: string; editable?: boolean; updated_at?: string }
 type ProductSecret = {
   id: string; provider: string; label: string; name: string; format: string; env_var?: string; scope: string; lifetime?: string
   root_id?: string; created_at?: string; expires_at?: string; revision: number; status: string; can_manage: boolean
@@ -34,7 +39,6 @@ type CredentialDraft = {
   provider: string; label: string; name: string; format: "env" | "file"; env_var: string
   scope: string; lifetime: string; root_id: string; expires_at: string; value: string
 }
-type Memory = { namespace: string; path: string; content: string; version?: string; truncated?: boolean }
 type ProductMemoryNote = {
   id: string; key: string; title: string; content: string; kind: string; repo_url: string; repository_id?: number | null
   revision: number; created_at?: string; updated_at?: string; expires_at?: string | null; truncated?: boolean; review_required?: boolean
@@ -52,7 +56,6 @@ type ProductSkill = {
 }
 type ProductSkillDetail = ProductSkill & { instructions: string; files: { path: string; size: number; characters?: number; sha256?: string }[] }
 type ProductSkillLibrary = Collection & { source: string; skills: ProductSkill[]; can_publish: boolean; note?: string; has_more: boolean; next_offset: number | null }
-type Automation = { id: string; name: string; prompt: string; session_id: string; model: string; interval_minutes: number; paused: boolean; state: string; updated_at?: string }
 type Account = { id: string; username: string; display_name: string; role: string; enabled: boolean; email?: string; revision?: number }
 type Connection = { id: string; name: string; kind: string; owner_id: string; shared: boolean; read_only: boolean; enabled: boolean; policy?: { allowed_tools?: string[] | null; require_approval?: boolean } }
 type ProductConnection = {
@@ -86,19 +89,22 @@ const scopeOptions = [{ value: "all", label: "All scopes" }, { value: "personal"
 const scopes = (user: SettingsUser, capabilities?: Capabilities) => scopeOptions.filter(option => option.value === "personal" || (user.role === "admin" && capabilities?.shared === true && option.value === "shared"))
 const contains = (query: string, ...values: (string | undefined)[]) => values.join(" ").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
 const count = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "Unavailable"
-const dateTime = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Not recorded"
+const dateTime = (value?: string | null) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Not recorded"
 const errorText = (error: unknown) => error instanceof ApiError && error.status === 404
   ? "This settings endpoint is not available on this server."
   : error instanceof Error ? error.message : "The request could not be completed."
 
-function useResource<T>(path: string | null): Resource<T> {
+const scopeInput = (value: FormValues[string]) => value === "shared" ? "shared" as const : "personal" as const
+
+/** `path` keys the request; `load` performs it (a generated SDK call where one exists). */
+function useResource<T>(path: string | null, load: (signal: AbortSignal) => Promise<T> = signal => api<T>(path ?? "", "GET", undefined, signal)): Resource<T> {
   const [revision, setRevision] = useState(0)
   const [state, setState] = useState<{ path: string | null; data?: T; loading: boolean; error: string }>({ path, loading: Boolean(path), error: "" })
   useEffect(() => {
     if (!path) { setState({ path, loading: false, error: "" }); return }
     const controller = new AbortController()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true, error: "" }))
-    void api<T>(path, "GET", undefined, controller.signal).then(
+    void load(controller.signal).then(
       data => { if (!controller.signal.aborted) setState({ path, data, loading: false, error: "" }) },
       error => { if (!controller.signal.aborted) setState({ path, loading: false, error: errorText(error) }) },
     )
@@ -217,9 +223,9 @@ function Confirm({ title, description, label, onConfirm, onClose }: { title: str
 }
 
 function SkillsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { skills: Skill[] }>("/settings/skills")
+  const resource = useResource("/settings/skills", signal => listSettingsSkills({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
-  const [editor, setEditor] = useState<Skill | "new" | null>(null), [remove, setRemove] = useState<Skill | null>(null)
+  const [editor, setEditor] = useState<SettingsSkill | "new" | null>(null), [remove, setRemove] = useState<SettingsSkill | null>(null)
   const clear = () => { setSearch(""); setScope("all") }
   return <LoadState resource={resource}>{data => {
     const rows = data.skills.filter(row => contains(search, row.name, row.description, row.content) && (scope === "all" || row.scope === scope))
@@ -237,19 +243,24 @@ function SkillsPage({ user }: { user: SettingsUser }) {
         { name: "scope", label: "Scope", type: "select", options: scopes(user, data.capabilities) }, { name: "content", label: "Instructions", type: "textarea", required: true, maxLength: 65536 },
         { name: "enabled", label: "Enable this skill", type: "checkbox" },
       ]} initial={editor === "new" ? { name: "", description: "", scope: "personal", content: "", enabled: true } : { name: editor.name, description: editor.description, scope: editor.scope, content: editor.content, enabled: editor.enabled }}
-        onSave={async values => { await api(`/settings/skills${editor === "new" ? "" : `/${encodeURIComponent(editor.id)}`}`, editor === "new" ? "POST" : "PATCH", values); resource.refresh() }} onClose={() => setEditor(null)} />}
-      {remove && <Confirm title={`Delete ${remove.name}?`} description="This removes the saved skill. Existing conversations are kept." label="Delete skill" onConfirm={async () => { await api(`/settings/skills/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+        onSave={async values => {
+          const body = { name: String(values.name), description: String(values.description), content: String(values.content), scope: scopeInput(values.scope), enabled: values.enabled === true }
+          if (editor === "new") await createSettingsSkill({ body })
+          else await updateSettingsSkill({ path: { identity: editor.id }, body })
+          resource.refresh()
+        }} onClose={() => setEditor(null)} />}
+      {remove && <Confirm title={`Delete ${remove.name}?`} description="This removes the saved skill. Existing conversations are kept." label="Delete skill" onConfirm={async () => { await deleteSettingsSkill({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
 
 function SecretsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { secrets: Secret[] }>("/settings/secrets")
+  const resource = useResource("/settings/secrets", signal => listSettingsSecrets({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
-  const [editor, setEditor] = useState<Secret | "new" | null>(null), [remove, setRemove] = useState<Secret | null>(null)
+  const [editor, setEditor] = useState<SettingsSecret | "new" | null>(null), [remove, setRemove] = useState<SettingsSecret | null>(null)
   return <LoadState resource={resource}>{data => {
     const rows = data.secrets.filter(row => contains(search, row.name, row.description) && (scope === "all" || row.scope === scope))
-    const editable = (row: Secret) => row.editable !== false && (row.scope === "personal" || user.role === "admin")
+    const editable = (row: SettingsSecret) => row.editable !== false && (row.scope === "personal" || user.role === "admin")
     return <><p className="ns-notice"><Shield size={16} />Saved secrets are encrypted and are not automatically passed to the agent. Use Connections for supported services.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Secret scope" value={scope} onChange={setScope} options={scopeOptions.filter(item => item.value !== "bundled")} />}
         action={data.capabilities?.create && <Button onClick={() => setEditor("new")}><Plus />Add secret</Button>} />
@@ -262,8 +273,16 @@ function SecretsPage({ user }: { user: SettingsUser }) {
         { name: "name", label: "Name", required: true, maxLength: 100, pattern: "[A-Za-z][A-Za-z0-9_.\\-]*", hint: "Start with a letter; use letters, numbers, underscores, dots, or hyphens." }, { name: "description", label: "Description", maxLength: 1000 },
         { name: "scope", label: "Scope", type: "select", options: scopes(user, data.capabilities) },
         { name: "value", label: editor === "new" ? "Secret value" : "Replacement value", type: "password", required: editor === "new", maxLength: 65536, hint: editor === "new" ? "This value will not be displayed again." : "Leave blank to keep the current value." },
-      ]} onSave={async values => { const body = { ...values }; if (editor !== "new" && !body.value) delete body.value; await api(`/settings/secrets${editor === "new" ? "" : `/${encodeURIComponent(editor.id)}`}`, editor === "new" ? "POST" : "PATCH", body); resource.refresh() }} onClose={() => setEditor(null)} />}
-      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future work that needs this credential may fail until a replacement is saved." label="Delete secret" onConfirm={async () => { await api(`/settings/secrets/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+      ]} onSave={async values => {
+        const fields = { name: String(values.name), description: String(values.description), scope: scopeInput(values.scope) }
+        if (editor === "new") await createSettingsSecret({ body: { ...fields, value: String(values.value) } })
+        else {
+          const body: SecretEditWritable = values.value ? { ...fields, value: String(values.value) } : fields
+          await updateSettingsSecret({ path: { identity: editor.id }, body })
+        }
+        resource.refresh()
+      }} onClose={() => setEditor(null)} />}
+      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future work that needs this credential may fail until a replacement is saved." label="Delete secret" onConfirm={async () => { await deleteSettingsSecret({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
@@ -415,12 +434,11 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
 
 function MemoryPage() {
   const [namespace, setNamespace] = useState("")
-  const resource = useResource<Collection & { namespaces: { id: string; label: string }[]; default_namespace: string; namespace: string; memories: Memory[]; truncated?: boolean }>(`/settings/memory${namespace ? `?${new URLSearchParams({ namespace })}` : ""}`)
+  const resource = useResource(`/settings/memory${namespace ? `?${new URLSearchParams({ namespace })}` : ""}`, signal => listSettingsMemory({ query: namespace ? { namespace } : undefined, signal }).then(({ data }) => data))
   const [options, setOptions] = useState<Option[]>([])
   const [search, setSearch] = useState("")
-  const [editor, setEditor] = useState<Memory | "new" | null>(null), [remove, setRemove] = useState<Memory | null>(null)
+  const [editor, setEditor] = useState<SettingsMemoryFile | "new" | null>(null), [remove, setRemove] = useState<SettingsMemoryFile | null>(null)
   useEffect(() => { if (resource.data) setOptions(resource.data.namespaces.map(item => ({ value: item.id, label: item.label }))) }, [resource.data])
-  const memoryPath = (row: { namespace: string; path: string }, version?: string) => `/settings/memory?${new URLSearchParams({ namespace: row.namespace, path: row.path, ...(version ? { version } : {}) })}`
   return <>
     <p className="ns-notice"><Shield size={16} />Only memory namespaces available to your own sessions are listed. Other users’ private memory is not requested.</p>
     {options.length > 0 && <div className="ns-scope-picker"><label htmlFor="memory-namespace">Memory namespace</label><Choice id="memory-namespace" label="Memory namespace" value={namespace || resource.data?.namespace || resource.data?.default_namespace || options[0].value} onChange={value => { setNamespace(value); setEditor(null); setRemove(null) }} options={options} /></div>}
@@ -436,8 +454,8 @@ function MemoryPage() {
         {editor && <Editor title={editor === "new" ? "Add memory" : "Edit memory"} description="Changes apply to the selected namespace. A newer saved version will not be overwritten." initial={{ path: editor === "new" ? "" : editor.path, content: editor === "new" ? "" : editor.content }} fields={[
           { name: "path", label: "Path", required: true, disabled: editor !== "new", pattern: "(?!.*\\.\\.)[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,199}\\.md", maxLength: 203, hint: "Use a Markdown filename such as preferences.md, without directory segments." },
           { name: "content", label: "Memory content", type: "textarea", required: true, maxLength: 65536 },
-        ]} onSave={async values => { await api(memoryPath({ namespace: editor === "new" ? data.namespace : editor.namespace, path: String(values.path) }), "PUT", { content: values.content, version: editor === "new" ? null : editor.version }); resource.refresh() }} onClose={() => setEditor(null)} />}
-        {remove && <Confirm title={`Delete ${remove.path}?`} description="This removes the saved memory from this namespace. Existing conversations are kept." label="Delete memory" onConfirm={async () => { await api(memoryPath(remove, remove.version), "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+        ]} onSave={async values => { await writeSettingsMemory({ query: { namespace: editor === "new" ? data.namespace : editor.namespace, path: String(values.path) }, body: { content: String(values.content), version: editor === "new" ? null : editor.version } }); resource.refresh() }} onClose={() => setEditor(null)} />}
+        {remove && <Confirm title={`Delete ${remove.path}?`} description="This removes the saved memory from this namespace. Existing conversations are kept." label="Delete memory" onConfirm={async () => { await deleteSettingsMemory({ query: { namespace: remove.namespace, path: remove.path, ...(remove.version ? { version: remove.version } : {}) } }); resource.refresh() }} onClose={() => setRemove(null)} />}
       </>
     }}</LoadState>
   </>
@@ -761,7 +779,7 @@ function ProductPersonalSlack({ individual, heading = "Personal Slack" }: { indi
 }
 
 function GeneralPage({ onPreferences }: { onPreferences: (preferences: GeneralPreferences) => void }) {
-  const resource = useResource<GeneralPreferences>("/settings/general")
+  const resource = useResource("/settings/general", signal => getSettingsGeneral({ signal }).then(({ data }) => data))
   return <LoadState resource={resource}>{data => <GeneralForm initial={data} onPreferences={onPreferences} />}</LoadState>
 }
 
@@ -772,7 +790,7 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
   const accounts = useResource<Connection[]>(custom ? "/connections" : null)
   const save = (patch: Partial<GeneralPreferences>) => {
     let updated: GeneralPreferences
-    void mutation.run(async () => { updated = await api<GeneralPreferences>("/settings/general", "PATCH", patch) }, () => {
+    void mutation.run(async () => { updated = (await updateSettingsGeneral({ body: patch })).data }, () => {
       setPreferences(updated); onPreferences(updated)
     })
   }
@@ -857,16 +875,20 @@ function UsersPage({ user }: { user: SettingsUser }) {
         { name: "role", label: "Role", type: "select", options: [{ value: "member", label: "Member" }, { value: "admin", label: "Administrator" }], disabled: editor !== "new" && editor.id === user.id },
         { name: "enabled", label: "Enable workspace access", type: "checkbox", disabled: editor !== "new" && editor.id === user.id },
       ]} onSave={async values => {
-        if (editor === "new") await api("/settings/users", "POST", values)
+        const role = values.role === "admin" ? "admin" as const : "member" as const
+        if (editor === "new") await createSettingsUser({ body: { username: String(values.username), display_name: String(values.display_name), password: String(values.password), role, enabled: values.enabled === true } })
         else {
-          const original: FormValues = { display_name: editor.display_name, role: editor.role, enabled: editor.enabled }
-          const body = Object.fromEntries(Object.entries(values).filter(([name, value]) => name !== "username" && (name === "password" ? Boolean(value) : value !== original[name])))
+          const body: UserEditWritable = {}
+          if (values.display_name !== editor.display_name) body.display_name = String(values.display_name)
+          if (values.role !== editor.role) body.role = role
+          if (values.enabled !== editor.enabled) body.enabled = values.enabled === true
+          if (values.password) body.password = String(values.password)
           if (!Object.keys(body).length) return
-          await api(`/settings/users/${encodeURIComponent(editor.id)}`, "PATCH", body)
+          await updateSettingsUser({ path: { identity: editor.id }, body })
         }
         resource.refresh()
       }} onClose={() => setEditor(null)} />}
-      {remove && <Confirm title={`Disable ${remove.display_name || remove.username}?`} description="This revokes workspace access and existing sign-ins, and stops this user’s pending or running work. Saved history is retained." label="Disable user" onConfirm={async () => { await api(`/settings/users/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+      {remove && <Confirm title={`Disable ${remove.display_name || remove.username}?`} description="This revokes workspace access and existing sign-ins, and stops this user’s pending or running work. Saved history is retained." label="Disable user" onConfirm={async () => { await deleteSettingsUser({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
@@ -891,12 +913,12 @@ function AutomationEditor({ user, onClose, refresh }: { user: SettingsUser; onCl
     ]} onSave={async values => {
       const selected = eligible.find(row => row.id === values.session_id)
       const selectedConnections = availableConnections.filter(row => values[`connection:${row.id}`] === true && (selected?.visibility === "private" || row.shared)).map(row => row.id)
-      await api("/settings/automations", "POST", { name: values.name, prompt: values.prompt, session_id: values.session_id, model: values.model, interval_minutes: values.interval_minutes, connections: selectedConnections }); refresh()
+      await createSettingsAutomation({ body: { name: String(values.name), prompt: String(values.prompt), session_id: String(values.session_id), model: String(values.model), interval_minutes: Number(values.interval_minutes), connections: selectedConnections } }); refresh()
     }} onClose={onClose} />
 }
 
-function AutomationLogs({ automation, onClose }: { automation: Automation; onClose: () => void }) {
-  const resource = useResource<{ logs: { id: string; turn_id: string | null; status: string; created_at: string }[] }>(`/settings/automations/${encodeURIComponent(automation.id)}/logs`)
+function AutomationLogs({ automation, onClose }: { automation: SettingsAutomation; onClose: () => void }) {
+  const resource = useResource(`/settings/automations/${encodeURIComponent(automation.id)}/logs`, signal => listSettingsAutomationLogs({ path: { identity: automation.id }, signal }).then(({ data }) => data))
   const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); returnFocus.current?.focus() }}>
     <DialogHeader><DialogTitle>{automation.name}: run history</DialogTitle><DialogDescription>Recorded admissions and their status. Open the session to review a turn’s output.</DialogDescription></DialogHeader>
@@ -906,9 +928,9 @@ function AutomationLogs({ automation, onClose }: { automation: Automation; onClo
 }
 
 function AutomationsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { automations: Automation[] }>("/settings/automations")
+  const resource = useResource("/settings/automations", signal => listSettingsAutomations({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
-  const [create, setCreate] = useState(false), [remove, setRemove] = useState<Automation | null>(null), [logs, setLogs] = useState<Automation | null>(null)
+  const [create, setCreate] = useState(false), [remove, setRemove] = useState<SettingsAutomation | null>(null), [logs, setLogs] = useState<SettingsAutomation | null>(null)
   const mutation = useMutation()
   return <LoadState resource={resource}>{data => {
     const rows = data.automations.filter(row => contains(search, row.name, row.prompt) && (filter === "all" || (filter === "paused" ? row.paused : !row.paused)))
@@ -919,12 +941,12 @@ function AutomationsPage({ user }: { user: SettingsUser }) {
       {rows.length ? <div className="ns-records">{rows.map(row => <article key={row.id} className="ns-record"><CalendarClock className="ns-record-icon" aria-hidden="true" /><div className="ns-record-copy"><div className="ns-record-title"><h2>{row.name}</h2><span className="ns-badge">{row.paused ? "Paused" : row.state}</span></div>
         <p>Every {count(row.interval_minutes)} minutes · {row.model}</p><details><summary>View instructions</summary><pre>{row.prompt}</pre></details><a className="ns-link" href={`#${row.session_id}`}>Open session</a></div>
         <div className="ns-row-actions"><Button variant="outline" size="sm" onClick={() => setLogs(row)}>Run history<span className="visually-hidden"> for {row.name}</span></Button>
-          {data.capabilities?.update && <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/settings/automations/${encodeURIComponent(row.id)}`, "PATCH", { paused: !row.paused }), resource.refresh)}>{row.paused ? "Resume" : "Pause"}<span className="visually-hidden"> {row.name}</span></Button>}
+          {data.capabilities?.update && <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => void mutation.run(() => updateSettingsAutomation({ path: { identity: row.id }, body: { paused: !row.paused } }), resource.refresh)}>{row.paused ? "Resume" : "Pause"}<span className="visually-hidden"> {row.name}</span></Button>}
           {data.capabilities?.delete && <Button variant="ghost" size="icon-sm" aria-label={`Delete ${row.name}`} disabled={mutation.busy} onClick={() => setRemove(row)}><Trash2 /></Button>}</div>
       </article>)}</div> : <Empty filtered={Boolean(search) || filter !== "all"} noun="automations" onClear={() => { setSearch(""); setFilter("all") }} />}
       {create && <AutomationEditor user={user} refresh={resource.refresh} onClose={() => setCreate(false)} />}
       {logs && <AutomationLogs automation={logs} onClose={() => setLogs(null)} />}
-      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future scheduled admissions stop. Work already admitted to a session and its history are kept." label="Delete automation" onConfirm={async () => { await api(`/settings/automations/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future scheduled admissions stop. Work already admitted to a session and its history are kept." label="Delete automation" onConfirm={async () => { await deleteSettingsAutomation({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
@@ -932,7 +954,7 @@ function AutomationsPage({ user }: { user: SettingsUser }) {
 function OverviewPage({ user, navigate, productMode }: { user: SettingsUser; navigate: (page: string) => void; productMode: "standalone" | "existing" }) {
   // Native-store totals do not describe canonical product data. Navigation
   // remains available without publishing false zero counts during cutover.
-  const resource = useResource<{ counts: Record<string, number>; capabilities: Record<string, Capabilities | boolean> }>(productMode === "existing" ? null : "/settings/overview")
+  const resource = useResource(productMode === "existing" ? null : "/settings/overview", signal => getSettingsOverview({ signal }).then(({ data }) => data))
   return <>
     {resource.error && <p className="ns-notice" role="alert">Overview counts could not be loaded. {resource.error} <Button variant="ghost" onClick={resource.refresh}>Try again</Button></p>}
     {resource.loading && <p className="ns-muted" role="status">Loading overview counts…</p>}
