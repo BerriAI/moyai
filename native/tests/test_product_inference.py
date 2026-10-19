@@ -48,6 +48,7 @@ from moyai.product_billing import (
 )
 from moyai.product_inference import InferenceAdmissionError, ProductInferenceRequest, ProductInferenceService
 from moyai.product_inference_routes import product_inference_routes
+from moyai.product_inference_transport import BrokerUpstream
 
 pytestmark = pytest.mark.skipif(not os.getenv("MOYAI_TEST_POSTGRES"), reason="Disposable local PostgreSQL required.")
 product_database = authority.product_database
@@ -121,6 +122,13 @@ async def requests(ctx):
         return list((await db.scalars(select(ProductInferenceRequest).order_by(
             ProductInferenceRequest.created_at,
         ))).all())
+
+
+async def install_broker_upstream(ctx, handler):
+    await ctx.service.upstream.aclose()
+    ctx.service.upstream = BrokerUpstream(
+        ctx.service.slots.capacity, transport=httpx2.MockTransport(handler),
+    )
 
 
 async def test_admission_captures_exact_scope_and_physical_identity_without_legacy_run(inference):
@@ -618,9 +626,7 @@ async def test_key_rotation_during_recovery_does_not_assign_receipt(inference):
 
 
 @pytest.mark.parametrize("protected", [False, True])
-async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inference, monkeypatch, protected):
-    from moyai import product_inference_routes as routes
-
+async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inference, protected):
     ctx = inference
     ctx.service.settings = ctx.service.settings.model_copy(update={
         "public_url": "https://workspace.invalid",
@@ -636,9 +642,7 @@ async def test_broker_relay_has_one_scoped_ledger_and_blocks_paid_replay(inferen
             200, stream=WireStream(json.dumps(payload(cost="0.43")).encode()),
             headers={"content-type": "application/json", "x-litellm-call-id": "exact-call-id"},
         )
-    monkeypatch.setattr(routes, "InferenceUsageTransport", lambda **kwargs: InferenceUsageTransport(
-        httpx2.MockTransport(upstream), **kwargs,
-    ))
+    await install_broker_upstream(ctx, upstream)
     app = FastAPI()
     app.include_router(product_inference_routes(ctx.service))
     broker_calls = []

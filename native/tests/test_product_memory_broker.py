@@ -18,7 +18,7 @@ from sqlalchemy import select, text, update
 from test_inference_usage import WireStream, payload
 from test_product_memory_store import memory_execution
 
-from moyai.inference_usage import InferenceActivity, InferenceUsageTransport, UsageCapture
+from moyai.inference_usage import InferenceActivity, UsageCapture
 from moyai.models import Session, Turn
 from moyai.product_drain_models import ProductDrainState
 from moyai.product_inference import InferenceAdmissionError, ProductInferenceRequest
@@ -116,15 +116,13 @@ def signed_review(ctx, body=None):
         json=body or {"model": "test", "input": "private review input"},
     )
     activity = InferenceActivity(
-        ctx.product.database, ctx.review_scope, "review-proxy/1",
+        ctx.product.database, ctx.review_scope, ctx.logical_review + "/1",
         logical_identity=ctx.logical_review, requests=1,
     )
     return broker_request(ctx.service, request, UsageCapture(activity, "e" * 64, request))
 
 
-async def test_signed_review_broker_uses_original_completed_scope_without_stream_or_tools(maintenance, monkeypatch):
-    from moyai import product_inference_routes as routes
-
+async def test_signed_review_broker_uses_original_completed_scope_without_stream_or_tools(maintenance):
     ctx = maintenance
     ctx.service.settings = ctx.service.settings.model_copy(update={
         "cloudflare_access_client_id": inference_fixtures.ACCESS_HEADERS["CF-Access-Client-Id"],
@@ -140,9 +138,7 @@ async def test_signed_review_broker_uses_original_completed_scope_without_stream
             "content-type": "application/json", "x-litellm-call-id": "review-broker-receipt",
         })
 
-    monkeypatch.setattr(routes, "InferenceUsageTransport", lambda **kwargs: InferenceUsageTransport(
-        httpx2.MockTransport(upstream), **kwargs,
-    ))
+    await inference_fixtures.install_broker_upstream(ctx, upstream)
     app = FastAPI()
     app.include_router(product_inference_routes(ctx.service))
     async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app)) as client:
@@ -163,9 +159,7 @@ async def test_signed_review_broker_uses_original_completed_scope_without_stream
     assert len(calls) == 1 and ctx.service.slots.active == 0
 
 
-async def test_remote_review_keeps_reclaimable_slot_through_response_body(maintenance, monkeypatch):
-    from moyai import product_inference_routes as routes
-
+async def test_remote_review_keeps_reclaimable_slot_through_response_body(maintenance):
     ctx = maintenance
     await ctx.service.close()
     ctx.service.settings.max_concurrent_model_requests = 1
@@ -179,18 +173,31 @@ async def test_remote_review_keeps_reclaimable_slot_through_response_body(mainte
             yield b""  # pragma: no cover - cancelled by foreground slot reclamation
 
     async def upstream(request):
+        if json.loads(request.content).get("input") == "foreground":
+            return httpx2.Response(
+                200, stream=WireStream(json.dumps(payload()).encode()),
+                headers={"content-type": "application/json"},
+            )
         return httpx2.Response(200, stream=DelayedBody(), headers={"content-type": "application/json"})
 
-    monkeypatch.setattr(routes, "InferenceUsageTransport", lambda **kwargs: InferenceUsageTransport(
-        httpx2.MockTransport(upstream), **kwargs,
-    ))
+    await inference_fixtures.install_broker_upstream(ctx, upstream)
     app = FastAPI()
     app.include_router(product_inference_routes(ctx.service))
     signed = signed_review(ctx)
     async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app)) as client:
         pending = asyncio.create_task(client.post(str(signed.url), headers=signed.headers, content=signed.content))
         await asyncio.wait_for(body_started.wait(), 3)
-        await asyncio.wait_for(inference_fixtures.perform(ctx, logical="foreground-during-review-body"), 5)
+        foreground = signed_review(
+            SimpleNamespace(
+                product=ctx.product, service=ctx.service, review_scope=ctx.scope,
+                logical_review="foreground-during-review-body",
+            ),
+            {"model": "test", "input": "foreground"},
+        )
+        response = await asyncio.wait_for(client.post(
+            str(foreground.url), headers=foreground.headers, content=foreground.content,
+        ), 5)
+        assert response.status_code == 200 and not ctx.service.upstream.closed
         response = await asyncio.wait_for(pending, 3)
         assert response.status_code == 503 and response.headers["x-moyai-memory-preempted"] == "1"
     async with ctx.product.database.sessions() as db:

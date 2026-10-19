@@ -20,7 +20,7 @@ from pydantic import TypeAdapter, ValidationError
 from starlette.responses import Response, StreamingResponse
 
 from .contracts import RunScope
-from .inference_usage import INFERENCE_ACTIVITY, InferenceActivity, InferenceUsageTransport
+from .inference_usage import INFERENCE_ACTIVITY, InferenceActivity
 from .models import now
 from .product_inference import InferenceAdmissionError, drain
 
@@ -110,11 +110,11 @@ async def _maintenance_response(
 ) -> Response:
     """One reclaimable owner spans admission, provider I/O, accounting and close."""
     async def perform() -> Response:
+        try:
+            client = service.upstream_client()
+        except InferenceAdmissionError:
+            return Response(status_code=409, headers={"x-moyai-inference-denied": "1"})
         token = INFERENCE_ACTIVITY.set(activity)
-        client = httpx2.AsyncClient(
-            transport=InferenceUsageTransport(require_admission=True),
-            timeout=service.database.settings.model_timeout_seconds, follow_redirects=False,
-        )
         upstream = None
         try:
             upstream = await client.send(client.build_request(
@@ -206,11 +206,11 @@ def product_inference_routes(service: ProductInferenceService) -> APIRouter:
         )
         if scope.surface == "memory_review":
             return await _maintenance_response(service, activity, route, bytes(content))
+        try:
+            client = service.upstream_client()
+        except InferenceAdmissionError:
+            return Response(status_code=409, headers={"x-moyai-inference-denied": "1"})
         token = INFERENCE_ACTIVITY.set(activity)
-        client = httpx2.AsyncClient(
-            transport=InferenceUsageTransport(require_admission=True),
-            timeout=service.database.settings.model_timeout_seconds, follow_redirects=False,
-        )
         try:
             upstream = await client.send(client.build_request(
                 "POST", service.settings.litellm_api_base.rstrip("/") + "/" + route,
