@@ -343,4 +343,4 @@ async def test_file_rejection_preserves_safe_provider_error_before_upload():
             with pytest.raises(ValueError, match=f"files.getUploadURLExternal rejected the upload: {expected}"):
                 await SlackFileDelivery.send(client, SlackFileDelivery.content(
                     UploadFile(filename="debug.json", content=b"{}"), after="failure"),
-                    {"channel": "CTEST", "thread_ts": "1.2"}, headers=None, before_send=before)
+                    {"channel": "CTEST", "thread_ts": "1.2"}, objects=AsyncMock(), headers=None, before_send=before)
