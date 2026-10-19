@@ -113,6 +113,11 @@ def test_question_blocks_render_choices_and_precede_the_submit_action():
         "moyai_question:0", "moyai_question:1",
     ]
 
+    stacked = SlackQuestions.blocks([request, request])
+    assert [block["block_id"] for block in stacked if block["type"] == "actions"] == [
+        f"moyai_question:{index}" for index in range(4)
+    ]
+
     submit = SlackQuestions.submit("turn-123")
     message = thread_message("Moyai needs your response.", URL, questions=questions, controls=[submit])
     assert message["blocks"][1:5] == questions

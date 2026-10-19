@@ -16,7 +16,8 @@ class SlackQuestions:
     @staticmethod
     def blocks(requests: list[AskUserRequest]) -> list[dict[str, Any]]:
         blocks = []
-        for index, request in enumerate(requests):
+        index = 0
+        for request in requests:
             for question in request.questions:
                 options = []
                 for option_index, option in enumerate(question.options):
