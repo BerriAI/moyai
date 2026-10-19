@@ -780,7 +780,10 @@ for(const width of [1440,768,320])test(`home keeps the draft and controls reacha
   // fill('') can race its selection listener and leave the old draft intact.
   await input.press('ControlOrMeta+A');
   await input.press('Backspace');
+  assert.equal(await input.textContent(),'');
   await page.getByRole('button',{name:'Review code',exact:true}).waitFor({state:'visible'});
+  assert.equal(await page.getByRole('button',{name:'Review code',exact:true}).isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
 });
 
 for(const [label,prompt] of [
