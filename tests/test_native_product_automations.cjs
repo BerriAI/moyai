@@ -100,7 +100,7 @@ test('history reuses canonical deduplication and routes old/new sessions without
 
 test('real shadcn editor escapes instructions and makes non-save form actions inert',()=>{
   const html=render(ui.DefinitionEditor,{existing:definition({name:'<script>bad</script>',prompt:'<img src=x onerror=alert(1)>'}),models:['enabled-model'],defaultModel:'enabled-model',busy:false,onCancel(){},async onSave(){}});
-  assert.doesNotMatch(html,/<script>|<img src=x/);assert.match(html,/&lt;img/);assert.match(html,/Save paused/);assert.match(html,/shared with workspace members/);
+  assert.doesNotMatch(html,/<script>|<img src=x/);assert.match(html,/&lt;img/);assert.match(html,/Save paused/);assert.match(html,/shared with your workspace/);
   const buttons=[...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)];
   for(const [,attrs,body]of buttons)if(!body.includes('Save paused'))assert.match(attrs,/type="button"/);
 });

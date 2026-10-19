@@ -1,3 +1,4 @@
+.product-automations .pa-result-count { margin-bottom: 12px; }
 .product-automations .pa-triggers, .pa-dialog .pa-triggers { margin: 8px 0; padding-inline-start: 18px; color: var(--ui-muted); font-size: 13px; overflow-wrap: anywhere; }
 .product-automations .pa-triggers > li, .pa-dialog .pa-triggers > li { margin-block: 4px; }
 .product-automations .pa-record { padding-block: 20px; }

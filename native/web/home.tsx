@@ -26,13 +26,13 @@ export function homeSubmission(prompt: string, model: string, privateSession: bo
   return { body, visibility, signature: JSON.stringify([visibility, body]) }
 }
 
-export function Home({ models, defaultModel, individual = true, productMode = "standalone", connectionVersion = "", preferences, onCreated, onStarted }: {
-  models: string[]; defaultModel: string; individual?: boolean; productMode?: "standalone" | "existing"; connectionVersion?: string; preferences?: GeneralPreferences
+export function Home({ models, defaultModel, initiallyPrivate = false, individual = true, productMode = "standalone", connectionVersion = "", preferences, onCreated, onStarted }: {
+  models: string[]; defaultModel: string; initiallyPrivate?: boolean; individual?: boolean; productMode?: "standalone" | "existing"; connectionVersion?: string; preferences?: GeneralPreferences
   onCreated: () => Promise<void>; onStarted: (conversation: NewConversation) => void
 }) {
   const [draft, setDraft] = useState("")
   const [model, setModel] = useState(defaultModel)
-  const [privateSession, setPrivateSession] = useState(false)
+  const [privateSession, setPrivateSession] = useState(initiallyPrivate)
   const isPrivate = individual && privateSession
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")

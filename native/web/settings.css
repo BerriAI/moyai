@@ -56,9 +56,30 @@
 .native-settings-dialog .ns-credential-variable > button { margin-bottom: 4px; }
 .native-settings .ns-skip { position: fixed; top: -100px; left: 16px; z-index: 100; padding: 12px 16px; background: var(--ui-background); border: 2px solid var(--ui-primary); border-radius: 8px; }
 .native-settings .ns-skip:focus { top: 12px; }
-.native-settings .ns-notice { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; padding: 12px 16px; margin-bottom: 20px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-subtle); color: var(--ui-muted); font-size: 13px; overflow-wrap: anywhere; }
+.native-settings .ns-help, .native-settings-dialog .ns-help { color: var(--ui-muted); font-size: 13px; line-height: 1.6; max-width: 68ch; overflow-wrap: anywhere; }
+.native-settings .ns-footer-help { margin-top: 16px; }
+.native-settings .check-label + :is(.ns-records, .ns-empty) { margin-top: 16px; }
+.native-settings-dialog .ns-help + .ns-fields,
+.native-settings-dialog .ns-fields + :is(.ns-help, .ns-muted) { margin-top: 16px; }
+.native-settings .ns-notice, .native-settings-dialog .ns-notice { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; padding: 12px 16px; margin-bottom: 20px; border-inline-start: 2px solid var(--ui-border); color: var(--ui-muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .native-settings .ns-notice > svg { flex: none; margin-top: 2px; }
-.native-settings .ns-error, .native-settings-dialog .ns-error { margin-block: 16px; padding: 12px 16px; background: var(--ui-danger-bg); color: var(--ui-danger); border: 1px solid var(--ui-danger-border); border-radius: 8px; overflow-wrap: anywhere; }
+.native-settings .ns-error, .native-settings-dialog .ns-error { margin-block: 16px; padding: 12px 16px; background: var(--ui-subtle); color: var(--ui-foreground); border-inline-start: 2px solid var(--ui-danger); border-radius: 0 6px 6px 0; overflow-wrap: anywhere; }
+.native-settings .ns-error > button, .native-settings-dialog .ns-error > button { margin-inline-start: 8px; }
+.native-settings .ns-memory-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; max-width: 100%; }
+.native-settings .ns-memory-controls > [data-slot="select-trigger"] { width: 280px; max-width: 100%; }
+.native-settings .ns-personal-slack { max-width: 720px; }
+.native-settings .ns-connection-card { display: grid; gap: 20px; padding: 24px; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-subtle); }
+.native-settings .ns-connection-heading { display: flex; align-items: center; gap: 16px; }
+.native-settings .ns-provider-icon { display: grid; place-items: center; flex: none; width: 48px; height: 48px; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-reading-surface); }
+.native-settings .ns-connection-identity { min-width: 0; }
+.native-settings .ns-connection-identity h2 { overflow-wrap: anywhere; }
+.native-settings .ns-connection-status { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--ui-muted); font-size: 12px; }
+.native-settings .ns-connection-status > span { width: 6px; height: 6px; border-radius: 50%; background: var(--ui-muted); }
+.native-settings .ns-connection-status.is-connected > span { background: var(--ui-success); }
+.native-settings .ns-connection-card > :is(.ns-notice, .ns-error) { margin-block: 0; }
+.native-settings .ns-connection-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--ui-border); padding-top: 16px; }
+.native-settings .ns-connection-footer button { color: var(--ui-muted); }
+.native-settings .ns-connection-card button { white-space: normal; height: auto; min-height: 32px; }
 .native-settings .ns-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-block: 24px; }
 .native-settings .ns-search { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; padding-inline-start: 12px; border: 1px solid var(--ui-control-border); border-radius: 8px; color: var(--ui-muted); }
 .native-settings .ns-search > svg { flex: none; }
@@ -76,7 +97,7 @@
 .native-settings .ns-record-copy > p { margin-block: 6px; color: var(--ui-muted); overflow-wrap: anywhere; }
 .native-settings .ns-record-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .native-settings .ns-record h2 { overflow-wrap: anywhere; }
-.native-settings .ns-record small { margin-top: 6px; font-size: 12px; }
+.native-settings .ns-record small { display: block; color: var(--ui-muted); margin-top: 6px; font-size: 12px; }
 .native-settings .ns-badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 400; padding: 2px 8px; border-radius: 4px; background: var(--ui-secondary); color: var(--ui-muted); }
 .native-settings .ns-badge.ns-success { background: var(--ui-success-bg); color: var(--ui-success); }
 .native-settings .ns-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: none; }
@@ -157,10 +178,14 @@
   .native-settings .ns-search { flex-basis: 100%; }
   .native-settings .ns-toolbar > [data-slot="select-trigger"] { max-width: 100%; flex: 1 1 150px; }
   .native-settings .ns-record-copy { flex-basis: 100%; }
+  .native-settings .ns-record-icon + .ns-record-copy { flex-basis: calc(100% - 36px); }
   .native-settings .ns-overview-group { grid-template-columns: minmax(0, 1fr); gap: 16px; padding-block: 24px; }
   .native-settings .ns-overview-group > .ns-section-heading { flex-direction: row; align-items: center; margin: 0; }
   .native-settings .ns-overview-link { padding: 16px; gap: 12px; }
   .native-settings .ns-row-actions { justify-content: flex-start; }
+  .native-settings .ns-connection-card { padding: 20px 16px; }
+  .native-settings .ns-connection-card button { min-height: 44px; }
+  .native-settings .ns-connection-heading { gap: 12px; }
   .native-settings .ns-table table, .native-settings-dialog .ns-table table { min-width: 560px; }
   .native-settings .ns-empty { padding: 24px 16px; }
   .native-settings :is([data-slot="button"], [data-slot="select-trigger"]), .native-settings-dialog :is([data-slot="button"], [data-slot="select-trigger"]) { min-height: 44px; }

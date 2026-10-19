@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react"
-import { AlertCircle, CalendarClock, ChevronLeft, History, Plus, RefreshCw, Search, Trash2 } from "lucide-react"
+import { CalendarClock, ChevronLeft, History, Plus, RefreshCw, Search, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -114,7 +114,7 @@ export function ProductAutomationsPage({ userId }: { userId: string }) {
     || filter === "blocked" && row.native?.sync_state === "blocked"
   )) ?? []
   return <section className="product-automations" aria-label="Saved product automations">
-    <p className="ns-notice"><AlertCircle size={16} />Existing definitions and run history stay saved. Migration is explicit and starts paused. Definitions and scheduled sessions are shared workspace resources.</p>
+    <p className="ns-help">Automations and their chats are shared with your workspace.</p>
     <div className="ns-toolbar">
       <div className="ns-search"><Search size={16} /><Input type="search" aria-label="Search automations" placeholder="Search automations…" value={search} onChange={event => setSearch(event.target.value)} /></div>
       <Choice label="Automation state" value={filter} onChange={setFilter} options={[{ value: "all", label: "All states" }, { value: "unmigrated", label: "Not migrated" }, { value: "active", label: "Enabled" }, { value: "paused", label: "Paused" }, { value: "blocked", label: "Blocked" }]} />
@@ -123,8 +123,8 @@ export function ProductAutomationsPage({ userId }: { userId: string }) {
     </div>
     {state.loading && <p className="ns-muted" role="status">Loading saved automations…</p>}
     {state.error && <p className="ns-error" role="alert">{state.error} <Button variant="outline" onClick={refresh}>Retry</Button></p>}
-    {state.data && <><p className="ns-muted">{rows.length} shown{state.data.next_offset !== null ? " · More workflows available" : ""}</p>
-      {rows.length ? <ProductAutomationList rows={rows} onReview={id => open("review", id)} /> : <div className="ns-empty"><h2>{search || filter !== "all" ? "No matching automations" : "No saved automations"}</h2><p>{search || filter !== "all" ? "Try another search or clear the filters." : "Create a calendar workflow and review it before migration and activation."}</p>{(search || filter !== "all") && <Button variant="outline" onClick={() => { setSearch(""); setFilter("all") }}>Clear filters</Button>}</div>}
+    {state.data && <><p className="ns-muted pa-result-count">{rows.length} shown{state.data.next_offset !== null ? " · More workflows available" : ""}</p>
+      {rows.length ? <ProductAutomationList rows={rows} onReview={id => open("review", id)} /> : <div className="ns-empty"><h2>{search || filter !== "all" ? "No matching automations" : "No saved automations"}</h2><p>{search || filter !== "all" ? "Try another search or clear the filters." : "Create an automation to schedule recurring work."}</p>{(search || filter !== "all") && <Button variant="outline" onClick={() => { setSearch(""); setFilter("all") }}>Clear filters</Button>}</div>}
       {state.data.next_offset !== null && <Button className="pa-load-more" variant="outline" disabled={state.loading} onClick={() => setPages(value => value + 1)}>Load more automations</Button>}
     </>}
       {dialog && <AutomationDialog key={dialog.id ?? "new"} mode={dialog.mode} id={dialog.id} canCreate={state.data?.capabilities?.create === true} eventChoices={state.data?.event_choices ?? {}}
@@ -445,7 +445,7 @@ export function DefinitionEditor({ existing, models, defaultModel, eventChoices 
     try { const saved = { ...definition, metadata: automationMetadata(metadata) }; validateAutomation(saved, Date.now(), !existing); await onSave(saved) }
     catch (reason) { setError(errorLabel(reason)) }
   }}>
-    <p className="ns-notice">Instructions and resulting sessions are shared with workspace members. Save only information intended for this workspace.</p>
+    <p className="ns-help">Instructions and resulting chats are shared with your workspace.</p>
     <div className="ns-fields">
       <div className="ns-field"><label htmlFor={`${id}-name`}>Automation name</label><Input id={`${id}-name`} ref={nameRef} value={definition.name} required minLength={2} maxLength={100} disabled={busy} onChange={event => change({ name: event.target.value })} /></div>
       <div className="ns-field"><label htmlFor={`${id}-prompt`}>Instructions</label><Textarea id={`${id}-prompt`} rows={6} required minLength={3} maxLength={500000} disabled={busy} value={definition.prompt} onChange={event => change({ prompt: event.target.value })} /></div>

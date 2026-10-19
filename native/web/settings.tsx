@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react"
-import { ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Gauge, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, SlidersHorizontal, FileText, Trash2, Users, Wallet, X } from "lucide-react"
+import { ArrowLeft, ArrowRight, BookOpen, CalendarClock, ChevronRight, Gauge, KeyRound, LayoutGrid, Link2, LockKeyhole, Menu, Pencil, Plus, RefreshCw, Search, Shield, Slack, SlidersHorizontal, FileText, Trash2, Users, Wallet, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -14,7 +14,7 @@ import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
 import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "./generated/api"
 import {
-  type PersonalSlackStatus, checkPersonalSlack, connectExistingGitHubApp, disconnectPersonalSlack, getMe, getPersonalSlack, listGitHubRepositories,
+  checkPersonalSlack, connectExistingGitHubApp, disconnectPersonalSlack, getMe, getPersonalSlack, listGitHubRepositories,
   selectGitHubRepositories, startGitHubConnection, startPersonalSlackOAuth,
 } from "./generated/api"
 import { MoyaiBrand, SidebarToggle } from "./brand"
@@ -38,7 +38,7 @@ import { listHistorySessions, type HistorySessionList, type SourcedHistorySessio
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
-type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void; sidebarCollapsed: boolean; onToggleSidebar: () => void; onPreferences: (preferences: GeneralPreferences) => void }
+type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void; onStartPrivateChat: () => void; sidebarCollapsed: boolean; onToggleSidebar: () => void; onPreferences: (preferences: GeneralPreferences) => void }
 type Capabilities = { read?: boolean; create?: boolean; update?: boolean; delete?: boolean; roles?: boolean; preferences?: boolean; review?: boolean; reason?: string; runtime_available?: boolean; shared?: boolean; run?: boolean; agent_access?: boolean }
 type Collection = { capabilities?: Capabilities; reason?: string }
 type CredentialDraft = {
@@ -75,11 +75,11 @@ type Field = { name: string; label: string; type?: "text" | "password" | "textar
 
 const destinations = [
   { id: "general", title: "General", description: "Set your chat preferences.", group: "Preferences", Icon: SlidersHorizontal },
-  { id: "skills", title: "Skills", description: "Save instructions for yourself or your team.", group: "Workflows", Icon: FileText },
+  { id: "skills", title: "Skills", description: "Choose reusable instructions for your chats.", group: "Workflows", Icon: FileText },
   { id: "automations", title: "Automations", description: "Schedule recurring work and review past runs.", group: "Workflows", Icon: CalendarClock },
-  { id: "memory", title: "Memory", description: "Review the context available to your future sessions.", group: "Workflows", Icon: BookOpen },
+  { id: "memory", title: "Memory", description: "Manage what Moyai remembers about your work.", group: "Workflows", Icon: BookOpen },
   { id: "connections", title: "Connections", description: "Choose the accounts Moyai can use in your sessions.", group: "Integrations", Icon: Link2 },
-  { id: "personal-slack", title: "Personal Slack", description: "Connect your own Slack account for private web sessions.", group: "Integrations", Icon: LockKeyhole, productOnly: true },
+  { id: "personal-slack", title: "Personal Slack", description: "Use your Slack account in private chats with Moyai.", group: "Integrations", Icon: LockKeyhole, productOnly: true },
   { id: "secrets", title: "Secrets", description: "Manage personal and shared service credentials.", group: "Integrations", Icon: KeyRound },
   { id: "users", title: "Users", description: "Manage workspace members, roles, and access.", group: "Administration", Icon: Users, admin: true },
   { id: "performance", title: "Performance", description: "Review recorded turn timings across the workspace.", group: "Administration", Icon: Gauge, admin: true },
@@ -167,7 +167,7 @@ function Toolbar({ search, setSearch, count: total, resource, filter, action }: 
 
 function Empty({ filtered, noun, onClear }: { filtered: boolean; noun: string; onClear: () => void }) {
   return <div className="ns-empty"><h2>{filtered ? `No matching ${noun}` : `No ${noun} yet`}</h2>
-    <p>{filtered ? "Try another search or clear the filters." : `Saved ${noun} will appear here.`}</p>
+    {filtered && <p>Try another search or clear the filters.</p>}
     {filtered && <Button variant="outline" onClick={onClear}>Clear filters</Button>}
   </div>
 }
@@ -269,7 +269,7 @@ function SecretsPage({ user }: { user: SettingsUser }) {
   return <LoadState resource={resource}>{data => {
     const rows = data.secrets.filter(row => contains(search, row.name, row.description) && (scope === "all" || row.scope === scope))
     const editable = (row: SettingsSecret) => row.editable !== false && (row.scope === "personal" || user.role === "admin")
-    return <><p className="ns-notice"><Shield size={16} />Saved secrets are encrypted and are not automatically passed to the agent. Use Connections for supported services.</p>
+    return <><p className="ns-help">For GitHub, Slack, and other supported services, use <a className="ns-link" href="#settings/connections">Connections</a>.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Secret scope" value={scope} onChange={setScope} options={scopeOptions.filter(item => item.value !== "bundled")} />}
         action={data.capabilities?.create && <Button onClick={() => setEditor("new")}><Plus />Add secret</Button>} />
       {rows.length ? <RecordTable label="Saved secrets" headings={["Name", "Scope", "Value", "Updated", "Actions"]}>{rows.map(row => <TableRow key={row.id}>
@@ -299,7 +299,7 @@ export function ProductSecretRows({ secrets, providers, capabilities, onEdit, on
   secrets: CredentialSecretMetadata[]; providers: { id: string; name: string }[]; capabilities?: CredentialInventory["capabilities"]
   onEdit?: (secret: CredentialSecretMetadata) => void; onRevoke?: (secret: CredentialSecretMetadata) => void
 }) {
-  return <RecordTable label="Original saved credentials" headings={["Credential", "Scope", "Lifetime", "Status", "Value", "Actions"]}>{secrets.map(secret => <TableRow key={secret.id}>
+  return <RecordTable label="Saved credentials" headings={["Credential", "Scope", "Lifetime", "Status", "Value", "Actions"]}>{secrets.map(secret => <TableRow key={secret.id}>
     <TableCell><strong>{secret.label}</strong><small>{secret.provider === "generic" ? secret.name : providers.find(provider => provider.id === secret.provider)?.name || secret.provider}</small>
       <small>{secret.format === "aws-sso" ? "AWS SSO login" : secret.format === "file" ? "Credential file" : secret.provider === "generic" ? "Environment variables" : "Provider access"} · Added {dateTime(secret.created_at)}</small>
     </TableCell><TableCell>{secret.scope === "organization" ? "Organization" : "Personal"}</TableCell>
@@ -361,10 +361,9 @@ function ProductSecretsPage({ user }: { user: SettingsUser }) {
   const [editor, setEditor] = useState<{ secret?: CredentialSecretMetadata; onePassword?: boolean } | null>(null), [revoke, setRevoke] = useState<CredentialSecretMetadata | null>(null)
   return <LoadState resource={resource}>{data => {
     const rows = data.secrets.filter(secret => contains(search, secret.label, secret.name, secret.provider) && (scope === "all" || (secret.scope === "organization" ? "organization" : "personal") === scope))
-    return <><p className="ns-notice"><Shield size={16} />This is the original credential inventory. Saved values are never returned to this page.</p>
-      {data.note && <p className="ns-notice">{data.note}</p>}
-      {!data.capabilities && <p className="ns-notice">Credential management is not available on this server yet. The original saved entries remain visible below.</p>}
-      {data.capabilities?.native_execution === false && <p className="ns-notice">Saved access is retained, but this runtime cannot yet supply these credentials to tasks.</p>}
+    return <>
+      {!data.capabilities && <p className="ns-notice">You can view saved credentials, but editing is unavailable.</p>}
+      {data.capabilities?.native_execution === false && <p className="ns-notice">Saved credentials are currently unavailable to tasks.</p>}
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Credential scope" value={scope} onChange={setScope} options={[{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "organization", label: "Organization" }]} />}
         action={data.capabilities?.create && <><Button variant="outline" onClick={() => {
           const saved = data.secrets.filter(secret => secret.provider === "generic" && secret.name === "1password-shared" && secret.format === "env")
@@ -408,7 +407,7 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
   let setup: string | undefined
   try { if (provider?.setup_url?.startsWith("https://")) setup = productRedirect(provider.setup_url, location.origin) } catch {}
   return <Dialog open onOpenChange={open => { if (!open && !mutation.busy) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus() }}>
-    <DialogHeader><DialogTitle>{existing ? "Edit saved access" : onePassword ? "Connect 1Password Shared" : "Save a credential"}</DialogTitle><DialogDescription>Secret values are encrypted on the server and never returned. Sharing and session lifetime are separate choices.</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>{existing ? "Edit saved access" : onePassword ? "Connect 1Password Shared" : "Save a credential"}</DialogTitle><DialogDescription>Choose who can use this credential and how long it stays available.</DialogDescription></DialogHeader>
     <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(async () => {
       let value = draft.value
       if (generic && draft.format === "env") {
@@ -433,7 +432,7 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
       if (!inventory.capabilities?.lifetimes.includes(draft.lifetime)) throw new Error("This credential lifetime is not supported.")
       await save()
     }, () => { setDraft(previous => ({ ...previous, value: "" })); setVariables([]); if (file.current) file.current.value = ""; onSaved(); onClose() }) }}>
-      {onePassword && <p className="ns-notice">Use a dedicated 1Password service account scoped to the Shared vault. Vault permissions are enforced by 1Password. Choose Organization only when teammates should use this access.</p>}
+      {onePassword && <p className="ns-help">Use a 1Password service account with access to the Shared vault. Choose Organization to share this access with teammates.</p>}
       <div className="ns-field"><label htmlFor={`${id}-provider`}>Service</label><Choice id={`${id}-provider`} label="Credential service" value={draft.provider} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} options={inventory.providers.map(item => ({ value: item.id, label: item.name }))} onChange={value => { const selected = inventory.providers.find(item => item.id === value); if (!selected) return; change({ provider: selected.id, value: "", name: "", format: "env", env_var: "" }); setVariables([{ key: "", value: "", id: crypto.randomUUID() }]) }} /></div>
       {setup && <a className="ns-link" href={setup} target="_blank" rel="noreferrer">Provider setup guide</a>}
       <div className="ns-field"><label htmlFor={`${id}-label`}>Display name</label><Input id={`${id}-label`} autoFocus required maxLength={80} disabled={mutation.busy} value={draft.label} onChange={event => change({ label: event.target.value })} /></div>
@@ -454,10 +453,10 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
       </>}
       {!generic && <div className="ns-field"><label htmlFor={`${id}-token`}>{existing ? "Replacement API key" : "API key"}</label><Input id={`${id}-token`} type="password" autoComplete="off" required={!existing} disabled={mutation.busy} value={draft.value} onChange={event => change({ value: event.target.value })} /></div>}
       {existing && <p className="ns-field-hint">Leave replacement values blank to keep the saved value. A supplied environment map replaces the complete saved map.</p>}
-      <div className="ns-field"><label htmlFor={`${id}-scope`}>Who can use this credential?</label><Choice id={`${id}-scope`} label="Credential sharing" value={draft.scope} disabled={mutation.busy} options={supportedScopes.filter(scope => scope !== "organization" || user.role === "admin").map(scope => ({ value: scope, label: scope === "organization" ? "Organization · Everyone" : "Personal · My requests" }))} onChange={value => change({ scope: value })} /></div>
-      {!supportedScopes.includes("personal") && <p className="ns-field-hint">Personal credentials require an individual sign-in. Available sharing choices are determined by the server.</p>}
+      <div className="ns-field"><label htmlFor={`${id}-scope`}>Who can use this credential?</label><Choice id={`${id}-scope`} label="Credential sharing" value={draft.scope} disabled={mutation.busy} options={supportedScopes.filter(scope => scope !== "organization" || user.role === "admin").map(scope => ({ value: scope, label: scope === "organization" ? "Organization · Everyone" : "Personal · My requests" }))} onChange={value => change({ scope: value })} /><p className="ns-field-hint">Personal credentials work in your private web chats. Shared chats and Slack tasks need organization credentials.</p></div>
+      {!supportedScopes.includes("personal") && <p className="ns-field-hint">Sign in with your individual work account to save personal credentials.</p>}
       <div className="ns-field"><label htmlFor={`${id}-lifetime`}>When can it be used?</label><Choice id={`${id}-lifetime`} label="Credential lifetime" value={draft.lifetime} disabled={mutation.busy} options={(inventory.capabilities?.lifetimes || []).map(value => ({ value, label: value === "session" ? "This session only" : "Across future sessions" }))} onChange={value => change({ lifetime: value })} /></div>
-      {draft.lifetime === "session" && <div className="ns-field"><label htmlFor={`${id}-root`}>Session</label><Choice id={`${id}-root`} label="Credential session" value={draft.root_id} disabled={mutation.busy || roots.loading} options={rootOptions} onChange={value => change({ root_id: value })} /><p className="ns-field-hint">Personal access requires your own current session/request. The server rechecks access when saving.</p>
+      {draft.lifetime === "session" && <div className="ns-field"><label htmlFor={`${id}-root`}>Session</label><Choice id={`${id}-root`} label="Credential session" value={draft.root_id} disabled={mutation.busy || roots.loading} options={rootOptions} onChange={value => change({ root_id: value })} /><p className="ns-field-hint">Choose the chat that needs this credential.</p>
         {roots.loading && <p role="status">Loading sessions…</p>}{roots.error && <p className="ns-error" role="alert">{roots.error}<Button type="button" variant="outline" onClick={roots.refresh}>Retry sessions</Button></p>}
         {roots.data?.next_cursor && <Button type="button" variant="outline" disabled={roots.loading || mutation.busy} onClick={() => { setSavedRoots(rootRows); setCursor(roots.data!.next_cursor!) }}>Load more sessions</Button>}
       </div>}
@@ -476,7 +475,6 @@ function MemoryPage() {
   const [editor, setEditor] = useState<SettingsMemoryFile | "new" | null>(null), [remove, setRemove] = useState<SettingsMemoryFile | null>(null)
   useEffect(() => { if (resource.data) setOptions(resource.data.namespaces.map(item => ({ value: item.id, label: item.label }))) }, [resource.data])
   return <>
-    <p className="ns-notice"><Shield size={16} />Only memory namespaces available to your own sessions are listed. Other users’ private memory is not requested.</p>
     {options.length > 0 && <div className="ns-scope-picker"><label htmlFor="memory-namespace">Memory namespace</label><Choice id="memory-namespace" label="Memory namespace" value={namespace || resource.data?.namespace || resource.data?.default_namespace || options[0].value} onChange={value => { setNamespace(value); setEditor(null); setRemove(null) }} options={options} /></div>}
     <LoadState resource={resource}>{data => {
       const rows = data.memories.filter(row => contains(search, row.path, row.content))
@@ -551,26 +549,29 @@ function ProductMemoryPage() {
     }
   }
   return <LoadState resource={resource}>{data => {
-    if (data.source !== "canonical") return <p className="ns-error" role="alert">The server did not return the original memory library.</p>
+    if (data.source !== "canonical") return <p className="ns-error" role="alert">Your saved memories could not be loaded. Refresh to try again.</p>
     if (data.capabilities.read !== true) return <div className="ns-empty"><Shield /><h2>Personal memory is unavailable for this sign-in</h2><p>{data.note || "Use an individual sign-in to view your personal memory."}</p><Button variant="outline" onClick={resource.refresh}>Check access again</Button></div>
-    if (!data.preferences || data.scope?.kind !== "personal") return <p className="ns-error" role="alert">The server did not confirm your personal memory scope and preferences.</p>
+    if (!data.preferences || data.scope?.kind !== "personal") return <p className="ns-error" role="alert">Your memory preferences could not be loaded. Refresh to try again.</p>
     const prefs = data.preferences, rows = data.memories.filter(row => contains(search, row.title, row.content, row.repo_url))
-    return <><p className="ns-notice"><Shield size={16} />These are your original personal notes. No other user’s private memory is requested.</p>
-      {data.note && <p className="ns-notice">{data.note}</p>}
-      <div className="ns-notice" role="status">{data.runtime ? <>
-        <span>Runtime recall: {data.runtime.recall ? "available" : "unavailable"} · Automatic saving: {data.runtime.auto_save ? "available" : "unavailable"} · Background review: {data.runtime.background_review ? "available" : "unavailable"}</span>
-        {data.runtime.note && <span>{data.runtime.note}</span>}
-      </> : "This server has not reported native memory readiness."}</div>
-      <section className="ns-record"><div className="ns-record-copy"><h2>Memory preferences</h2><p>Saved setting: {prefs.enabled ? "enabled" : "paused"}. Pausing keeps your notes and stops future recall and automatic saving.</p>
+    const unavailable = data.runtime && [
+      prefs.enabled && !data.runtime.recall && "Using saved memories",
+      prefs.enabled && prefs.auto_save && !data.runtime.auto_save && "Automatic saving",
+      prefs.enabled && data.review?.enabled && !data.runtime.background_review && "Background review",
+    ].filter(Boolean)
+    return <>
+      {prefs.enabled && !data.runtime ? <p className="ns-notice" role="status">Memory availability could not be checked. Your saved notes are shown below.</p>
+        : unavailable && unavailable.length > 0 && <p className="ns-notice" role="status">Currently unavailable: {unavailable.join(", ")}. Your saved notes are kept.</p>}
+      <section className="ns-record"><div className="ns-record-copy"><h2>Memory preferences</h2><p>{!prefs.enabled ? "Memory is paused. Your saved notes are kept." : data.runtime?.recall ? "Moyai can use these notes in future chats." : "Choose how memories are saved."}</p>
+        {data.review?.latest && <small>Last review: {data.review.latest.status} · {dateTime(data.review.latest.updated_at)}</small>}
+      </div><div className="ns-memory-controls">
         <Choice label="How new memories are saved" value={prefs.auto_save ? "auto" : "manual"} disabled={!data.capabilities.preferences || mutation.busy || !prefs.enabled}
-          options={[{ value: "auto", label: "Save useful context automatically" }, { value: "manual", label: "Only save manually" }]}
+          options={[{ value: "auto", label: "Save automatically" }, { value: "manual", label: "Save manually" }]}
           onChange={value => void mutation.run(() => request(() => updateProductMemoryPreferences({ body: { enabled: prefs.enabled, auto_save: value === "auto", revision: prefs.revision } })), resource.refresh)} />
-        {data.review?.latest && <small>Recorded review: {data.review.latest.status} · {dateTime(data.review.latest.updated_at)}</small>}
-      </div>{data.capabilities.preferences && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => request(() => updateProductMemoryPreferences({ body: { enabled: !prefs.enabled, auto_save: prefs.auto_save, revision: prefs.revision } })), resource.refresh)}>{prefs.enabled ? "Pause memory" : "Resume memory"}</Button>}</section>
+        {data.capabilities.preferences && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => request(() => updateProductMemoryPreferences({ body: { enabled: !prefs.enabled, auto_save: prefs.auto_save, revision: prefs.revision } })), resource.refresh)}>{prefs.enabled ? "Pause memory" : "Resume memory"}</Button>}</div></section>
       {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} action={data.capabilities.create && <Button onClick={() => setEditor({ requestId: crypto.randomUUID() })}><Plus />Add memory</Button>} />
       {rows.length ? <ProductMemoryNotes notes={rows} capabilities={data.capabilities} onEdit={note => setEditor({ note, requestId: crypto.randomUUID() })} onRemove={setRemove} /> : <Empty filtered={Boolean(search)} noun="memories" onClear={() => setSearch("")} />}
-      {editor && (editor.note ? data.capabilities.update && !editor.note.truncated : data.capabilities.create) && <Editor title={editor.note ? "Edit memory" : "Add memory"} description="Keep one useful idea per note. Updates preserve the saved identity and check its revision."
+      {editor && (editor.note ? data.capabilities.update && !editor.note.truncated : data.capabilities.create) && <Editor title={editor.note ? "Edit memory" : "Add memory"} description="Keep one useful idea per note."
         initial={{ title: editor.note?.title ?? "", content: editor.note?.content ?? "", kind: editor.note?.kind ?? "preference", repo_url: editor.note?.repo_url ?? "" }}
         fields={[{ name: "title", label: "Title", required: true, minLength: 3, maxLength: 120 }, { name: "kind", label: "Type", type: "select", options: productMemoryKinds },
           { name: "content", label: "What should Moyai remember?", type: "textarea", required: true, minLength: 3 },
@@ -602,7 +603,7 @@ function ProductSkillDialog({ skill, onClose }: { skill: ProductSkillSummary; on
   const resource = useResource<ProductSkillDetail>(`/product/skills/${encodeURIComponent(skill.id)}`, signal => getProductSkill({ path: { skill_id: skill.id }, signal }).then(({ data }) => data))
   const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus() }}>
-    <DialogHeader><DialogTitle>{skill.name}</DialogTitle><DialogDescription>Type / in chat to select this skill. Its original instructions and supporting files are retained.</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>{skill.name}</DialogTitle><DialogDescription>Type / in a chat to choose this skill.</DialogDescription></DialogHeader>
     <LoadState resource={resource}>{detail => <><div className="ns-field"><label>Saved instructions<Textarea readOnly aria-label="Saved skill instructions" value={detail.instructions} rows={12} /></label></div>{detail.files.length > 0 && <section><h3>Supporting files</h3><ul className="ns-supporting-files">{detail.files.map(file => {
       const href = productSkillFileUrl(detail.id, file.path, detail.revision)
       return <li key={file.path}>{href ? <a className="ns-link" href={href} download>{file.path}</a> : <span>{file.path} · Download unavailable</span>}<small> · {file.size.toLocaleString()} bytes</small></li>
@@ -625,7 +626,7 @@ function ProductSkillsPage() {
         for (let page = 0; page < pages; page++) {
           const { data: next } = await listProductSkills({ query: { archived, limit: 100, offset }, signal: controller.signal })
           if (controller.signal.aborted) return
-          if (next.source !== "canonical") throw new Error("The server did not return the original skill library.")
+          if (next.source !== "canonical") throw new Error("Your saved skills could not be loaded. Refresh to try again.")
           for (const skill of next.skills) rows.set(skill.id, skill)
           result = { ...next, skills: [...rows.values()] }
           if (!next.has_more || next.next_offset === null || next.next_offset <= offset) break
@@ -641,9 +642,9 @@ function ProductSkillsPage() {
     error: state.archived === archived ? state.error : "", refresh: () => setRevision(value => value + 1),
   }
   return <LoadState resource={resource}>{data => {
-    if (data.capabilities?.read !== true) return <div className="ns-empty" role="status"><h2>Original skill library unavailable</h2><p>{data.note || "The server has not enabled access to the canonical skill library."}</p><Button variant="outline" onClick={resource.refresh}>Retry</Button></div>
+    if (data.capabilities?.read !== true) return <div className="ns-empty" role="status"><h2>Skills unavailable</h2><p>{data.note || "Your skills could not be loaded."}</p><Button variant="outline" onClick={resource.refresh}>Retry</Button></div>
     const rows = data.skills.filter(row => contains(search, row.name, row.description, row.reference) && (scope === "all" || row.scope === scope))
-    return <><p className="ns-notice">{data.note || "Type / in chat to select a skill from your original library."}</p>
+    return <><p className="ns-help">Type <kbd>/</kbd> in a chat to choose a skill.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
         filter={<Choice label="Skill scope" value={scope} onChange={setScope} options={[{ value: "all", label: "All scopes" }, { value: "personal", label: "Personal" }, { value: "organization", label: "Organization" }]} />} />
       <label className="check-label"><Checkbox checked={archived} onCheckedChange={value => { setArchived(value === true); setPages(1); setSelected(null) }} />Include archived skills</label>
@@ -678,7 +679,7 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
   return <>
     <LoadState resource={resource}>{data => {
       const rows = data.filter(row => contains(search, row.id, row.label, row.identity) && (filter === "all" || row.id === filter))
-      return <><p className="ns-notice">These are the original organization accounts. Each session selects its accounts; credentials stay on the server. Read-only and paused policies remain in force.</p>
+      return <><p className="ns-help">These accounts are shared with your workspace.</p>
         <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Connected service" value={filter} onChange={setFilter} options={[{ value: "all", label: "All services" }, ...Object.entries(productProviders).map(([value, label]) => ({ value, label }))]} />} />
         {rows.length ? <ProductConnectionRows connections={rows} admin={user.role === "admin"} onManage={open} /> : <Empty filtered={Boolean(search) || filter !== "all"} noun="organization connections" onClear={() => { setSearch(""); setFilter("all") }} />}
         {selected && <ProductConnectionDialog connection={selected.connection} mode={selected.mode} admin={user.role === "admin"} opener={opener}
@@ -686,7 +687,7 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
           onUpdated={() => { resource.refresh(); setSelected(null) }} />}
       </>
     }}</LoadState>
-    <p className="ns-muted">For your own Slack read identity, open <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
+    <p className="ns-help ns-footer-help">To use your own Slack account, connect <a className="ns-link" href="#settings/personal-slack">Personal Slack</a>.</p>
   </>
 }
 function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onClose, onUpdated }: {
@@ -701,11 +702,11 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
   return <Dialog open onOpenChange={open => { if (!open && !mutation.busy && !nestedBusy) onClose() }}><DialogContent className="native-settings-dialog"
     onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus({ preventScroll: true }) }}>
     <DialogHeader><DialogTitle>{name} · {mode === "repositories" ? "Repositories" : mode === "connect" ? "Connect account" : "Organization access"}</DialogTitle>
-      <DialogDescription>{mode === "manage" ? "This account and its policy apply to organization sessions. Provider permissions still bound every request." : "Use the existing provider setup flow. Secret values stay in this form and its authenticated submission."}</DialogDescription></DialogHeader>
+      <DialogDescription>{mode === "manage" ? "Manage how your workspace can use this account." : "Connect an account for your workspace."}</DialogDescription></DialogHeader>
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}{notice && <p className="ns-notice" role="status">{notice}</p>}
     {mode === "manage" && <>
       <p>{connection.connected ? `${connection.label} · ${connection.identity}` : "No organization account is connected."}</p>
-      {connection.tools.length > 0 && <details><summary>Provider operation descriptions</summary><ul className="ns-supporting-files">{connection.tools.map((tool, index) => <li key={tool.name || index}>{tool.name && <code>{tool.name} · </code>}{tool.description}</li>)}</ul></details>}
+      {connection.tools.length > 0 && <details><summary>Available actions</summary><ul className="ns-supporting-files">{connection.tools.map((tool, index) => <li key={tool.name || index}>{tool.name && <code>{tool.name} · </code>}{tool.description}</li>)}</ul></details>}
       {admin ? <form onSubmit={event => { event.preventDefault(); void mutation.run(() => updateOrganizationConnectionPolicy({ path: { provider: connection.id }, body: { enabled, read_only: readOnly } }), onUpdated) }}>
         <div className="ns-fields"><label className="check-label"><Checkbox checked={enabled} disabled={mutation.busy} onCheckedChange={value => setEnabled(value === true)} />Available to organization sessions</label>
           <div className="ns-field"><label>Allowed actions<Choice label="Allowed connection actions" value={readOnly ? "read" : "write"} onChange={value => setReadOnly(value === "read")} disabled={mutation.busy} options={[{ value: "read", label: "Read only" }, { value: "write", label: "Read and write" }]} /></label></div>
@@ -785,7 +786,7 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
     let installation: string | undefined
     try { installation = productRedirect(data.installation_url, location.origin) } catch {}
     return <form onSubmit={event => { event.preventDefault(); void mutation.run(() => selectGitHubRepositories({ body: { repository_ids: selected } }), onDone) }}>
-      <p>Choose repositories by their permanent GitHub IDs. Renaming a repository keeps the connection and saved work.</p>
+      <p>Choose which repositories Moyai can access.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} />
       <div className="ns-fields">{rows.map(repo => <label className="check-label" key={repo.id}><Checkbox checked={selected.includes(repo.id)} disabled={mutation.busy} onCheckedChange={checked => setSelected(previous => checked ? [...new Set([...previous, repo.id])] : previous.filter(id => id !== repo.id))} />{repo.full_name}</label>)}</div>
       {installation && <p className="ns-muted"><a className="ns-link" href={installation} target="_blank" rel="noreferrer">Manage the GitHub App’s repository access</a>, then refresh this list.</p>}
@@ -794,29 +795,48 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
     </form>
   }}</LoadState>
 }
-const personalSlackSources: Record<PersonalSlackStatus["effective_source"], string> = { personal: "your personal Slack account", organization: "organization Slack connection", none: "no Slack connection" }
-function ProductPersonalSlack({ individual, heading = "Personal Slack" }: { individual: boolean; heading?: string }) {
+function ProductPersonalSlack({ individual, onStartPrivateChat }: { individual: boolean; onStartPrivateChat: () => void }) {
   const resource = useResource("/connections/slack/personal", signal => getPersonalSlack({ signal }).then(({ data }) => data))
   const mutation = useMutation(), [disconnect, setDisconnect] = useState(false)
-  return <section className="ns-section"><h2>{heading}</h2><LoadState resource={resource}>{data => <>
-    <p>{data.label || "No personal Slack account connected"} · {data.connected ? data.health === "healthy" ? "Connected" : "Needs attention" : "Not connected"}</p>
-    <p className="ns-muted">Effective read identity: {personalSlackSources[data.effective_source]}. A configured personal account never silently falls back to organization credentials after a failure.</p>
-    <p className="ns-notice">Personal Slack reads require a private web session. They are unavailable in shared chats, Slack threads, and automations.</p>
-    {data.limitation && <p className="ns-muted">{data.limitation}</p>}
-    {!data.available && <p className="ns-muted">Use an individual workspace sign-in to own a personal Slack connection.</p>}
-    {!data.oauth_configured && <p className="ns-muted">An administrator must configure Slack OAuth before connecting.</p>}
-    <div className="ns-row-actions">
-      <Button disabled={mutation.busy || !data.available || !data.oauth_configured} onClick={() => {
-        let url: string
-        void mutation.run(async () => { url = (await startPersonalSlackOAuth()).data.url }, () => window.location.assign(productRedirect(url, location.origin)))
-      }}>{data.connected ? "Reconnect Slack" : "Connect Slack"}</Button>
-      {data.connected && <><Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => checkPersonalSlack(), resource.refresh)}>Check connection</Button><Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button></>}
-      {data.available && individual && <Button variant="outline" disabled={mutation.busy} onClick={() => { location.hash = "" }}>Start private web session</Button>}
-    </div>
-    {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
-    {disconnect && <Confirm title="Disconnect personal Slack?" description="Future Slack reads can use the organization connection when available. Existing private sessions stay private. Only your personal connection is removed." label="Disconnect personal Slack"
-      onConfirm={async () => { await disconnectPersonalSlack(); resource.refresh() }} onClose={() => setDisconnect(false)} />}
-  </>}</LoadState></section>
+  const [checked, setChecked] = useState(false)
+  return <LoadState resource={resource}>{data => {
+    const healthy = data.connected && data.health === "healthy"
+    const canStart = data.available && individual
+    const connect = () => {
+      let url: string
+      void mutation.run(async () => { url = (await startPersonalSlackOAuth()).data.url }, () => window.location.assign(productRedirect(url, location.origin)))
+    }
+    return <section className="ns-personal-slack" aria-label="Your Slack connection">
+      <div className="ns-connection-card">
+        <div className="ns-connection-heading">
+          <span className="ns-provider-icon"><Slack size={24} aria-hidden="true" /></span>
+          <div className="ns-connection-identity"><h2>{data.connected ? data.label || "Your Slack account" : "Connect Slack"}</h2>
+            <span className={`ns-connection-status ${healthy ? "is-connected" : ""}`}><span aria-hidden="true" />{data.connected ? healthy ? "Connected" : "Needs attention" : "Not connected"}</span>
+          </div>
+        </div>
+        <p className="ns-help">Available in your private web chats. Not used in shared chats, Slack threads, or automations.</p>
+        {data.connected && !healthy && <p className="ns-notice" role="status">Reconnect to restore access. Moyai will not switch to a workspace account if this connection fails.</p>}
+        {!data.connected && data.effective_source === "organization" && <p className="ns-help">Your chats currently use the workspace Slack connection.</p>}
+        {!data.available && <p className="ns-notice" role="status">Sign in with your individual work account to connect Slack.</p>}
+        {data.available && !data.oauth_configured && <p className="ns-notice" role="status">Ask a workspace administrator to enable Slack sign-in.</p>}
+        <div className="ns-row-actions">
+          {healthy && canStart && <Button disabled={mutation.busy} onClick={onStartPrivateChat}>Start private chat<ArrowRight aria-hidden="true" /></Button>}
+          <Button variant={healthy ? "outline" : "default"} disabled={mutation.busy || !data.available || !data.oauth_configured} onClick={connect}>{data.connected ? "Reconnect Slack" : "Connect Slack"}</Button>
+          {!healthy && canStart && <Button variant="outline" disabled={mutation.busy} onClick={onStartPrivateChat}>Start private chat</Button>}
+        </div>
+        {data.connected && <div className="ns-connection-footer">
+          <div className="ns-row-actions"><Button variant="ghost" disabled={mutation.busy || resource.loading} onClick={() => {
+            setChecked(false)
+            void mutation.run(() => checkPersonalSlack(), () => { setChecked(true); resource.refresh() })
+          }}><RefreshCw aria-hidden="true" />Check connection</Button>{checked && !resource.loading && <span className="ns-muted" role="status">Checked</span>}</div>
+          <Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button>
+        </div>}
+        {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
+      </div>
+      {disconnect && <Confirm title="Disconnect personal Slack?" description="Future chats can use the workspace Slack connection, if available. Your existing private chats stay private." label="Disconnect personal Slack"
+        onConfirm={async () => { await disconnectPersonalSlack(); setChecked(false); resource.refresh() }} onClose={() => setDisconnect(false)} />}
+    </section>
+  }}</LoadState>
 }
 
 function GeneralPage({ onPreferences }: { onPreferences: (preferences: GeneralPreferences) => void }) {
@@ -854,7 +874,7 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
         </label>) : <p className="ns-muted">No connections available.</p>
       }}</LoadState>}
     </div>
-    <p className="ns-muted">Only connections available to the chat are used. Personal connections are limited to private chats. <a className="ns-link" href="#settings/connections">Manage connections</a></p>
+    <p className="ns-help ns-footer-help">Only connections available to the chat are used. Personal connections are limited to private chats. <a className="ns-link" href="#settings/connections">Manage connections</a></p>
     {mutation.busy && <p className="ns-muted" role="status">Saving…</p>}
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
   </>
@@ -895,7 +915,7 @@ function UsersPage({ user }: { user: SettingsUser }) {
   return <LoadState resource={resource}>{data => {
     const product = data.product
     const rows = data.users.filter(row => contains(search, row.username, row.display_name, row.email) && (filter === "all" || (filter === "disabled" ? !row.enabled : row.role === filter)))
-    return <><CapabilityNote {...data} />{data.note && <p className="ns-notice">{data.note}</p>}<Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
+    return <><CapabilityNote {...data} />{product && <p className="ns-help">Members join through your workspace sign-in.</p>}<Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
       filter={<Choice label="User role or access" value={filter} onChange={setFilter} options={[{ value: "all", label: "All members" }, { value: "admin", label: "Administrators" }, { value: "member", label: "Members" }, ...product ? [] : [{ value: "disabled", label: "Disabled" }]]} />}
       action={data.capabilities?.create && <Button onClick={() => setEditor("new")}><Plus />Add user</Button>} />
       {rows.length ? <RecordTable label="Workspace users" headings={["User", "Role", "Access", "Actions"]}>{rows.map(row => <TableRow key={row.id}>
@@ -1013,7 +1033,7 @@ function SettingsLink({ page, navigate, children, ...props }: { page: string; na
   }}>{children}</a>
 }
 
-export function SettingsPage({ user, page, productMode = "standalone", onNavigate, onBack, sidebarCollapsed, onToggleSidebar, onPreferences }: SettingsPageProps) {
+export function SettingsPage({ user, page, productMode = "standalone", onNavigate, onBack, onStartPrivateChat, sidebarCollapsed, onToggleSidebar, onPreferences }: SettingsPageProps) {
   const current = !page || page === "settings" ? "overview" : page === "spend" ? "usage" : page
   const destination = destinations.find(item => item.id === current)
   const [navOpen, setNavOpen] = useState(false)
@@ -1040,7 +1060,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
       </nav><div className="ns-account"><span>{user.name}</span><small>{user.role === "admin" ? "Administrator" : "Workspace member"}</small></div>
     </aside>
     <div className="ns-main"><div className="ns-breadcrumb" aria-label="Breadcrumb"><SettingsLink page="overview" navigate={navigate}>Settings</SettingsLink>{current !== "overview" && <><ChevronRight size={14} aria-hidden="true" /><span>{title}</span></>}<AppearanceToggle /></div>
-      <div className="ns-content" id="native-settings-content" ref={content}>{!reportPage && <header className="ns-page-heading"><h1 ref={heading} tabIndex={-1}>{title}</h1><p>{current === "overview" ? "Make Moyai work the way your team does." : destination?.description}</p></header>}
+      <div className="ns-content" id="native-settings-content" ref={content}>{!reportPage && <header className="ns-page-heading"><h1 ref={heading} tabIndex={-1}>{title}</h1>{destination?.description && current !== "general" && <p>{destination.description}</p>}</header>}
         <div key={`${user.id}:${current}`}>
           {destination?.productOnly && productMode !== "existing" ? <div className="ns-empty"><h2>Existing product accounts required</h2><p>This page is available when Moyai uses the existing product account service.</p></div>
             : destination?.admin && user.role !== "admin" ? <div className="ns-empty" role="alert"><Shield size={24} /><h2>Administrator access required</h2><p>This page is available to workspace administrators.</p><Button variant="outline" onClick={() => navigate("overview")}>Back to overview</Button></div>
@@ -1050,7 +1070,7 @@ export function SettingsPage({ user, page, productMode = "standalone", onNavigat
                 : current === "automations" ? productMode === "existing" ? <ProductAutomationsPage userId={user.id} /> : <AutomationsPage user={user} />
                   : current === "memory" ? productMode === "existing" ? <ProductMemoryPage /> : <MemoryPage />
                     : current === "connections" ? productMode === "existing" ? <ProductConnectionsPage user={user} /> : <ConnectionsPage user={user} />
-                      : current === "personal-slack" ? <ProductPersonalSlack individual={user.individual !== false} heading="Your connection" />
+                      : current === "personal-slack" ? <ProductPersonalSlack onStartPrivateChat={onStartPrivateChat} individual={user.individual !== false} />
                       : current === "secrets" ? productMode === "existing" ? <ProductSecretsPage user={user} /> : <SecretsPage user={user} />
                         : current === "users" ? <UsersPage user={user} />
                           : current === "performance" || current === "usage" ? <AnalyticsPage kind={current} productMode={productMode} headingRef={heading} />
