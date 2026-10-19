@@ -109,6 +109,11 @@ async def _maintenance_response(
     service: ProductInferenceService, activity: InferenceActivity, route: str, content: bytes,
 ) -> Response:
     """One reclaimable owner spans admission, provider I/O, accounting and close."""
+    # Shutdown removes the slot runner. Check before constructing its coroutine;
+    # registration has no intervening await and perform() checks admission again.
+    if not service.started or service.slots is None:
+        return Response(status_code=409, headers={"x-moyai-inference-denied": "1"})
+
     async def perform() -> Response:
         try:
             client = service.upstream_client()
