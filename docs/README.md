@@ -18,6 +18,7 @@
 | [Runtime performance](pydantic-performance.md) | Activity queues, capacity and computer startup |
 | [PostgreSQL runtime](postgres-runtime.md) | Canonical and native schema ownership |
 | [Schema migrations](schema-migrations.md) | Receipts, offline migration and compatibility |
+| [Online native expansion](native-online-schema.md) | Prepare the reviewed v21→v22 schema while existing services remain online |
 | [PostgreSQL migration](postgres-migration.md) | Verified historical SQLite transfer |
 | [Object storage](object-storage.md) | Historical payload migration and backup requirements |
 | [UI components](shadcn-ui.md) | Shared controls, frontend build and browser checks |
