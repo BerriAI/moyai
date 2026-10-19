@@ -167,3 +167,34 @@ async def test_revocation_during_detail_read_drops_payload(runtime, active, acto
         response = await request
     assert response.status_code in {401, 403, 404}
     assert "README.md" not in response.text
+
+
+async def test_history_segments_keep_actions_and_missing_dispatch_failures(runtime, active):
+    from dataclasses import replace
+
+    from moyai.history_handoff import record_segment
+
+    session, turn, prepared = active
+    scope = replace(prepared.scope, history_segment=2)
+    await record_segment(runtime, scope)
+    await saved_action(runtime, turn.id, call_id="first")
+    await saved_action(runtime, scope.root_run_id, call_id="last")
+    await runtime.stores.steps.append_event(StepEvent(
+        run_id=scope.root_run_id, kind="model_request_completed", step_index=3,
+    ))
+    await runtime.stores.steps.save_snapshot(ContinuableSnapshot(
+        run_id=scope.root_run_id, step_index=4,
+        messages=[
+            ModelResponse(run_id=scope.root_run_id, parts=[ToolCallPart("browser_open", {"url": "https://example.test"}, tool_call_id="refused")]),
+            ModelRequest(parts=[ToolReturnPart("browser_open", "Guidance changed", tool_call_id="refused", outcome="failed")]),
+        ],
+    ))
+    async with sign_in(runtime) as client:
+        base = f"/api/sessions/{session.id}/progress/{turn.id}"
+        progress = (await client.get(base + "?include_activity=true")).json()
+        assert {tool["id"] for tool in progress["tools"]} == {"first", "last", "refused"}
+        for identity in ["first", "last", "refused"]:
+            result = await client.get(base + "/actions/" + identity)
+            assert result.status_code == 200, result.text
+        assert result.json()["status"] == "failed"
+        assert result.json()["output"] == "Guidance changed"

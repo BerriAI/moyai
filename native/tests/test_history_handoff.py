@@ -142,7 +142,7 @@ def test_segment_identity_is_scoped_to_its_turn(run_id, expected):
     assert is_turn_run(run_id, "turn") is expected
 
 
-@pytest.mark.parametrize("action", ["steer", "stop", "failed_steer"])
+@pytest.mark.parametrize("action", ["steer", "steer_twice", "stop", "failed_steer"])
 @pytest.mark.parametrize("runtime", ["history"], indirect=True)
 async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, actor, monkeypatch, action):
     from moyai import history_handoff, worker
@@ -177,12 +177,13 @@ async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, act
                 TurnWorkflow.run, turn.id, id=turn.workflow_id, task_queue=runtime.settings.temporal_queue,
             )
             await asyncio.wait_for(entered.wait(), 45)
-            if action in {"steer", "failed_steer"}:
-                correction = await runtime.database.submit(actor, session.id, NewMessage(
-                    prompt="NEW GUIDANCE", request_key="at-handoff", mode="asap",
-                ))
-                await runtime.database.signal_attempted(correction.id)
-                await runtime.client.get_workflow_handle(turn.workflow_id).signal(TurnWorkflow.steer, correction.id)
+            if action in {"steer", "steer_twice", "failed_steer"}:
+                for index in range(2 if action == "steer_twice" else 1):
+                    correction = await runtime.database.submit(actor, session.id, NewMessage(
+                        prompt=f"NEW GUIDANCE {index}", request_key=f"at-handoff-{index}", mode="asap",
+                    ))
+                    await runtime.database.signal_attempted(correction.id)
+                    await runtime.client.get_workflow_handle(turn.workflow_id).signal(TurnWorkflow.steer, correction.id)
                 release.set()
                 result = await asyncio.wait_for(handle.result(), 45)
                 assert result["status"] == "completed"
@@ -191,6 +192,10 @@ async def test_control_during_checkpoint_commit_is_not_lost(runtime, active, act
                     received = await db.get(Turn, correction.id)
                 assert received.status == "included"
                 assert runtime.security.unseal(saved.result).decode() == "Guidance preserved after handoff."
+                snapshot = await latest_turn_snapshot(runtime, turn.id)
+                dispatched = [part for message in snapshot.messages for part in message.parts
+                              if isinstance(part, ToolReturnPart) and part.tool_call_id == "after-new-guidance"]
+                assert len(dispatched) == 1 and dispatched[0].outcome == "success"
             else:
                 await runtime.client.get_workflow_handle(turn.workflow_id).cancel()
                 release.set()

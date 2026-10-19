@@ -157,7 +157,11 @@ async def run_lineage(
 ) -> tuple[list[tuple[RunRecord, Turn, int]], bool]:
     # Always enter the native lineage through authorized product turns. Never
     # enumerate the global run store, which contains other people's contexts.
-    queue = deque((turn.id, turn, 0) for turn in turns)
+    from .history_handoff import turn_run_ids
+
+    queue = deque()
+    for turn in turns:
+        queue.extend((run_id, turn, 0) for run_id in await turn_run_ids(runtime, turn.id))
     seen: set[str] = set()
     found: list[tuple[RunRecord, Turn, int]] = []
     while queue and len(found) < limit:

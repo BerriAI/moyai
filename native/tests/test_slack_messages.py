@@ -228,7 +228,6 @@ async def test_progress_uses_ambient_session_link_and_final_clears_old_attachmen
 ):
     await bind(slack, active)
     runtime.settings.public_url = slack.service.settings.public_url = "https://moyai.example"
-    await queued(runtime, active, product=product, kind="anchor", text="Working.")
     if product:
         from moyai.product_slack_models import ProductSlackBinding
         async with runtime.database.sessions.begin() as db:
@@ -255,8 +254,7 @@ async def test_progress_uses_ambient_session_link_and_final_clears_old_attachmen
     requests, _messages, handler = transport()
     async with runtime.database.sessions() as db:
         anchor = await db.scalar(select(Delivery).where(
-            Delivery.identity == (f"product-slack:{active[1].id}:accepted" if product
-                                  else f"slack-progress:{active[1].id}"),
+            Delivery.id == row.id,
         ))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://slack.test/") as client:
         await deliver(client, anchor)

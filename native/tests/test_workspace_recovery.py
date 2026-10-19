@@ -33,6 +33,86 @@ REFERENCE = {"provider": "modal", "id": "sb-original"}
 RESTORED = {"provider": "modal", "id": "sb-restored"}
 
 
+async def interrupted(runtime, active, monkeypatch):
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+    from pydantic_ai_harness.step_persistence import ContinuableSnapshot
+
+    session, turn, prepared = active
+    async with runtime.database.sessions.begin() as db:
+        current = await db.get(Session, session.id)
+        current.workspace = json.dumps(REFERENCE)
+        current.workspace_scope = prepared.scope.workspace_key
+    await runtime.stores.steps.save_snapshot(ContinuableSnapshot(
+        run_id=turn.id, step_index=2, state="interrupted", messages=[
+            ModelRequest(parts=[UserPromptPart("Edit the files")]),
+            ModelResponse(parts=[TextPart("The edits are saved; checking them next.")]),
+        ],
+    ))
+    capture = AsyncMock(return_value="im-interrupted-files")
+    monkeypatch.setattr(runtime.database.answers, "snapshots", SimpleNamespace(capture=capture))
+    return capture
+
+
+async def test_failed_first_turn_restores_files_without_claiming_an_accepted_answer(runtime, actor, active, monkeypatch):
+    from moyai.failure_checkpoint import preserve_failed_workspace
+
+    session, turn, _ = active
+    capture = await interrupted(runtime, active, monkeypatch)
+    await preserve_failed_workspace(runtime, turn.id)
+    await runtime.database.fail(turn.id, "The worker failed.")
+    async with runtime.database.sessions() as db:
+        current, source = await db.get(Session, session.id), await db.get(Turn, turn.id)
+        point = checkpoint(current.snapshot)
+        assert point.kind == "interrupted" and point.image_id == "im-interrupted-files"
+        assert source.status == "failed" and not source.result_accepted and source.result is None
+        assert current.conversation == source.conversation and current.conversation
+        assert current.updated_at == source.finished_at
+    capture.assert_awaited_once()
+    followup = await runtime.database.submit(actor, session.id, NewMessage(prompt="Inspect and finish the saved edits.", request_key="after-failure"))
+    assert (await runtime.database.claim_next()).id == followup.id
+    prepared = await runtime.database.prepare(followup.id)
+    monkeypatch.setattr("moyai.workspace_recovery.live_sandbox", AsyncMock(return_value=False))
+    create = AsyncMock(return_value=SimpleNamespace(object_id=RESTORED["id"], poll=SimpleNamespace(aio=AsyncMock(return_value=None))))
+    monkeypatch.setattr("moyai.workspace_recovery.restored_sandbox", create)
+    assert (await prepare_workspace(runtime, prepared)).workspace == RESTORED
+    create.assert_awaited_once()
+
+
+async def test_stop_during_failure_capture_cannot_publish_a_late_checkpoint(runtime, actor, active, monkeypatch):
+    from moyai.failure_checkpoint import preserve_failed_workspace
+
+    session, turn, _ = active
+    capture = await interrupted(runtime, active, monkeypatch)
+
+    async def stop(*_args, **_kwargs):
+        await runtime.database.stop(actor, session.id)
+        return "im-too-late"
+
+    capture.side_effect = stop
+    await preserve_failed_workspace(runtime, turn.id)
+    await runtime.database.fail(turn.id, "late failure")
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert current.status == "stopped" and current.snapshot is None
+        assert await db.get(ComputerOperation, session.id) is None
+
+
+async def test_failure_checkpoint_cannot_cross_an_uncertain_write(runtime, active, monkeypatch):
+    from moyai.failure_checkpoint import preserve_failed_workspace
+
+    session, turn, prepared = active
+    capture = await interrupted(runtime, active, monkeypatch)
+    async with runtime.database.sessions.begin() as db:
+        db.add(Effect(id="uncertain", session_id=session.id, turn_id=turn.id, actor_id=prepared.scope.actor_id,
+                      tool_name="publish", arguments=runtime.security.seal("{}"), fingerprint="same", state="pending"))
+    await preserve_failed_workspace(runtime, turn.id)
+    capture.assert_not_awaited()
+    async with runtime.database.sessions() as db:
+        current = await db.get(Session, session.id)
+        assert current.snapshot is None and current.save_warning
+        assert (await db.get(Effect, "uncertain")).state == "pending"
+
+
 async def saved(runtime, active, monkeypatch, *, waiting=True):
     monkeypatch.setattr("moyai.activities.current", lambda: runtime)
     session, turn, prepared = active

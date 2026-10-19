@@ -16,6 +16,34 @@ const steering = {id:'steer',actor_id:'viewer',status:'accepted',parent_turn:'ro
 const input = (id,turn,time) => ({id,turn_id:turn,role:'user',author_id:'viewer',content:'Input',created_at:time});
 const progress = (id,text,time) => ({id,text,phase:'commentary',created_at:time});
 
+test('resumed roots without a new input keep their own progress before their answer or next input',async()=>{
+  const {unanchoredWorkSegments} = await loaded;
+  const resumed={...root,id:'resumed',created_at:at(20),status:'completed'};
+  const next={...root,id:'next',created_at:at(40)};
+  const messages=[input(1,'root',at(0)),{id:2,turn_id:'resumed',role:'assistant',content:'Result',created_at:at(30)},input(3,'next',at(40))];
+  const segments=unanchoredWorkSegments(messages,[root,resumed,next]);
+  assert.deepEqual([...segments.keys()],[2]);
+  assert.equal(segments.get(2)[0].turn.id,'resumed');
+  assert.equal(segments.get(2)[0].hasFinalAnswer,true);
+  const running=unanchoredWorkSegments(messages.slice(0,1),[root,{...resumed,status:'running'}]);
+  assert.equal(running.get(null)[0].turn.id,'resumed');
+  assert.equal(running.get(null)[0].hasFinalAnswer,false);
+});
+
+test('current tool follows authoritative progress while old events replay',async()=>{
+  const {currentWorkTool} = await loaded;
+  const {emptyLiveTranscript,applyLiveEvent} = await liveModule;
+  const current={id:'current',name:'shell',status:'running',created_at:at(40)};
+  const entry={data:{tools:[{id:'old',name:'read_file',status:'completed'},current]}};
+  let live=emptyLiveTranscript('root');
+  for(let i=0;i<100;i++) {
+    live=applyLiveEvent(live,{type:'tool_call',name:i%2?'edit_file':'browser_open',id:String(i)},i);
+    assert.equal(currentWorkTool(entry),current);
+  }
+  assert.equal(currentWorkTool({...entry,error:'disconnected'}),undefined);
+  assert.equal(currentWorkTool({data:{tools:[{...current,status:'completed'}]}}),undefined);
+});
+
 test('a queued follow-up cannot move the preceding saved answer below its input',async()=>{
   const {orderedWorkMessages} = await loaded;
   const next={...root,id:'next',created_at:at(10)};

@@ -104,6 +104,12 @@ async def fail_turn(turn_id: str, message: str) -> None:
     await current().database.fail(turn_id, message)
 
 
+@activity.defn(name="moyai_preserve_failed_workspace_v1")
+async def preserve_failed_workspace(turn_id: str) -> None:
+    from .failure_checkpoint import preserve_failed_workspace as preserve
+    await preserve(current(), turn_id)
+
+
 @activity.defn(name="moyai_stopped_turn_v1")
 async def stopped_turn(turn_id: str, conversation: str | None) -> None:
     await current().database.stopped(turn_id, conversation)
@@ -132,6 +138,6 @@ async def steering_receipt(turn_id: str, enqueue_id: str | None) -> None:
 
 ACTIVITIES = [
     prepare_turn, save_answer, save_computer, settle_answer, fail_turn, stopped_turn,
-    prepare_steering, steering_receipt, keep_computer_alive, *HISTORY_ACTIVITIES,
+    prepare_steering, steering_receipt, keep_computer_alive, preserve_failed_workspace, *HISTORY_ACTIVITIES,
 ]
 

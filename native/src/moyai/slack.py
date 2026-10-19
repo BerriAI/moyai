@@ -161,28 +161,12 @@ async def admit_one(runtime: Runtime, inbox: SlackInbox) -> None:
             provenance={"team_id": team, "channel_id": channel, "thread_ts": thread_ts,
                         "message_ts": event["ts"], "user_id": event["user"]},
         ))
-        turn = await runtime.database.submit(actor, thread.session_id, body)
+        await runtime.database.submit(actor, thread.session_id, body)
     except HTTPException as error:
         if error.status_code not in (401, 403, 404):
             raise
         await mark_inbox(runtime, inbox.id, "access_denied")
         return
-    from .slack_progress import anchor_identity
-    try:
-        async with runtime.database.sessions.begin() as db:
-            db.add(Delivery(
-                id=new_id(), identity=anchor_identity(turn.id, False),
-                session_id=thread.session_id, turn_id=turn.id,
-                destination=json.dumps({
-                    "channel": thread.channel_id, "thread_ts": thread.thread_ts,
-                    "rich_reply": True, "segment_id": turn.id,
-                }),
-                content=runtime.security.seal(thread_message(
-                    "Moyai received your message.", session_url(runtime.settings.public_url, thread.session_id),
-                )),
-            ))
-    except IntegrityError:
-        pass
     await mark_inbox(runtime, inbox.id, "accepted")
 
 

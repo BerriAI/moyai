@@ -9443,6 +9443,10 @@ export type SlackDeliveryRetry = {
  */
 export type SlackDeliveryStatus = {
     /**
+     * File Error Codes
+     */
+    file_error_codes: Array<string>;
+    /**
      * Pending
      */
     pending: number;
@@ -9450,6 +9454,10 @@ export type SlackDeliveryStatus = {
      * Rejected
      */
     rejected: number;
+    /**
+     * Rejected Files
+     */
+    rejected_files: number;
     /**
      * Sending
      */

@@ -23,11 +23,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import workflow
 
-from .contracts import NewMessage, NewSession, RunScope
+from .contracts import NewMessage, RunScope
 from .delegation_authority import DelegatedAuthority
 from .delegation_models import DelegatedSession, DelegatedTurn
 from .input_identity import input_identity
-from .models import Message, Session, Turn, TurnImage, User
+from .models import Message, Session, Turn, TurnImage, User, new_id
 
 if TYPE_CHECKING:
     from .database import Database
@@ -188,9 +188,12 @@ class DelegationService:
                 f"Agent {len(names) + 1}",
             )
             # Delegated prompts may contain requester-only working context.
-            child = await database.create_session(
-                actor, NewSession(title=name, visibility="private", model=scope.model), db=db,
-            )
+            # This is a bounded child of the already-authorized parent, not a
+            # new private human conversation. Slack requesters retain the same
+            # saved authority and audience checks through DelegatedAuthority.
+            child = Session(id=new_id(), owner_id=actor.id, title=name,
+                            visibility="private", model=scope.model)
+            db.add(child)
             await db.flush()
             uploads = list(await db.scalars(select(TurnImage.upload_id).where(
                 TurnImage.turn_id == scope.turn_id,

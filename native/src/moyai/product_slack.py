@@ -19,7 +19,6 @@ from urllib.parse import parse_qs
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
-from agentchat.channels.slack.host import SlackHost, SlackHostEvent
 from agentchat.channels.slack.rendering import message_request
 from agentchat.models import RichReply
 from app.db import database as source_database
@@ -162,39 +161,11 @@ class ProductSlack:
             runtime.product_history.slack_access = lambda conn, principal, ids: historical_access(self, conn, principal, ids)
             runtime.product_history.decorate_messages = lambda conn, principal, run, rows: historical_messages(self, conn, principal, run, rows)
         self.inbox = HookInbox(self.store, self, list, security=self.product.security)
-        self.intake_tasks: set[asyncio.Task[None]] = set()
         self.delivery_task: asyncio.Task[None] | None = None
         self.activity_task: asyncio.Task[None] | None = None
         self.delivery_wakeup = asyncio.Event()
         self.profile_task: asyncio.Task[None] | None = None
         self.stopping = asyncio.Event()
-
-    async def acknowledge(self, source: SlackHostEvent, installed: dict) -> None:
-        host = SlackHost(bot_user_id=installed["user_id"], workspace_id=installed["team_id"])
-
-        async def request(api_method: str, payload: dict[str, object]) -> dict[str, object]:
-            token = await self.connectors.slack_bot_token()
-            return await self.connectors.request(
-                "POST", "https://slack.com/api/" + api_method,
-                headers={"Authorization": "Bearer " + token},
-                json=payload,
-                allowed_errors=("already_reacted",),
-            )
-
-        if not await host.acknowledge(source, request):
-            logger.info("Slack acknowledgement reaction was not added.")
-
-    def acknowledge_soon(self, payload: dict[str, Any]) -> None:
-        async def acknowledge() -> None:
-            try:
-                async with asyncio.timeout(3):
-                    await self.events.acknowledge_intake(payload)
-            except Exception as error:  # noqa: BLE001 - intake acknowledgement never blocks durable receipt
-                logger.warning("Slack intake acknowledgement failed (%s).", type(error).__name__)
-
-        task = asyncio.create_task(acknowledge(), name="product-slack-intake-ack")
-        self.intake_tasks.add(task)
-        task.add_done_callback(self.intake_tasks.discard)
 
     def start(self) -> None:
         """Call only inside the parent's CoordinatorHandoff background context."""
@@ -218,7 +189,6 @@ class ProductSlack:
         if self.stopping.is_set():
             tasks = [task for task in (
                 self.inbox.task, self.profile_task, self.activity_task, self.delivery_task,
-                *self.intake_tasks,
             ) if task is not None]
 
             async def drain():
@@ -230,12 +200,6 @@ class ProductSlack:
             await finish(asyncio.create_task(drain(), name="product-slack-drain"))
             self.profile_task = self.activity_task = self.delivery_task = None
             return
-        intake_tasks = tuple(self.intake_tasks)
-        for task in intake_tasks:
-            task.cancel()
-        if intake_tasks:
-            await asyncio.gather(*intake_tasks, return_exceptions=True)
-        self.intake_tasks.difference_update(intake_tasks)
         await self.inbox.close()
         if self.profile_task is not None:
             self.profile_task.cancel()
@@ -446,11 +410,6 @@ class ProductSlack:
                     binding.paused or (turn.finished_at and turn.finished_at <= binding.delivery_after)
                 ))
                 for key, content in parts:
-                    if key == "accepted":
-                        content = thread_message(content["text"], session_url(
-                            self.settings.public_url, thread.session_id,
-                            binding.source_run_id or "" if binding else "",
-                        ))
                     db.add(Delivery(
                         id=new_id(), identity=f"product-slack:{turn.id}:{key}",
                         session_id=thread.session_id, turn_id=turn.id,
@@ -458,7 +417,7 @@ class ProductSlack:
                             "channel": thread.channel_id, "thread_ts": thread.thread_ts, "control": control,
                             **({"input": True, "input_message": key.removeprefix("web-input:").rsplit(":", 2)[0],
                                 "input_revision": int(key.rsplit(":", 2)[1])} if key.startswith("web-input:") else {}),
-                            "segment_id": turn.id if key == "accepted" or control else segment.id,
+                            "segment_id": turn.id if control else segment.id,
                         }),
                         content=self.runtime.security.seal(content),
                         status="suppressed" if suppressed else "pending",
@@ -476,21 +435,17 @@ class ProductSlack:
                 SlackThread, SlackThread.session_id == Turn.session_id,
             ).join(ProductSlackBinding, ProductSlackBinding.session_id == Turn.session_id).where(
                 ~Turn.workflow_id.startswith("moyai-slack-control-"),
-                Turn.status.in_(["queued", "running", "waiting", "saving", "completed", "failed", "stopped"]),
+                Turn.status.in_(["waiting", "completed", "failed", "stopped"]),
                 ~select(Delivery.id).where(
                     Delivery.identity == ("product-slack:" + Turn.id + ":" + Turn.status + ":0"),
                 ).exists(),
             ).order_by(Turn.created_at).limit(100))).all()
         for turn, thread, binding in pairs:
-            # Admission and delivery can run concurrently. Reserve the same
-            # primary reply before any later state is queued.
-            await self.queue(turn, thread, "accepted", {"text": "Moyai received your message."})
             failure_report = (
                 await FailureReport.for_turn(self.runtime, turn) if turn.status == "failed" else None
             )
             text_value = {
-                "queued": "Moyai is getting ready.", "running": "Moyai is working.",
-                "saving": "Moyai is saving the work.", "waiting": "Moyai needs your response.",
+                "waiting": "Moyai needs your response.",
                 "failed": failure_report.text if failure_report is not None else "",
                 "stopped": "The task stopped.",
             }.get(turn.status, "")
@@ -959,7 +914,7 @@ class ProductSlack:
         @router.post("/hooks/slack")
         @router.post("/hooks/slack/events")
         async def event(request: Request):
-            return await self.inbox.receive_event(request, on_enqueued=self.acknowledge_soon)
+            return await self.inbox.receive_event(request)
 
         @router.post("/hooks/slack/interactions")
         async def interaction(request: Request):
