@@ -22,8 +22,9 @@ from pydantic_ai.messages import (
 )
 from sqlalchemy import select
 
+from .failure_diagnostics import FAILURE_KIND, safe_failure_metadata
 from .history_handoff import is_turn_run, latest_turn_snapshot
-from .models import Message, Turn, User
+from .models import Event, Message, Turn, User
 from .presentation import private_tool
 from .runtime import Runtime
 
@@ -81,6 +82,15 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
         from .message_sources import public_message
         public = {row.id: (await public_message(runtime.database, db, row))[0] for row in messages}
         own = {turn.actor_id: await runtime.database.same_person(db, user, turn.actor_id) for turn in turns}
+        failure_records = list(await db.scalars(select(Event).where(
+            Event.session_id == session_id, Event.kind == FAILURE_KIND,
+        ).order_by(Event.id)))
+        own_turns = {turn.id for turn in turns if own[turn.actor_id]}
+        failure_metadata = {
+            row.turn_id: safe_failure_metadata(json.loads(runtime.security.unseal(row.content)))
+            for row in failure_records
+            if row.turn_id in own_turns
+        }
 
     messages_by_turn: dict[str, list[Message]] = {}
     for message in messages:
@@ -296,7 +306,10 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
                 "timestamp": turn.finished_at or turn.created_at,
                 "source": "system",
                 "message": turn.error,
-                "extra": {"kind": "error", "turn_id": turn.id},
+                "extra": {
+                    "kind": "error", "turn_id": turn.id,
+                    **({"diagnostics": failure_metadata[turn.id]} if failure_metadata.get(turn.id) else {}),
+                },
             })
         if (cost := _turn_cost(turn)) is not None:
             total_cost_usd += cost

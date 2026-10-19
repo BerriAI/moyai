@@ -23,7 +23,9 @@ from pydantic_ai_harness import ModalSandbox
 from sqlalchemy import delete, literal, select, update
 
 from .contracts import PreparedTurn, RunScope
-from .models import ComputerOperation, Message, Session, Turn, now
+from .failed_action_attempts import settle_failed_action_attempts
+from .failure_diagnostics import FAILURE_KIND, safe_failure_metadata
+from .models import ComputerOperation, Event, Message, Session, Turn, now
 from .product_continuation_errors import preparation_blocked
 from .workspace_recovery import (
     checkpoint,
@@ -297,7 +299,10 @@ class AnswerSettlement:
             session.status = "stopped" if stopped else "idle"
             session.active_turn = None
 
-    async def fail(self, turn_id: str, message: str, *, only_unsettled: bool = False) -> None:
+    async def fail(
+        self, turn_id: str, message: str, *, only_unsettled: bool = False,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
         async with self.database._admission_session(None) as db:
             # Resolve ownership without caching a mutable Turn. Stop, deletion
             # and answer publication fence the session first; take that same
@@ -327,6 +332,15 @@ class AnswerSettlement:
             turn.status = "failed"
             turn.error = message
             turn.finished_at = now()
+            details = safe_failure_metadata(diagnostics)
+            identity = f"failure-diagnostics:{turn.id}"
+            if details and not await db.scalar(select(Event.id).where(Event.identity == identity)):
+                db.add(Event(
+                    session_id=session_id, turn_id=turn.id, kind=FAILURE_KIND, identity=identity,
+                    content=self.database.security.seal(details),
+                ))
+            await db.flush()
+            await settle_failed_action_attempts(db, session_id)
             if session and session.active_turn == turn.id:
                 session.active_turn = None
                 session.status = "failed"

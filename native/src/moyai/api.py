@@ -53,6 +53,7 @@ from .api_views import (
     SessionSummary,
     SessionUpdateResult,
     SlackDeliveryRetry,
+    TurnFailureDetails,
     TurnView,
     TurnWorkProgress,
     WorkActionDetail,
@@ -61,6 +62,8 @@ from .computer import routes as computer_routes
 from .connections import ConnectionPolicy
 from .contracts import ApprovalReply, EffectResolution, NewMessage, NewSession, QueuedEdit, SessionEdit
 from .debug_trace import debug_trace
+from .failed_action_attempts import failed_action_attempt
+from .failure_diagnostics import failure_details
 from .file_preview import routes as file_preview_routes
 from .general_preferences import GeneralPreferences, general_preferences
 from .history_handoff import is_turn_run, latest_turn_snapshot
@@ -538,7 +541,8 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             result["session"]["unread"] = bool(read and read.unread)
             active_turn = next((turn for turn in turns if turn.id == row.active_turn), None)
             unsettled = list((await db.scalars(select(Effect).where(
-                Effect.session_id == session_id, Effect.state == "pending"
+                Effect.session_id == session_id, Effect.state == "pending",
+                ~failed_action_attempt(),
             ))).all())
             result["has_unsettled_effects"] = bool(unsettled)
             own_turns = {turn.id for turn, view in zip(turns, result["turns"]) if view["is_self"]}
@@ -624,6 +628,27 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
         if source_session != session_id:
             await runtime.database.session(user, source_session)
         return WorkActionDetail.model_validate(result)
+
+    @app.get("/api/sessions/{session_id}/turns/{turn_id}/failure", operation_id="getTurnFailureDetails")
+    async def turn_failure_details(
+        session_id: str, turn_id: str, request: Request, response: Response, user: User = Depends(actor),
+    ) -> TurnFailureDetails:
+        await runtime.database.session(user, session_id)
+        async with runtime.database.sessions() as db:
+            turn = await db.get(Turn, turn_id)
+            if turn is None or turn.session_id != session_id or not turn.error:
+                raise HTTPException(404, "Failure not found.")
+            if not await runtime.database.same_person(db, user, turn.actor_id):
+                raise HTTPException(403, "Failure details are visible only to the requester.")
+        details = await failure_details(runtime, turn)
+        fresh = await runtime.database.user(user.id)
+        if fresh.auth_version != user.auth_version:
+            raise HTTPException(401, "Your session expired.")
+        if runtime.product_identity is not None:
+            await runtime.product_identity.require_request_current(request)
+        await runtime.database.session(user, session_id)
+        response.headers["Cache-Control"] = "no-store"
+        return TurnFailureDetails.model_validate(details)
 
     @app.get("/api/sessions/{session_id}/activity", operation_id="getSessionActivity")
     async def session_activity(session_id: str, user: User = Depends(actor)) -> list[SavedActivity]:
@@ -1046,6 +1071,7 @@ def create_app(runtime: Runtime | None = None, *, run_dispatcher: bool = True) -
             rows = await db.scalars(select(Effect).where(
                 Effect.session_id == session_id,
                 Effect.state == "pending",
+                ~failed_action_attempt(),
             ).order_by(Effect.created_at))
             return [PendingEffect(
                 id=row.id, turn_id=row.turn_id, tool_name=row.tool_name,

@@ -7,11 +7,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel, computed_field
+from pydantic import MISSING, BaseModel, ConfigDict, Field, JsonValue, RootModel, computed_field
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai_harness.ask_user import AskUserRequest
 
 from .general_preferences import GeneralPreferences
+from .product_history import absent
 
 
 class MeUser(BaseModel):
@@ -423,6 +424,54 @@ class WorkActionDetail(WorkToolProgress):
     restricted: bool
     input_truncated: bool
     output_truncated: bool
+
+
+class FailureCauseView(ApiView):
+    type: str
+    application_type: str | MISSING = absent()
+    activity_type: str | MISSING = absent()
+    activity_id: str | MISSING = absent()
+
+
+class FailureRuntimeView(ApiView):
+    exception_chain: list[FailureCauseView]
+
+
+class FailureActionView(ApiView):
+    id: str
+    tool: str
+    timestamp: str | None
+    status: Literal["completed", "failed", "interrupted"]
+
+
+class FailureToolErrorView(FailureActionView):
+    error: str | None
+    restricted: bool
+    truncated: bool
+
+
+class FailureUsageView(ApiView):
+    requests: int | float | MISSING = absent()
+    input_tokens: int | float | MISSING = absent()
+    output_tokens: int | float | MISSING = absent()
+
+
+class TurnFailureDetails(ApiView):
+    session_id: str
+    turn_id: str
+    workflow_id: str
+    # Uses the same runtime state vocabulary as TurnView.
+    status: str
+    model: str
+    summary: str
+    created_at: str
+    finished_at: str | None
+    runtime: FailureRuntimeView | None
+    notes: list[str]
+    last_action: FailureActionView | None
+    recent_failures: list[FailureToolErrorView]
+    failures_limited: bool
+    usage: FailureUsageView
 
 
 class SessionUpdateResult(ApiView):

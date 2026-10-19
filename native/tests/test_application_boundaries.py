@@ -218,7 +218,7 @@ async def test_login_attempt_limit_is_shared_by_application_instances(runtime, m
         await other.close()
 
 
-async def test_uncertain_write_blocks_new_call_ids_until_reviewed(runtime, active, actor):
+async def test_uncertain_write_blocks_new_call_ids_until_turn_fails(runtime, active, actor):
     session, turn, prepared = active
     receipts = EffectReceipts(runtime.database)
     await receipts.reserve(prepared.scope, "first-call", "shell", {"command": "external write"})
@@ -227,13 +227,12 @@ async def test_uncertain_write_blocks_new_call_ids_until_reviewed(runtime, activ
     await runtime.database.fail(turn.id, "The transport lost the acknowledgment.")
     async with sign_in(runtime) as client:
         pending = await client.get(f"/api/sessions/{session.id}/effects")
-        assert pending.json()[0]["id"] == "first-call"
-        resolved = await client.post("/api/effects/first-call/resolve", json={
-            "outcome": "completed", "evidence": "Checked the destination and found the created item.",
-        })
-        assert resolved.status_code == 200
+        assert pending.json() == []
+        assert not (await client.get(f"/api/sessions/{session.id}")).json()["has_unsettled_effects"]
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Effect, "first-call")).state == "failed"
     follow_up = await runtime.database.submit(actor, session.id, NewMessage(
-        prompt="Continue.", request_key="after-review"
+        prompt="Continue.", request_key="after-failure"
     ))
     await runtime.database.claim_next()
     admitted = await runtime.database.prepare(follow_up.id)

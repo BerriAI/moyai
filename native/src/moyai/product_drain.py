@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 
 from .inference_usage import InferenceUsage
-from .models import Effect, Turn, now
+from .models import ComputerOperation, Effect, Turn, now
 from .product_drain_models import ProductDrainReceipt, ProductDrainState, ProductDrainWorker
 from .product_inference import ProductInferenceRequest
 from .product_role_authority import ProductRoleAuthority
@@ -172,8 +173,19 @@ class ProductDrainService:
 
     @staticmethod
     async def _unsettled(db: AsyncSession, turn_id: str | None = None) -> tuple[int, int]:
+        from .failed_action_attempts import failed_action_attempt
+
         effects = select(func.count()).select_from(Effect).where(
             Effect.state.not_in(["confirmed", "not_dispatched"]),
+            or_(
+                ~failed_action_attempt(),
+                # A failed attempt no longer requires human evidence,
+                # but its bounded guest operation must finish before maintenance.
+                select(ComputerOperation.session_id).where(
+                    ComputerOperation.session_id == Effect.session_id,
+                    ComputerOperation.expires_at > time.time(),
+                ).exists(),
+            ),
         )
         if turn_id is not None:
             effects = effects.where(Effect.turn_id == turn_id)

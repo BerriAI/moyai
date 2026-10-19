@@ -6767,6 +6767,188 @@
         "title": "EventTrigger",
         "type": "object"
       },
+      "FailureActionView": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "timestamp",
+          "status"
+        ],
+        "title": "FailureActionView",
+        "type": "object"
+      },
+      "FailureCauseView": {
+        "properties": {
+          "activity_id": {
+            "title": "Activity Id",
+            "type": "string"
+          },
+          "activity_type": {
+            "title": "Activity Type",
+            "type": "string"
+          },
+          "application_type": {
+            "title": "Application Type",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "FailureCauseView",
+        "type": "object"
+      },
+      "FailureRuntimeView": {
+        "properties": {
+          "exception_chain": {
+            "items": {
+              "$ref": "#/components/schemas/FailureCauseView"
+            },
+            "title": "Exception Chain",
+            "type": "array"
+          }
+        },
+        "required": [
+          "exception_chain"
+        ],
+        "title": "FailureRuntimeView",
+        "type": "object"
+      },
+      "FailureToolErrorView": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "restricted": {
+            "title": "Restricted",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "timestamp",
+          "status",
+          "error",
+          "restricted",
+          "truncated"
+        ],
+        "title": "FailureToolErrorView",
+        "type": "object"
+      },
+      "FailureUsageView": {
+        "properties": {
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "requests": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Requests"
+          }
+        },
+        "title": "FailureUsageView",
+        "type": "object"
+      },
       "FolderName": {
         "properties": {
           "name": {
@@ -17923,6 +18105,108 @@
         "title": "Trigger",
         "type": "object"
       },
+      "TurnFailureDetails": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "failures_limited": {
+            "title": "Failures Limited",
+            "type": "boolean"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "last_action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureActionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "recent_failures": {
+            "items": {
+              "$ref": "#/components/schemas/FailureToolErrorView"
+            },
+            "title": "Recent Failures",
+            "type": "array"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureRuntimeView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/FailureUsageView"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "turn_id",
+          "workflow_id",
+          "status",
+          "model",
+          "summary",
+          "created_at",
+          "finished_at",
+          "runtime",
+          "notes",
+          "last_action",
+          "recent_failures",
+          "failures_limited",
+          "usage"
+        ],
+        "title": "TurnFailureDetails",
+        "type": "object"
+      },
       "TurnView": {
         "properties": {
           "accepted_at": {
@@ -24220,6 +24504,54 @@
           }
         },
         "summary": "Board"
+      }
+    },
+    "/api/sessions/{session_id}/turns/{turn_id}/failure": {
+      "get": {
+        "operationId": "getTurnFailureDetails",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnFailureDetails"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Turn Failure Details"
       }
     },
     "/api/sessions/{session_id}/workspace": {

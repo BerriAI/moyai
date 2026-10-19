@@ -40,6 +40,7 @@ with workflow.unsafe.imports_passed_through():
     from .contracts import CompletedTurn, PreparedTurn, RunScope, SteeringInput
     from .deployment_handoff import VERSION as DEPLOYMENT_HANDOFF_VERSION
     from .deployment_handoff import DeploymentHandoff
+    from .failure_diagnostics import FAILURE_VERSION, capture_failure
     from .history_handoff import VERSION as HISTORY_VERSION
     from .history_handoff import AgentCheckpoint, CheckpointSave, HistoryHandoff, HistoryLimits
     from .images import prompt_content
@@ -459,7 +460,8 @@ class TurnWorkflow(PydanticAIWorkflow):
                     )
             await workflow.execute_activity(
                 "moyai_fail_turn_v1",
-                args=[turn_id, message],
+                args=[turn_id, message, capture_failure(error)] if workflow.patched(FAILURE_VERSION)
+                else [turn_id, message],
                 **CONTROL,
             )
             if isinstance(error, ApplicationError):

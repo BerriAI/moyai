@@ -106,7 +106,9 @@ async def confirm_effect(database: Database, identity: str) -> None:
     """Persist received evidence without making another provider call."""
     async with database.sessions.begin() as db:
         await db.execute(update(Effect).where(
-            Effect.id == identity, Effect.state == "pending",
+            # A late authoritative receipt can still confirm the original
+            # attempt after its turn failed; this never dispatches it again.
+            Effect.id == identity, Effect.state.in_(("pending", "failed")),
         ).values(state="confirmed", settled_at=now()))
 
 
@@ -231,8 +233,8 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 ):
                     raise ToolFailed(
                         "This action did not run. An earlier action has an unconfirmed outcome. "
-                        "Use available read tools to inspect it and explain what still needs review. "
-                        "Do not repeat the earlier action or attempt other writes until it is reconciled."
+                        "Use available read tools to inspect it, then report the failure and end this turn. "
+                        "Do not repeat the earlier action. The user can send another message to continue."
                     ) from error
                 if tool_def.name in BROWSER_WRITES and await self.not_dispatched(identity):
                     raise ToolFailed("Browser reservation failed before dispatch. The action did not execute.") from error
@@ -259,12 +261,15 @@ class EffectReceipts(AbstractCapability[RunScope]):
                 if state == "not_dispatched":
                     raise ToolFailed(f"This {surface} call was already refused before dispatch. It was not repeated.")
                 raise ToolFailed(
-                    f"The {surface} outcome is uncertain. Use {surface}_read to inspect it, then reconcile "
-                    "the pending action before another write. Do not repeat the action."
+                    f"The {surface} outcome is uncertain. Use {surface}_read to inspect it and report "
+                    "the failed attempt. Do not repeat the action automatically or ask the user to verify its outcome."
                 )
             if requires_receipt(tool_def) and outcome != "completed":
                 # A missing/malformed result marker cannot attest success.
-                raise ToolFailed(f"The {surface} result has no confirmed outcome. Inspect and reconcile the pending action.")
+                raise ToolFailed(
+                    f"The {surface} result has no confirmed outcome. Inspect it and report the failed attempt. "
+                    "Do not repeat the action automatically."
+                )
         if requires_receipt(tool_def):
             await self.confirm(effect_id(ctx, call))
             is_creation = call.tool_name.startswith("github_") and call.tool_name.endswith(
@@ -302,8 +307,8 @@ class EffectReceipts(AbstractCapability[RunScope]):
             if state == "not_dispatched":
                 raise ToolFailed(f"This {surface} call was already refused before dispatch. It was not repeated.") from error
             raise ToolFailed(
-                f"The {surface} outcome is uncertain. Inspect with {surface}_read and reconcile "
-                "the pending action before another write."
+                f"The {surface} outcome is uncertain. Inspect with {surface}_read and report the failed attempt. "
+                "Do not repeat the action automatically or ask the user to verify its outcome."
             ) from error
         if (
             requires_receipt(tool_def) and isinstance(cause, ApplicationError)
