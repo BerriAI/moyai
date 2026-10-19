@@ -449,8 +449,20 @@ class ProductSlack:
                 "failed": failure_report.text if failure_report is not None else "",
                 "stopped": "The task stopped.",
             }.get(turn.status, "")
+            artifacts = []
             if turn.status == "completed":
                 text_value = self.runtime.security.unseal(turn.result).decode() if turn.result else "Task completed."
+                async with self.runtime.database.sessions() as db:
+                    artifacts = list(await db.scalars(
+                        select(Artifact).where(Artifact.turn_id == turn.id).order_by(
+                            Artifact.created_at, Artifact.id,
+                        ),
+                    ))
+                text_value = SlackFileDelivery.strip_links(
+                    text_value, (artifact.id for artifact in artifacts), self.settings.public_url,
+                )
+                if not text_value.strip():
+                    text_value = "Task completed."
             url = session_url(self.settings.public_url, turn.session_id, binding.source_run_id or "")
             cards = pr_cards(text_value, url) if turn.status == "completed" else []
             content: dict[str, Any] = {"text": slack_text(text_value)}
@@ -479,18 +491,19 @@ class ProductSlack:
                             content["text"] += "\nProvide organization access through the secure form in Moyai. Never post secret values in Slack."
                     if any(call.tool_name == "ask_user_question" for call in pending.calls):
                         content["text"] += "\nReply `/answer your response` for one question, or `/answer {\"Heading\":\"response\"}` for several."
-            if turn.status == "completed":
-                async with self.runtime.database.sessions() as db:
-                    artifacts = list(await db.scalars(select(Artifact).where(Artifact.turn_id == turn.id)))
-                for artifact in artifacts:
-                    content["text"] += (
-                        "\n<" + self.settings.public_url.rstrip("/") + "/api/files/" + artifact.id
-                        + "|" + html.escape(artifact.name, quote=False).replace("|", "¦") + ">"
-                    )
             parts = [(
                 f"{turn.status}:0",
                 thread_message(content["text"], url, cards=cards, controls=controls),
             )]
+            parts.extend(
+                (
+                    f"completed:artifact:{artifact.id}",
+                    SlackFileDelivery.artifact(
+                        artifact, after=f"product-slack:{turn.id}:completed:0",
+                    ),
+                )
+                for artifact in artifacts
+            )
             if failure_report is not None:
                 parts.append(("failed:debug", SlackFileDelivery.content(
                     failure_report.debug_log,
@@ -667,13 +680,14 @@ class ProductSlack:
 
             async def before_send():
                 if not await self.delivery_allowed(delivery):
-                    raise PermissionError("Slack debug log delivery is no longer authorized.")
+                    raise PermissionError("Slack file delivery is no longer authorized.")
 
             try:
                 receipt = await SlackFileDelivery.send(
                     client,
                     content,
                     destination,
+                    objects=self.runtime.objects,
                     headers={"Authorization": "Bearer " + token},
                     before_send=before_send,
                 )
