@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import MISSING
 from sqlalchemy import and_, case, column, false, func, or_, select, table
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased
@@ -29,7 +30,11 @@ from .product_history import (
     MAX_MESSAGE_CHARS,
     MAX_OFFSET,
     MAX_PAGE,
+    HistoryMessage,
+    HistorySession,
     Principal,
+    ResponseModel,
+    absent,
     bounded,
     prepare_history_query,
 )
@@ -45,6 +50,68 @@ NavigationScope = Literal["all", "mine"]
 SEARCH_ROWS = 1000
 SEARCH_BYTES = 4 * 1024 * 1024
 CIPHER_CHARS = 180_000
+SourceState = Literal["available", "unavailable", "disabled"]
+
+
+class HistorySourceStates(ResponseModel):
+    native: SourceState | MISSING = absent()
+    legacy: SourceState | MISSING = absent()
+
+
+class HistorySearchLimits(ResponseModel):
+    native_messages: int
+    native_ciphertext_bytes: int
+    legacy_message_prefix_chars: int | None
+
+
+class SourcedHistorySession(HistorySession):
+    """A /api/history row: stored IDs are kept; ``key`` is the source-qualified UI identity."""
+    source: Source
+    key: str
+    can_manage: bool | MISSING = absent()
+
+
+class HistorySessionList(ResponseModel):
+    sessions: list[SourcedHistorySession]
+    ancestors: list[SourcedHistorySession]
+    has_more: bool
+    next_cursor: str | None
+    sources: HistorySourceStates
+    partial: bool
+    notice: str | None
+    search_limits: HistorySearchLimits | None
+
+
+class ProductContinuationResult(ResponseModel):
+    """The native conversation that continues an earlier-product session."""
+    source: Literal["native"]
+    id: str
+    source_session_id: str
+    url: str
+    turn_id: str | None
+    history_count: int
+    imported_count: int
+    recent_history: bool
+
+
+class HistorySessionDetail(ResponseModel):
+    session: SourcedHistorySession
+    # Earlier-product sessions only.
+    turns: list[Any] | MISSING = absent()
+    effects: list[Any] | MISSING = absent()
+    has_unsettled_effects: bool | MISSING = absent()
+    continuation_supported: bool | MISSING = absent()
+    continuation: ProductContinuationResult | None | MISSING = absent()
+
+
+class HistoryMessagePage(ResponseModel):
+    messages: list[HistoryMessage]
+    has_more: bool
+    next_offset: int | None
+    # Earlier-product sessions only.
+    content_limit: int | MISSING = absent()
+    attachments_truncated: bool | MISSING = absent()
+    source_format: str | MISSING = absent()
 
 
 def sourced(row: dict[str, Any], source: Source) -> dict[str, Any]:
@@ -609,7 +676,7 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         return await service.authenticate(request, user)
 
-    @router.get("/api/history/sessions")
+    @router.get("/api/history/sessions", operation_id="listHistorySessions", response_model=HistorySessionList)
     async def sessions(
         source: Sources = "all", limit: int = Query(50, ge=1, le=MAX_PAGE),
         cursor: str | None = Query(None, max_length=512), archived: bool = False, deleted: bool = False,
@@ -619,18 +686,21 @@ def routes(runtime: Runtime, actor) -> APIRouter:
         return await service.listing(current, source=source, limit=limit, cursor=cursor,
                                      archived=archived, deleted=deleted, scope=scope)
 
-    @router.get("/api/history/search")
+    @router.get("/api/history/search", operation_id="searchHistory", response_model=HistorySessionList)
     async def search(
         q: str = Query("", max_length=200), source: Sources = "all", limit: int = Query(20, ge=1, le=MAX_PAGE),
         cursor: str | None = Query(None, max_length=512), current: Reader = Depends(reader),
     ):
         return await service.listing(current, source=source, query=q, limit=limit, cursor=cursor)
 
-    @router.get("/api/history/sessions/{run_id}")
+    @router.get("/api/history/sessions/{run_id}", operation_id="getHistorySession", response_model=HistorySessionDetail)
     async def detail(run_id: str, source: Source, current: Reader = Depends(reader)):
         return await service.detail(current, run_id, source)
 
-    @router.get("/api/history/sessions/{run_id}/messages")
+    @router.get(
+        "/api/history/sessions/{run_id}/messages", operation_id="listHistoryMessages",
+        response_model=HistoryMessagePage,
+    )
     async def messages(
         run_id: str, source: Source, limit: int = Query(50, ge=1, le=MAX_PAGE),
         offset: int = Query(0, ge=0, le=MAX_OFFSET), current: Reader = Depends(reader),

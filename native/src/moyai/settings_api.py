@@ -27,10 +27,29 @@ from .analytics_service import report as analytics_report
 from .contracts import PreparedTurn, RunScope
 from .general_preferences import GeneralPreferences, general_preferences, preference_document
 from .models import Connection, Turn, User, now
+from .product_auth import ProductUserDirectory, user_directory
+from .product_secrets import CredentialInventory
 from .pull_requests import PullRequestService
 from .security import password_hash
 from .settings_models import SettingAutomation, SettingAutomationRun, SettingSecret, SettingSkill
 from .settings_runtime import automation_readiness, reconcile_schedule
+from .settings_views import (
+    AnalyticsReport,
+    SettingsAccount,
+    SettingsAccountList,
+    SettingsAutomation,
+    SettingsAutomationCapabilities,
+    SettingsAutomationList,
+    SettingsAutomationLogs,
+    SettingsDeleted,
+    SettingsMemoryList,
+    SettingsMemoryWrite,
+    SettingsOverview,
+    SettingsSecret,
+    SettingsSecretList,
+    SettingsSkill,
+    SettingsSkillList,
+)
 
 Scope = Literal["personal", "shared"]
 CAPABILITIES = {"create": True, "update": True, "delete": True}
@@ -153,19 +172,19 @@ async def lock_actor(db: Any, user: User) -> None:
         raise HTTPException(401, "Your access changed. Sign in again.")
 
 
-def secret_view(row: SettingSecret | SettingSkill, user: User) -> dict[str, Any]:
-    return {
-        "id": row.id, "name": row.name, "description": row.description,
-        "scope": "shared" if row.scope_key == "shared" else "personal",
-        "editable": can_edit(row, user), "updated_at": row.updated_at,
-    }
+def secret_view(row: SettingSecret | SettingSkill, user: User) -> SettingsSecret:
+    return SettingsSecret(
+        id=row.id, name=row.name, description=row.description,
+        scope="shared" if row.scope_key == "shared" else "personal",
+        editable=can_edit(row, user), updated_at=row.updated_at,
+    )
 
 
-def skill_view(runtime: Any, row: SettingSkill, user: User) -> dict[str, Any]:
-    return {
-        **secret_view(row, user), "content": runtime.security.unseal(row.content).decode(),
-        "enabled": row.enabled,
-    }
+def skill_view(runtime: Any, row: SettingSkill, user: User) -> SettingsSkill:
+    return SettingsSkill(
+        **secret_view(row, user).model_dump(), content=runtime.security.unseal(row.content).decode(),
+        enabled=row.enabled,
+    )
 
 
 def bundled_skills() -> list[dict[str, Any]]:
@@ -184,19 +203,20 @@ def bundled_skills() -> list[dict[str, Any]]:
     return rows
 
 
-def user_view(row: User) -> dict[str, Any]:
-    return {name: getattr(row, name) for name in (
-        "id", "username", "display_name", "role", "enabled", "auth_version",
-    )}
+def user_view(row: User) -> SettingsAccount:
+    return SettingsAccount(
+        id=row.id, username=row.username, display_name=row.display_name, role=row.role,
+        enabled=row.enabled, auth_version=row.auth_version,
+    )
 
 
-def automation_view(runtime: Any, row: SettingAutomation) -> dict[str, Any]:
-    return {
-        "id": row.id, "name": row.name, "prompt": runtime.security.unseal(row.prompt).decode(),
-        "session_id": row.session_id, "model": row.model, "connections": json.loads(row.connections),
-        "interval_minutes": row.interval_minutes, "paused": row.paused, "state": row.state,
-        "updated_at": row.updated_at, "editable": True,
-    }
+def automation_view(runtime: Any, row: SettingAutomation) -> SettingsAutomation:
+    return SettingsAutomation(
+        id=row.id, name=row.name, prompt=runtime.security.unseal(row.prompt).decode(),
+        session_id=row.session_id, model=row.model, connections=json.loads(row.connections),
+        interval_minutes=row.interval_minutes, paused=row.paused, state=row.state,
+        updated_at=row.updated_at, editable=True,
+    )
 
 
 async def memory_namespaces(runtime: Any, user: User) -> list[dict[str, str]]:
@@ -227,7 +247,7 @@ async def memory_path(runtime: Any, user: User, namespace: str | None, path: str
     return namespace, f"{namespace}/main/{path}"
 
 
-async def change_user(runtime: Any, caller: User, identity: str, changes: UserEdit) -> dict[str, Any]:
+async def change_user(runtime: Any, caller: User, identity: str, changes: UserEdit) -> SettingsAccount:
     admin(caller)
     values = changes.model_dump(exclude_none=True)
     if "password" in values:
@@ -318,12 +338,12 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
 
     router = APIRouter(prefix="/api/settings", tags=["settings"], route_class=RuntimeSettingsRoute)
 
-    @router.get("/general")
-    async def general(user: User = Depends(actor)):
-        return general_preferences(user.preferences)
+    @router.get("/general", operation_id="getSettingsGeneral")
+    async def general(user: User = Depends(actor)) -> GeneralPreferences:
+        return GeneralPreferences.model_validate(general_preferences(user.preferences))
 
-    @router.patch("/general")
-    async def update_general(body: GeneralPreferences, user: User = Depends(actor)):
+    @router.patch("/general", operation_id="updateSettingsGeneral")
+    async def update_general(body: GeneralPreferences, user: User = Depends(actor)) -> GeneralPreferences:
         async with runtime.database.sessions.begin() as db:
             await lock_actor(db, user)
             row = await db.get(User, user.id)
@@ -334,7 +354,7 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
                 **body.model_dump(exclude_unset=True),
             }
             row.preferences = json.dumps(document)
-            return general_preferences(row.preferences)
+            return GeneralPreferences.model_validate(general_preferences(row.preferences))
 
     def capabilities(user: User) -> dict[str, Any]:
         return {
@@ -345,8 +365,8 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             "users": user.role == "admin", "performance": user.role == "admin", "usage": user.role == "admin",
         }
 
-    @router.get("/overview")
-    async def overview(user: User = Depends(actor)):
+    @router.get("/overview", operation_id="getSettingsOverview")
+    async def overview(user: User = Depends(actor)) -> SettingsOverview:
         async with runtime.database.sessions() as db:
             counts = {
                 "skills": len(bundled_skills()) + (await db.scalar(select(func.count()).select_from(
@@ -370,24 +390,26 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         ])
         available = capabilities(user)
         available["automations"] = await automation_readiness(runtime)
-        return {
+        return SettingsOverview.model_validate({
             "user": {"id": user.id, "name": user.display_name, "role": user.role},
             "counts": counts, "capabilities": available,
             "engine": {"agent": "pydantic-ai", "harness": "pydantic-ai-harness",
                        "durability": "temporal", "sandbox": "modal"},
-        }
+        })
 
-    @router.get("/skills")
-    async def skills(user: User = Depends(actor)):
+    @router.get("/skills", operation_id="listSettingsSkills")
+    async def skills(user: User = Depends(actor)) -> SettingsSkillList:
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(SettingSkill).where(accessible(SettingSkill, user)).order_by(
                 SettingSkill.name,
             ))
-            return {"skills": bundled_skills() + [skill_view(runtime, row, user) for row in rows],
-                    "capabilities": capabilities(user)["skills"]}
+            return SettingsSkillList.model_validate({
+                "skills": [*bundled_skills(), *(skill_view(runtime, row, user) for row in rows)],
+                "capabilities": capabilities(user)["skills"],
+            })
 
-    @router.post("/skills", status_code=201)
-    async def create_skill(body: SkillInput, user: User = Depends(actor)):
+    @router.post("/skills", status_code=201, operation_id="createSettingsSkill")
+    async def create_skill(body: SkillInput, user: User = Depends(actor)) -> SettingsSkill:
         key = scope_key(body.scope, user)
         try:
             async with runtime.database.sessions.begin() as db:
@@ -403,8 +425,8 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         except IntegrityError:
             raise HTTPException(409, "A skill with this name already exists in that scope.") from None
 
-    @router.patch("/skills/{identity}")
-    async def edit_skill(identity: str, body: SkillInput, user: User = Depends(actor)):
+    @router.patch("/skills/{identity}", operation_id="updateSettingsSkill")
+    async def edit_skill(identity: str, body: SkillInput, user: User = Depends(actor)) -> SettingsSkill:
         key = scope_key(body.scope, user)
         try:
             async with runtime.database.sessions.begin() as db:
@@ -419,25 +441,35 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         except IntegrityError:
             raise HTTPException(409, "A skill with this name already exists in that scope.") from None
 
-    @router.delete("/skills/{identity}")
-    async def delete_skill(identity: str, user: User = Depends(actor)):
+    @router.delete("/skills/{identity}", operation_id="deleteSettingsSkill")
+    async def delete_skill(identity: str, user: User = Depends(actor)) -> SettingsDeleted:
         async with runtime.database.sessions.begin() as db:
             await lock_actor(db, user)
             await db.delete(await resource(db, SettingSkill, identity, user))
-        return {"deleted": True}
+        return SettingsDeleted(deleted=True)
 
-    @router.get("/secrets")
-    async def secrets(user: User = Depends(actor)):
+    # Product mode answers these settings routes from the product services, so
+    # each path has one handler and one documented contract for both modes.
+    @router.get("/secrets", operation_id="listSettingsSecrets")
+    async def secrets(
+        request: Request, run_id: str = Query("", description="Product mode only."), user: User = Depends(actor),
+    ) -> SettingsSecretList | CredentialInventory:
+        if runtime.product_secrets is not None:
+            return await runtime.product_secrets.settings_inventory(request, run_id)
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(SettingSecret).where(accessible(SettingSecret, user)).order_by(
                 SettingSecret.name,
             ))
-            return {"secrets": [secret_view(row, user) for row in rows],
-                    "capabilities": capabilities(user)["secrets"],
-                    "reason": ""}
+            return SettingsSecretList.model_validate({
+                "secrets": [secret_view(row, user) for row in rows],
+                "capabilities": capabilities(user)["secrets"],
+                "reason": "",
+            })
 
-    @router.post("/secrets", status_code=201)
-    async def create_secret(body: SecretInput, user: User = Depends(actor)):
+    @router.post("/secrets", status_code=201, operation_id="createSettingsSecret")
+    async def create_secret(body: SecretInput, request: Request, user: User = Depends(actor)) -> SettingsSecret:
+        if runtime.product_secrets is not None:
+            await runtime.product_secrets.reject_settings_mutation(request)
         key = scope_key(body.scope, user)
         try:
             async with runtime.database.sessions.begin() as db:
@@ -450,8 +482,10 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         except IntegrityError:
             raise HTTPException(409, "A secret with this name already exists in that scope.") from None
 
-    @router.patch("/secrets/{identity}")
-    async def edit_secret(identity: str, body: SecretEdit, user: User = Depends(actor)):
+    @router.patch("/secrets/{identity}", operation_id="updateSettingsSecret")
+    async def edit_secret(identity: str, body: SecretEdit, request: Request, user: User = Depends(actor)) -> SettingsSecret:
+        if runtime.product_secrets is not None:
+            await runtime.product_secrets.reject_settings_mutation(request)
         key = scope_key(body.scope, user) if body.scope is not None else None
         try:
             async with runtime.database.sessions.begin() as db:
@@ -471,15 +505,17 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         except IntegrityError:
             raise HTTPException(409, "A secret with this name already exists in that scope.") from None
 
-    @router.delete("/secrets/{identity}")
-    async def delete_secret(identity: str, user: User = Depends(actor)):
+    @router.delete("/secrets/{identity}", operation_id="deleteSettingsSecret")
+    async def delete_secret(identity: str, request: Request, user: User = Depends(actor)) -> SettingsDeleted:
+        if runtime.product_secrets is not None:
+            await runtime.product_secrets.reject_settings_mutation(request)
         async with runtime.database.sessions.begin() as db:
             await lock_actor(db, user)
             await db.delete(await resource(db, SettingSecret, identity, user))
-        return {"deleted": True}
+        return SettingsDeleted(deleted=True)
 
-    @router.get("/memory")
-    async def memory(namespace: str | None = None, user: User = Depends(actor)):
+    @router.get("/memory", operation_id="listSettingsMemory")
+    async def memory(namespace: str | None = None, user: User = Depends(actor)) -> SettingsMemoryList:
         scopes = await memory_namespaces(runtime, user)
         namespace, _ = await memory_path(runtime, user, namespace, "MEMORY.md")
         prefix = f"{namespace}/main/"
@@ -490,13 +526,15 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             if value:
                 rows.append({"namespace": namespace, "path": path[len(prefix):], "content": value.content,
                              "version": value.version, "truncated": value.truncated})
-        return {"memories": rows, "namespaces": scopes, "default_namespace": scopes[0]["id"],
-                "namespace": namespace, "truncated": len(paths) > 1000,
-                "capabilities": capabilities(user)["memory"]}
+        return SettingsMemoryList.model_validate({
+            "memories": rows, "namespaces": scopes, "default_namespace": scopes[0]["id"],
+            "namespace": namespace, "truncated": len(paths) > 1000,
+            "capabilities": capabilities(user)["memory"],
+        })
 
-    @router.put("/memory")
+    @router.put("/memory", operation_id="writeSettingsMemory")
     async def write_memory(body: MemoryInput, path: str = "MEMORY.md", namespace: str | None = None,
-                           user: User = Depends(actor)):
+                           user: User = Depends(actor)) -> SettingsMemoryWrite:
         namespace, store_path = await memory_path(runtime, user, namespace, path)
         try:
             async with runtime.database.sessions.begin() as db:
@@ -504,11 +542,11 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
                 result = await runtime.stores.memory.write(store_path, body.content, expected_version=body.version)
         except MemoryConflictError:
             raise HTTPException(409, "Memory changed. Reload before saving.") from None
-        return {"namespace": namespace, "path": path, "content": body.content, "version": result.version}
+        return SettingsMemoryWrite(namespace=namespace, path=path, content=body.content, version=result.version)
 
-    @router.delete("/memory")
+    @router.delete("/memory", operation_id="deleteSettingsMemory")
     async def delete_memory(path: str, namespace: str | None = None, version: str | None = None,
-                            user: User = Depends(actor)):
+                            user: User = Depends(actor)) -> SettingsDeleted:
         _, store_path = await memory_path(runtime, user, namespace, path)
         try:
             async with runtime.database.sessions.begin() as db:
@@ -516,17 +554,25 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
                 await runtime.stores.memory.delete(store_path, expected_version=version)
         except MemoryConflictError:
             raise HTTPException(409, "Memory changed. Reload before deleting.") from None
-        return {"deleted": True}
+        return SettingsDeleted(deleted=True)
 
-    @router.get("/users")
-    async def users(user: User = Depends(actor)):
+    @router.get("/users", operation_id="listSettingsUsers")
+    async def users(user: User = Depends(actor)) -> SettingsAccountList | ProductUserDirectory:
+        if runtime.product is not None:
+            if user.role != "admin":
+                raise HTTPException(403, "An organization administrator must perform this action.")
+            return await user_directory(runtime)
         admin(user)
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(User).order_by(User.username))
-            return {"users": [user_view(row) for row in rows], "capabilities": CAPABILITIES}
+            return SettingsAccountList.model_validate({
+                "users": [user_view(row) for row in rows], "capabilities": CAPABILITIES,
+            })
 
-    @router.post("/users", status_code=201)
-    async def create_user(body: UserInput, user: User = Depends(actor)):
+    @router.post("/users", status_code=201, operation_id="createSettingsUser")
+    async def create_user(body: UserInput, user: User = Depends(actor)) -> SettingsAccount:
+        if runtime.product is not None:
+            raise HTTPException(409, "Manage this account through organization sign-in and product roles.")
         admin(user)
         encoded = await asyncio.to_thread(password_hash, body.password.get_secret_value())
         try:
@@ -540,16 +586,20 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         except IntegrityError:
             raise HTTPException(409, "That username already exists.") from None
 
-    @router.patch("/users/{identity}")
-    async def edit_user(identity: str, body: UserEdit, request: Request, user: User = Depends(actor)):
+    @router.patch("/users/{identity}", operation_id="updateSettingsUser")
+    async def edit_user(identity: str, body: UserEdit, request: Request, user: User = Depends(actor)) -> SettingsAccount:
+        if runtime.product is not None:
+            raise HTTPException(409, "Manage this account through organization sign-in and product roles.")
         result = await change_user(runtime, user, identity, body)
         # A self-edit intentionally revokes this cookie. Its authorized result
         # contains only user metadata and no post-commit external read.
-        request.state.settings_self_auth_change = identity == user.id and result["auth_version"] != user.auth_version
+        request.state.settings_self_auth_change = identity == user.id and result.auth_version != user.auth_version
         return result
 
-    @router.delete("/users/{identity}")
-    async def delete_user(identity: str, request: Request, user: User = Depends(actor)):
+    @router.delete("/users/{identity}", operation_id="deleteSettingsUser")
+    async def delete_user(identity: str, request: Request, user: User = Depends(actor)) -> SettingsAccount:
+        if runtime.product is not None:
+            raise HTTPException(409, "Manage this account through organization sign-in and product roles.")
         # Preserve FK-backed audit history while revoking every existing session.
         result = await change_user(runtime, user, identity, UserEdit(enabled=False))
         request.state.settings_self_auth_change = identity == user.id
@@ -569,18 +619,20 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         except (RPCError, TimeoutError, RuntimeError, OSError):
             raise HTTPException(503, "Temporal did not confirm this change. Saved intent is pending; retry.") from None
 
-    @router.get("/automations")
-    async def automations(user: User = Depends(actor)):
+    @router.get("/automations", operation_id="listSettingsAutomations")
+    async def automations(user: User = Depends(actor)) -> SettingsAutomationList:
         available = await automation_readiness(runtime)
         async with runtime.database.sessions() as db:
             rows = await db.scalars(select(SettingAutomation).where(
                 SettingAutomation.owner_id == user.id, SettingAutomation.state != "deleted",
             ).order_by(SettingAutomation.created_at.desc()))
-            return {"automations": [automation_view(runtime, row) for row in rows],
-                    "capabilities": available, "reason": available["reason"]}
+            return SettingsAutomationList(
+                automations=[automation_view(runtime, row) for row in rows],
+                capabilities=SettingsAutomationCapabilities.model_validate(available), reason=available["reason"],
+            )
 
-    @router.post("/automations", status_code=201)
-    async def create_automation(body: AutomationInput, user: User = Depends(actor)):
+    @router.post("/automations", status_code=201, operation_id="createSettingsAutomation")
+    async def create_automation(body: AutomationInput, user: User = Depends(actor)) -> SettingsAutomation:
         available = await automation_readiness(runtime)
         if not available["create"]:
             raise HTTPException(503, available["reason"])
@@ -608,8 +660,8 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         async with runtime.database.sessions() as db:
             return automation_view(runtime, await own_automation(db, identity, user))
 
-    @router.patch("/automations/{identity}")
-    async def edit_automation(identity: str, body: AutomationEdit, user: User = Depends(actor)):
+    @router.patch("/automations/{identity}", operation_id="updateSettingsAutomation")
+    async def edit_automation(identity: str, body: AutomationEdit, user: User = Depends(actor)) -> SettingsAutomation:
         async with runtime.database.sessions.begin() as db:
             await lock_actor(db, user)
             await db.execute(update(SettingAutomation).where(
@@ -626,8 +678,8 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
         async with runtime.database.sessions() as db:
             return automation_view(runtime, await own_automation(db, identity, user))
 
-    @router.delete("/automations/{identity}")
-    async def delete_automation(identity: str, user: User = Depends(actor)):
+    @router.delete("/automations/{identity}", operation_id="deleteSettingsAutomation")
+    async def delete_automation(identity: str, user: User = Depends(actor)) -> SettingsDeleted:
         async with runtime.database.sessions.begin() as db:
             await lock_actor(db, user)
             await db.execute(update(SettingAutomation).where(
@@ -637,10 +689,10 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             row.paused, row.state, row.updated_at = True, "deleted", now()
             row.revision += 1
         await sync_automation(identity)
-        return {"deleted": True}
+        return SettingsDeleted(deleted=True)
 
-    @router.get("/automations/{identity}/logs")
-    async def automation_logs(identity: str, user: User = Depends(actor)):
+    @router.get("/automations/{identity}/logs", operation_id="listSettingsAutomationLogs")
+    async def automation_logs(identity: str, user: User = Depends(actor)) -> SettingsAutomationLogs:
         async with runtime.database.sessions() as db:
             await own_automation(db, identity, user)
             rows = (await db.execute(select(SettingAutomationRun, Turn.status).outerjoin(
@@ -648,11 +700,22 @@ def routes(runtime: Any, actor: Any) -> APIRouter:
             ).where(SettingAutomationRun.automation_id == identity).order_by(
                 SettingAutomationRun.created_at.desc(),
             ).limit(100))).all()
-            return {"logs": [{"id": row.id, "turn_id": row.turn_id, "status": status or row.status,
-                              "created_at": row.created_at} for row, status in rows]}
+            return SettingsAutomationLogs.model_validate({"logs": [
+                {"id": row.id, "turn_id": row.turn_id, "status": status or row.status, "created_at": row.created_at}
+                for row, status in rows
+            ]})
 
-    @router.get("/usage")
-    @router.get("/performance")
+    # format=csv returns a text/csv download (a Response, which bypasses the model).
+    csv_download: dict[int | str, dict[str, Any]] = {200: {"content": {"text/csv": {}}}}
+
+    @router.get(
+        "/usage", operation_id="getSettingsUsage", response_model=AnalyticsReport,
+        responses=csv_download,
+    )
+    @router.get(
+        "/performance", operation_id="getSettingsPerformance", response_model=AnalyticsReport,
+        responses=csv_download,
+    )
     async def report(
         request: Request,
         start: str | None = None, end: str | None = None,

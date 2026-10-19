@@ -6,21 +6,13 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ApiError, api, csrfToken } from "./api"
+import { ApiError, csrfToken } from "./api"
+import { controlSwarm, getSwarm, type SwarmBoard } from "./generated/api"
 import { SwarmSpace } from "./swarm-space"
 import "./swarm.css"
 
 export type SwarmOptions = { workers: number | null; budget_seconds: number; worker_models: string[] }
-type Member = {
-  session_id: string; name: string; model: string; coordinator: boolean; status: string
-  active_turn: string | null; assignment: string; deleted: boolean
-}
-type Post = { id: string; sequence: number; kind: string; author: string; author_session_id: string | null; content: string; created_at: string }
-export type SwarmView = {
-  id: string; status: string; reason: string; revision: number; generation: number; round: number
-  goal: string; budget_seconds: number; ends_at: string | null; leader_id: string | null
-  can_control: boolean; sequence: number; members: Member[]; posts: Post[]; has_more: boolean; next_after: number
-}
+export type SwarmView = SwarmBoard
 
 const windows = [
   { value: "0", label: "No time limit" }, { value: "300", label: "5 minutes" },
@@ -88,7 +80,7 @@ export function SwarmPanel({ sessionId, visible = true, onChanged, space = false
       }
       const current = ++version.current
       try {
-        const value = await api<SwarmView | null>(`/sessions/${encodeURIComponent(sessionId)}/swarm`, "GET", undefined, controller.signal)
+        const { data: value } = await getSwarm({ path: { session_id: sessionId }, signal: controller.signal })
         if (!controller.signal.aborted && current === version.current && !busyNow.current) { setData(value); setError("") }
       } catch (reason) {
         if (!controller.signal.aborted && current === version.current) {
@@ -108,9 +100,9 @@ export function SwarmPanel({ sessionId, visible = true, onChanged, space = false
     busyNow.current = true; setBusy(true); setError(""); ++version.current
     const token = csrfToken()
     try {
-      const value = await api<SwarmView>(`/swarms/${encodeURIComponent(data.id)}/control`, "POST", {
+      const { data: value } = await controlSwarm({ path: { mission_id: data.id }, body: {
         action, revision: data.revision, ...(seconds === undefined ? {} : { budget_seconds: seconds }),
-      })
+      } })
       if (mounted.current && csrfToken() === token) { ++version.current; setData(value); await changed.current() }
     } catch (reason) {
       if (mounted.current && csrfToken() === token) setError(String(reason))

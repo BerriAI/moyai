@@ -4,36 +4,108 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import MISSING
 from sqlalchemy import select
 
 from .product_continuation import ContinuationRequest
 from .product_continuation_models import ProductContinuationCapture
 from .product_continuation_workspace import fingerprint
 from .product_files import FILE_HEADERS
-from .product_history import session_id
+from .product_history import ResponseModel, absent, session_id
+from .product_routes import ProductContinuationResult
+
+
+class ProductEnvironmentBuild(ResponseModel):
+    id: str
+    revision: int | None
+    commit_sha: str | None
+    sandbox_provider: str | None
+
+
+class ProductEnvironment(ResponseModel):
+    id: str
+    name: str
+    repository: str
+    repository_id: int | None
+    revision: int
+    enabled: bool
+    active_build: str | None
+    is_default: bool
+    ready: bool
+    phase: str
+    prepared_build: ProductEnvironmentBuild | None
+
+
+class ContinuationBlocker(ResponseModel):
+    code: str
+    message: str
+    action: str
+
+
+class ProductContinuationPreview(ResponseModel):
+    state: Literal["ready", "blocked", "continued"]
+    blockers: list[ContinuationBlocker]
+    # Present only when state is "continued".
+    continuation: ProductContinuationResult | MISSING = absent()
+    # Present only before continuation (state "ready" or "blocked").
+    source_fingerprint: str | MISSING = absent()
+    history_count: int | MISSING = absent()
+    imported_count: int | MISSING = absent()
+    history_bytes: int | MISSING = absent()
+    surface: str | MISSING = absent()
+    visibility: Literal["private", "shared"] | MISSING = absent()
+    requires_recent_history: bool | MISSING = absent()
+    requires_workspace_ack: bool | MISSING = absent()
+    requires_workspace_drain: bool | MISSING = absent()
+    file_notice: str | MISSING = absent()
+
+
+class ContinuationRecoveryFile(ResponseModel):
+    kind: Literal["artifact"]
+    id: str
+    name: str
+    url: str
+    download_url: str
+    size: int
+    media_type: str
+    source_format: str
+    preview_supported: bool
+    restored_directory: str
+    omissions: str
+
+
+class ContinuationRecoveryFiles(ResponseModel):
+    files: list[ContinuationRecoveryFile]
+    sources: list[Any]
+    links: list[Any]
+    source_session_id: str
+    original_files_url: str
 
 
 def continuation_routes(runtime: Any, reader) -> APIRouter:
     router = APIRouter()
     service = runtime.product_continuations
 
-    @router.get("/api/product/environments")
+    @router.get("/api/product/environments", operation_id="listProductEnvironments",
+                response_model=list[ProductEnvironment])
     async def environments(current=Depends(reader)):
         if current.principal is None:
             raise HTTPException(401, "Current product authorization is required.")
         return await runtime.product_workspace.catalog(current.principal)
 
-    @router.get("/api/product/sessions/{run_id}/continuation")
+    @router.get("/api/product/sessions/{run_id}/continuation", operation_id="previewProductContinuation",
+                response_model=ProductContinuationPreview)
     async def preview(run_id: str, current=Depends(reader)):
         if current.principal is None:
             raise HTTPException(401, "Current product authorization is required.")
         return await service.preview(current.principal, run_id)
 
-    @router.post("/api/product/sessions/{run_id}/continuation")
+    @router.post("/api/product/sessions/{run_id}/continuation", operation_id="continueProductSession",
+                 response_model=ProductContinuationResult)
     async def continue_session(
         run_id: str, body: ContinuationRequest, request: Request, current=Depends(reader),
     ):
@@ -60,7 +132,8 @@ def continuation_routes(runtime: Any, reader) -> APIRouter:
                 raise HTTPException(404, "This session has no native continuation.")
             return binding
 
-    @router.get("/api/product/sessions/{run_id}/continuation/files")
+    @router.get("/api/product/sessions/{run_id}/continuation/files", operation_id="listProductContinuationFiles",
+                response_model=ContinuationRecoveryFiles)
     async def files(run_id: str, current=Depends(reader)):
         binding = await allowed(current, run_id)
         async with runtime.database.sessions() as db:

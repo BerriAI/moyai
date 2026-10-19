@@ -1,19 +1,18 @@
 import type { UploadedFile } from "./attachment-uploads"
 import type { SidebarSession } from "./session-actions"
+import type { SessionDetailSession, SessionMessage, SessionSummary, SessionTurn, TurnView } from "./generated/api"
 
 export type Session = SidebarSession & {
   visibility: string; surface: string; model: string; active_turn: string | null
-  read_marker_key?: string; completion_marker?: string; save_warning?: string
-  workspace?: { id: string; provider: string }
-  swarm_id?: string
+  read_marker_key?: string; completion_marker?: string; save_warning?: SessionSummary["save_warning"]
+  workspace?: SessionSummary["workspace"]
+  swarm_id?: SessionDetailSession["swarm_id"]
 }
-export type Turn = {
-  id: string; actor_id: string; is_self?: boolean; status: string; mode?: string; model?: string; connections: string[]; error?: string
-  parent_turn?: string | null; accepted_at?: string | null; guidance_at?: string | null
-  created_at?: string; finished_at?: string | null
-  usage: { requests?: number; input_tokens?: number; output_tokens?: number }
-}
-export type Message = { id: number; turn_id: string; role: string; author_id: string | null; content: string; author_name?: string | null; is_self?: boolean; source?: "delegation" | "slack" | null; source_url?: string | null; source_timestamp?: string; legacy_review_required?: boolean; edited?: boolean; edited_in?: "web" | "slack"; deleted?: boolean; edited_after_start?: boolean; attachments_changed?: boolean; attachment_status?: { file_id?: string; name?: string; error?: string; preview_error?: string }[]; created_at?: string; attachments?: UploadedFile[] }
+/** A turn from a send/steer/answer receipt; session detail adds the viewer fields. */
+export type Turn = TurnView & Partial<Pick<SessionTurn, "is_self" | "guidance_at">>
+type MessageCore = "id" | "turn_id" | "role" | "author_id" | "content"
+/** A saved message, or the optimistic first message of a new conversation. */
+export type Message = Pick<SessionMessage, MessageCore> & Partial<Omit<SessionMessage, MessageCore | "attachments">> & { attachments?: UploadedFile[] }
 export type NewConversation = { session: Session; turn: Turn; prompt: string; attachments: UploadedFile[] }
 
 /** Durable queued admission is normal startup, not necessarily a user queue. */

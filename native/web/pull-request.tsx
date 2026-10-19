@@ -8,36 +8,18 @@ import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
-import { api, ApiError } from "./api"
+import { ApiError } from "./api"
+import {
+  getPullRequest, type GetPullRequestResponse, type PullRequestChecksSection, type PullRequestCommitsSection,
+  type PullRequestDiscussionSection, type PullRequestFilesSection, type PullRequestStatus,
+} from "./generated/api"
 import "./pull-request.css"
 
-export type PRSummary = {
-  url: string; title: string; repository: string; number: number
-  state: "open" | "closed" | "merged" | "unknown"; draft: boolean; accessible: boolean
-  error?: string; origin?: "attached" | "mentioned"
-}
-type Author = { login: string; bot: boolean }
-type Detail = PRSummary & {
-  description?: string; description_limited?: boolean; author?: Author; base?: string; head?: string
-  head_sha?: string; base_sha?: string; additions?: number; deletions?: number
-  changed_files?: number; commits?: number; updated_at?: string
-}
-type FileChange = {
-  filename: string; previous_filename: string; status: string; additions: number; deletions: number
-  patch: string; patch_status: "available" | "partial" | "unavailable"
-}
-type Discussion = {
-  id: string; kind: string; author: Author; body: string; state: string; path: string
-  line?: number; created_at: string; url: string | null; body_limited: boolean
-}
-type Commit = { sha: string; message: string; author: Author; created_at: string; url: string | null }
-type Check = {
-  id: string; name: string; status: string; url: string | null; title: string; summary: string
-  text: string; annotations: number; output_limited: boolean
-}
-type Section<T> = { items: T[]; limited: boolean; error?: string | null; notice?: string; head_sha?: string }
+type PRSummary = Omit<PullRequestStatus, "origin">
+type Detail = GetPullRequestResponse
 type Sections = {
-  files: Section<FileChange>; discussion: Section<Discussion>; commits: Section<Commit>; checks: Section<Check>
+  files: PullRequestFilesSection; discussion: PullRequestDiscussionSection
+  commits: PullRequestCommitsSection; checks: PullRequestChecksSection
 }
 type Tab = "description" | keyof Sections
 const tabs: { id: Tab; label: string }[] = [
@@ -97,6 +79,15 @@ function date(value?: string) {
   const parsed = new Date(value)
   return Number.isNaN(parsed.valueOf()) ? "" : parsed.toLocaleString()
 }
+function sectionOf(value: Detail): Partial<Sections> | null {
+  switch (value.tab) {
+    case "files": return value.section ? { files: value.section } : null
+    case "discussion": return value.section ? { discussion: value.section } : null
+    case "commits": return value.section ? { commits: value.section } : null
+    case "checks": return value.section ? { checks: value.section } : null
+    default: return null
+  }
+}
 function stateLabel(detail: PRSummary) {
   return !detail.accessible || detail.state === "unknown" ? "Unavailable" : detail.state === "merged" ? "Merged"
     : detail.state === "closed" ? "Closed" : detail.draft ? "Draft" : "Ready for review"
@@ -114,14 +105,15 @@ function Panel({ sessionId, url, onBack, onUpdated }: Props) {
   const heading = useRef<HTMLHeadingElement>(null)
   const updated = useRef(onUpdated)
   updated.current = onUpdated
-  const path = `/sessions/${encodeURIComponent(sessionId)}/pull-request?url=${encodeURIComponent(url)}`
 
   useEffect(() => { heading.current?.focus() }, [])
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true); setError(""); setSections({}); setSectionError(""); setSectionLoading(false)
-    void api<Detail>(`${path}&refresh=${revision > 0}`, "GET", undefined, controller.signal).then(
-      value => {
+    void getPullRequest({
+      path: { session_id: sessionId }, query: { url, refresh: revision > 0 }, signal: controller.signal,
+    }).then(
+      ({ data: value }) => {
         if (controller.signal.aborted) return
         setDetail(value); setLoading(false); updated.current?.(value)
       },
@@ -131,7 +123,7 @@ function Panel({ sessionId, url, onBack, onUpdated }: Props) {
       },
     )
     return () => controller.abort()
-  }, [path, revision])
+  }, [sessionId, url, revision])
 
   useEffect(() => {
     setSectionError("")
@@ -142,15 +134,16 @@ function Panel({ sessionId, url, onBack, onUpdated }: Props) {
     const controller = new AbortController()
     const selected = tab
     setSectionLoading(true); setSectionError("")
-    void api<Detail & { section?: Sections[typeof selected] }>(
-      `${path}&tab=${selected}&refresh=${revision > 0}`, "GET", undefined, controller.signal,
-    ).then(value => {
+    void getPullRequest({
+      path: { session_id: sessionId }, query: { url, tab: selected, refresh: revision > 0 }, signal: controller.signal,
+    }).then(({ data: value }) => {
       if (controller.signal.aborted) return
       // A subsequent tab read may discover loss of provider access or a new head.
       setDetail(value)
-      if (value.section) setSections(previous => ({
+      const section = sectionOf(value)
+      if (section) setSections(previous => ({
         ...(detail.head_sha === value.head_sha && detail.base_sha === value.base_sha ? previous : {}),
-        [selected]: value.section,
+        ...section,
       }))
       else setSections({})
       setSectionLoading(false)
@@ -164,7 +157,7 @@ function Panel({ sessionId, url, onBack, onUpdated }: Props) {
     return () => controller.abort()
     // Loaded sections stay mounted/cached only in this panel. Server scope checks
     // run on every request; Refresh discards all section snapshots.
-  }, [path, revision, tab, loading, detail?.accessible])
+  }, [sessionId, url, revision, tab, loading, detail?.accessible])
 
   const refresh = () => { setRevision(value => value + 1) }
   const state = detail ? stateLabel(detail) : "Loading"
@@ -231,7 +224,7 @@ function Panel({ sessionId, url, onBack, onUpdated }: Props) {
 
 type Expansion = { values: Record<string, boolean>; update: (key: string, open: boolean) => void }
 
-function Changes({ section, expansion }: { section: Section<FileChange>; expansion: Expansion }) {
+function Changes({ section, expansion }: { section: Sections["files"]; expansion: Expansion }) {
   return <div className="pr-files">
     {!section.items.length && !section.error && <p className="pr-muted">No changed files returned by GitHub.</p>}
     {section.items.map(file => <Collapsible className="pr-file" key={file.filename}
@@ -250,7 +243,7 @@ function Changes({ section, expansion }: { section: Section<FileChange>; expansi
     {section.notice && <p className="pr-muted pr-section-note">{section.notice}</p>}
   </div>
 }
-function DiscussionList({ section }: { section: Section<Discussion> }) {
+function DiscussionList({ section }: { section: Sections["discussion"] }) {
   return <div className="pr-list">
     {!section.items.length && !section.error && <p className="pr-muted">No discussion returned by GitHub.</p>}
     {section.items.map(item => <article key={item.id} className="pr-entry">
@@ -264,7 +257,7 @@ function DiscussionList({ section }: { section: Section<Discussion> }) {
     </article>)}
   </div>
 }
-function CommitList({ section }: { section: Section<Commit> }) {
+function CommitList({ section }: { section: Sections["commits"] }) {
   return <div className="pr-list">
     {!section.items.length && !section.error && <p className="pr-muted">No commits returned by GitHub.</p>}
     {section.items.map(item => <article key={item.sha} className="pr-entry">
@@ -273,7 +266,7 @@ function CommitList({ section }: { section: Section<Commit> }) {
     </article>)}
   </div>
 }
-function Checks({ section, expansion }: { section: Section<Check>; expansion: Expansion }) {
+function Checks({ section, expansion }: { section: Sections["checks"]; expansion: Expansion }) {
   return <div className="pr-list">
     {section.head_sha && <p className="pr-muted">Checks for <code>{section.head_sha.slice(0, 7)}</code></p>}
     {!section.items.length && !section.error && <p className="pr-muted">No checks reported for this revision. This does not establish that CI passed.</p>}

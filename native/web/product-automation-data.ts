@@ -1,53 +1,25 @@
-export type AutomationTiming = {
-  frequency: "hourly" | "daily" | "weekdays" | "weekly" | "cron" | "once"
-  time: string; weekday: number; timezone: string; cron: string; run_at: string | null
-}
-export type AutomationEvent = { provider: string; event: string; [key: string]: unknown }
-export type AutomationTrigger = { id: string; schedule?: AutomationTiming | null; event?: AutomationEvent | null }
-export type AutomationDefinition = {
-  name: string; prompt: string; triggers: AutomationTrigger[]; max_runs_per_hour: number | null
-  queue_events: boolean; metadata: Record<string, string>; self_management: { instructions: boolean; schedule: boolean }
-  repo_url: string; github_repository_id: number | null; environment_id: string; plugins: string[]
-  model: string; harness: string; mode: "modal" | "demo"
-}
-export type AutomationBinding = {
-  core: string; generation: number; state: "paused" | "active" | "deleted"; sync_state: string
-  synced_generation: number; source_revision: number; last_error: string
-}
-export type AutomationCapabilities = { read?: boolean; create?: boolean; update?: boolean; migrate?: boolean; enable?: boolean; pause?: boolean; retire?: boolean; run?: boolean; webhook?: boolean; test_event?: boolean }
-export type ProductAutomation = { id: string; revision: number; name: string; owner_id?: string; owned?: boolean; legacy_paused: boolean; triggers: AutomationTrigger[]; native: AutomationBinding | null }
-export type AutomationPreview = Pick<ProductAutomation, "id" | "revision" | "legacy_paused" | "native"> & {
-  owner_id: string; definition: AutomationDefinition; blockers: string[]; supported: boolean
-  capabilities?: AutomationCapabilities; activation: string; execution_visibility?: string; sharing_notice?: string
-  overlap: string; catchup_seconds: number
-}
-export type AutomationInventory = {
-  automations: ProductAutomation[]; next_offset: number | null; source: string; migration: string
-  capabilities?: AutomationCapabilities; reason?: string
-  event_choices?: Record<string, [string, string][]>
-}
-export type AutomationHistory = {
-  occurrence: string; revision: number; outcome: string; created_at: string; engine: string
-  status: string; session_id: string | null; turn_id: string | null; detail: string
-}
-export type AutomationHistoryPage = { history: AutomationHistory[]; next_cursor: string | null }
-export type AutomationRunResult = { status: string; session_id: string | null; turn_id: string | null }
-export type AutomationWebhookInfo = {
-  ready: boolean
-  providers: { provider: string; ready: boolean; url: string; examples: { trigger_id: string; payload: Record<string, unknown>; event_header: string }[] }[]
-  deliveries: { status: string; detail: string; received_at: string }[]
-}
-export type AutomationWebhookResult = { id: string; revision: number; provider: string; paused: boolean; configured: boolean; registered_at_provider: boolean; secret?: string }
-export type AutomationTestResult = { matches: boolean; context: { matched_trigger_ids?: string[]; [key: string]: unknown } | null; started: false }
-export type AutomationEnvironment = {
-  id: string; name: string; repository: string; repository_id: number | null; revision: number
-  enabled: boolean; active_build: string | null; is_default: boolean; ready: boolean; phase: string
-  prepared_build: { id: string; revision: number; commit_sha: string; sandbox_provider: string } | null
-}
-export type AutomationConnection = {
-  id: string; connected: boolean; enabled: boolean; read_only: boolean
-  tools?: { name?: string; description: string }[]
-}
+import type {
+  EventTriggerInput, ProductAutomationDefinition, ProductAutomationHistoryEntry, ProductAutomationPreview,
+  ProductAutomationSummary, TimingOutput, ProductAutomationTrigger,
+  OrganizationConnection,
+} from "./generated/api"
+
+export type {
+  ProductAutomationHistoryPage as AutomationHistoryPage, ProductAutomationInventory as AutomationInventory,
+  ProductAutomationRunResult as AutomationRunResult, ProductAutomationWebhookInfo as AutomationWebhookInfo,
+  ProductAutomationWebhookResult as AutomationWebhookResult, ProductAutomationTestResult as AutomationTestResult,
+} from "./generated/api"
+
+export type AutomationTiming = TimingOutput
+/** Editor state: a saved event, or a partially filled one; the service validates every field. */
+export type AutomationEvent = EventTriggerInput & { event: string; [key: string]: unknown }
+export type AutomationTrigger = Pick<ProductAutomationTrigger, "id"> & { schedule?: AutomationTiming | null; event?: AutomationEvent | null }
+export type AutomationDefinition = Omit<ProductAutomationDefinition, "triggers"> & { triggers: AutomationTrigger[] }
+export type ProductAutomation = ProductAutomationSummary
+export type AutomationPreview = ProductAutomationPreview
+export type AutomationHistory = ProductAutomationHistoryEntry
+export type { ProductEnvironment as AutomationEnvironment } from "./generated/api"
+export type AutomationConnection = Pick<OrganizationConnection, "id" | "connected" | "enabled" | "read_only"> & { tools?: OrganizationConnection["tools"] }
 
 export const calendarFrequencies: { value: AutomationTiming["frequency"]; label: string }[] = [
   { value: "hourly", label: "Hourly" }, { value: "daily", label: "Daily" }, { value: "weekdays", label: "Weekdays" },
@@ -83,6 +55,10 @@ export function eventFieldVisible(event: AutomationEvent, name: string): boolean
     if (name === "branch") return kind.startsWith("pull_request") || ["check_run", "push"].includes(kind)
   }
   return true
+}
+/** Event sources come from the server's event_choices; only those providers are offered. */
+export function isAutomationProvider(value: string, choices: Record<string, unknown>): value is AutomationEvent["provider"] {
+  return Object.hasOwn(choices, value)
 }
 /** Changing event type clears only fields that the existing editor disables. */
 export function changeAutomationEvent(event: AutomationEvent, name: string): AutomationEvent {

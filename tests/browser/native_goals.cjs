@@ -71,7 +71,7 @@ after(async()=>{
 });
 async function pageFor(t,width=1440,query="",handler){
   const page=await browser.newPage({viewport:{width,height:900},reducedMotion:"reduce"});
-  await page.route("**/api/**",handler|| (route=>route.fulfill({status:503,json:{detail:"Skills temporarily unavailable"}})));
+  await page.route(/^https?:\/\/[^/]+\/api\//,handler|| (route=>route.fulfill({status:503,json:{detail:"Skills temporarily unavailable"}})));
   t.after(()=>page.close());
   await page.goto(address+query);
   return page;

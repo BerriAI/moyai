@@ -20,6 +20,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: uv sync --frozen
+      - run: npm run api:check
       - run: npm run typecheck
       - run: npm run build
       - run: test -z "$(git ls-files -- native/src/moyai/static)"

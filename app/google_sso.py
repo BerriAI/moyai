@@ -10,12 +10,12 @@ from urllib.parse import urlencode
 
 import httpx
 import jwt
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field
 
-from .security import Throttle, digest
 from .file_links import valid_file_return_path
+from .security import Throttle, digest
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -25,6 +25,12 @@ COOKIE = "google_login"
 
 class SignInStart(BaseModel):
     return_to: str = Field(default="/#tasks", max_length=1600)
+
+
+class SignInRedirect(BaseModel):
+    """Where the browser goes next: Google's authorization page, or a local path."""
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+    url: str
 
 
 class GoogleSignIn:
@@ -95,12 +101,12 @@ class GoogleSignIn:
     def routes(self):
         router = APIRouter()
 
-        @router.post("/api/auth/google/start")
-        async def start(body: SignInStart, request: Request):
+        @router.post("/api/auth/google/start", operation_id="startGoogleSignIn")
+        async def start(body: SignInStart, request: Request, response: Response) -> SignInRedirect:
             self.security.check_origin(request)
             if self.settings.cloudflare_access_login:
                 self.security.require(request)
-                return JSONResponse({'url': '/#tasks'})
+                return SignInRedirect(url='/#tasks')
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
             client = self.security.client_key(request)
@@ -122,10 +128,9 @@ class GoogleSignIn:
                       "response_type": "code", "scope": "openid email profile", "state": state,
                       "nonce": nonce, "code_challenge": challenge, "code_challenge_method": "S256",
                       "prompt": "select_account", "hd": domains[0] if len(domains) == 1 else "*"}
-            response = JSONResponse({"url": AUTHORIZE_URL + "?" + urlencode(params)})
             response.set_cookie(COOKIE, browser, max_age=600, httponly=True,
                                 secure=not self.security.local, samesite="lax", path="/auth/google")
-            return response
+            return SignInRedirect(url=AUTHORIZE_URL + "?" + urlencode(params))
 
         @router.get("/auth/google/callback")
         async def callback(request: Request, state: str = "", code: str = "", error: str = ""):

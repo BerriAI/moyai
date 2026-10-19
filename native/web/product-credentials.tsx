@@ -3,23 +3,18 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { api, csrfToken } from "./api"
+import { csrfToken } from "./api"
+import { getCredentialRequest, resolveCredentialRequest, type CredentialAccessRequestDetail, type ResolveWritable } from "./generated/api"
 import "./settings.css"
 
-type CredentialRequest = {
-  request_id: string; generation: number; status: string; provider: string; name: string; format: string; env_var: string
-  reason: string; setup_url: string; setup_instructions: string; can_resolve: boolean
-  input_fields: { name: string; label: string; secret: boolean; required: boolean }[]
-  credentials: { id: string; label: string; scope: string; lifetime: string; revision: number }[]
-  scopes: string[]; lifetimes: string[]
-  note?: string
-}
+const credentialScope = (value: string): value is "personal" | "organization" => value === "personal" || value === "organization"
+const credentialLifetime = (value: string): value is "session" | "persistent" => value === "session" || value === "persistent"
 const errorText = (value: unknown) => value instanceof Error ? value.message : "The request could not be completed."
 
 /** The caller passes only the server-authored request_id from deferred-call metadata. */
 export function ProductCredentialRequest({ requestId, onResolved }: { requestId: string; onResolved: () => void | Promise<void> }) {
   const [open, setOpen] = useState(false), [version, setVersion] = useState(0)
-  const [resource, setResource] = useState<CredentialRequest | null>(null)
+  const [resource, setResource] = useState<CredentialAccessRequestDetail | null>(null)
   const [loading, setLoading] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("")
   const [selected, setSelected] = useState("__new__"), [scope, setScope] = useState(""), [lifetime, setLifetime] = useState("")
   const [label, setLabel] = useState(""), [expires, setExpires] = useState(""), [value, setValue] = useState("")
@@ -38,7 +33,7 @@ export function ProductCredentialRequest({ requestId, onResolved }: { requestId:
     if (!open) return
     const controller = new AbortController(), auth = csrfToken()
     setLoading(true); setError(""); setResource(null); clearValues()
-    void api<CredentialRequest>(`/credentials/requests/${encodeURIComponent(requestId)}`, "GET", undefined, controller.signal).then(result => {
+    void getCredentialRequest({ path: { identity: requestId }, signal: controller.signal }).then(({ data: result }) => {
       if (!controller.signal.aborted && csrfToken() === auth) {
         setResource(result); setSelected(result.scopes.length ? "__new__" : result.credentials[0]?.id || "__new__")
         setScope(""); setLifetime(""); setLabel(result.name); setExpires("")
@@ -53,11 +48,11 @@ export function ProductCredentialRequest({ requestId, onResolved }: { requestId:
     if (!resource || pending.current) return
     const auth = csrfToken()
     setError("")
-    let body: Record<string, unknown> = { generation: resource.generation, decision: decline ? "decline" : "provide" }
+    let body: ResolveWritable = { generation: resource.generation, decision: decline ? "decline" : "provide" }
     if (!decline) {
       if (selected !== "__new__") body.secret_id = selected
       else {
-        if (!scope || !lifetime) { setError("Choose who can use this access and how long to save it."); return }
+        if (!credentialScope(scope) || !credentialLifetime(lifetime)) { setError("Choose who can use this access and how long to save it."); return }
         if (resource.provider === "generic" && resource.format === "env" && !resource.input_fields.length) {
           setError("This request must declare its credential input fields before new access can be supplied."); return
         }
@@ -71,7 +66,7 @@ export function ProductCredentialRequest({ requestId, onResolved }: { requestId:
     }
     pending.current = true; setBusy(true)
     try {
-      await api(`/credentials/requests/${encodeURIComponent(requestId)}`, "POST", body)
+      await resolveCredentialRequest({ path: { identity: requestId }, body })
       if (mounted.current && csrfToken() === auth) { clearValues(); setOpen(false); await onResolved() }
     } catch (reason) {
       if (mounted.current && csrfToken() === auth) setError(errorText(reason))

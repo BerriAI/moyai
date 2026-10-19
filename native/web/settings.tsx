@@ -7,62 +7,66 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { api, ApiError, csrfToken } from "./api"
+import { ApiError, csrfToken } from "./api"
+import { createConnection, listConnections, listSessions, updateConnection, type ConnectionInputWritable, type ConnectionPolicy, type ConnectionView } from "./generated/api"
 import { AnalyticsPage } from "./analytics"
 import { ProductAutomationsPage } from "./product-automations"
 import { onceUtcInput, onceUtcInstant } from "./product-automation-data"
+import { listSettingsUsers, updateProductUserRole, type ProductDirectoryUser, type SettingsAccount } from "./generated/api"
+import {
+  type PersonalSlackStatus, checkPersonalSlack, connectExistingGitHubApp, disconnectPersonalSlack, getMe, getPersonalSlack, listGitHubRepositories,
+  selectGitHubRepositories, startGitHubConnection, startPersonalSlackOAuth,
+} from "./generated/api"
 import { MoyaiBrand, SidebarToggle } from "./brand"
 import { AppearanceToggle } from "./appearance-toggle"
 import type { GeneralPreferences } from "./general-preferences"
+import {
+  checkOrganizationConnection, connectOrganizationConnection, createCredential, createProductMemory, deleteProductMemory,
+  disconnectOrganizationConnection, getProductSkill, listCredentials, listOrganizationConnections, listProductMemories,
+  listProductSkills, revokeCredential, startOrganizationConnectionOAuth, updateCredential, updateOrganizationConnectionPolicy,
+  updateProductMemory, updateProductMemoryPreferences,
+  type CredentialInventory, type CredentialProvider, type CredentialSecretMetadata, type Note as ProductMemoryWriteBody,
+  type OrganizationConnection, type ProductMemoryNote as ProductMemoryNoteData, type ProductSaveSecretWritable,
+  type ProductSkillDetail, type ProductSkillLibrary, type ProductSkillSummary, type ProductUpdateSecretWritable,
+  createSettingsAutomation, createSettingsSecret, createSettingsSkill, createSettingsUser, deleteSettingsAutomation, deleteSettingsMemory,
+  deleteSettingsSecret, deleteSettingsSkill, deleteSettingsUser, getSettingsGeneral, getSettingsOverview, listSettingsAutomationLogs,
+  listSettingsAutomations, listSettingsMemory, listSettingsSecrets, listSettingsSkills, updateSettingsAutomation, updateSettingsGeneral,
+  updateSettingsSecret, updateSettingsSkill, updateSettingsUser, writeSettingsMemory,
+  type SecretEditWritable, type SettingsAutomation, type SettingsMemoryFile, type SettingsSecret, type SettingsSkill, type UserEditWritable,
+} from "./generated/api"
+import { listHistorySessions, type HistorySessionList, type SourcedHistorySession } from "./generated/api"
 import "./settings.css"
 
 type SettingsUser = { id: string; name: string; role: string; individual?: boolean }
 type SettingsPageProps = { user: SettingsUser; page: string; productMode?: "standalone" | "existing"; onNavigate: (page: string) => void; onBack: () => void; sidebarCollapsed: boolean; onToggleSidebar: () => void; onPreferences: (preferences: GeneralPreferences) => void }
 type Capabilities = { read?: boolean; create?: boolean; update?: boolean; delete?: boolean; roles?: boolean; preferences?: boolean; review?: boolean; reason?: string; runtime_available?: boolean; shared?: boolean; run?: boolean; agent_access?: boolean }
 type Collection = { capabilities?: Capabilities; reason?: string }
-type Skill = { id: string; name: string; description: string; content: string; scope: string; enabled: boolean; editable: boolean; updated_at?: string }
-type Secret = { id: string; name: string; description: string; scope: string; editable?: boolean; updated_at?: string }
-type ProductSecret = {
-  id: string; provider: string; label: string; name: string; format: string; env_var?: string; scope: string; lifetime?: string
-  root_id?: string; created_at?: string; expires_at?: string; revision: number; status: string; can_manage: boolean
-}
-type ProductCredentialInventory = {
-  secrets: ProductSecret[]; providers: { id: string; name: string; setup_url?: string }[]; root_id?: string; note?: string
-  capabilities?: { create: boolean; update: boolean; delete: boolean; scopes: string[]; lifetimes: string[]; native_execution: boolean }
-}
 type CredentialDraft = {
-  provider: string; label: string; name: string; format: "env" | "file"; env_var: string
+  provider: CredentialProvider["id"]; label: string; name: string; format: "env" | "file"; env_var: string
   scope: string; lifetime: string; root_id: string; expires_at: string; value: string
 }
-type Memory = { namespace: string; path: string; content: string; version?: string; truncated?: boolean }
-type ProductMemoryNote = {
-  id: string; key: string; title: string; content: string; kind: string; repo_url: string; repository_id?: number | null
-  revision: number; created_at?: string; updated_at?: string; expires_at?: string | null; truncated?: boolean; review_required?: boolean
-  source?: { type?: string; quote?: string; evidence?: string; scope?: string; run_id?: string; session_id?: string; engine?: string; url?: string }
+/** UI view of a saved note: editing stays disabled for a truncated preview, and a confirmed repository ID is kept on resave. */
+type ProductMemoryNote = ProductMemoryNoteData & { repository_id?: number | null; truncated?: boolean }
+/** A row of either directory: native accounts, or product members (who also carry email and role revision). */
+type Account = Pick<SettingsAccount, "id" | "username" | "display_name" | "role" | "enabled"> & Partial<Pick<ProductDirectoryUser, "email" | "revision">>
+type UserDirectory = { users: Account[]; product: boolean; note?: string } & Collection
+async function loadUsers(signal: AbortSignal): Promise<UserDirectory> {
+  const { data } = await listSettingsUsers({ signal })
+  return "source" in data
+    ? { users: data.users, product: true, note: data.note, capabilities: data.capabilities }
+    : { users: data.users, product: false, capabilities: data.capabilities }
 }
-type ProductMemoryData = {
-  source: "canonical"; scope: { kind: "personal"; owner_id: string } | null; note?: string; capabilities: Capabilities
-  preferences: { enabled: boolean; auto_save: boolean; revision: number } | null; memories: ProductMemoryNote[]
-  review?: { enabled?: boolean; configured?: boolean; pending?: number; latest?: { status: string; updated_at?: string; saved_count?: number } | null } | null
-  runtime?: { recall: boolean; auto_save: boolean; background_review: boolean; note?: string }
-}
-type ProductSkill = {
-  id: string; name: string; description: string; scope: string; icon?: string; revision: number; archived: boolean
-  reference: string; created_at?: string; updated_at?: string; can_manage: boolean
-}
-type ProductSkillDetail = ProductSkill & { instructions: string; files: { path: string; size: number; characters?: number; sha256?: string }[] }
-type ProductSkillLibrary = Collection & { source: string; skills: ProductSkill[]; can_publish: boolean; note?: string; has_more: boolean; next_offset: number | null }
-type Automation = { id: string; name: string; prompt: string; session_id: string; model: string; interval_minutes: number; paused: boolean; state: string; updated_at?: string }
-type Account = { id: string; username: string; display_name: string; role: string; enabled: boolean; email?: string; revision?: number }
-type Connection = { id: string; name: string; kind: string; owner_id: string; shared: boolean; read_only: boolean; enabled: boolean; policy?: { allowed_tools?: string[] | null; require_approval?: boolean } }
-type ProductConnection = {
-  id: string; connected: boolean; scope: string; oauth_configured: boolean; label: string; identity: string
-  enabled: boolean; read_only: boolean; checked_at?: string; check_status?: string; app_registered?: boolean
-  tools: { name?: string; description: string }[]; repositories?: { id: number; full_name: string }[]
-}
-type PersonalSlack = {
-  available: boolean; connected: boolean; oauth_configured: boolean; label?: string; health?: string
-  effective_source?: string; limitation?: string; description?: string
+type Connection = ConnectionView
+const loadConnections = async (signal: AbortSignal) => (await listConnections({ signal })).data
+const loadSessions = async (signal: AbortSignal) => (await listSessions({ signal })).data
+const connectionKinds = ["github", "linear", "notion", "slack"] as const
+function connectionInput(values: FormValues, policy: ConnectionPolicy): ConnectionInputWritable {
+  const kind = connectionKinds.find(item => item === values.kind)
+  if (!kind) throw new Error("Choose a supported service.")
+  return {
+    name: String(values.name ?? ""), kind, credential: String(values.credential ?? ""),
+    shared: values.shared === true, read_only: values.read_only === true, enabled: values.enabled === true, policy,
+  }
 }
 type Option = { value: string; label: string }
 type Resource<T> = { data: T | undefined; loading: boolean; error: string; refresh: () => void }
@@ -86,19 +90,24 @@ const scopeOptions = [{ value: "all", label: "All scopes" }, { value: "personal"
 const scopes = (user: SettingsUser, capabilities?: Capabilities) => scopeOptions.filter(option => option.value === "personal" || (user.role === "admin" && capabilities?.shared === true && option.value === "shared"))
 const contains = (query: string, ...values: (string | undefined)[]) => values.join(" ").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
 const count = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "Unavailable"
-const dateTime = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Not recorded"
+const dateTime = (value?: string | null) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Not recorded"
 const errorText = (error: unknown) => error instanceof ApiError && error.status === 404
   ? "This settings endpoint is not available on this server."
   : error instanceof Error ? error.message : "The request could not be completed."
 
-function useResource<T>(path: string | null): Resource<T> {
+const scopeInput = (value: FormValues[string]) => value === "shared" ? "shared" as const : "personal" as const
+
+/** `path` keys the read (and its cache); `load` performs it with a generated SDK call. */
+function useResource<T>(path: string | null, load: (signal: AbortSignal) => Promise<T>): Resource<T> {
+  const loader = useRef(load)
+  loader.current = load
   const [revision, setRevision] = useState(0)
   const [state, setState] = useState<{ path: string | null; data?: T; loading: boolean; error: string }>({ path, loading: Boolean(path), error: "" })
   useEffect(() => {
     if (!path) { setState({ path, loading: false, error: "" }); return }
     const controller = new AbortController()
     setState(previous => ({ path, data: previous.path === path ? previous.data : undefined, loading: true, error: "" }))
-    void api<T>(path, "GET", undefined, controller.signal).then(
+    void loader.current(controller.signal).then(
       data => { if (!controller.signal.aborted) setState({ path, data, loading: false, error: "" }) },
       error => { if (!controller.signal.aborted) setState({ path, loading: false, error: errorText(error) }) },
     )
@@ -217,9 +226,9 @@ function Confirm({ title, description, label, onConfirm, onClose }: { title: str
 }
 
 function SkillsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { skills: Skill[] }>("/settings/skills")
+  const resource = useResource("/settings/skills", signal => listSettingsSkills({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
-  const [editor, setEditor] = useState<Skill | "new" | null>(null), [remove, setRemove] = useState<Skill | null>(null)
+  const [editor, setEditor] = useState<SettingsSkill | "new" | null>(null), [remove, setRemove] = useState<SettingsSkill | null>(null)
   const clear = () => { setSearch(""); setScope("all") }
   return <LoadState resource={resource}>{data => {
     const rows = data.skills.filter(row => contains(search, row.name, row.description, row.content) && (scope === "all" || row.scope === scope))
@@ -237,19 +246,29 @@ function SkillsPage({ user }: { user: SettingsUser }) {
         { name: "scope", label: "Scope", type: "select", options: scopes(user, data.capabilities) }, { name: "content", label: "Instructions", type: "textarea", required: true, maxLength: 65536 },
         { name: "enabled", label: "Enable this skill", type: "checkbox" },
       ]} initial={editor === "new" ? { name: "", description: "", scope: "personal", content: "", enabled: true } : { name: editor.name, description: editor.description, scope: editor.scope, content: editor.content, enabled: editor.enabled }}
-        onSave={async values => { await api(`/settings/skills${editor === "new" ? "" : `/${encodeURIComponent(editor.id)}`}`, editor === "new" ? "POST" : "PATCH", values); resource.refresh() }} onClose={() => setEditor(null)} />}
-      {remove && <Confirm title={`Delete ${remove.name}?`} description="This removes the saved skill. Existing conversations are kept." label="Delete skill" onConfirm={async () => { await api(`/settings/skills/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+        onSave={async values => {
+          const body = { name: String(values.name), description: String(values.description), content: String(values.content), scope: scopeInput(values.scope), enabled: values.enabled === true }
+          if (editor === "new") await createSettingsSkill({ body })
+          else await updateSettingsSkill({ path: { identity: editor.id }, body })
+          resource.refresh()
+        }} onClose={() => setEditor(null)} />}
+      {remove && <Confirm title={`Delete ${remove.name}?`} description="This removes the saved skill. Existing conversations are kept." label="Delete skill" onConfirm={async () => { await deleteSettingsSkill({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
 
 function SecretsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { secrets: Secret[] }>("/settings/secrets")
+  const resource = useResource("/settings/secrets", async signal => {
+    const { data } = await listSettingsSecrets({ signal })
+    // Product mode answers with the credential inventory; that mode renders ProductSecretsPage.
+    if ("providers" in data) throw new Error("Saved secrets are managed under Credentials.")
+    return data
+  })
   const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
-  const [editor, setEditor] = useState<Secret | "new" | null>(null), [remove, setRemove] = useState<Secret | null>(null)
+  const [editor, setEditor] = useState<SettingsSecret | "new" | null>(null), [remove, setRemove] = useState<SettingsSecret | null>(null)
   return <LoadState resource={resource}>{data => {
     const rows = data.secrets.filter(row => contains(search, row.name, row.description) && (scope === "all" || row.scope === scope))
-    const editable = (row: Secret) => row.editable !== false && (row.scope === "personal" || user.role === "admin")
+    const editable = (row: SettingsSecret) => row.editable !== false && (row.scope === "personal" || user.role === "admin")
     return <><p className="ns-notice"><Shield size={16} />Saved secrets are encrypted and are not automatically passed to the agent. Use Connections for supported services.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} filter={<Choice label="Secret scope" value={scope} onChange={setScope} options={scopeOptions.filter(item => item.value !== "bundled")} />}
         action={data.capabilities?.create && <Button onClick={() => setEditor("new")}><Plus />Add secret</Button>} />
@@ -262,15 +281,23 @@ function SecretsPage({ user }: { user: SettingsUser }) {
         { name: "name", label: "Name", required: true, maxLength: 100, pattern: "[A-Za-z][A-Za-z0-9_.\\-]*", hint: "Start with a letter; use letters, numbers, underscores, dots, or hyphens." }, { name: "description", label: "Description", maxLength: 1000 },
         { name: "scope", label: "Scope", type: "select", options: scopes(user, data.capabilities) },
         { name: "value", label: editor === "new" ? "Secret value" : "Replacement value", type: "password", required: editor === "new", maxLength: 65536, hint: editor === "new" ? "This value will not be displayed again." : "Leave blank to keep the current value." },
-      ]} onSave={async values => { const body = { ...values }; if (editor !== "new" && !body.value) delete body.value; await api(`/settings/secrets${editor === "new" ? "" : `/${encodeURIComponent(editor.id)}`}`, editor === "new" ? "POST" : "PATCH", body); resource.refresh() }} onClose={() => setEditor(null)} />}
-      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future work that needs this credential may fail until a replacement is saved." label="Delete secret" onConfirm={async () => { await api(`/settings/secrets/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+      ]} onSave={async values => {
+        const fields = { name: String(values.name), description: String(values.description), scope: scopeInput(values.scope) }
+        if (editor === "new") await createSettingsSecret({ body: { ...fields, value: String(values.value) } })
+        else {
+          const body: SecretEditWritable = values.value ? { ...fields, value: String(values.value) } : fields
+          await updateSettingsSecret({ path: { identity: editor.id }, body })
+        }
+        resource.refresh()
+      }} onClose={() => setEditor(null)} />}
+      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future work that needs this credential may fail until a replacement is saved." label="Delete secret" onConfirm={async () => { await deleteSettingsSecret({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
 
 export function ProductSecretRows({ secrets, providers, capabilities, onEdit, onRevoke }: {
-  secrets: ProductSecret[]; providers: { id: string; name: string }[]; capabilities?: ProductCredentialInventory["capabilities"]
-  onEdit?: (secret: ProductSecret) => void; onRevoke?: (secret: ProductSecret) => void
+  secrets: CredentialSecretMetadata[]; providers: { id: string; name: string }[]; capabilities?: CredentialInventory["capabilities"]
+  onEdit?: (secret: CredentialSecretMetadata) => void; onRevoke?: (secret: CredentialSecretMetadata) => void
 }) {
   return <RecordTable label="Original saved credentials" headings={["Credential", "Scope", "Lifetime", "Status", "Value", "Actions"]}>{secrets.map(secret => <TableRow key={secret.id}>
     <TableCell><strong>{secret.label}</strong><small>{secret.provider === "generic" ? secret.name : providers.find(provider => provider.id === secret.provider)?.name || secret.provider}</small>
@@ -285,17 +312,42 @@ export function ProductSecretRows({ secrets, providers, capabilities, onEdit, on
     </div>{secret.format === "aws-sso" && <small>AWS SSO access is renewed through its sign-in flow.</small>}</TableCell>
   </TableRow>)}</RecordTable>
 }
+type CredentialRootSession = Pick<SourcedHistorySession, "id" | "source" | "title" | "parent_session_id" | "deleted" | "deleting">
+/** One page of session-lifetime credential roots from the history listing. */
+function useHistoryRoots(enabled: boolean, cursor: string | null) {
+  const [revision, setRevision] = useState(0)
+  const key = enabled ? `${revision}:${cursor ?? ""}` : null
+  const [state, setState] = useState<{ key: string | null; data?: HistorySessionList; error: string }>({ key: null, error: "" })
+  useEffect(() => {
+    if (key === null) return
+    const controller = new AbortController()
+    void listHistorySessions({ query: { source: "all", limit: 100, cursor: cursor ?? undefined }, signal: controller.signal }).then(
+      ({ data }) => { if (!controller.signal.aborted) setState({ key, data, error: "" }) },
+      error => { if (!controller.signal.aborted) setState({ key, error: errorText(error) }) },
+    )
+    return () => controller.abort()
+  }, [key])
+  const refresh = useCallback(() => setRevision(value => value + 1), [])
+  const current = state.key === key
+  return { data: current ? state.data : undefined, loading: key !== null && !current, error: current ? state.error : "", refresh }
+}
+
 export function productCredentialRoot(session: { id: string; source: string }): string {
   if (session.source === "legacy" && /^[0-9a-f]{32}$/.test(session.id)) return session.id
   if (session.source === "native" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(session.id)) return `native:${session.id}`
   throw new Error("Choose an available session from the list.")
 }
-export function productCredentialBody(draft: CredentialDraft, existing: ProductSecret | undefined, clientId: string) {
-  if (!["personal", "organization"].includes(draft.scope)) throw new Error("Choose who can use this credential.")
-  if (!["persistent", "session"].includes(draft.lifetime)) throw new Error("Choose this session or future sessions.")
+const credentialScope = (value: string): value is "personal" | "organization" => value === "personal" || value === "organization"
+const credentialLifetime = (value: string): value is "persistent" | "session" => value === "persistent" || value === "session"
+export function productCredentialBody(draft: CredentialDraft, existing: CredentialSecretMetadata, clientId: string): ProductUpdateSecretWritable
+export function productCredentialBody(draft: CredentialDraft, existing: undefined, clientId: string): ProductSaveSecretWritable
+export function productCredentialBody(draft: CredentialDraft, existing: CredentialSecretMetadata | undefined, clientId: string): ProductUpdateSecretWritable | ProductSaveSecretWritable {
+  const { scope, lifetime } = draft
+  if (!credentialScope(scope)) throw new Error("Choose who can use this credential.")
+  if (!credentialLifetime(lifetime)) throw new Error("Choose this session or future sessions.")
   if (draft.lifetime === "session" && !/^(?:[0-9a-f]{32}|native:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.test(draft.root_id)) throw new Error("Choose a session for session-only access.")
   if (!draft.label.trim() || draft.label.trim().length > 80) throw new Error("Use a credential name between 1 and 80 characters.")
-  const fields = { label: draft.label.trim(), scope: draft.scope, lifetime: draft.lifetime, root_id: draft.lifetime === "session" ? draft.root_id : "", expires_at: draft.expires_at }
+  const fields = { label: draft.label.trim(), scope, lifetime, root_id: lifetime === "session" ? draft.root_id : "", expires_at: draft.expires_at }
   if (existing) {
     if (existing.format === "aws-sso") throw new Error("Renew AWS SSO access through its sign-in flow.")
     return { revision: existing.revision, ...fields, ...(draft.value ? { value: draft.value } : {}) }
@@ -304,9 +356,9 @@ export function productCredentialBody(draft: CredentialDraft, existing: ProductS
   return { provider: draft.provider, ...fields, value: draft.value, client_id: clientId, ...(draft.provider === "generic" ? { name: draft.name.trim(), format: draft.format, env_var: draft.format === "file" ? draft.env_var.trim() : "" } : {}) }
 }
 function ProductSecretsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<ProductCredentialInventory>("/credentials")
+  const resource = useResource("/credentials", signal => listCredentials({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [scope, setScope] = useState("all")
-  const [editor, setEditor] = useState<{ secret?: ProductSecret; onePassword?: boolean } | null>(null), [revoke, setRevoke] = useState<ProductSecret | null>(null)
+  const [editor, setEditor] = useState<{ secret?: CredentialSecretMetadata; onePassword?: boolean } | null>(null), [revoke, setRevoke] = useState<CredentialSecretMetadata | null>(null)
   return <LoadState resource={resource}>{data => {
     const rows = data.secrets.filter(secret => contains(search, secret.label, secret.name, secret.provider) && (scope === "all" || (secret.scope === "organization" ? "organization" : "personal") === scope))
     return <><p className="ns-notice"><Shield size={16} />This is the original credential inventory. Saved values are never returned to this page.</p>
@@ -323,18 +375,18 @@ function ProductSecretsPage({ user }: { user: SettingsUser }) {
       {rows.length ? <ProductSecretRows secrets={rows} providers={data.providers} capabilities={data.capabilities} onEdit={secret => setEditor({ secret, onePassword: secret.name === "1password-shared" && secret.format === "env" })} onRevoke={setRevoke} /> : <Empty filtered={Boolean(search) || scope !== "all"} noun="saved credentials" onClear={() => { setSearch(""); setScope("all") }} />}
       {editor && (editor.secret ? data.capabilities?.update && editor.secret.can_manage : data.capabilities?.create) && <ProductCredentialEditor key={editor.secret?.id || (editor.onePassword ? "1password" : "new")} user={user} inventory={data} existing={editor.secret} onePassword={editor.onePassword} onClose={() => setEditor(null)} onSaved={resource.refresh} />}
       {revoke && data.capabilities?.delete && revoke.can_manage && <Confirm title={`Revoke ${revoke.label}?`} description="Future tasks cannot use this saved access. The credential is not revoked at its provider, and existing conversations are retained." label="Revoke access"
-        onConfirm={async () => { await api(`/credentials/secrets/${encodeURIComponent(revoke.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRevoke(null)} />}
+        onConfirm={async () => { await revokeCredential({ path: { identity: revoke.id } }); resource.refresh() }} onClose={() => setRevoke(null)} />}
     </>
   }}</LoadState>
 }
 
 function ProductCredentialEditor({ user, inventory, existing, onePassword, onClose, onSaved }: {
-  user: SettingsUser; inventory: ProductCredentialInventory; existing?: ProductSecret; onePassword?: boolean; onClose: () => void; onSaved: () => void
+  user: SettingsUser; inventory: CredentialInventory; existing?: CredentialSecretMetadata; onePassword?: boolean; onClose: () => void; onSaved: () => void
 }) {
   const mutation = useMutation(), id = useId(), clientId = useRef(crypto.randomUUID())
   const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   const [draft, setDraft] = useState<CredentialDraft>({
-    provider: existing?.provider || (onePassword ? "generic" : inventory.providers[0]?.id || "generic"),
+    provider: existing ? inventory.providers.find(item => item.id === existing.provider)?.id ?? "generic" : onePassword ? "generic" : inventory.providers[0]?.id ?? "generic",
     label: existing?.label || (onePassword ? "1Password Shared" : ""), name: existing?.name || (onePassword ? "1password-shared" : ""),
     format: existing?.format === "file" ? "file" : "env", env_var: existing?.env_var || "", scope: existing ? existing.scope === "session" ? "personal" : existing.scope : "",
     lifetime: existing?.lifetime || (existing ? existing.scope === "session" ? "session" : "persistent" : ""), root_id: existing?.root_id || "", expires_at: existing?.expires_at || "", value: "",
@@ -342,8 +394,8 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
   const [expiry, setExpiry] = useState(onceUtcInput(existing?.expires_at || null))
   const [variables, setVariables] = useState<{ key: string; value: string; id: string }[]>([{ key: onePassword ? "OP_SERVICE_ACCOUNT_TOKEN" : "", value: "", id: crypto.randomUUID() }])
   const file = useRef<HTMLInputElement>(null)
-  const [cursor, setCursor] = useState<string | null>(null), [savedRoots, setSavedRoots] = useState<{ id: string; source: string; title: string; parent_session_id?: string | null; deleted?: boolean; deleting?: boolean }[]>([])
-  const roots = useResource<{ sessions: typeof savedRoots; next_cursor?: string | null }>(draft.lifetime === "session" ? `/history/sessions?source=all&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}` : null)
+  const [cursor, setCursor] = useState<string | null>(null), [savedRoots, setSavedRoots] = useState<CredentialRootSession[]>([])
+  const roots = useHistoryRoots(draft.lifetime === "session", cursor)
   useEffect(() => { if (roots.error) setSavedRoots([]) }, [roots.error])
   const rootRows = roots.error ? [] : [...new Map([...savedRoots, ...roots.data?.sessions ?? []].map(row => [`${row.source}:${row.id}`, row])).values()]
   const rootOptions = rootRows.filter(row => !row.parent_session_id && !row.deleted && !row.deleting).flatMap(row => {
@@ -373,13 +425,16 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
         value = selected ? await selected.text() : ""
         if (value.includes("\0")) throw new Error("Choose a UTF-8 text credential file without NUL characters.")
       }
-      const body = productCredentialBody({ ...draft, value, expires_at: expiry ? onceUtcInstant(expiry) : "" }, existing, clientId.current)
+      const saved = { ...draft, value, expires_at: expiry ? onceUtcInstant(expiry) : "" }
+      const save = existing
+        ? (body => () => updateCredential({ path: { identity: existing.id }, body }))(productCredentialBody(saved, existing, clientId.current))
+        : (body => () => createCredential({ body }))(productCredentialBody(saved, undefined, clientId.current))
       if (!supportedScopes.includes(draft.scope) || (draft.scope === "organization" && user.role !== "admin")) throw new Error("This sign-in cannot save credentials in the selected scope.")
       if (!inventory.capabilities?.lifetimes.includes(draft.lifetime)) throw new Error("This credential lifetime is not supported.")
-      await api(`/credentials/secrets${existing ? `/${encodeURIComponent(existing.id)}` : ""}`, existing ? "PATCH" : "POST", body)
+      await save()
     }, () => { setDraft(previous => ({ ...previous, value: "" })); setVariables([]); if (file.current) file.current.value = ""; onSaved(); onClose() }) }}>
       {onePassword && <p className="ns-notice">Use a dedicated 1Password service account scoped to the Shared vault. Vault permissions are enforced by 1Password. Choose Organization only when teammates should use this access.</p>}
-      <div className="ns-field"><label htmlFor={`${id}-provider`}>Service</label><Choice id={`${id}-provider`} label="Credential service" value={draft.provider} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} options={inventory.providers.map(item => ({ value: item.id, label: item.name }))} onChange={value => { change({ provider: value, value: "", name: "", format: "env", env_var: "" }); setVariables([{ key: "", value: "", id: crypto.randomUUID() }]) }} /></div>
+      <div className="ns-field"><label htmlFor={`${id}-provider`}>Service</label><Choice id={`${id}-provider`} label="Credential service" value={draft.provider} disabled={mutation.busy || Boolean(existing) || Boolean(onePassword)} options={inventory.providers.map(item => ({ value: item.id, label: item.name }))} onChange={value => { const selected = inventory.providers.find(item => item.id === value); if (!selected) return; change({ provider: selected.id, value: "", name: "", format: "env", env_var: "" }); setVariables([{ key: "", value: "", id: crypto.randomUUID() }]) }} /></div>
       {setup && <a className="ns-link" href={setup} target="_blank" rel="noreferrer">Provider setup guide</a>}
       <div className="ns-field"><label htmlFor={`${id}-label`}>Display name</label><Input id={`${id}-label`} autoFocus required maxLength={80} disabled={mutation.busy} value={draft.label} onChange={event => change({ label: event.target.value })} /></div>
       {generic && <>
@@ -415,12 +470,11 @@ function ProductCredentialEditor({ user, inventory, existing, onePassword, onClo
 
 function MemoryPage() {
   const [namespace, setNamespace] = useState("")
-  const resource = useResource<Collection & { namespaces: { id: string; label: string }[]; default_namespace: string; namespace: string; memories: Memory[]; truncated?: boolean }>(`/settings/memory${namespace ? `?${new URLSearchParams({ namespace })}` : ""}`)
+  const resource = useResource(`/settings/memory${namespace ? `?${new URLSearchParams({ namespace })}` : ""}`, signal => listSettingsMemory({ query: namespace ? { namespace } : undefined, signal }).then(({ data }) => data))
   const [options, setOptions] = useState<Option[]>([])
   const [search, setSearch] = useState("")
-  const [editor, setEditor] = useState<Memory | "new" | null>(null), [remove, setRemove] = useState<Memory | null>(null)
+  const [editor, setEditor] = useState<SettingsMemoryFile | "new" | null>(null), [remove, setRemove] = useState<SettingsMemoryFile | null>(null)
   useEffect(() => { if (resource.data) setOptions(resource.data.namespaces.map(item => ({ value: item.id, label: item.label }))) }, [resource.data])
-  const memoryPath = (row: { namespace: string; path: string }, version?: string) => `/settings/memory?${new URLSearchParams({ namespace: row.namespace, path: row.path, ...(version ? { version } : {}) })}`
   return <>
     <p className="ns-notice"><Shield size={16} />Only memory namespaces available to your own sessions are listed. Other users’ private memory is not requested.</p>
     {options.length > 0 && <div className="ns-scope-picker"><label htmlFor="memory-namespace">Memory namespace</label><Choice id="memory-namespace" label="Memory namespace" value={namespace || resource.data?.namespace || resource.data?.default_namespace || options[0].value} onChange={value => { setNamespace(value); setEditor(null); setRemove(null) }} options={options} /></div>}
@@ -436,14 +490,14 @@ function MemoryPage() {
         {editor && <Editor title={editor === "new" ? "Add memory" : "Edit memory"} description="Changes apply to the selected namespace. A newer saved version will not be overwritten." initial={{ path: editor === "new" ? "" : editor.path, content: editor === "new" ? "" : editor.content }} fields={[
           { name: "path", label: "Path", required: true, disabled: editor !== "new", pattern: "(?!.*\\.\\.)[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,199}\\.md", maxLength: 203, hint: "Use a Markdown filename such as preferences.md, without directory segments." },
           { name: "content", label: "Memory content", type: "textarea", required: true, maxLength: 65536 },
-        ]} onSave={async values => { await api(memoryPath({ namespace: editor === "new" ? data.namespace : editor.namespace, path: String(values.path) }), "PUT", { content: values.content, version: editor === "new" ? null : editor.version }); resource.refresh() }} onClose={() => setEditor(null)} />}
-        {remove && <Confirm title={`Delete ${remove.path}?`} description="This removes the saved memory from this namespace. Existing conversations are kept." label="Delete memory" onConfirm={async () => { await api(memoryPath(remove, remove.version), "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+        ]} onSave={async values => { await writeSettingsMemory({ query: { namespace: editor === "new" ? data.namespace : editor.namespace, path: String(values.path) }, body: { content: String(values.content), version: editor === "new" ? null : editor.version } }); resource.refresh() }} onClose={() => setEditor(null)} />}
+        {remove && <Confirm title={`Delete ${remove.path}?`} description="This removes the saved memory from this namespace. Existing conversations are kept." label="Delete memory" onConfirm={async () => { await deleteSettingsMemory({ query: { namespace: remove.namespace, path: remove.path, ...(remove.version ? { version: remove.version } : {}) } }); resource.refresh() }} onClose={() => setRemove(null)} />}
       </>
     }}</LoadState>
   </>
 }
 
-const productMemoryKinds = [{ value: "preference", label: "Preference" }, { value: "feedback", label: "Correction" }, { value: "project", label: "Project context" }, { value: "reference", label: "Reference" }]
+const productMemoryKinds: { value: ProductMemoryNote["kind"]; label: string }[] = [{ value: "preference", label: "Preference" }, { value: "feedback", label: "Correction" }, { value: "project", label: "Project context" }, { value: "reference", label: "Reference" }]
 export function productMemorySourceLink(source: ProductMemoryNote["source"]): string | undefined {
   if (!source?.session_id || !source.url) return
   const hash = source.engine === "legacy" && /^[0-9a-f]{32}$/.test(source.session_id) ? `#run=${source.session_id}`
@@ -472,23 +526,25 @@ export function ProductMemoryNotes({ notes, capabilities, onEdit, onRemove }: {
   })}</div>
 }
 
-export function productMemoryWrite(note: ProductMemoryNote | undefined, values: FormValues, requestId: string) {
+export function productMemoryWrite(note: ProductMemoryNote | undefined, values: FormValues, requestId: string): ProductMemoryWriteBody {
+  const kind = productMemoryKinds.find(item => item.value === values.kind)?.value
+  if (!kind) throw new Error("Choose a memory type.")
   const normalizeRepository = (value: string) => value.trim().replace(/\/$/, "").replace(/\.git$/, "").toLowerCase()
   const sameRepository = note && normalizeRepository(note.repo_url) === normalizeRepository(String(values.repo_url || ""))
   return {
     key: note?.key || `note-${requestId.toLowerCase()}`, title: String(values.title), content: String(values.content),
-    kind: String(values.kind), repo_url: String(values.repo_url || ""), revision: note?.revision ?? 0, request_id: requestId,
+    kind, repo_url: String(values.repo_url || ""), revision: note?.revision ?? 0, request_id: requestId,
     ...(note?.repository_id && sameRepository ? { repository_id: note.repository_id } : {}),
   }
 }
 function ProductMemoryPage() {
-  const resource = useResource<ProductMemoryData>("/product/memory")
+  const resource = useResource("/product/memory", signal => listProductMemories({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState("")
   const [editor, setEditor] = useState<{ note?: ProductMemoryNote; requestId: string } | null>(null)
   const [remove, setRemove] = useState<ProductMemoryNote | null>(null)
   const mutation = useMutation()
-  const request = async (path: string, method: string, body: unknown) => {
-    try { return await api(path, method, body) }
+  const request = async (call: () => Promise<unknown>) => {
+    try { return await call() }
     catch (reason) {
       if (reason instanceof ApiError && [401, 403, 404].includes(reason.status)) { setEditor(null); setRemove(null); resource.refresh() }
       throw reason
@@ -508,9 +564,9 @@ function ProductMemoryPage() {
       <section className="ns-record"><div className="ns-record-copy"><h2>Memory preferences</h2><p>Saved setting: {prefs.enabled ? "enabled" : "paused"}. Pausing keeps your notes and stops future recall and automatic saving.</p>
         <Choice label="How new memories are saved" value={prefs.auto_save ? "auto" : "manual"} disabled={!data.capabilities.preferences || mutation.busy || !prefs.enabled}
           options={[{ value: "auto", label: "Save useful context automatically" }, { value: "manual", label: "Only save manually" }]}
-          onChange={value => void mutation.run(() => request("/product/memory/preferences", "PUT", { enabled: prefs.enabled, auto_save: value === "auto", revision: prefs.revision }), resource.refresh)} />
+          onChange={value => void mutation.run(() => request(() => updateProductMemoryPreferences({ body: { enabled: prefs.enabled, auto_save: value === "auto", revision: prefs.revision } })), resource.refresh)} />
         {data.review?.latest && <small>Recorded review: {data.review.latest.status} · {dateTime(data.review.latest.updated_at)}</small>}
-      </div>{data.capabilities.preferences && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => request("/product/memory/preferences", "PUT", { enabled: !prefs.enabled, auto_save: prefs.auto_save, revision: prefs.revision }), resource.refresh)}>{prefs.enabled ? "Pause memory" : "Resume memory"}</Button>}</section>
+      </div>{data.capabilities.preferences && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => request(() => updateProductMemoryPreferences({ body: { enabled: !prefs.enabled, auto_save: prefs.auto_save, revision: prefs.revision } })), resource.refresh)}>{prefs.enabled ? "Pause memory" : "Resume memory"}</Button>}</section>
       {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} action={data.capabilities.create && <Button onClick={() => setEditor({ requestId: crypto.randomUUID() })}><Plus />Add memory</Button>} />
       {rows.length ? <ProductMemoryNotes notes={rows} capabilities={data.capabilities} onEdit={note => setEditor({ note, requestId: crypto.randomUUID() })} onRemove={setRemove} /> : <Empty filtered={Boolean(search)} noun="memories" onClear={() => setSearch("")} />}
@@ -519,9 +575,12 @@ function ProductMemoryPage() {
         fields={[{ name: "title", label: "Title", required: true, minLength: 3, maxLength: 120 }, { name: "kind", label: "Type", type: "select", options: productMemoryKinds },
           { name: "content", label: "What should Moyai remember?", type: "textarea", required: true, minLength: 3 },
           { name: "repo_url", label: "Repository (optional)", type: "url", maxLength: 240, hint: "Use a GitHub repository URL, or leave blank for context across your sessions. Editing project context or a reference refreshes its expiry." }]}
-        onSave={async values => { await request(`/product/memory${editor.note ? `/${encodeURIComponent(editor.note.id)}` : ""}`, editor.note ? "PUT" : "POST", productMemoryWrite(editor.note, values, editor.requestId)); resource.refresh() }} onClose={() => setEditor(null)} />}
+        onSave={async values => {
+          const body = productMemoryWrite(editor.note, values, editor.requestId), note = editor.note
+          await request(() => note ? updateProductMemory({ path: { note_id: note.id }, body }) : createProductMemory({ body })); resource.refresh()
+        }} onClose={() => setEditor(null)} />}
       {remove && data.capabilities.delete && <Confirm title={`Delete ${remove.title}?`} description="This stops future recall of the note. Existing conversations and backups are retained." label="Delete memory"
-        onConfirm={async () => { await request(`/product/memory/${encodeURIComponent(remove.id)}`, "DELETE", { revision: remove.revision }); resource.refresh() }} onClose={() => setRemove(null)} />}
+        onConfirm={async () => { await request(() => deleteProductMemory({ path: { note_id: remove.id }, body: { revision: remove.revision } })); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
@@ -532,15 +591,15 @@ export function productSkillFileUrl(id: string, path: string, revision: number):
   if (parts.some(part => !part || part === "." || part === "..")) return
   return `/api/product/skills/${encodeURIComponent(id)}/files/${parts.map(encodeURIComponent).join("/")}?revision=${revision}`
 }
-export function ProductSkillRows({ skills, onView }: { skills: ProductSkill[]; onView: (skill: ProductSkill) => void }) {
+export function ProductSkillRows({ skills, onView }: { skills: ProductSkillSummary[]; onView: (skill: ProductSkillSummary) => void }) {
   return <div className="ns-records">{skills.map(skill => <article className="ns-record" key={skill.id}><FileText className="ns-record-icon" aria-hidden="true" />
     <div className="ns-record-copy"><div className="ns-record-title"><h2>{skill.name}</h2><span className="ns-badge">{skill.scope === "organization" ? "Organization" : "Personal"}</span>{skill.archived && <span className="ns-badge">Archived</span>}</div>
       <p>{skill.description}</p><small>Saved reference: /{skill.reference} · Updated {dateTime(skill.updated_at)}</small></div>
     <Button size="sm" variant="outline" onClick={() => onView(skill)}>View instructions<span className="visually-hidden"> for {skill.name}</span></Button>
   </article>)}</div>
 }
-function ProductSkillDialog({ skill, onClose }: { skill: ProductSkill; onClose: () => void }) {
-  const resource = useResource<ProductSkillDetail>(`/product/skills/${encodeURIComponent(skill.id)}`)
+function ProductSkillDialog({ skill, onClose }: { skill: ProductSkillSummary; onClose: () => void }) {
+  const resource = useResource<ProductSkillDetail>(`/product/skills/${encodeURIComponent(skill.id)}`, signal => getProductSkill({ path: { skill_id: skill.id }, signal }).then(({ data }) => data))
   const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); if (opener.current?.isConnected) opener.current.focus() }}>
     <DialogHeader><DialogTitle>{skill.name}</DialogTitle><DialogDescription>Type / in chat to select this skill. Its original instructions and supporting files are retained.</DialogDescription></DialogHeader>
@@ -555,16 +614,16 @@ function ProductSkillsPage() {
   const [archived, setArchived] = useState(false), [search, setSearch] = useState(""), [scope, setScope] = useState("all")
   const [pages, setPages] = useState(1), [revision, setRevision] = useState(0)
   const [state, setState] = useState<{ archived: boolean; data?: ProductSkillLibrary; loading: boolean; error: string }>({ archived, loading: true, error: "" })
-  const [selected, setSelected] = useState<ProductSkill | null>(null)
+  const [selected, setSelected] = useState<ProductSkillSummary | null>(null)
   useEffect(() => {
     const controller = new AbortController()
     setState(previous => ({ archived, data: previous.archived === archived ? previous.data : undefined, loading: true, error: "" }))
     void (async () => {
       try {
         let offset = 0, result: ProductSkillLibrary | undefined
-        const rows = new Map<string, ProductSkill>()
+        const rows = new Map<string, ProductSkillSummary>()
         for (let page = 0; page < pages; page++) {
-          const next = await api<ProductSkillLibrary>(`/product/skills?archived=${archived}&limit=100&offset=${offset}`, "GET", undefined, controller.signal)
+          const { data: next } = await listProductSkills({ query: { archived, limit: 100, offset }, signal: controller.signal })
           if (controller.signal.aborted) return
           if (next.source !== "canonical") throw new Error("The server did not return the original skill library.")
           for (const skill of next.skills) rows.set(skill.id, skill)
@@ -602,7 +661,7 @@ export function productRedirect(value: string, origin: string): string {
   if (url.username || url.password || /[\\\u0000-\u0020\u007f]/.test(value) || (url.protocol !== "https:" && url.origin !== origin)) throw new Error("The connection service returned an invalid destination.")
   return url.href
 }
-export function ProductConnectionRows({ connections, admin, onManage }: { connections: ProductConnection[]; admin: boolean; onManage: (connection: ProductConnection) => void }) {
+export function ProductConnectionRows({ connections, admin, onManage }: { connections: OrganizationConnection[]; admin: boolean; onManage: (connection: OrganizationConnection) => void }) {
   return <div className="ns-records">{connections.map(connection => <article className="ns-record" key={connection.id}><Link2 className="ns-record-icon" aria-hidden="true" />
     <div className="ns-record-copy"><div className="ns-record-title"><h2>{productProviders[connection.id] || connection.id}</h2><span className="ns-badge">{connection.connected ? connection.enabled ? "Connected" : "Paused" : "Not connected"}</span><span className="ns-badge">Organization</span></div>
       <p>{connection.label || "No account connected"}</p><small>{connection.identity || "No provider identity"} · {connection.read_only ? "Read-only policy" : "Read and write policy"}</small>
@@ -611,11 +670,11 @@ export function ProductConnectionRows({ connections, admin, onManage }: { connec
   </article>)}</div>
 }
 function ProductConnectionsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<ProductConnection[]>("/product/connections")
+  const resource = useResource("/product/connections", signal => listOrganizationConnections({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
-  const [selected, setSelected] = useState<{ connection: ProductConnection; mode: "manage" | "connect" | "repositories" } | null>(null)
+  const [selected, setSelected] = useState<{ connection: OrganizationConnection; mode: "manage" | "connect" | "repositories" } | null>(null)
   const opener = useRef<HTMLElement | null>(null)
-  const open = (connection: ProductConnection) => { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setSelected({ connection, mode: "manage" }) }
+  const open = (connection: OrganizationConnection) => { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setSelected({ connection, mode: "manage" }) }
   return <>
     <LoadState resource={resource}>{data => {
       const rows = data.filter(row => contains(search, row.id, row.label, row.identity) && (filter === "all" || row.id === filter))
@@ -631,7 +690,7 @@ function ProductConnectionsPage({ user }: { user: SettingsUser }) {
   </>
 }
 function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onClose, onUpdated }: {
-  connection: ProductConnection; mode: "manage" | "connect" | "repositories"; admin: boolean
+  connection: OrganizationConnection; mode: "manage" | "connect" | "repositories"; admin: boolean
   opener: React.MutableRefObject<HTMLElement | null>; onMode: (mode: "manage" | "connect" | "repositories") => void; onClose: () => void; onUpdated: () => void
 }) {
   const mutation = useMutation()
@@ -647,7 +706,7 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
     {mode === "manage" && <>
       <p>{connection.connected ? `${connection.label} · ${connection.identity}` : "No organization account is connected."}</p>
       {connection.tools.length > 0 && <details><summary>Provider operation descriptions</summary><ul className="ns-supporting-files">{connection.tools.map((tool, index) => <li key={tool.name || index}>{tool.name && <code>{tool.name} · </code>}{tool.description}</li>)}</ul></details>}
-      {admin ? <form onSubmit={event => { event.preventDefault(); void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}/policy`, "PATCH", { enabled, read_only: readOnly }), onUpdated) }}>
+      {admin ? <form onSubmit={event => { event.preventDefault(); void mutation.run(() => updateOrganizationConnectionPolicy({ path: { provider: connection.id }, body: { enabled, read_only: readOnly } }), onUpdated) }}>
         <div className="ns-fields"><label className="check-label"><Checkbox checked={enabled} disabled={mutation.busy} onCheckedChange={value => setEnabled(value === true)} />Available to organization sessions</label>
           <div className="ns-field"><label>Allowed actions<Choice label="Allowed connection actions" value={readOnly ? "read" : "write"} onChange={value => setReadOnly(value === "read")} disabled={mutation.busy} options={[{ value: "read", label: "Read only" }, { value: "write", label: "Read and write" }]} /></label></div>
           <p className="ns-field-hint">Pausing access or changing it to read only blocks new writes. Actions already sent cannot be recalled.</p></div>
@@ -655,13 +714,13 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
       </form> : <p className="ns-muted">{connection.enabled ? "Available to sessions." : "Paused for organization sessions."} Ask an administrator to change this policy.</p>}
       {admin && <div className="ns-row-actions">
         <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("connect")}>{connection.connected ? "Reconnect" : "Connect"} {name}</Button>
-        {connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}/check`, "POST"), () => setNotice("The provider confirmed this connection."))}>Check connection</Button>}
+        {connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => checkOrganizationConnection({ path: { provider: connection.id } }), () => setNotice("The provider confirmed this connection."))}>Check connection</Button>}
         {connection.id === "github" && connection.connected && <Button variant="outline" disabled={mutation.busy} onClick={() => onMode("repositories")}>Choose repositories</Button>}
         {connection.connected && <Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button>}
       </div>}
       {disconnect && admin && <div className="ns-empty"><h3>Disconnect {name} for the organization?</h3><p>Future tasks cannot use this account. Actions already sent and provider credentials are not recalled.</p><div className="ns-dialog-actions">
         <Button autoFocus variant="outline" disabled={mutation.busy} onClick={() => setDisconnect(false)}>Cancel</Button>
-        <Button variant="destructive" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}`, "DELETE"), onUpdated)}>Disconnect for everyone</Button>
+        <Button variant="destructive" disabled={mutation.busy} onClick={() => void mutation.run(() => disconnectOrganizationConnection({ path: { provider: connection.id } }), onUpdated)}>Disconnect for everyone</Button>
       </div></div>}
     </>}
     {mode === "connect" && admin && <ProductConnectionSetup connection={connection} onDone={onUpdated} onBack={() => onMode("manage")} onBusyChange={setNestedBusy} />}
@@ -669,15 +728,15 @@ function ProductConnectionDialog({ connection, mode, admin, opener, onMode, onCl
     <Button variant="outline" disabled={mutation.busy || nestedBusy} onClick={onClose}>Close</Button>
   </DialogContent></Dialog>
 }
-function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { connection: ProductConnection; onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
+function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { connection: OrganizationConnection; onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
   const mutation = useMutation()
   const [token, setToken] = useState(""), [organization, setOrganization] = useState(""), [appId, setAppId] = useState("")
   const file = useRef<HTMLInputElement>(null)
   useEffect(() => { onBusyChange(mutation.busy); return () => onBusyChange(false) }, [mutation.busy, onBusyChange])
   const name = productProviders[connection.id] || connection.id
-  const redirect = (path: string, body?: object) => {
+  const redirect = (start: () => Promise<{ url?: string; connected?: boolean }>) => {
     let result: { url?: string; connected?: boolean }
-    return mutation.run(async () => { result = await api(path, "POST", body) }, () => {
+    return mutation.run(async () => { result = await start() }, () => {
       if (result.connected) onDone()
       else if (result.url) window.location.assign(productRedirect(result.url, location.origin))
     })
@@ -685,11 +744,11 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
   return <div className="ns-fields">
     {connection.id === "github" ? <>
       <p>Connect the organization’s GitHub App. Its installation controls which repositories can be selected.</p>
-      {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect("/connections/github/oauth")}>Continue with GitHub</Button> : <>
+      {connection.app_registered ? <Button disabled={mutation.busy} onClick={() => void redirect(() => startGitHubConnection().then(({ data }) => data))}>Continue with GitHub</Button> : <>
         <form className="ns-fields" onSubmit={event => { event.preventDefault(); let destination: string; void mutation.run(async () => {
           const selected = file.current?.files?.[0]
           if (!selected || selected.size > 20_000) throw new Error("Choose a PEM private key file under 20 KB.")
-          const result = await api<{ url: string }>("/connections/github/app", "POST", { app_id: Number(appId), private_key: await selected.text() })
+          const { data: result } = await connectExistingGitHubApp({ body: { app_id: Number(appId), private_key: await selected.text() } })
           if (file.current) file.current.value = ""
           destination = productRedirect(result.url, location.origin)
         }, () => window.location.assign(destination)) }}>
@@ -698,15 +757,15 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
           <div className="ns-field"><label>PEM private key<Input ref={file} type="file" accept=".pem" required disabled={mutation.busy} /></label><p className="ns-field-hint">Choose the key from GitHub App settings. It is never displayed here or placed in chat.</p></div>
           <Button type="submit" disabled={mutation.busy}>Verify app and continue</Button>
         </form>
-        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect("/connections/github/oauth", { organization: organization.trim() }) }}>
+        <form className="ns-fields" onSubmit={event => { event.preventDefault(); void redirect(() => startGitHubConnection({ body: { organization: organization.trim() } }).then(({ data }) => data)) }}>
           <h3>Register an organization App</h3><div className="ns-field"><label>GitHub organization<Input required maxLength={39} pattern="[A-Za-z0-9][A-Za-z0-9-]{0,38}" disabled={mutation.busy} value={organization} onChange={event => setOrganization(event.target.value)} /></label></div>
           <Button type="submit" variant="outline" disabled={mutation.busy}>Continue to GitHub registration</Button>
         </form>
       </>}
     </> : <>
-      {connection.oauth_configured ? <Button disabled={mutation.busy} onClick={() => void redirect(`/connections/${encodeURIComponent(connection.id)}/oauth`)}>Continue with {name}</Button>
+      {connection.oauth_configured ? <Button disabled={mutation.busy} onClick={() => void redirect(() => startOrganizationConnectionOAuth({ path: { provider: connection.id } }).then(({ data }) => data))}>Continue with {name}</Button>
         : <p className="ns-muted">OAuth is not configured for this provider. An administrator can connect using a supported access token.</p>}
-      <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(() => api(`/connections/${encodeURIComponent(connection.id)}`, "POST", { token }), () => { setToken(""); onDone() }) }}>
+      <form className="ns-fields" onSubmit={event => { event.preventDefault(); void mutation.run(() => connectOrganizationConnection({ path: { provider: connection.id }, body: { token } }), () => { setToken(""); onDone() }) }}>
         <div className="ns-field"><label>Access token<Input type="password" autoComplete="off" required minLength={1} maxLength={100000} disabled={mutation.busy} value={token} onChange={event => setToken(event.target.value)} /></label><p className="ns-field-hint">The provider validates the token. It is stored encrypted and is never returned to this page.</p></div>
         <Button type="submit" disabled={mutation.busy}>Connect {name} using token</Button>
       </form>
@@ -716,7 +775,7 @@ function ProductConnectionSetup({ connection, onDone, onBack, onBusyChange }: { 
   </div>
 }
 function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: () => void; onBack: () => void; onBusyChange: (busy: boolean) => void }) {
-  const resource = useResource<{ repositories: { id: number; full_name: string }[]; selected_ids: number[]; installation_url: string }>("/connections/github/repositories")
+  const resource = useResource("/connections/github/repositories", signal => listGitHubRepositories({ signal }).then(({ data }) => data))
   const mutation = useMutation(), initialized = useRef(false)
   const [selected, setSelected] = useState<number[]>([]), [search, setSearch] = useState("")
   useEffect(() => { onBusyChange(mutation.busy); return () => onBusyChange(false) }, [mutation.busy, onBusyChange])
@@ -725,7 +784,7 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
     const rows = data.repositories.filter(row => contains(search, row.full_name))
     let installation: string | undefined
     try { installation = productRedirect(data.installation_url, location.origin) } catch {}
-    return <form onSubmit={event => { event.preventDefault(); void mutation.run(() => api("/connections/github/repositories", "POST", { repository_ids: selected }), onDone) }}>
+    return <form onSubmit={event => { event.preventDefault(); void mutation.run(() => selectGitHubRepositories({ body: { repository_ids: selected } }), onDone) }}>
       <p>Choose repositories by their permanent GitHub IDs. Renaming a repository keeps the connection and saved work.</p>
       <Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource} />
       <div className="ns-fields">{rows.map(repo => <label className="check-label" key={repo.id}><Checkbox checked={selected.includes(repo.id)} disabled={mutation.busy} onCheckedChange={checked => setSelected(previous => checked ? [...new Set([...previous, repo.id])] : previous.filter(id => id !== repo.id))} />{repo.full_name}</label>)}</div>
@@ -735,33 +794,33 @@ function ProductRepositorySelection({ onDone, onBack, onBusyChange }: { onDone: 
     </form>
   }}</LoadState>
 }
-const personalSlackSources: Record<string, string> = { personal: "your personal Slack account", organization: "organization Slack connection", none: "no Slack connection" }
+const personalSlackSources: Record<PersonalSlackStatus["effective_source"], string> = { personal: "your personal Slack account", organization: "organization Slack connection", none: "no Slack connection" }
 function ProductPersonalSlack({ individual, heading = "Personal Slack" }: { individual: boolean; heading?: string }) {
-  const resource = useResource<PersonalSlack>("/connections/slack/personal")
+  const resource = useResource("/connections/slack/personal", signal => getPersonalSlack({ signal }).then(({ data }) => data))
   const mutation = useMutation(), [disconnect, setDisconnect] = useState(false)
   return <section className="ns-section"><h2>{heading}</h2><LoadState resource={resource}>{data => <>
     <p>{data.label || "No personal Slack account connected"} · {data.connected ? data.health === "healthy" ? "Connected" : "Needs attention" : "Not connected"}</p>
-    <p className="ns-muted">Effective read identity: {personalSlackSources[data.effective_source || ""] || "Unavailable"}. A configured personal account never silently falls back to organization credentials after a failure.</p>
+    <p className="ns-muted">Effective read identity: {personalSlackSources[data.effective_source]}. A configured personal account never silently falls back to organization credentials after a failure.</p>
     <p className="ns-notice">Personal Slack reads require a private web session. They are unavailable in shared chats, Slack threads, and automations.</p>
-    {data.description && <p>{data.description}</p>}{data.limitation && <p className="ns-muted">{data.limitation}</p>}
+    {data.limitation && <p className="ns-muted">{data.limitation}</p>}
     {!data.available && <p className="ns-muted">Use an individual workspace sign-in to own a personal Slack connection.</p>}
     {!data.oauth_configured && <p className="ns-muted">An administrator must configure Slack OAuth before connecting.</p>}
     <div className="ns-row-actions">
       <Button disabled={mutation.busy || !data.available || !data.oauth_configured} onClick={() => {
-        let result: { url: string }
-        void mutation.run(async () => { result = await api("/connections/slack/personal/oauth", "POST") }, () => window.location.assign(productRedirect(result.url, location.origin)))
+        let url: string
+        void mutation.run(async () => { url = (await startPersonalSlackOAuth()).data.url }, () => window.location.assign(productRedirect(url, location.origin)))
       }}>{data.connected ? "Reconnect Slack" : "Connect Slack"}</Button>
-      {data.connected && <><Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => api("/connections/slack/personal/check", "POST"), resource.refresh)}>Check connection</Button><Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button></>}
+      {data.connected && <><Button variant="outline" disabled={mutation.busy} onClick={() => void mutation.run(() => checkPersonalSlack(), resource.refresh)}>Check connection</Button><Button variant="ghost" disabled={mutation.busy} onClick={() => setDisconnect(true)}>Disconnect…</Button></>}
       {data.available && individual && <Button variant="outline" disabled={mutation.busy} onClick={() => { location.hash = "" }}>Start private web session</Button>}
     </div>
     {mutation.error && <p className="ns-error" role="alert">{mutation.error}</p>}
     {disconnect && <Confirm title="Disconnect personal Slack?" description="Future Slack reads can use the organization connection when available. Existing private sessions stay private. Only your personal connection is removed." label="Disconnect personal Slack"
-      onConfirm={async () => { await api("/connections/slack/personal", "DELETE"); resource.refresh() }} onClose={() => setDisconnect(false)} />}
+      onConfirm={async () => { await disconnectPersonalSlack(); resource.refresh() }} onClose={() => setDisconnect(false)} />}
   </>}</LoadState></section>
 }
 
 function GeneralPage({ onPreferences }: { onPreferences: (preferences: GeneralPreferences) => void }) {
-  const resource = useResource<GeneralPreferences>("/settings/general")
+  const resource = useResource("/settings/general", signal => getSettingsGeneral({ signal }).then(({ data }) => data))
   return <LoadState resource={resource}>{data => <GeneralForm initial={data} onPreferences={onPreferences} />}</LoadState>
 }
 
@@ -769,10 +828,10 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
   const [preferences, setPreferences] = useState(initial)
   const mutation = useMutation()
   const custom = preferences.connection_ids !== null
-  const accounts = useResource<Connection[]>(custom ? "/connections" : null)
+  const accounts = useResource(custom ? "/connections" : null, loadConnections)
   const save = (patch: Partial<GeneralPreferences>) => {
     let updated: GeneralPreferences
-    void mutation.run(async () => { updated = await api<GeneralPreferences>("/settings/general", "PATCH", patch) }, () => {
+    void mutation.run(async () => { updated = (await updateSettingsGeneral({ body: patch })).data }, () => {
       setPreferences(updated); onPreferences(updated)
     })
   }
@@ -802,11 +861,11 @@ function GeneralForm({ initial, onPreferences }: { initial: GeneralPreferences; 
 }
 
 function ConnectionsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Connection[]>("/connections")
+  const resource = useResource("/connections", loadConnections)
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [editor, setEditor] = useState<Connection | "new" | null>(null), [disable, setDisable] = useState<Connection | null>(null)
   const services = [{ value: "github", label: "GitHub" }, { value: "slack", label: "Slack" }, { value: "linear", label: "Linear" }, { value: "notion", label: "Notion" }]
-  const connectionBody = (row: Connection) => ({ name: row.name, kind: row.kind, credential: "", shared: row.shared, read_only: row.read_only, enabled: row.enabled, policy: row.policy ?? { require_approval: true } })
+  const connectionBody = (row: Connection) => connectionInput({ name: row.name, kind: row.kind, credential: "", shared: row.shared, read_only: row.read_only, enabled: row.enabled }, row.policy)
   return <LoadState resource={resource}>{data => {
     const rows = data.filter(row => contains(search, row.name, row.kind) && (filter === "all" || row.kind === filter))
     return <><p className="ns-muted">Choose default connections in <a className="ns-link" href="#settings/general">General preferences</a>.</p>
@@ -823,18 +882,18 @@ function ConnectionsPage({ user }: { user: SettingsUser }) {
         { name: "credential", label: editor === "new" ? "Access token" : "Replacement token", type: "password", required: editor === "new", hint: values.kind === "slack" ? "Use a Slack user token, not a bot token." : values.kind === "notion" ? "Use a Notion OAuth access token, not an integration token." : editor === "new" ? "Token permissions determine which resources this account can reach." : "Leave blank to keep the current token." },
         { name: "read_only", label: "Read only", type: "checkbox" }, { name: "enabled", label: "Enable this connection", type: "checkbox" },
         ...(user.role === "admin" ? [{ name: "shared", label: "Share with workspace members", type: "checkbox" as const }] : []),
-      ]} onSave={async values => { await api(`/connections${editor === "new" ? "" : `/${encodeURIComponent(editor.id)}`}`, editor === "new" ? "POST" : "PUT", { ...values, policy: editor === "new" ? { require_approval: true } : editor.policy ?? { require_approval: true } }); resource.refresh() }} onClose={() => setEditor(null)} />}
-      {disable && <Confirm title={`Disable ${disable.name}?`} description="New work cannot use this connection until you enable it again. The saved credential is kept." label="Disable connection" onConfirm={async () => { await api(`/connections/${encodeURIComponent(disable.id)}`, "PUT", { ...connectionBody(disable), enabled: false }); resource.refresh() }} onClose={() => setDisable(null)} />}
+      ]} onSave={async values => { await (editor === "new" ? createConnection({ body: connectionInput(values, { require_approval: true }) }) : updateConnection({ path: { connection_id: editor.id }, body: connectionInput(values, editor.policy) })); resource.refresh() }} onClose={() => setEditor(null)} />}
+      {disable && <Confirm title={`Disable ${disable.name}?`} description="New work cannot use this connection until you enable it again. The saved credential is kept." label="Disable connection" onConfirm={async () => { await updateConnection({ path: { connection_id: disable.id }, body: { ...connectionBody(disable), enabled: false } }); resource.refresh() }} onClose={() => setDisable(null)} />}
     </>
   }}</LoadState>
 }
 
 function UsersPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { users: Account[]; source?: string; note?: string }>("/settings/users")
+  const resource = useResource("/settings/users", loadUsers)
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
   const [editor, setEditor] = useState<Account | "new" | null>(null), [remove, setRemove] = useState<Account | null>(null)
   return <LoadState resource={resource}>{data => {
-    const product = data.source === "product"
+    const product = data.product
     const rows = data.users.filter(row => contains(search, row.username, row.display_name, row.email) && (filter === "all" || (filter === "disabled" ? !row.enabled : row.role === filter)))
     return <><CapabilityNote {...data} />{data.note && <p className="ns-notice">{data.note}</p>}<Toolbar search={search} setSearch={setSearch} count={rows.length} resource={resource}
       filter={<Choice label="User role or access" value={filter} onChange={setFilter} options={[{ value: "all", label: "All members" }, { value: "admin", label: "Administrators" }, { value: "member", label: "Members" }, ...product ? [] : [{ value: "disabled", label: "Disabled" }]]} />}
@@ -848,7 +907,7 @@ function UsersPage({ user }: { user: SettingsUser }) {
         initial={{ role: editor.role }} fields={[{ name: "role", label: "Role", type: "select", options: [{ value: "member", label: "Member" }, { value: "admin", label: "Administrator" }] }]}
         onSave={async values => {
           if (values.role === editor.role) return
-          await api("/settings/users/role", "PUT", { email: editor.email, role: values.role, revision: editor.revision })
+          await updateProductUserRole({ body: { email: editor.email ?? "", role: values.role === "admin" ? "admin" : "member", revision: editor.revision ?? 0 } })
           resource.refresh(); window.dispatchEvent(new Event("moyai:access-changed"))
         }} onClose={() => setEditor(null)} />}
       {!product && editor && <Editor title={editor === "new" ? "Add user" : "Edit user"} description={editor === "new" ? "Share new credentials through an approved channel." : "Saving changes revokes existing sign-ins and stops this user’s pending or running work. Saved history is retained."} initial={editor === "new" ? { username: "", display_name: "", password: "", role: "member", enabled: true } : { username: editor.username, display_name: editor.display_name, password: "", role: editor.role, enabled: editor.enabled }} fields={[
@@ -857,24 +916,28 @@ function UsersPage({ user }: { user: SettingsUser }) {
         { name: "role", label: "Role", type: "select", options: [{ value: "member", label: "Member" }, { value: "admin", label: "Administrator" }], disabled: editor !== "new" && editor.id === user.id },
         { name: "enabled", label: "Enable workspace access", type: "checkbox", disabled: editor !== "new" && editor.id === user.id },
       ]} onSave={async values => {
-        if (editor === "new") await api("/settings/users", "POST", values)
+        const role = values.role === "admin" ? "admin" as const : "member" as const
+        if (editor === "new") await createSettingsUser({ body: { username: String(values.username), display_name: String(values.display_name), password: String(values.password), role, enabled: values.enabled === true } })
         else {
-          const original: FormValues = { display_name: editor.display_name, role: editor.role, enabled: editor.enabled }
-          const body = Object.fromEntries(Object.entries(values).filter(([name, value]) => name !== "username" && (name === "password" ? Boolean(value) : value !== original[name])))
+          const body: UserEditWritable = {}
+          if (values.display_name !== editor.display_name) body.display_name = String(values.display_name)
+          if (values.role !== editor.role) body.role = role
+          if (values.enabled !== editor.enabled) body.enabled = values.enabled === true
+          if (values.password) body.password = String(values.password)
           if (!Object.keys(body).length) return
-          await api(`/settings/users/${encodeURIComponent(editor.id)}`, "PATCH", body)
+          await updateSettingsUser({ path: { identity: editor.id }, body })
         }
         resource.refresh()
       }} onClose={() => setEditor(null)} />}
-      {remove && <Confirm title={`Disable ${remove.display_name || remove.username}?`} description="This revokes workspace access and existing sign-ins, and stops this user’s pending or running work. Saved history is retained." label="Disable user" onConfirm={async () => { await api(`/settings/users/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+      {remove && <Confirm title={`Disable ${remove.display_name || remove.username}?`} description="This revokes workspace access and existing sign-ins, and stops this user’s pending or running work. Saved history is retained." label="Disable user" onConfirm={async () => { await deleteSettingsUser({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
 
 function AutomationEditor({ user, onClose, refresh }: { user: SettingsUser; onClose: () => void; refresh: () => void }) {
-  const sessions = useResource<{ id: string; title: string; owner_id: string; archived: boolean; deleted?: boolean; surface: string; visibility: string }[]>("/sessions")
-  const models = useResource<{ models: string[]; default_model: string }>("/me")
-  const connections = useResource<Connection[]>("/connections")
+  const sessions = useResource("/sessions", loadSessions)
+  const models = useResource("/me", signal => getMe({ signal }).then(({ data }) => data))
+  const connections = useResource("/connections", loadConnections)
   if (sessions.error || models.error || connections.error || !sessions.data || !models.data || !connections.data) return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog"><DialogHeader><DialogTitle>New automation</DialogTitle><DialogDescription>Choose an active session and a model available to your account.</DialogDescription></DialogHeader>
     {sessions.error || models.error || connections.error ? <><p className="ns-error" role="alert">{sessions.error || models.error || connections.error}</p><Button variant="outline" onClick={() => { sessions.refresh(); models.refresh(); connections.refresh() }}>Try again</Button></> : <p role="status">Loading sessions and models…</p>}
   </DialogContent></Dialog>
@@ -891,12 +954,12 @@ function AutomationEditor({ user, onClose, refresh }: { user: SettingsUser; onCl
     ]} onSave={async values => {
       const selected = eligible.find(row => row.id === values.session_id)
       const selectedConnections = availableConnections.filter(row => values[`connection:${row.id}`] === true && (selected?.visibility === "private" || row.shared)).map(row => row.id)
-      await api("/settings/automations", "POST", { name: values.name, prompt: values.prompt, session_id: values.session_id, model: values.model, interval_minutes: values.interval_minutes, connections: selectedConnections }); refresh()
+      await createSettingsAutomation({ body: { name: String(values.name), prompt: String(values.prompt), session_id: String(values.session_id), model: String(values.model), interval_minutes: Number(values.interval_minutes), connections: selectedConnections } }); refresh()
     }} onClose={onClose} />
 }
 
-function AutomationLogs({ automation, onClose }: { automation: Automation; onClose: () => void }) {
-  const resource = useResource<{ logs: { id: string; turn_id: string | null; status: string; created_at: string }[] }>(`/settings/automations/${encodeURIComponent(automation.id)}/logs`)
+function AutomationLogs({ automation, onClose }: { automation: SettingsAutomation; onClose: () => void }) {
+  const resource = useResource(`/settings/automations/${encodeURIComponent(automation.id)}/logs`, signal => listSettingsAutomationLogs({ path: { identity: automation.id }, signal }).then(({ data }) => data))
   const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="native-settings-dialog" onCloseAutoFocus={event => { event.preventDefault(); returnFocus.current?.focus() }}>
     <DialogHeader><DialogTitle>{automation.name}: run history</DialogTitle><DialogDescription>Recorded admissions and their status. Open the session to review a turn’s output.</DialogDescription></DialogHeader>
@@ -906,9 +969,9 @@ function AutomationLogs({ automation, onClose }: { automation: Automation; onClo
 }
 
 function AutomationsPage({ user }: { user: SettingsUser }) {
-  const resource = useResource<Collection & { automations: Automation[] }>("/settings/automations")
+  const resource = useResource("/settings/automations", signal => listSettingsAutomations({ signal }).then(({ data }) => data))
   const [search, setSearch] = useState(""), [filter, setFilter] = useState("all")
-  const [create, setCreate] = useState(false), [remove, setRemove] = useState<Automation | null>(null), [logs, setLogs] = useState<Automation | null>(null)
+  const [create, setCreate] = useState(false), [remove, setRemove] = useState<SettingsAutomation | null>(null), [logs, setLogs] = useState<SettingsAutomation | null>(null)
   const mutation = useMutation()
   return <LoadState resource={resource}>{data => {
     const rows = data.automations.filter(row => contains(search, row.name, row.prompt) && (filter === "all" || (filter === "paused" ? row.paused : !row.paused)))
@@ -919,12 +982,12 @@ function AutomationsPage({ user }: { user: SettingsUser }) {
       {rows.length ? <div className="ns-records">{rows.map(row => <article key={row.id} className="ns-record"><CalendarClock className="ns-record-icon" aria-hidden="true" /><div className="ns-record-copy"><div className="ns-record-title"><h2>{row.name}</h2><span className="ns-badge">{row.paused ? "Paused" : row.state}</span></div>
         <p>Every {count(row.interval_minutes)} minutes · {row.model}</p><details><summary>View instructions</summary><pre>{row.prompt}</pre></details><a className="ns-link" href={`#${row.session_id}`}>Open session</a></div>
         <div className="ns-row-actions"><Button variant="outline" size="sm" onClick={() => setLogs(row)}>Run history<span className="visually-hidden"> for {row.name}</span></Button>
-          {data.capabilities?.update && <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => void mutation.run(() => api(`/settings/automations/${encodeURIComponent(row.id)}`, "PATCH", { paused: !row.paused }), resource.refresh)}>{row.paused ? "Resume" : "Pause"}<span className="visually-hidden"> {row.name}</span></Button>}
+          {data.capabilities?.update && <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => void mutation.run(() => updateSettingsAutomation({ path: { identity: row.id }, body: { paused: !row.paused } }), resource.refresh)}>{row.paused ? "Resume" : "Pause"}<span className="visually-hidden"> {row.name}</span></Button>}
           {data.capabilities?.delete && <Button variant="ghost" size="icon-sm" aria-label={`Delete ${row.name}`} disabled={mutation.busy} onClick={() => setRemove(row)}><Trash2 /></Button>}</div>
       </article>)}</div> : <Empty filtered={Boolean(search) || filter !== "all"} noun="automations" onClear={() => { setSearch(""); setFilter("all") }} />}
       {create && <AutomationEditor user={user} refresh={resource.refresh} onClose={() => setCreate(false)} />}
       {logs && <AutomationLogs automation={logs} onClose={() => setLogs(null)} />}
-      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future scheduled admissions stop. Work already admitted to a session and its history are kept." label="Delete automation" onConfirm={async () => { await api(`/settings/automations/${encodeURIComponent(remove.id)}`, "DELETE"); resource.refresh() }} onClose={() => setRemove(null)} />}
+      {remove && <Confirm title={`Delete ${remove.name}?`} description="Future scheduled admissions stop. Work already admitted to a session and its history are kept." label="Delete automation" onConfirm={async () => { await deleteSettingsAutomation({ path: { identity: remove.id } }); resource.refresh() }} onClose={() => setRemove(null)} />}
     </>
   }}</LoadState>
 }
@@ -932,7 +995,7 @@ function AutomationsPage({ user }: { user: SettingsUser }) {
 function OverviewPage({ user, navigate, productMode }: { user: SettingsUser; navigate: (page: string) => void; productMode: "standalone" | "existing" }) {
   // Native-store totals do not describe canonical product data. Navigation
   // remains available without publishing false zero counts during cutover.
-  const resource = useResource<{ counts: Record<string, number>; capabilities: Record<string, Capabilities | boolean> }>(productMode === "existing" ? null : "/settings/overview")
+  const resource = useResource(productMode === "existing" ? null : "/settings/overview", signal => getSettingsOverview({ signal }).then(({ data }) => data))
   return <>
     {resource.error && <p className="ns-notice" role="alert">Overview counts could not be loaded. {resource.error} <Button variant="ghost" onClick={resource.refresh}>Try again</Button></p>}
     {resource.loading && <p className="ns-muted" role="status">Loading overview counts…</p>}

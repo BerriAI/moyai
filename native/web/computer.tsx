@@ -2,10 +2,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react"
 import RFB from "@novnc/novnc"
 import { Monitor, MousePointer2, RefreshCw, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { api, csrfToken } from "./api"
+import { controlComputer, getComputer, type ComputerState } from "./generated/api"
 import { DesktopLifetime, HeldKey, pasteRemote, pauseRemote, releaseRemoteKeys } from "./desktop-session"
 
-type DesktopState = { available: boolean; has_workspace: boolean; controlled: boolean; busy: boolean; controller?: string | null }
+type DesktopState = ComputerState
 const CONTROL = 0xffe3
 type PanelProps = { id: string; hasWorkspace: boolean; active?: boolean }
 
@@ -15,7 +15,7 @@ export function ComputerPanel(props: PanelProps) {
 }
 
 function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
-  const [view, setView] = useState<DesktopState>({ available: false, has_workspace: hasWorkspace, controlled: false, busy: false })
+  const [view, setView] = useState<DesktopState>({ available: false, has_workspace: hasWorkspace, controlled: false, busy: false, controller: null })
   const [error, setError] = useState("")
   const [working, setWorking] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -53,18 +53,14 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
   const releaseOwned = useCallback(() => {
     if (!owned.current) return
     owned.current = false
-    void fetch(`/api/sessions/${id}/computer`, {
-      method: "POST", keepalive: true,
-      headers: {
-        "Content-Type": "application/json", "X-Moyai-CSRF": csrfToken(), "X-CSRF-Token": csrfToken(),
-      },
-      body: JSON.stringify({ action: "release", client_id: clientId.current }),
+    void controlComputer({
+      path: { session_id: id }, body: { action: "release", client_id: clientId.current }, keepalive: true,
     }).catch(() => {}) // A lost request retains the bounded lease until expiry.
   }, [id])
   const refresh = useCallback(async (signal?: AbortSignal) => {
     if (!lifetime.current.visible || commandPending.current) return
     const version = lifetime.current.invalidate()
-    const next = await api<DesktopState>(`/sessions/${id}/computer?client_id=${clientId.current}`, "GET", undefined, signal)
+    const { data: next } = await getComputer({ path: { session_id: id }, query: { client_id: clientId.current }, signal })
     if (!signal?.aborted && lifetime.current.accepts(version) && !commandPending.current) {
       owned.current = next.controlled
       setView(next)
@@ -167,7 +163,7 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
     // browser writes back to the agent. Unmount and explicit release do.
     if (!view.controlled) return
     const timer = setInterval(() => {
-      void api(`/sessions/${id}/computer`, "POST", { action: "heartbeat", client_id: clientId.current }).catch(error => {
+      void controlComputer({ path: { session_id: id }, body: { action: "heartbeat", client_id: clientId.current } }).catch(error => {
         if (!mounted.current) return
         pauseInput(); owned.current = false
         setView(previous => ({ ...previous, controlled: false, available: false }))
@@ -185,7 +181,7 @@ function ComputerSession({ id, hasWorkspace, active = true }: PanelProps) {
     setWorking(true); setError("")
     lifetime.current.invalidate()
     try {
-      await api(`/sessions/${id}/computer`, "POST", { action, client_id: clientId.current })
+      await controlComputer({ path: { session_id: id }, body: { action, client_id: clientId.current } })
       owned.current = action !== "release"
       if (!mounted.current) {
         // Setup may have completed after unmount's first release attempt.

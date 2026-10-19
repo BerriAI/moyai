@@ -1,18 +1,10 @@
 import { useEffect, useRef, useState } from "react"
 import { RefreshCw, Terminal } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { api, ApiError, csrfToken } from "./api"
-import type { ToolProgress } from "./work-timeline"
+import { ApiError, csrfToken } from "./api"
+import { getTurnAction, type WorkActionDetail as ActionDetail } from "./generated/api"
 import type { ActionSelection } from "./workspace-types"
 import "./action-panel.css"
-
-type ActionDetail = ToolProgress & {
-  input: string | null
-  output: string | null
-  restricted: boolean
-  input_truncated: boolean
-  output_truncated: boolean
-}
 
 function ActionValue({ label, value, truncated, empty }: {
   label: string; value: string | null; truncated: boolean; empty: string
@@ -48,12 +40,15 @@ export function ActionPanel({ action, active, onDenied }: {
     const token = csrfToken()
     let timer: ReturnType<typeof setTimeout>
     let settlingReads = 0
-    const path = `/sessions/${encodeURIComponent(action.sessionId)}/progress/${encodeURIComponent(action.turnId)}/actions/${encodeURIComponent(action.toolId)}`
-      + (action.agentId ? `?agent_id=${encodeURIComponent(action.agentId)}` : "")
+    const options = {
+      path: { session_id: action.sessionId, turn_id: action.turnId, action_id: action.toolId },
+      query: action.agentId ? { agent_id: action.agentId } : undefined,
+      signal: controller.signal,
+    }
     async function read() {
       setLoading(true)
       try {
-        const value = await api<ActionDetail>(path, "GET", undefined, controller.signal)
+        const { data: value } = await getTurnAction(options)
         if (controller.signal.aborted || csrfToken() !== token) return
         setDetail(value); setError("")
         // Lifecycle events can arrive just before their result snapshot is saved.

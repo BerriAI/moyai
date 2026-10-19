@@ -761,6 +761,21 @@ async def test_slash_command_routes_before_skills_and_is_owner_only(runtime, act
         assert sent.status_code == 202, sent.text
         detail = (await client.get(f"/api/sessions/{session['id']}")).json()
         assert detail["goal"]["status"] == "active"
+        assert sent.json()["goal"] == detail["goal"]
+        assert sent.json()["id"] == detail["turns"][0]["id"]
+        assert detail["goal"] == await goal(runtime, session["id"])
+        viewed = await client.post(f"/api/sessions/{session['id']}/messages", json={
+            "prompt": "/goal", "request_key": "http-goal-view",
+        })
+        assert viewed.status_code == 202
+        assert viewed.json()["goal"] == detail["goal"]
+        assert viewed.json()["help"]
+        cleared = await client.post(f"/api/sessions/{session['id']}/messages", json={
+            "prompt": "/goal clear", "request_key": "http-goal-clear",
+        })
+        assert cleared.status_code == 202
+        assert cleared.json()["goal"] is None
+        assert (await client.get(f"/api/sessions/{session['id']}")).json()["goal"] is None
     async with runtime.database.sessions.begin() as db:
         viewer = User(username="other", display_name="Other", password="unused")
         db.add(viewer)

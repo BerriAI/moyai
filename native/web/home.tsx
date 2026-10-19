@@ -6,12 +6,13 @@ import { GoalDialog, goalCommandAction } from "./goal"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { SpaceBackdrop } from "./space-backdrop"
 import "./home.css"
-import { api, csrfToken } from "./api"
+import { csrfToken } from "./api"
 import { AttachButton, AttachmentPreviews, useAttachments, useFileDrop, FileDropOverlay } from "./attachments"
 import type { GeneralPreferences } from "./general-preferences"
-import type { NewConversation, Session, Turn } from "./conversation-state"
+import type { NewConversation, Session } from "./conversation-state"
+import { createSession, createSessionMessage, listConnections, type ConnectionView, type NewSession } from "./generated/api"
 
-type HomeConnection = { id: string; name: string; enabled: boolean; shared: boolean; read_only: boolean }
+type HomeConnection = Pick<ConnectionView, "id" | "name" | "enabled" | "shared" | "read_only">
 const starters = [
   { label: "Review code", detail: "Find the edge cases", prompt: "Review my changes for bugs and improvements.", Icon: Code2 },
   { label: "Fix a bug", detail: "Trace it to the source", prompt: "Help me investigate and fix this bug: ", Icon: Bug },
@@ -21,7 +22,7 @@ export function homeSubmission(prompt: string, model: string, privateSession: bo
   const connections = [...new Set(selected)].sort()
   const allowed = new Set(available.filter(row => row.enabled && (privateSession || row.shared)).map(row => row.id))
   if (connections.some(id => !allowed.has(id))) throw new Error("Account access changed. Review the selected accounts before sending.")
-  const body = { prompt, model, attachments, connections }, visibility = privateSession ? "private" : "shared"
+  const body = { prompt, model, attachments, connections }, visibility: NonNullable<NewSession["visibility"]> = privateSession ? "private" : "shared"
   return { body, visibility, signature: JSON.stringify([visibility, body]) }
 }
 
@@ -60,7 +61,7 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
     if (!needsAccounts) return
     const controller = new AbortController(), scope = accountScope
     setCatalog({ scope, rows: [], loading: true, error: "" })
-    void api<HomeConnection[]>(`/connections?shared=${!isPrivate}`, "GET", undefined, controller.signal).then(rows => {
+    void listConnections({ query: { shared: !isPrivate }, signal: controller.signal }).then(({ data: rows }) => {
       if (controller.signal.aborted) return
       const eligible = rows.filter(row => row.enabled && (isPrivate || row.shared))
       setCatalog({ scope, rows: eligible, loading: false, error: "" })
@@ -97,13 +98,14 @@ export function Home({ models, defaultModel, individual = true, productMode = "s
       if (admission.current?.signature !== signature) admission.current = { signature, request: crypto.randomUUID() }
       const attempt = admission.current
       if (!attempt.session) {
-        attempt.session = await api<Session>("/sessions", "POST", { model, visibility: submission.visibility })
+        attempt.session = (await createSession({ body: { model, visibility: submission.visibility } })).data
       }
       requireCurrent()
-      const turn = await api<Turn>(`/sessions/${attempt.session.id}/messages`, "POST", {
+      const { data: turn } = await createSessionMessage({ path: { session_id: attempt.session.id }, body: {
         ...submission.body, request_key: attempt.request,
-      })
+      } })
       requireCurrent()
+      if (!("id" in turn)) throw new Error("The request did not start a conversation.")
       onStarted({ session: attempt.session, turn, prompt, attachments })
       // Admission succeeded. A list refresh failure must not invite a second start.
       try { await onCreated() }
