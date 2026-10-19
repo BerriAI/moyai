@@ -21,10 +21,13 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
-from moyai.models import Effect, Session, Turn, now
+from moyai.contracts import NewMessage, NewSession
+from moyai.inference_usage import InferenceUsage
+from moyai.models import Effect, Session, Turn, User, now
 from moyai.product_drain import ProductDrainError, ProductDrainService
 from moyai.product_drain_models import ProductDrainReceipt, ProductDrainState
 from moyai.product_identity import ProductIdentityAdapter
+from moyai.product_inference import ProductInferenceRequest
 from moyai.product_role_authority import ProductOwnershipLost, ProductRoleAuthority
 from moyai.runtime import Runtime
 from moyai.storage import encrypted_converter
@@ -247,6 +250,188 @@ async def test_included_input_does_not_hide_an_unsettled_effect(drain):
     assert observed["state"] == "draining"
     with pytest.raises(ProductDrainError, match="unknown outcomes"):
         await service.request(paused=False, expected_generation=2, request_key="resume")
+
+
+async def accepted_steering(product, session, parent):
+    """Use the real admission and durable steering acknowledgement transitions."""
+    child = await product.database.submit(product.actor, session.id, NewMessage(
+        prompt="Keep the same task, with this correction.", request_key="accepted-correction", mode="asap",
+    ))
+    assert child.status == "steering" and child.parent_turn == parent.id
+    await product.database.signal_attempted(child.id)
+    await product.database.steering_receipt(child.id, "durable-sdk-enqueue")
+    async with product.database.sessions() as db:
+        return await db.get(Turn, child.id)
+
+
+@pytest.mark.parametrize("parent_state", ["parked", "deferred_waiting", "completed", "failed", "stopped", "resumed"])
+async def test_accepted_steering_inherits_only_its_safe_parent_without_rewriting_rows(drain, parent_state):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, parent, _ = await authority_fixtures.active_turn(product)
+    child = await accepted_steering(product, session, parent)
+    original = (child.status, child.parent_turn, child.enqueue_id, child.accepted_at, child.finished_at)
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    assert (await service.status())["counts"]["unsafe_turns"] == 2
+    if parent_state == "parked":
+        await service.checkpoint(
+            parent.id, workflow_id=parent.workflow_id, workflow_run_id="parent-run", boundary="native_node:2",
+        )
+    elif parent_state == "deferred_waiting":
+        async with product.database.sessions.begin() as db:
+            stored = await db.get(Turn, parent.id)
+            stored.status, stored.result_accepted, stored.conversation = "waiting", True, "saved-conversation"
+        await service.park_deferred(
+            parent.id, 2, workflow_id=parent.workflow_id, workflow_run_id="completed-parent-run",
+        )
+    else:
+        async with product.database.sessions.begin() as db:
+            stored = await db.get(Turn, parent.id)
+            stored.status, stored.finished_at = parent_state, now()
+    observed = await service.status()
+    assert observed["state"] == "drained"
+    assert observed["counts"] == {
+        "queued": 0, "parked": int(parent_state in {"parked", "deferred_waiting"}),
+        "unsafe_turns": 0, "effects": 0, "requests": 0,
+    }
+    assert not (await service.request(
+        paused=False, expected_generation=2, request_key="resume",
+    ))["paused"]
+    async with product.database.sessions() as db:
+        saved = await db.get(Turn, child.id)
+        assert (saved.status, saved.parent_turn, saved.enqueue_id, saved.accepted_at, saved.finished_at) == original
+        assert await db.get(ProductDrainReceipt, (child.id, 2)) is None
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing_parent", "no_parent", "self_parent", "other_session", "other_actor", "other_model",
+    "not_steering", "no_enqueue", "no_acceptance", "parent_is_input",
+    "preparation", "result", "conversation", "deferred_results", "result_accepted", "finished_at",
+])
+async def test_accepted_steering_with_invalid_parent_or_acceptance_still_blocks_resume(drain, invalid):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, parent, _ = await authority_fixtures.active_turn(product)
+    child = await accepted_steering(product, session, parent)
+    other_session = await product.database.create_session(product.actor, NewSession())
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    await service.checkpoint(
+        parent.id, workflow_id=parent.workflow_id, workflow_run_id="parent-run", boundary="native_node:2",
+    )
+    async with product.database.sessions.begin() as db:
+        saved = await db.get(Turn, child.id)
+        stored_parent = await db.get(Turn, parent.id)
+        if invalid == "missing_parent":
+            saved.parent_turn = "missing"
+        elif invalid == "no_parent":
+            saved.parent_turn = None
+        elif invalid == "self_parent":
+            saved.parent_turn = child.id
+        elif invalid == "other_session":
+            saved.session_id = other_session.id
+        elif invalid == "other_actor":
+            # Both are real users; only the stored relationship is invalid.
+            db.add(User(
+                id="google:other-sub", username="other", display_name="Other",
+                password="synthetic-unused-password", role="member",
+            ))
+            await db.flush()
+            stored_parent.actor_id = "google:other-sub"
+        elif invalid == "other_model":
+            saved.model = "other-model"
+        elif invalid == "not_steering":
+            saved.mode = "when_idle"
+        elif invalid == "no_enqueue":
+            saved.enqueue_id = None
+        elif invalid == "no_acceptance":
+            saved.accepted_at = None
+        elif invalid in {"preparation", "result", "conversation", "deferred_results", "finished_at"}:
+            setattr(saved, invalid, "independent-execution-evidence")
+        elif invalid == "result_accepted":
+            saved.result_accepted = True
+        else:
+            stored_parent.parent_turn = child.id
+    observed = await service.status()
+    assert observed["state"] == "draining" and observed["counts"]["unsafe_turns"] == 1
+    with pytest.raises(ProductDrainError, match="unknown outcomes"):
+        await service.request(paused=False, expected_generation=2, request_key="resume")
+
+
+@pytest.mark.parametrize("invalid", [
+    "running", "stopping", "queued", "unknown", "blocked", "stale_generation",
+    "wrong_workflow", "resumed_receipt", "waiting_no_result", "waiting_no_conversation", "waiting_wrong_boundary",
+])
+async def test_accepted_steering_cannot_cover_an_unsafe_parent(drain, invalid):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, parent, _ = await authority_fixtures.active_turn(product)
+    await accepted_steering(product, session, parent)
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    async with product.database.sessions.begin() as db:
+        stored = await db.get(Turn, parent.id)
+        if invalid in {"running", "stopping", "queued", "unknown"}:
+            stored.status = invalid
+        elif invalid.startswith("waiting"):
+            stored.status = "waiting"
+            stored.result_accepted = invalid != "waiting_no_result"
+            stored.conversation = None if invalid == "waiting_no_conversation" else "saved-conversation"
+        if invalid != "running":
+            db.add(ProductDrainReceipt(
+                turn_id=parent.id, generation=1 if invalid == "stale_generation" else 2,
+                workflow_id="wrong-workflow" if invalid == "wrong_workflow" else parent.workflow_id,
+                workflow_run_id="parent-run",
+                boundary="deferred_waiting" if invalid.startswith("waiting") and invalid != "waiting_wrong_boundary"
+                else "native_node:2",
+                phase="blocked" if invalid == "blocked" else "parked",
+                resumed_generation=3 if invalid == "resumed_receipt" else None,
+            ))
+    observed = await service.status()
+    assert observed["state"] == "draining" and observed["counts"]["unsafe_turns"] >= 1
+    with pytest.raises(ProductDrainError, match="unknown outcomes"):
+        await service.request(paused=False, expected_generation=2, request_key="resume")
+
+
+@pytest.mark.parametrize("kind", ["effect", "usage", "broker_request"])
+@pytest.mark.parametrize("target", ["parent", "child"])
+async def test_accepted_steering_never_hides_outstanding_effects_or_requests(drain, kind, target):
+    product, service = drain.product, drain.first.service
+    await service.request(paused=False, expected_generation=0, request_key="start")
+    session, parent, _ = await authority_fixtures.active_turn(product)
+    child = await accepted_steering(product, session, parent)
+    await service.request(paused=True, expected_generation=1, request_key="pause")
+    await service.checkpoint(
+        parent.id, workflow_id=parent.workflow_id, workflow_run_id="parent-run", boundary="native_node:2",
+    )
+    turn = parent if target == "parent" else child
+    async with product.database.sessions.begin() as db:
+        if kind == "effect":
+            row = Effect(
+                id="pending-input-effect", session_id=session.id, turn_id=turn.id,
+                actor_id=product.actor.id, tool_name="shell", arguments="synthetic-fixture",
+                fingerprint="e" * 64, state="pending",
+            )
+        else:
+            values = {
+                "id": "pending-input-request", "request_key": "pending-input-request",
+                "session_id": session.id, "turn_id": turn.id, "actor_id": product.actor.id,
+                "model": parent.model, "status": "pending", "created_at": now(),
+            }
+            row = InferenceUsage(**values, provider_scope="a" * 64) if kind == "usage" else ProductInferenceRequest(
+                **values, logical_key="pending-input-request", authority_version="a" * 64,
+                gateway_scope="a" * 64, key_hash="b" * 64,
+                owner_pid=drain.first.authority.owner_pid, owner_started=service._started(drain.first.authority),
+            )
+        db.add(row)
+    observed = await service.status()
+    assert observed["counts"]["unsafe_turns"] == 0
+    assert observed["counts"]["effects"] == int(kind == "effect")
+    assert observed["counts"]["requests"] == int(kind != "effect")
+    assert observed["state"] == "draining"
+    with pytest.raises(ProductDrainError, match="unknown outcomes"):
+        await service.request(paused=False, expected_generation=2, request_key="resume")
+    async with product.database.sessions() as db:
+        saved = await db.get(type(row), row.id)
+        assert (saved.state if kind == "effect" else saved.status) == "pending"
 
 
 async def test_checkpoint_is_idempotent_and_resume_preserves_generation_receipts(drain):

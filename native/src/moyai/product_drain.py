@@ -266,17 +266,40 @@ class ProductDrainService:
         )))
         parked = {r.turn_id: r for r in receipts}
         queued = sum(t.status == "queued" for t in turns)
-        safe = sum(
-            t.id in parked and parked[t.id].workflow_id == t.workflow_id
+        safe = {
+            t.id for t in turns
+            if t.id in parked and parked[t.id].workflow_id == t.workflow_id
             and (
                 t.status in {"starting", "running", "saving"}
                 or (t.status == "waiting" and bool(t.result_accepted) and bool(t.conversation)
                     and parked[t.id].boundary == "deferred_waiting")
-            ) for t in turns
+            )
+        }
+        accepted = [t for t in turns if t.status == "accepted"]
+        parents = {
+            t.id: t for t in await db.scalars(select(Turn).where(
+                Turn.id.in_(select(Turn.parent_turn).where(Turn.status == "accepted")),
+            ))
+        } if accepted else {}
+        # Accepted steering is durably enqueued in its parent's workflow, not
+        # dispatched as a separate workflow. Its parent must still prove safety;
+        # never invent a checkpoint or make all accepted rows terminal.
+        safe_inputs = sum(
+            t.parent_turn is not None
+            and t.mode == "asap" and bool(t.enqueue_id) and bool(t.accepted_at)
+            and t.preparation is None and t.result is None and t.conversation is None
+            and t.deferred_results is None and t.result_accepted is None and t.finished_at is None
+            and (parent := parents.get(t.parent_turn)) is not None
+            and parent.parent_turn is None and bool(parent.workflow_id)
+            and parent.session_id == t.session_id
+            and parent.actor_id == t.actor_id and parent.model == t.model
+            and (parent.id in safe or parent.status in {"completed", "failed", "stopped", "resumed"})
+            for t in accepted
         )
         effects, requests = await self._unsettled(db)
         return {
-            "queued": queued, "parked": safe, "unsafe_turns": len(turns) - queued - safe,
+            "queued": queued, "parked": len(safe),
+            "unsafe_turns": len(turns) - queued - len(safe) - safe_inputs,
             "effects": effects, "requests": requests,
         }
 
