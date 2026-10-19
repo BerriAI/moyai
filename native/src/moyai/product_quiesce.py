@@ -58,6 +58,14 @@ class ProductQuiescence:
             "request_id": self.request_id, "active_requests": len(self.requests),
             "ready": self.life.healthy,
             "worker_drain_required": self.life.role == "worker",
+            "generation_admission": (
+                {
+                    "registered": self.life.admission.registered,
+                    "generation": self.life.admission.current["generation"],
+                    "state": self.life.admission.current["state"],
+                }
+                if self.life.admission is not None and self.life.admission.current is not None else None
+            ),
         }
 
     def begin(self, expected: dict, request_id: str) -> None:
@@ -69,9 +77,14 @@ class ProductQuiescence:
             if request_id != self.request_id:
                 raise ValueError("Another quiescence request already owns this process.")
             return
-        if self.life.role == "worker":
+        admission = self.life.admission
+        if admission is not None:
+            admission.require_drain(request_id)
+        if self.life.role == "worker" and (admission is None or not admission.sealed):
             raise ValueError("Worker retirement requires Temporal deployment drainage.")
-        if not self.life.healthy:
+        # A learned durable seal immediately removes HTTP readiness. The
+        # otherwise operational process must still be able to drain its work.
+        if not self.life.operational:
             raise ValueError("Only a ready process can begin planned quiescence.")
         # Admission and task registration run on the same loop without an await.
         self.request_id, self.state = request_id, "quiescing"
@@ -100,7 +113,11 @@ class ProductQuiescence:
                 slack = getattr(self.life.runtime, "product_slack", None)
                 if slack is not None:
                     await slack.close()
+            if self.life.worker is not None:
+                await self.life.worker.shutdown()
             await self.check_owner()
+            if self.life.admission is not None:
+                await self.life.admission.finish_drain(self.request_id)
         except BaseException:
             # A failed drain is not permission to retire or start it again.
             self.state = "failed"

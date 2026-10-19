@@ -239,11 +239,14 @@ class ModalRecoveryTransport:
             await process.wait.aio()
 
 
+RESTORE_CONCURRENCY = 2
+
+
 class ProductWorkspaceRestorer:
     def __init__(self, runtime: Any, *, transport: Any = None):
         self.runtime = runtime
         self.transport = transport or ModalRecoveryTransport(runtime)
-        self.slots = asyncio.Semaphore(2)
+        self.slots = asyncio.Semaphore(RESTORE_CONCURRENCY)
 
     async def authorize(self, scope: RunScope, source_id: str | None = None) -> None:
         await self.runtime.database.authorize_scope(scope)
