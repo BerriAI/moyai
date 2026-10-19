@@ -137,8 +137,8 @@ class ProductContinuationService:
         """The mapped native privacy/deletion boundary also protects old files."""
         if not ids:
             return set()
-        query = text(f"""
-            SELECT r.run_id FROM {self.table('run_roots')} r
+        query = text(self.history.graph_cte() + f"""
+            SELECT r.run_id FROM history_roots r
             LEFT JOIN {identifier(self.native_schema)}.moyai_product_continuations c
               ON c.source_schema=:schema AND c.source_session_id=r.root_id
             LEFT JOIN {identifier(self.native_schema)}.moyai_sessions s ON s.id=c.native_session_id

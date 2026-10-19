@@ -107,9 +107,8 @@ async def test_recursive_history_shares_expansion_and_preserves_ancestor_privacy
     assert await history.recheck(principal, denied) == set()
     assert len((await history.sessions(principal, limit=100))["sessions"]) == 65
 
-    # The actual plan must expand each canonical view only once. Repeating the
-    # ancestry view for self/lineage/ancestor ACLs used to create extra recursive
-    # unions and trigger expensive compilation on tiny result sets.
+    # The statement shares a single ancestry expansion across root and ACL
+    # calculations. The persisted canonical views remain unchanged.
     async with history.read() as db:
         assert await db.scalar(text("SHOW jit")) == "off"
         plan = (await db.execute(text(
@@ -120,7 +119,7 @@ async def test_recursive_history_shares_expansion_and_preserves_ancestor_privacy
         for child in node.get("Plans", []):
             yield from nodes(child)
     assert plan.get("JIT") is None
-    assert sum(n["Node Type"] == "Recursive Union" for n in nodes(plan["Plan"])) == 2
+    assert sum(n["Node Type"] == "Recursive Union" for n in nodes(plan["Plan"])) == 1
 
 
 async def test_native_list_search_and_detail_disable_jit_with_recursive_continuations(continuation):
