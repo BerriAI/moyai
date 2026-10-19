@@ -16,7 +16,7 @@ from .models import Event, Session, Turn, User
 from .product_requester import answer_actor
 
 
-def question_results(pending, value: str) -> dict[str, Any]:
+def question_results(pending, value: str | dict[str, Any]) -> dict[str, Any]:
     calls = [call for call in pending.calls if call.tool_name == "ask_user_question"]
     requests = [AskUserRequest.from_tool_call(call) for call in calls]
     headers = [question.header for request in requests for question in request.questions]
@@ -24,7 +24,9 @@ def question_results(pending, value: str) -> dict[str, Any]:
         raise HTTPException(409, "There is no ordinary question to answer. Use the secure form for credential requests.")
     if len(headers) != len(set(headers)):
         raise HTTPException(422, "These questions repeat a heading; answer them in the Moyai session.")
-    if len(headers) == 1 and not value.lstrip().startswith("{"):
+    if isinstance(value, dict):
+        answers = value
+    elif len(headers) == 1 and not value.lstrip().startswith("{"):
         answers = {headers[0]: value.strip()}
     else:
         try:
