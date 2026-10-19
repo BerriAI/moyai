@@ -377,6 +377,7 @@ async def test_temporal_pending_write_returns_failure_to_agent_and_replays_old_c
     """Real activity failure transport/replay, with synthetic browser and model."""
     session, turn, _ = active
     dispatches, commands, requests = [], [], []
+    pending_evidence = []
 
     async def controlled_request(database, scope, workspace, command, *, writing, before_dispatch=None, after_dispatch=None):
         if before_dispatch:
@@ -384,6 +385,12 @@ async def test_temporal_pending_write_returns_failure_to_agent_and_replays_old_c
         dispatches.append(writing)
         if writing:
             raise TimeoutError("The navigation response was lost after dispatch.")
+        # A read may inspect the failed attempt while the agent is still active,
+        # but cannot settle it or release the fence on another write.
+        async with runtime.database.sessions() as db:
+            effect = await db.scalar(select(Effect).where(Effect.session_id == session.id))
+            assert effect is not None and effect.state == "pending" and effect.settled_at is None
+            pending_evidence.append((effect.arguments, effect.fingerprint, effect.resolution))
         return {"tabs": [], "observed": True}
 
     monkeypatch.setattr("moyai.browser.agent_request", controlled_request)
@@ -470,9 +477,12 @@ async def test_temporal_pending_write_returns_failure_to_agent_and_replays_old_c
     assert len(requests) == (2 if old_history else 4)
     async with runtime.database.sessions() as db:
         rows = list(await db.scalars(select(Effect).where(Effect.session_id == session.id)))
-    assert [(row.tool_name, row.state) for row in rows] == [
-        ("browser_open", "failed" if old_history else "pending"),
-    ]
+    # Final-answer acceptance now settles failed attempts before backing up the
+    # computer. The active-turn fence above and original receipt remain intact.
+    assert [(row.tool_name, row.state) for row in rows] == [("browser_open", "failed")]
+    assert rows[0].settled_at is not None
+    if not old_history:
+        assert pending_evidence == [(rows[0].arguments, rows[0].fingerprint, rows[0].resolution)]
     if old_history:
         async with runtime.database.sessions() as db:
             event = await db.scalar(select(Event).where(
