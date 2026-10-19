@@ -26,7 +26,8 @@ from typing import Any, Literal, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .analytics import ReportRange, csv_export, report_range
@@ -75,8 +76,15 @@ class _ReportTiming:
 
 
 def accounting_failure(error: SQLAlchemyError | TimeoutError) -> HTTPException:
-    if isinstance(error, TimeoutError):
+    if isinstance(error, (TimeoutError, DatabaseTimeoutError)):
         return HTTPException(503, "The accounting database did not respond. Please try again.")
+    if isinstance(error, DBAPIError) and (
+        getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
+    ) == "57014":
+        # PostgreSQL uses query_canceled for statement timeouts and explicit
+        # server cancellation. Inspect the driver code, never exception text:
+        # SQLAlchemy's message can contain SQL, parameters and credentials.
+        return HTTPException(503, "The accounting database query was cancelled. Please try again.")
     return HTTPException(503, "Product accounting is temporarily unavailable.")
 
 

@@ -16,8 +16,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+from asyncpg import InsufficientPrivilegeError, QueryCanceledError
 from fastapi import FastAPI
 from sqlalchemy import event, insert, text
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
 from test_product_identity import google_cookie, settings_for
 from test_product_identity import product as product_fixture
@@ -496,8 +499,6 @@ async def test_report_has_no_internal_deadline_and_caller_cancellation_releases_
 
 
 async def test_accounting_failure_logs_phase_without_database_details(billing_product, monkeypatch, caplog):
-    from sqlalchemy.exc import SQLAlchemyError
-
     import moyai.product_billing_routes as billing_routes
 
     async def failed_read(*args, **kwargs):
@@ -509,6 +510,44 @@ async def test_accounting_failure_logs_phase_without_database_details(billing_pr
     assert "'phase': 'accounting'" in caplog.text
     assert "'error_type': 'SQLAlchemyError'" in caplog.text
     assert "PRIVATE_CONNECTION_DETAIL" not in caplog.text
+
+
+class _PgcodeQueryCancelled(Exception):
+    pgcode = "57014"
+
+
+@pytest.mark.parametrize(("failure", "message"), [
+    (TimeoutError("PRIVATE_TIMEOUT"), "The accounting database did not respond. Please try again."),
+    (DatabaseTimeoutError("PRIVATE_POOL"), "The accounting database did not respond. Please try again."),
+    (
+        OperationalError("PRIVATE_SQL", {"secret": "PRIVATE_PARAMETER"}, QueryCanceledError("PRIVATE_DRIVER")),
+        "The accounting database query was cancelled. Please try again.",
+    ),
+    (
+        OperationalError("PRIVATE_SQL", None, _PgcodeQueryCancelled("PRIVATE_DRIVER")),
+        "The accounting database query was cancelled. Please try again.",
+    ),
+    (
+        OperationalError("PRIVATE_SQL", None, InsufficientPrivilegeError("PRIVATE_DRIVER")),
+        "Product accounting is temporarily unavailable.",
+    ),
+    (SQLAlchemyError("PRIVATE_DATABASE"), "Product accounting is temporarily unavailable."),
+])
+async def test_billing_route_classifies_driver_failures_without_leaking_details(
+    billing_product, monkeypatch, failure, message,
+):
+    async def unavailable(**kwargs):
+        raise failure
+
+    monkeypatch.setattr(billing_product.service, "report", unavailable)
+    cookie, _ = google_cookie(billing_product.identity)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=billing_product.app), base_url="http://testserver",
+    ) as client:
+        client.cookies.set("workspace_session", cookie)
+        response = await client.get("/api/settings/billing", params={"start": "2026-10-01", "end": "2026-10-31"})
+    assert response.status_code == 503
+    assert response.json() == {"detail": message}
 
 
 def test_reconciliation_population_is_not_limited_by_fetch_bounds(rules, monkeypatch):

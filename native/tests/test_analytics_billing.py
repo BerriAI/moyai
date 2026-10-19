@@ -12,8 +12,11 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 import test_product_billing as billing_fixtures
+from asyncpg import QueryCanceledError
 from fastapi import HTTPException
 from sqlalchemy import text, update
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
 from test_analytics_identity import observation
 from test_native_analytics import END, START, ledger
@@ -167,17 +170,25 @@ async def test_usage_root_filters_match_shared_billing_cohorts(runtime, actor, s
         assert performance.json()["summary"]["requests"] == 1
 
 
-async def test_billing_failure_never_falls_back_to_native_subtotal(runtime, actor, shared, monkeypatch):
+@pytest.mark.parametrize(("failure", "message"), [
+    (TimeoutError("PRIVATE_TIMEOUT"), "The accounting database did not respond. Please try again."),
+    (DatabaseTimeoutError("PRIVATE_POOL"), "The accounting database did not respond. Please try again."),
+    (
+        OperationalError("PRIVATE_SQL", {"secret": "PRIVATE_PARAMETER"}, QueryCanceledError("PRIVATE_DRIVER")),
+        "The accounting database query was cancelled. Please try again.",
+    ),
+])
+async def test_billing_failure_never_falls_back_to_native_subtotal(
+    runtime, actor, shared, monkeypatch, failure, message,
+):
     async def unavailable(**kwargs):
-        raise TimeoutError
+        raise failure
 
     monkeypatch.setattr(shared.service, "report", unavailable)
     async with client_for(runtime, actor) as client:
         response = await client.get("/api/settings/usage", params=params())
         assert response.status_code == 503
-        assert response.json() == {
-            "detail": "The accounting database did not respond. Please try again.",
-        }
+        assert response.json() == {"detail": message}
     ordinary = await member(runtime)
     async with client_for(runtime, ordinary) as client:
         assert (await client.get("/api/settings/usage", params=params())).status_code == 403

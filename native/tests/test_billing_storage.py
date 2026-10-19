@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from sqlalchemy import event, insert, text
+from sqlalchemy.exc import TimeoutError as DatabaseTimeoutError
+from sqlalchemy.ext.asyncio import create_async_engine
 from test_product_billing import CLOCK, MAPPINGS, PERIOD, SCOPE, new_row, old_row
 
 from moyai.analytics import report_range
@@ -30,7 +32,7 @@ from moyai.product_billing import (
     RecoveryPolicy,
     read_product_billing,
 )
-from moyai.product_billing_routes import ProductBillingService
+from moyai.product_billing_routes import ProductBillingService, accounting_failure
 from moyai.product_inference import ProductInferenceRequest
 
 pytestmark = pytest.mark.skipif(
@@ -204,6 +206,27 @@ async def test_caller_cancellation_stops_postgres_work_and_releases_the_pool(bil
               AND query LIKE '%accounting_cancel_test%'
         """)) == 0
         assert await db.scalar(text("SELECT 1")) == 1
+
+
+async def test_real_pool_timeout_has_a_retry_message_and_releases_connections(billing):
+    ctx = billing
+    constrained = create_async_engine(ctx.engine.url, pool_size=1, max_overflow=0, pool_timeout=0.05)
+    service = ProductBillingService(
+        None, constrained, ctx.native,
+        schema=ctx.storage.source_schema, native_schema=ctx.storage.native_schema,
+    )
+    try:
+        async with constrained.connect():
+            with pytest.raises(DatabaseTimeoutError) as failure:
+                await service.report(start="2026-10-01", end="2026-10-31")
+            response = accounting_failure(failure.value)
+            assert response.status_code == 503
+            assert response.detail == "The accounting database did not respond. Please try again."
+        assert constrained.pool.checkedout() == 0
+        async with constrained.connect() as db:
+            assert await db.scalar(text("SELECT 1")) == 1
+    finally:
+        await constrained.dispose()
 
 
 async def test_batched_counterpart_lookup_keeps_aliases_namespaces_and_exact_rows(billing):
