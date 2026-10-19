@@ -339,6 +339,11 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
     if has_cost:
         final_metrics["total_cost_usd"] = total_cost_usd
 
+    hidden_turns = sum(not own[turn.actor_id] for turn in turns)
+    visibility_note = (
+        f" {hidden_turns} turn(s) belong to another requester; their private activity is omitted. "
+        "Token totals cover only visible activity, not the whole session."
+    ) if hidden_turns else ""
     return {
         "schema_version": "ATIF-v1.8",
         "session_id": session.id,
@@ -352,11 +357,14 @@ async def debug_trace(runtime: Runtime, user: User, session_id: str) -> dict[str
             f"Moyai debug trace for session {session.title}: user messages, the agent's reasoning, "
             "tool calls and tool results in order. Hand it to Moyai with what you expected to debug "
             "where it went wrong. Arguments and results marked redacted were hidden for privacy, not empty."
+            + visibility_note
         ),
         "final_metrics": final_metrics,
         "extra": {
             "exported_at": datetime.now(UTC).isoformat(),
             "session_title": session.title,
             "turn_count": len(turns),
+            "private_activity_omitted_turns": hidden_turns,
+            "token_metrics_scope": "visible_activity",
         },
     }

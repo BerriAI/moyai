@@ -230,6 +230,8 @@ async def test_debug_trace_hides_teammate_work_and_denies_nonmembers(runtime, ac
         assert "reasoning_content" not in assistant
         assert "tool_calls" not in assistant
         assert snapshot_calls == []
+        assert response.json()["extra"]["private_activity_omitted_turns"] == 1
+        assert "Token totals cover only visible activity" in response.json()["notes"]
 
         private = await runtime.database.create_session(actor, NewSession(visibility="private"))
         denied = await client.get(f"/api/sessions/{private.id}/debug-trace")

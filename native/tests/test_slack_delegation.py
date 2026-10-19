@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import test_product_authority as authority
 from fastapi import HTTPException
-from test_product_identity_admission import slack_admission  # noqa: F401 - shared pytest fixture
+from test_product_identity_admission import slack_admission as slack_admission  # noqa: PLC0414 - shared pytest fixture
 
 from moyai.contracts import NewMessage, NewSession
 from moyai.delegation import DelegationService

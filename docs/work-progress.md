@@ -76,3 +76,6 @@ checkpoint cannot be saved, the conversation shows a recovery warning.
 Slack delivery notices distinguish failed file uploads from undelivered messages
 and include a safe provider error code when available. The failure message does
 not claim that a debug attachment was delivered before Slack confirms it.
+
+Debug exports identify omitted teammate activity so their visible token totals
+are not mistaken for the complete session.
